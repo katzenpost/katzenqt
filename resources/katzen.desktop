@@ -1,0 +1,27 @@
+[Desktop Entry]
+
+# this file should be validated with
+# desktop-file-validate katzen.desktop
+# and then:
+# desktop-file-install --dir=$HOME/.local/share/applications /path/to/katzen.desktop
+
+# https://wiki.archlinux.org/title/Desktop_entries
+Type=Application
+# Version of desktop.ini spec, not app:
+Version=1.0
+
+Name=Katzen
+GenericName=Mixnet chat client
+# tool tip:
+Comment=Group chat over a mixnet
+Icon=katzen
+
+#Path= cwd
+
+Exec=katzen.py
+Categories=Qt;Network
+Terminal=false
+Hidden=false
+SingleMainWindow=true
+X-GNOME-UsesNotifications=true
+X-GNOME-SingleWindow=true

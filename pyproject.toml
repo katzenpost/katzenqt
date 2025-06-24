@@ -1,0 +1,37 @@
+[project]
+name = "katzen"
+authors = []
+description = "Mixnet chat application"
+readme = "README.md"
+classifiers = [
+            "Programming Language :: Python :: 3.12"
+]
+
+requires-python = ">=3.12"
+dynamic = ["version"]
+
+dependencies = [
+"pyside6~=6.9",
+# sqlalchemy
+"sqlmodel>=0",
+"alembic~=1.16.2",
+"aiosqlite~=0.21.0",
+"pydantic~=2.11.7",
+"cbor2>=5.6.0", # kp_thinclient pins old minor version
+"katzenpost_thinclient~=0.0.3"
+]
+
+#[project.urls]
+# Documentation =
+# Source = =
+# Tracker =
+
+#[tool.pyside6-project]
+#files = ["main.py", "main_window.py"]
+
+#[tool.pyside6-uic]
+#files = ["mixchat.ui"]
+
+[tool.alembic]
+script_location = "%(here)s/migrations"
+prepend_sys_path = ["."]

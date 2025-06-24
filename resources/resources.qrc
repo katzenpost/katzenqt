@@ -1,0 +1,13 @@
+<RCC>
+  <qresource prefix="icons/">
+    <file>./echomix_16.png</file>
+    <file>./echomix_160.png</file>
+    <file>./echomix_256.png</file>
+    <file>./echomix_32.png</file>
+    <file>./echomix_48.png</file>
+    <file>./echomix_icon.svg</file>
+    <file>./echomix_landscape.svg</file>
+    <file>./echomix_portrait.svg</file>
+    <file>./echomix_256_new_message.png</file>
+  </qresource>
+</RCC>

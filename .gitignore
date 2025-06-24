@@ -1,0 +1,6 @@
+__pycache__/
+*.sqlite3
+*.egg-info/
+src/resources_rc.py
+src/ui_mixchat.py
+
