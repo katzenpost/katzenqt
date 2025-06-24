@@ -1,6 +1,8 @@
 ## Installation dependencies
 
 ```
+git clone https://github.com/katzenpost/katzenqt
+cd katzenqt
 python3 -m venv myvenv
 source myvenv/bin/activate
 pip install --upgrade pip
@@ -9,9 +11,11 @@ pip install -e .
 
 # Running the application
 
-For now you need to build the Qt parts every time:
-
+First navigate to the `katzenqt` folder and initialize the `venv`:
 ```shell
+cd katzenqt && source myvenv/bin/activate
+
+# Then once there:
 make
 ```
 
