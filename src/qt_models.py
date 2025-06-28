@@ -49,7 +49,6 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
-        print("conv log model init", self.roleNames())
 
     def roleNames(self):
         """These map names used in QML to ints used in QAbstractItemModel

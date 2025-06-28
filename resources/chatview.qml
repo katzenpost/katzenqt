@@ -4,11 +4,111 @@ import QtQuick.Layouts
 import QtQuick.Controls
 //import QtQuick.Controls.Material
 
+// TODO: need to make sure at least pgup/pgdown work
+// maybe also arrows?
+// it would also be nice if pgup/pgdown worked when the treeview isn't
+// the input focus
+
 TreeView {
      id: chatTreeView
+     objectName: "chatTreeView"
 
-     required property var conversation_name
-     required property var chatTreeViewModel
+     //required property QtObject change_convo
+
+     // we should track if messages have been "read" for some definition of "read"
+     // the easiest is probably to count the amount of time they've been on screen.
+     // TODO should track these states per model
+     property var msgReadTimer_generation: 0
+     property var read_map: ({})
+     property var unread_map: ({})
+     required property var ctx
+
+     Timer {
+       id: msgReadTimer
+       interval: 1500
+       repeat: true
+       running: typeof ctx.first_unread !== 'undefined' && ctx.first_unread < rows
+
+       // TODO shouldn't say that our own messages are "unread"
+
+       onTriggered: {
+         //print("timer triggered", ctx.first_unread, rows, this.parent.ctx.first_unread)
+         let cull_read_map = false
+         let first_unread = ctx.first_unread
+         // don't care about anything before first_unread
+         // we want to see if any of the rows between
+         // first_unread <= topRow <= bottomRow
+         // have been in focus for more than one interval
+
+         // and then we want to increase first_unread
+         for (var i = topRow; i <= bottomRow; i++) {
+           if (first_unread <= i) {
+           if (unread_map[i] && unread_map[i] == msgReadTimer_generation) {
+             // they were in view last time and they still are, so we have
+             // "read" this message. we mark it as read, but we can't
+             // bump the split buffer yet
+             read_map[i] = 1
+             cull_read_map = true
+             //print("read_map[i]", i, read_map[i])
+           } // unread_map[i] && unread_map[i] == msgReadTimer_generation
+           //print("unread_map", i, unread_map[i], first_unread, msgReadTimer_generation)
+           unread_map[i] = msgReadTimer_generation + 1;
+           } // first_unread <= i
+         }
+         if (cull_read_map) {
+           //print("first_unread was", first_unread)
+           while (read_map[first_unread]) {
+             delete read_map[first_unread]
+             delete unread_map[first_unread]
+             first_unread++
+           } // while read_map[first_unread]
+           //print("first_unread is now", first_unread)
+         } // if cull_read_map
+         msgReadTimer_generation++
+         if (first_unread && ctx.first_unread != first_unread) {
+           //ctx.insert("first_unread", first_unread)
+           print("updating first_unread from",ctx.first_unread,"to",first_unread)
+           ctx.first_unread = first_unread
+         }
+       } // onTriggered
+
+     }
+
+     onContentYChanged: {
+        // save scroll position
+        //print("onContentYChanged", contentY, bottomRow, topRow)
+        // forceLayout()
+        // positionViewAtRow(rowAtIndex(index), Qt.AlignVCenter)
+        // atYEnd
+        // atYBeginning
+        // contentY
+        // contentHeight
+        // topRow: This property holds the topmost row that is currently visible inside the view.
+        // bottomRow: This property holds the bottom-most row that is currently visible inside the view.
+        // rows: total amount of rows in model
+     }
+
+     //signal scrollToBottom: { positionViewAtCell(Qt.point(columns - 1, rows - 1), TableView.AlignLeft | TableView.AlignBottom) }
+
+     onLayoutChanged: {
+        //print("layout changed", contentY, contentHeight, vscrollbar.position)
+       //positionViewAtRow(10, TableView.Contain)
+     }
+
+     //required property QtObject backend
+     //Connections {
+     //  target: backend
+     //  function onUpdated(){
+     //  console.log("helllo backend", backend)
+     //  }
+     //}
+
+     //required property var conversation_name
+     //required property var chatTreeViewModel
+
+     //onModelChanged: console.log(vscrollbar.position, ctx.conversation_scroll)
+    //property int savedIndex:  0
+    //onCurrentIndexChanged: savedIndex = currentIndex //eventually check against != 0 first
 
     anchors.centerIn: parent
         //Layout.fillWidth: true
@@ -22,16 +122,28 @@ TreeView {
        // TODO how do we track the position of this
        // this thing has a property "position" that we should track
        id: vscrollbar
+       objectName: "vscrollbar"
        //policy: ScrollBar.AlwaysOn
        policy: chatTreeView.contentHeight > chatTreeView.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
         width: 15
-        snapMode: ScrollBar.SnapOnRelease
+        //snapMode: ScrollBar.SnapOnRelease
+        //position: ctx.conversation_scroll
         contentItem: Rectangle {
+            objectName: "vscrollbar_rect"
             color: "red"
         }
-     }
+        //function onPositionChanged() {
+          //console.log("scroll pos changed")
+        //}
 
-        model: chatTreeViewModel
+        Connections {
+          target: chatTreeView
+          function onModelChanged() {
+            console.log("model changed", vscrollbar.position, ctx.conversation_scroll, ctx.first_unread)
+          }
+        }
+     }
+        model: ctx.chatTreeViewModel
 
         delegate: TreeViewDelegate {
 // https://doc.qt.io/qt-6/qml-qtquick-controls-treeviewdelegate-members.html
@@ -55,7 +167,7 @@ TreeView {
           Text {
             id: hellodog
             textFormat: Text.PlainText
-            text: model.author
+            text: model.author + (ctx.first_unread <= row ? " (*)" : "")
           }
           TextArea {
             id: itemMessageTextArea
@@ -77,6 +189,5 @@ TreeView {
           } // Text
 } // contentItem: Row
         } // delegate: TreeViewDelegate
-     }
 
-//  }  // Rectangle
+} // TreeView

@@ -101,6 +101,9 @@ class Conversation(SQLModel, table=True):
     peers: list[ConversationPeer] = Relationship(back_populates="conversation", link_model=ConversationPeerLink, sa_relationship_kwargs={"lazy":"selectin"})
     log: list["ConversationLog"] = Relationship(back_populates="conversation", sa_relationship_kwargs={"lazy":"selectin"})
 
+    # first_unread: nullable ForeignKey to conversation_order
+    # to keep track of the read state "split buffer"
+
 class ConversationLog(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     # we use a UUID here so as not to betray the relative receival order

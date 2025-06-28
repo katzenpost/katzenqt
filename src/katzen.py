@@ -11,8 +11,9 @@ import math
 from asyncio import ensure_future
 from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem
 from PySide6.QtGui import QIcon, QPixmap, QStandardItemModel, QStandardItem, QAction, QKeySequence, QShortcut
-from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings
+from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings, Signal
 from PySide6.QtMultimedia import QMediaCaptureSession, QAudioBufferInput, QAudioBufferOutput, QMediaRecorder, QAudioFormat, QAudioInput
+from PySide6.QtQml import QQmlPropertyMap
 from PySide6 import QtCore
 from models import ConversationUIState
 from sqlalchemy import func
@@ -126,6 +127,19 @@ class MainWindow(QMainWindow):
         # TODO Instead of trying to use the QMediaCapture, maybe we'd rather want to just grab stuff
         # from an input device, encode in a separate thread, and then send that as a file.
         # The Qt APIs seemed nice, but unfortunately QMediaRecorder can only write to files, not memory, and it likely can't encode to any of the codecs we want.
+
+        # https://doc.qt.io/qtforpython-6/examples/example_charts_audio.html#example-charts-audio
+        # This example shows more or less how to do that
+
+        # https://doc.qt.io/qtforpython-6/examples/example_multimedia_audiosource.html#example-multimedia-audiosource
+        # This example shows how to select microphone and ask for permission on MacOS/Android
+
+        # https://doc.qt.io/qtforpython-6/examples/example_multimedia_audiooutput.html#example-multimedia-audiooutput
+        # This example shows how to do audio playback using raw samples.
+
+        # Then what we need is the external encoder/decoder receiving/producing PCM samples,
+        # and to hook it all up. We probably want these things running in a separate thread so as not to
+        # tie up the main event loop, and to avoid stuttering if something else ties it up.
 
         # https://pastebin.com/n7e9KREA
         self.push_to_talk_started = True  # TODO should use the qt state stuff for this I guess
@@ -342,6 +356,13 @@ class MainWindow(QMainWindow):
             #   x.1) Scrolling: Conversation is in focus:
             # TODO make which of these to do configurable:
             print("convo order would scroll", conversation_order)
+            convo_state.chat_lines_scroll_idx = 1.0
+            root = self.ui.qml_ChatLines.rootObject()
+            convo_state.first_unread = root.property("ctx").value("first_unread")
+            root.setProperty("ctx", convo_state.qml_ctx(root))
+
+            #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
+            #print(xx)
             #import pdb;pdb.set_trace()
             #print("current", self.ui.ChatLines.verticalScrollBar().value())
             #print("next", min(
@@ -354,7 +375,7 @@ class MainWindow(QMainWindow):
         else:
             #   x.2) Scrolling: Conversation is NOT in focus:
             print("NOT IN FOCUS")
-            convo_state.chat_lines_scroll_idx += 1
+            convo_state.chat_lines_scroll_idx += 1.0
             # convo_state.chat_lines_scroll_idx = conversation_order
             # TODO we should flash the contact entry somehow
             # TODO we should bump "unread message" counter
@@ -413,7 +434,7 @@ class MainWindow(QMainWindow):
     async def attach_file(self):
         dialog = QFileDialog()
         dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)  # allow more than one file
-        dialog.setAcceptMode(QFileDialog.AcceptOpen)  # 
+        dialog.setAcceptMode(QFileDialog.AcceptOpen)  # files should exist already
         dialog.setViewMode(QFileDialog.ViewMode.Detail)
         if saved := getattr(self, "saved_file_dialog", None):
             dialog.restoreState(saved)
@@ -472,50 +493,86 @@ class MainWindow(QMainWindow):
         print("conversation selected", selected)
         ### TODO this was how far we got
 
-        convo_state = self.convo_state()
         if old_convo:
             # Store old line edit buffer and scroll
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
-            c=self.ui.qml_ChatLines.rootObject()
-            if c and c.children():
-                vscrollbar = c.children()[2].children()[0]
-                vrect = vscrollbar.children()[2] # this is the rectangle,
-                old_convo.chat_lines_scroll_idx = int(vrect.y())
-                print("saved scroll", int(vrect.y()))
+            if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
+                print("old first_unread is", old_ctx.value("first_unread"))
+                old_convo.first_unread = old_ctx.value("first_unread")
+            root = self.ui.qml_ChatLines.rootObject()
+            if root and (vscrollbar := root.findChild(object, "vscrollbar")):
+                #vrect = vscrollbar.findChild(object, "vscrollbar_rect")
+                #vh = root.height()
+                #vcih = c.property("contentHeight")
+                #vpos = (vh - vcih) / vh / 2
+                #print("so pos", vpos)
+                # vscrollbar.position() is NOT the same as vscrollbar.property("position")
+                #print("vscrollbar.property.position was", vscrollbar.property("position"))
+                #off = vscrollbar.findChild(object,"vscrollbar_rect").height() / vscrollbar.height()
+                #print('calculated off', off)
+                #off *= 2
+                #off = 0
+                #print("adjusted:", vscrollbar.property("position")  + off, off)
+                #old_convo.chat_lines_scroll_idx = vscrollbar.property("position") #+ off
+                #import pdb;pdb.set_trace()
+                #print("saved scroll", old_convo.chat_lines_scroll_idx, off)
+                pass
+        convo_state = self.convo_state()
         if not convo_state:
             return
         # When user selects a conversation we need to replace the chat model with:
         #self.ui.quickWidget.setSource("http://127.0.0.1:2222")
         # Feed "initial properties" into QML; not sure how to force a reload except
         # setSource() again, but presumably QML can read updated properties set with
-        # self.ui.quickWidget.setProperty("author", "not me") etc?
-        #if self.ui.qml_ChatLines.rootObject()
+        #if c := self.ui.qml_ChatLines.rootObject()
         #c.dumpItemTree()
         #c.property("conversation_name")
-        #vscrollbar = c.children()[2].children()[0]
-        # vrect = vscrollbar.children()[2].position() # this is the rectangle,
-        # vrec.position().y()
-        # but does vrec.position().setY() work?
         #import pdb;pdb.set_trace()
         print("load root", self.ui.qml_ChatLines.rootObject())
         if root := self.ui.qml_ChatLines.rootObject():
-            root.setProperty("conversation_name", str(convo_state.conversation_id))
-            root.setProperty("chatTreeViewModel", convo_state.conversation_log_model)
-            c=self.ui.qml_ChatLines.rootObject()
-            convo_state = self.convo_state()
-            vscrollbar = c.children()[2].children()[0]
-            vrect = vscrollbar.children()[2] # this is the rectangle,
-            vrect.setY(convo_state.chat_lines_scroll_idx)
-            print('set first restored scroll to', convo_state.chat_lines_scroll_idx)
+            print("rootObject is", root, root.property("ctx"), self.ui.qml_ChatLines.property("ctx"))
+            rctx = self.ui.qml_ChatLines.rootContext()
+            print("root context", self.ui.qml_ChatLines.rootContext())
+            # >>> rctx.setContextProperties([PySide6.QtQml.QQmlContext.PropertyPair(name="ctx", value=1)])
+
+            #import pdb;pdb.set_trace()
+            props = convo_state.qml_ctx(root)
+            root.setProperty("ctx", props)
+            #convo_state = self.convo_state()
+            # backend.set_convo_model_and_scroll()
+            vscrollbar = root.findChild(object, "vscrollbar")
+            #vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
+            print('set first restored scroll to', convo_state.chat_lines_scroll_idx, vscrollbar.property("position"))
+            async def in_a_bit():
+                vscrollbar = root.findChild(object, "vscrollbar")
+                vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
+            #asyncio.get_running_loop().call_soon(lambda :ensure_future(in_a_bit()))
+            #import pdb;pdb.set_trace()
         else:
+            props = convo_state.qml_ctx(None)
+            print("root context", self.ui.qml_ChatLines.rootContext())
             self.ui.qml_ChatLines.setInitialProperties({
-                "conversation_name": "me",
-                "chatTreeViewModel": convo_state.conversation_log_model,
+                "ctx": props,
             })
             self.ui.qml_ChatLines.setSource("resources/chatview.qml")
+            self.app.processEvents()  # wait for .rootObject() to be created
+            root = self.ui.qml_ChatLines.rootObject()
+            root.setProperty("ctx", convo_state.qml_ctx(root))
+            print("init first_unread", self.ui.qml_ChatLines.rootObject().property("ctx").value("first_unread"))
 
-        if convo_state.chat_lines_scroll_idx is not None:
-            self.scroll_chat_lines(convo_state.chat_lines_scroll_idx)
+            #self.ui.qml_ChatLines.rootObject().setProperty("ctx", props)
+            # >>> ct=PySide6.QtQml.QQmlContext(self.ui.qml_ChatLines.rootContext(), objParent=self.ui.qml_ChatLines.rootObject())
+            #import pdb;pdb.set_trace()
+            #self.ui.qml_ChatLines.rootContext().setContextObject(self.ui.qml_ChatLines.rootObject())
+            #self.ui.qml_ChatLines.setProperty("ctx", props)
+            #self.ui.qml_ChatLines.rootContext().setProperty("ctx", props)
+            #self.ui.qml_ChatLines.rootContext().setProperty("backend", backend)
+            #self.ui.qml_ChatLines.rootContext().setContextProperty("backend2", backend)
+            #backend.set_convo_model_and_scroll()
+
+
+        #if convo_state.chat_lines_scroll_idx is not None:
+        #    self.scroll_chat_lines(convo_state.chat_lines_scroll_idx)
 
         # Restore new single line input buffer
         self.ui.chat_lineEdit.setText(convo_state.chat_lineEdit_buffer)
@@ -645,19 +702,16 @@ class MainWindow(QMainWindow):
         def in_a_bit2():
             c=self.ui.qml_ChatLines.rootObject()
             convo_state = self.convo_state()
-            vscrollbar = c.children()[2].children()[0]
-            vrect = vscrollbar.children()[2] # this is the rectangle,
-            oldy = vrect.y()
-            vrect.setY(convo_state.chat_lines_scroll_idx)
-            if vrect.y() != convo_state.chat_lines_scroll_idx:
-                print("TEST"*100)
-            print('set restored scroll to', convo_state.chat_lines_scroll_idx)
+            vscrollbar = c.findChild(object,"vscrollbar")
+            vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
+            print('set restored scroll to', convo_state.chat_lines_scroll_idx, vscrollbar.property("position"))
         async def in_a_bit():
             in_a_bit2()
             #self.ui.ChatLines.verticalScrollBar().setValue(
             #    value
             #)
-        asyncio.get_running_loop().call_soon(lambda :ensure_future(in_a_bit()))
+        #asyncio.get_running_loop().call_soon(lambda :ensure_future(in_a_bit()))
+        #in_a_bit2()
 
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):
@@ -667,6 +721,11 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.systray.showMessage('Still running', f"{APP_NAME} running in background.")
             self.hide()
+
+class Backend(QObject):
+    updated = Signal(str, arguments=[])
+    def set_convo_model_and_scroll(self):
+        self.updated.emit("a")
 
 class MixSystrayIcon(QSystemTrayIcon):
     """https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QSystemTrayIcon.html
@@ -749,7 +808,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         conversation_id=convo.id,
         chat_lineEdit_buffer="",
         conversation_log_model=clm,
-        chat_lines_scroll_idx=None,
+        chat_lines_scroll_idx=1.0,
     )
     window.conversation_state_by_id[convo.id] = convo_state
     for peer in convo.peers:
@@ -763,7 +822,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
             .where(persistent.ConversationLog.conversation_id == convo.id)
         )).first()
         convo_state.conversation_log_model.row_count = msg_count
-    convo_state.chat_lines_scroll_idx = msg_count  # initially we scroll to bottom
+    convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
     # qtwi: select all contactpeers under here
     window.all_contacts.appendRow(qtwi)
     #window.ui.contacts_treeWidget.model().invalidate()

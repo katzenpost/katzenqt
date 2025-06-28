@@ -52,6 +52,7 @@ This application is a GUI chat client for mixnet group chat.
     - https://stackoverflow.com/questions/30314882/using-pysqlcipher-with-sqlalchemy
       - create_engine( ... , module=sqlcipher3.dbapi2)
       - https://sqlite.org/com/see.html
+- https://docs.rs/codec2/latest/codec2/ for encoding/decoding PTT voice chat
 
 ## Design of this application
 - `persistent.py`: Persistent state management (persists to disk)
