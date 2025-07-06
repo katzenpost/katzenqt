@@ -1,21 +1,23 @@
 APP_ORGANIZATION = "Mixnetwork"
 APP_NAME = "KatzenQt"
 
+import threading
 import PySide6.QtAsyncio as QtAsyncio
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
 import persistent
 import sys
 import fcntl
 from pathlib import Path
+import uuid
 import math
 from asyncio import ensure_future
-from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem
+from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox
 from PySide6.QtGui import QIcon, QPixmap, QStandardItemModel, QStandardItem, QAction, QKeySequence, QShortcut
-from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings, Signal
+from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings, Signal, QThread
 from PySide6.QtMultimedia import QMediaCaptureSession, QAudioBufferInput, QAudioBufferOutput, QMediaRecorder, QAudioFormat, QAudioInput
 from PySide6.QtQml import QQmlPropertyMap
 from PySide6 import QtCore
-from models import ConversationUIState
+from models import ConversationUIState, SendOperation, GroupChatMessage, GroupChatFileUpload, GroupChatPleaseAdd
 from sqlalchemy import func
 import asyncio
 from PySide6.QtTest import QAbstractItemModelTester
@@ -33,7 +35,32 @@ from PySide6.QtQml import QQmlNetworkAccessManagerFactory
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from typing import Dict
+    from typing import Dict, List
+    import typing
+
+
+class AsyncioThread(threading.Thread):
+    def run(self):
+        self.loop = asyncio.new_event_loop()
+        self.loop.run_until_complete(self.async_main())
+        self.loop.run_until_complete(network.start_background_threads(self.kp_client))
+        self.loop.run_forever()
+
+    async def run_in_io(self, fn):
+        """Run (fn) in the io loop, to work around QtAsyncio not providing sock_connect etc.
+
+        Would be nice to have a "with" context handler I guess.
+        """
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(fn, self.loop))
+
+    async def async_main(self):
+        self.kp_client = None
+        while self.kp_client is None:
+            try:
+                self.kp_client = await network.reconnect()
+            except (ConnectionRefusedError,BrokenPipeError) as e:
+                print(e)
+                await asyncio.sleep(1)
 
 # matplotlib in qt:
 # https://www.datacamp.com/tutorial/introduction-to-pyside6-for-building-gui-applications-with-python
@@ -87,14 +114,14 @@ class FirewallNetworkAccessManager(QtNetwork.QNetworkAccessManager):
         print("firewall: connectToHostEncrypted")
         return
 class FirewallNetworkAccessManagerFactory(QQmlNetworkAccessManagerFactory):
-    def create(self) -> QtNetwork.QNetworkAccessManager:
+    def create(self, obj:QObject) -> QtNetwork.QNetworkAccessManager:
         """TODO not sure this actually works"""
-        return FirewallNetworkAccessManager()
+        return FirewallNetworkAccessManager(obj)
 
 class KeyPressFilter(QObject):
     """Listen for Space(bar) / push-to-talk"""
     def eventFilter(self, widget, event):
-        if event.type() == QEvent.KeyPress:
+        if event.type() == QEvent.Type.KeyPress:
             text = event.text()
             #if event.modifiers():
             #    text = event.keyCombination().key().name.decode(encoding="utf-8")
@@ -117,11 +144,11 @@ def duration_time_ns():
         return time.monotonic_ns()
 
 class MainWindow(QMainWindow):
-    def X_keyPressEvent(self, ev: "QEvent.KeyPress") -> None:
-        key = ev.key()
+    def X_keyPressEvent(self, ev: "QEvent") -> None:
+        key = ev.key()  # type: ignore[attr-defined]
         print("key pressed", key)
-    def X_keyReleaseEvent(self, ev: "QEvent.KeyPress") -> None:
-        key = ev.key()
+    def X_keyReleaseEvent(self, ev: "QEvent") -> None:
+        key = ev.key()  # type: ignore[attr-defined]
         print("key released", key)
     def push_to_talk_start(self):
         # TODO Instead of trying to use the QMediaCapture, maybe we'd rather want to just grab stuff
@@ -243,7 +270,7 @@ class MainWindow(QMainWindow):
         nwa = eng.networkAccessManager()
         #import pdb;pdb.set_trace()
         fnamf = FirewallNetworkAccessManagerFactory()
-        a = fnamf.create()
+        a = fnamf.create(QObject())
         eng.setNetworkAccessManagerFactory(fnamf)
 
         self.setWindowTitle(APP_NAME)
@@ -299,24 +326,32 @@ class MainWindow(QMainWindow):
         if not msg.strip():
             return
         print('chat msg single line, TODO should write this to WAL and contact log', msg)
-        # - look up current Conversation:
-        #   - we need the write cap and the current index
-        async with persistent.asession() as sess:
-            # TODO we should probably just cache this
-            bacap_write_cap = (await sess.exec(
-                select(persistent.Conversation.write_cap).filter(
-                    persistent.Conversation.id == convo_state.conversation_id
-                ))).first()
-        # - thinclient: we need to encrypt it using write cap + current index
-        encrypted = await network.encrypt_message(
-            msg=msg,
-            bacap_write_cap=bacap_write_cap,
-            bacap_write_index=0, # TODO
+        send_op = SendOperation(
+            bacap_stream=convo_state.own_peer_bacap_uuid,
+            messages=[GroupChatMessage(
+                version=0,
+                membership_hash=b"s"*32, # TODO: mocked for now; convo_state.group_chat_state.membership_hash
+                text=msg
+            )]
         )
+        print(send_op)
+        # TODO this code is duplicated in self.send_file
+        new_write_caps, plaintextwals = send_op.serialize(
+            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            conversation_id=convo_state.conversation_id)
+        async with persistent.asession() as sess:
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for pw in plaintextwals:
+                sess.add(pw)
+            await sess.commit()
 
-        # - we need to queue it for writing in the MixWAL
-        #
-        # - once it's in MixWAL we should pretend to have received it:
+        todo = await self.iothread.run_in_io(
+            network.send_resendable_plaintexts(self.iothread.kp_client)
+        )
+        print("send_resendable_plaintexts", todo)
+
+        # Then we pretend that we have received it:
 
         await self.receive_msg(
             conversation_id=convo_state.conversation_id,
@@ -418,6 +453,51 @@ class MainWindow(QMainWindow):
         print("should send files", convo.attached_files)
 
         # TODO actually send them
+        fmsgs = []
+        for fn in convo.attached_files:
+            f_path = Path(fn)
+            fmsgs.append(
+                GroupChatMessage(
+                version=0,
+                membership_hash=b"t"*32, # TODO: mocked for now; convo_state.group_chat_state.membership_hash
+                    file_upload=GroupChatFileUpload(
+                        basename=f_path.name,
+                        filetype="arbitrary",
+                        payload=f_path.read_bytes(), # TODO we'll obviously need a better strategy for big files
+                    )
+                )
+            )
+
+        send_op = SendOperation(
+            messages=fmsgs,
+            bacap_stream=uuid.uuid4() # TODO look up the right uuid in convo_state.group_chat_state.bacap_uuid
+        )
+        print(send_op)
+
+        new_write_caps, plaintextwals = send_op.serialize(
+            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            conversation_id=convo.conversation_id)
+        async with persistent.asession() as sess:
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for pw in plaintextwals:
+                sess.add(pw)
+            await sess.commit()
+
+        todo = await self.iothread.run_in_io(
+            network.send_resendable_plaintexts(self.iothread.kp_client)
+        )
+        #import pdb;pdb.set_trace()
+
+        return
+        # open a new transaction: TODO: need to only READ COMMITTED, we do not want dirty reads here
+        async with persistent.asession() as sess:
+            for cap_uuid in new_write_caps:
+                # sess.add(cap_uuid)  # TODO the network writer needs to create these before it can process plaintextwals
+                pass # write these to database
+            for wal_entry in plaintextwals:
+                sess.add(wal_entry)  # These are the actual payloads
+            await sess.commit()
 
         # Remove sent files from model and view:
         convo.attached_files.clear()
@@ -602,6 +682,7 @@ class MainWindow(QMainWindow):
             "Choose conversation name:",
         )
         if not ok: return
+        # TODO this crap out while something is awaiting the write_channel:
         display_name , ok = QInputDialog.getText(
             self,
             "New conversation",
@@ -609,12 +690,17 @@ class MainWindow(QMainWindow):
         )
         if not ok: return
 
-        write_cap = await network.new_write_cap()
-        read_cap = await network.read_cap_from_write_cap(write_cap)
+        chan_id, read_cap, write_cap, next_index = await self.iothread.run_in_io(self.iothread.kp_client.create_write_channel())
+        print("WTF1"*100, len(write_cap), len(read_cap))
+        await self.iothread.run_in_io(self.iothread.kp_client.close_channel(chan_id))
+        wcapwal = persistent.WriteCapWAL(
+            id=uuid.uuid4(), write_cap=write_cap, next_index=next_index
+        )
+        rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
 
-        convo = persistent.Conversation(name=conversation_name, write_cap=write_cap)
+        convo = persistent.Conversation(name=conversation_name, write_cap=wcapwal.id)
 
-        own_peer = persistent.ConversationPeer(name=display_name, read_cap=read_cap, active=False, conversation=convo)
+        own_peer = persistent.ConversationPeer(name=display_name, read_cap_id=rcapwal.id, active=False, conversation=convo)
         convo.own_peer = own_peer
         # TODO this is mainly for debugging:
         first_post = persistent.ConversationLog(
@@ -624,6 +710,8 @@ class MainWindow(QMainWindow):
             payload=b"hello " + own_peer.name.encode(),
         )
         async with persistent.asession() as sess:
+            sess.add(wcapwal)
+            sess.add(rcapwal)
             sess.add(convo)
             sess.add(own_peer)
             sess.add(first_post)
@@ -636,7 +724,7 @@ class MainWindow(QMainWindow):
         """User wants to generate an invitation to give to a friend.
 
         We need to ask the user what name they want, and make them a BACAP write cap.
-        Then we need to find the read cap, and show that.
+        Then we need to find the corresponding read cap, and show that.
 
         Persistence-wise, we need to store:
         - Our display name
@@ -645,6 +733,22 @@ class MainWindow(QMainWindow):
 
         The BACAP stuff we will get from the thin client.
         """
+        print("invite contact pressed TODO")
+
+        # Retrieve our read cap for selected convo:
+        convo = self.convo_state()
+        import sqlalchemy as sa
+        async with persistent.asession() as sess:
+            # TODO this can definitely be rewritten as a more graceful JOIN:
+            co = (await sess.exec(sa.select(persistent.Conversation).where(persistent.Conversation.id==convo.conversation_id))).one()
+            co = co[0]  # TODO why doe .one() get us a tuple? probably the sa.select()
+            rcw = (await sess.exec(sa.select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==co.own_peer.read_cap_id))).one()[0]
+            print("RCW:", rcw)
+            pass
+        if rcw.read_cap is None:
+            dlg = QMessageBox.critical(self, f"ERROR: {APP_NAME}", "Can't invite when not connected to clientd")
+            return
+
         display_name , ok = QInputDialog.getText(
             self,
             "Invite contact",
@@ -652,9 +756,21 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
-        print("invite contact pressed TODO ", display_name)
 
-        # OK, now we need to ask thin client to generate BACAP caps
+        # serialize:
+        # rcw.read_cap ( + rcw.next_index ? )
+        intro = GroupChatPleaseAdd(
+            display_name=display_name,
+            read_cap=rcw.read_cap
+        )
+
+        # So now if the other person plops this intro into their client, they can read our stream.
+        # We still don't have theirs.
+        print()
+        print(intro.to_human_readable())
+        print()
+        # TODO instead of print, we want a GUI element diplaying this, with a button to copy to
+        # clipboard
 
         # And then we need to persist the invitation (So we know what we're doing)
         # async with persistent.asession() as session:
@@ -682,8 +798,41 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         print("accept invitation pressed", invite_string)
+        try:
+            please_add = GroupChatPleaseAdd.from_human_readable(invite_string)
+        except:
+            print("Invalid PleaseAdd")
+            return
+
+        # TODO need to validate these a bit more, like ensure we are not adding ourselves to our own convo, and so on.
+
         # Now we need to parse it, validate the cap,
         #   and confirm with the user that they like the display name
+        dlg = QMessageBox.critical(self, f"TODO ask", f"is this name ok? {please_add.display_name}")
+
+        convo = self.convo_state()
+        from sqlmodel import select
+        async with persistent.asession() as sess:
+            # insert into readcapwal
+            rcwal = persistent.ReadCapWAL(
+                id=uuid.uuid4(),
+                read_cap=please_add.read_cap,
+                next_index=please_add.read_cap[-104:]) # TODO don't hardcode 104 as length of messageboxindex?
+            sess.add(rcwal)
+            # TODO don't want to commit here but do need the uuid
+            # insert into conversationpeer:
+            x = select(persistent.Conversation).where(persistent.Conversation.id==convo.conversation_id)
+            conv_obj = (await sess.exec(x)).one()
+            sess.add(conv_obj)
+            cp = persistent.ConversationPeer(
+                name=please_add.display_name,
+                read_cap_id=rcwal.id,
+                active=True,
+                conversation=conv_obj,
+            )
+            sess.add(cp)
+            await sess.commit()
+        print("OK THEY ARE HERE")
         # Then ask them for the Conversation name (or just default to the display name for now)
         # Then we need to persist the contact:
         # - persistent.ConversationPeer(name=..., read_cap=...)
@@ -775,13 +924,17 @@ class MixSystrayIcon(QSystemTrayIcon):
         self.setIcon(self.mw.echomix_icon)
         self.mw.setWindowIcon(self.mw.echomix_icon)
 
-    def showMessage(self, title, message, icon:QIcon|QPixmap|None=None, msTimeoutHint:int|None=None):
-        extra = []
-        if icon is not None:
-            extra.append(icon)
-        if msTimeoutHint is not None:
-            extra.append(msTimeoutHint)
-        super().showMessage(title, message, *extra)
+    def showMessage(self, title:str, message:str) -> None:  # type: ignore[override]
+        # icon:QIcon|QPixmap, /, msTimeoutHint:int|None=None
+        super().showMessage(title, message)
+        #if icon is not None:
+        #    if msTimeoutHint is not None:
+        #        super().showMessage(title, message, icon, msTimeoutHint)
+        #    else:
+        #        super().showMessage(title, message, icon)
+        #else:
+        #    super().showMessage(title, message)
+
     def on_left_click(self, reason: QSystemTrayIcon.ActivationReason):
         self.mw.show()  # if they closed the window
         self.mw.raise_()  # raise to top  /  make active window in WM
@@ -805,6 +958,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     clm = ConversationLogModel(convo.id)
     convo_state = ConversationUIState(
         own_peer_id=convo.own_peer_id,
+        own_peer_bacap_uuid=convo.write_cap,
         conversation_id=convo.id,
         chat_lineEdit_buffer="",
         conversation_log_model=clm,
@@ -825,6 +979,12 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
     # qtwi: select all contactpeers under here
     window.all_contacts.appendRow(qtwi)
+    for peer in convo.peers:
+        if peer.id != convo.own_peer_id:
+            print("TODO: start fetching ReadCaps for ", peer.name, peer.read_cap_id)
+        else:
+            print("Not fetching ReadCap for own", peer.name, peer.read_cap_id)
+
     #window.ui.contacts_treeWidget.model().invalidate()
     #window.ui.contacts_treeWidget.model()
     #contacts.addTopLevelItem(qtwi)
@@ -840,6 +1000,28 @@ def rebuild_pydantic_models():
 
 async def main(window: MainWindow):
     rebuild_pydantic_models()
+    """
+    import trio
+    async def kp_async():
+        try:
+            print("KP RECON")
+            kp_client = await network.reconnect()
+            print("KP RECON2")
+        except FileNotFoundError as e:
+            print("KP RECON FNE")
+            error_and_exit(window.app, "Cannot find mixnet configuration file:\n" + e.filename, window)
+        pass
+    qloop = asyncio.get_running_loop()
+    def donecb(out):
+        print("DONECB",out)
+    def sooncb(fn):
+        print("SOONCB", fn)
+        qloop.call_soon_threadsafe(fn)
+    trio.lowlevel.start_guest_run(
+        kp_async,
+        run_sync_soon_threadsafe=qloop.call_soon_threadsafe,
+        done_callback=donecb)
+    """
     echomix_icon = QIcon()
     window.echomix_icon = echomix_icon
     for sz in (16,32,48,160,256):
@@ -872,6 +1054,10 @@ async def main(window: MainWindow):
 
     window.show()
 
+    #await asyncio.sleep(5)
+    #f = asyncio.run_coroutine_threadsafe(window.at.kp_client.create_write_channel(), window.at.loop)
+    #f = await window.iothread.run_in_io(window.iothread.kp_client.create_write_channel())
+    #print("new write channel", f)
     #import pdb;pdb.set_trace()
     pass
 
@@ -887,6 +1073,10 @@ def todo_settings():
     # https://doc.qt.io/qtforpython-6/PySide6/QtCore/QSettings.html
     pass
 
+# Make the fd global so it doesn't go out of scope when we return
+# since close(2) will unlock:
+already_running_fd: "typing.IO" = open(__file__, "rb")
+
 def is_there_already_an_instance_running() -> bool:
     """
     Checks if there are other instances of the application running.
@@ -895,28 +1085,41 @@ def is_there_already_an_instance_running() -> bool:
       False: There is already an app instance running
       True: This is the first app instance
     """
-    # Make the fd global so it doesn't go out of scope when we return
-    # since close(2) will unlock:
-    global already_running_fd
     # TODO: use a config file entry or something else than __FILE__:
-    already_running_fd = open(__file__, "r")
+    global already_running_fd
     try:
         fcntl.flock(already_running_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return True  # Already running
     return False  # Obtained the lock
 
+def error_and_exit(app: QApplication, why: str, main_window: QMainWindow | None=None) -> None:
+    if not main_window:
+        main_window = QMainWindow()
+    dlg = QMessageBox.critical(main_window, f"ERROR: {APP_NAME}", why)
+    app.quit()
+    sys.exit(why)
+
+
 if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
 
     if is_there_already_an_instance_running():
-        sys.exit("The app is already running.")
+        error_and_exit(app, f"{APP_NAME} is already running.")
+
+    try:
+        persistent.init_and_migrate()  # this must be run outside the async loop
+    except Exception as e:
+        error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
 
     # Make scrolling suck less, https://bugreports.qt.io/browse/QTBUG-123936
     os.environ["QT_QUICK_FLICKABLE_WHEEL_DECELERATION"] = "14999"
 
-    persistent.init_and_migrate()  # this must be run outside the async loop
+    iothread = AsyncioThread()
+    iothread.start()
 
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
     window = MainWindow(app)
+    window.iothread = iothread
+
     QtAsyncio.run(main(window), handle_sigint=True)

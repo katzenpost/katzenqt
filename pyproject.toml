@@ -17,8 +17,14 @@ dependencies = [
 "alembic~=1.16.2",
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
-"cbor2>=5.6.0", # kp_thinclient pins old minor version
-"katzenpost_thinclient~=0.0.3"
+"cbor2~=5.6.5", # kp_thinclient pins old minor version
+"katzenpost_thinclient~=0.0.10"
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "hypothesis>=6.135.17",
 ]
 
 #[project.urls]
@@ -35,3 +41,8 @@ dependencies = [
 [tool.alembic]
 script_location = "%(here)s/migrations"
 prepend_sys_path = ["."]
+
+[project.urls]
+Homepage = "https://katzenpost.network/"
+Repository = "https://github.com/katzenpost/katzenqt"
+Issues = "https://github.com/katzenpost/katzenqt/issues"
