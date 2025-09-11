@@ -480,27 +480,20 @@ class MainWindow(QMainWindow):
         new_write_caps, plaintextwals = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo.conversation_id)
-        async with persistent.asession() as sess:
-            for cap_uuid in new_write_caps:
-                sess.add(persistent.WriteCapWAL(id=cap_uuid))
-            for pw in plaintextwals:
-                sess.add(pw)
-            await sess.commit()
 
-        todo = await self.iothread.run_in_io(
-            network.send_resendable_plaintexts(self.iothread.kp_client)
-        )
-        #import pdb;pdb.set_trace()
-
-        return
         # open a new transaction: TODO: need to only READ COMMITTED, we do not want dirty reads here
         async with persistent.asession() as sess:
             for cap_uuid in new_write_caps:
-                # sess.add(cap_uuid)  # TODO the network writer needs to create these before it can process plaintextwals
-                pass # write these to database
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))  # the network writer needs to create these before it can process plaintextwals
             for wal_entry in plaintextwals:
                 sess.add(wal_entry)  # These are the actual payloads
             await sess.commit()
+
+        if self.iothread.kp_client:
+            todo = await self.iothread.run_in_io(
+                network.send_resendable_plaintexts(self.iothread.kp_client)
+            )
+            #import pdb;pdb.set_trace()
 
         # Remove sent files from model and view:
         convo.attached_files.clear()
