@@ -207,3 +207,15 @@ class ConversationUIState(BaseModel):
             "first_unread": self.first_unread,
         })
         return props
+
+    async def update_first_unread(self, new_first_unread:int) -> None:
+        """Update first_unread in the persistent database:"""
+        if new_first_unread == self.first_unread:
+            return
+        print("UPDATED FIRST_UNREAD", self.first_unread, new_first_unread)
+        self.first_unread = new_first_unread
+        async with persistent.asession() as sess:
+            co = (await sess.exec(persistent.select(persistent.Conversation).where(persistent.Conversation.id==self.conversation_id))).one()
+            co.first_unread = self.first_unread
+            sess.add(co)
+            await sess.commit()

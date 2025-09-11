@@ -396,9 +396,8 @@ class MainWindow(QMainWindow):
             print("convo order would scroll", conversation_order)
             convo_state.chat_lines_scroll_idx = 1.0
             root = self.ui.qml_ChatLines.rootObject()
-            convo_state.first_unread = root.property("ctx").value("first_unread")
+            await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
             root.setProperty("ctx", convo_state.qml_ctx(root))
-
             #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
             #print(xx)
             #import pdb;pdb.set_trace()
@@ -574,7 +573,7 @@ class MainWindow(QMainWindow):
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
             if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
                 print("old first_unread is", old_ctx.value("first_unread"))
-                old_convo.first_unread = old_ctx.value("first_unread")
+                await old_convo.update_first_unread(old_ctx.value("first_unread"))
             root = self.ui.qml_ChatLines.rootObject()
             if root and (vscrollbar := root.findChild(object, "vscrollbar")):
                 #vrect = vscrollbar.findChild(object, "vscrollbar_rect")
