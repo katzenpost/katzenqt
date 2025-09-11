@@ -16,8 +16,12 @@ if TYPE_CHECKING:
     from typing import AsyncContextManager
     import sqlmodel
 
-_alembic_cfg = alembic.config.Config(Path(__file__).parent.parent / "alembic.ini")
-_sql_url = _alembic_cfg.file_config._sections['alembic']['sqlalchemy.url']  # TODO this should reside in ~/.local/state/ or similar xdg path
+try:
+    _alembic_cfg = alembic.config.Config(Path(__file__).parent.parent / "alembic.ini")
+    _sql_url = _alembic_cfg.file_config._sections['alembic']['sqlalchemy.url']  # TODO this should reside in ~/.local/state/ or similar xdg path
+except:
+    import pdb;pdb.post_mortem()
+
 _engine = create_async_engine(_sql_url, echo=True, future=True)
 _engine_sync = create_engine("sqlite:///katzen.sqlite3", echo=True)
 

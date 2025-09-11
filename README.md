@@ -9,6 +9,11 @@ pip install --upgrade pip
 pip install -e .
 ```
 
+Most debian systems will already have this package, but it is required:
+```shell
+apt install libxcb-cursor0 # version (0.1.4-1)
+```
+
 # Running the application
 
 First navigate to the `katzenqt` folder and initialize the `venv`:
