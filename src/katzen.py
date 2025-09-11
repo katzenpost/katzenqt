@@ -694,7 +694,7 @@ class MainWindow(QMainWindow):
         )
         rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
 
-        convo = persistent.Conversation(name=conversation_name, write_cap=wcapwal.id)
+        convo = persistent.Conversation(name=conversation_name, write_cap=wcapwal.id, first_unread=0)
 
         own_peer = persistent.ConversationPeer(name=display_name, read_cap_id=rcapwal.id, active=False, conversation=convo)
         convo.own_peer = own_peer
@@ -959,6 +959,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         chat_lineEdit_buffer="",
         conversation_log_model=clm,
         chat_lines_scroll_idx=1.0,
+        first_unread=convo.first_unread or 0,
     )
     window.conversation_state_by_id[convo.id] = convo_state
     for peer in convo.peers:

@@ -26,6 +26,17 @@ _engine = create_async_engine(_sql_url, echo=True, future=True)
 _engine_sync = create_engine("sqlite:///katzen.sqlite3", echo=True)
 
 
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+metadata = SQLModel.metadata
+metadata.naming_convention = NAMING_CONVENTION
+
+
 @asynccontextmanager
 async def asession() -> "AsyncContextManager[sqlmodel.ext.asyncio.session.AsyncSession]":
     """Opens a sqlmodel.ext.asyncio.session.AsyncSession"""
@@ -201,8 +212,10 @@ class Conversation(SQLModel, table=True):
     # and a number of BACAP read caps
     peers: list[ConversationPeer] = Relationship(back_populates="conversation", link_model=ConversationPeerLink, sa_relationship_kwargs={"lazy":"selectin"})
     log: list["ConversationLog"] = Relationship(back_populates="conversation", sa_relationship_kwargs={"lazy":"selectin"})
+    #sa_relationship=RelationshipProperty("ConversationLog", foreign_keys=["fk_conversationlog_id_conversation_id"])
 
-    # first_unread: nullable ForeignKey to conversation_order
+    first_unread: int = Field(nullable=True, default=None, description="pointer to latest read ConversationLog entry")
+    #first_unread: uuid.UUID = Field(foreign_key="conversationlog.id", nullable=True, index=False, description="pointer to latest read ConversationLog entry")
     # to keep track of the read state "split buffer"
 
 class ConversationLog(SQLModel, table=True):
