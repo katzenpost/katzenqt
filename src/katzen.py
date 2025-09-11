@@ -325,7 +325,7 @@ class MainWindow(QMainWindow):
         convo_state.chat_lineEdit_buffer = ''
         if not msg.strip():
             return
-        print('chat msg single line, TODO should write this to WAL and contact log', msg)
+
         send_op = SendOperation(
             bacap_stream=convo_state.own_peer_bacap_uuid,
             messages=[GroupChatMessage(
@@ -346,10 +346,13 @@ class MainWindow(QMainWindow):
                 sess.add(pw)
             await sess.commit()
 
-        todo = await self.iothread.run_in_io(
-            network.send_resendable_plaintexts(self.iothread.kp_client)
-        )
-        print("send_resendable_plaintexts", todo)
+        # TODO we can only do this if we have a self.iothread.kp_client,
+        # that is, a connection to the clientd:
+        if self.iothread.kp_client:
+            todo = await self.iothread.run_in_io(
+                network.send_resendable_plaintexts(self.iothread.kp_client)
+            )
+            print("send_resendable_plaintexts", todo)
 
         # Then we pretend that we have received it:
 

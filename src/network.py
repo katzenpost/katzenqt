@@ -208,7 +208,7 @@ async def readables_to_mixwal(connection):
     if len(readable_peers):
         __mixwal_updated.set()
 
-async def send_resendable_plaintexts(connection) -> None:
+async def send_resendable_plaintexts(connection:ThinClient) -> None:
     # TODO this needs to be protected by a mutex or use an asyncio.Event
     # look at persistent.PlaintextWAL:
     # PICK OUT stuff in plaintextwall that we aren't currently resending
