@@ -11,18 +11,19 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlmodel import SQLModel
 from alembic import context
 
-from persistent import ConversationPeerLink, ConversationPeer, Conversation, metadata
-
-# TODO here we need to import the SQLModel models
-
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# TODO here we need to import the SQLModel models
+from persistent import ConversationPeerLink, ConversationPeer, Conversation, metadata, _sql_url
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+config.set_main_option('sqlalchemy.url', _sql_url) # 'sqlite+aiosqlite:///katzen.sqlite3')
+
 
 # add your model's MetaData object here
 # for 'autogenerate' support

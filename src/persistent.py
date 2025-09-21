@@ -4,6 +4,7 @@ from sqlalchemy.orm import declarative_base
 from pathlib import Path
 import alembic.config
 import alembic.command
+import alembic.context
 import uuid
 from contextlib import asynccontextmanager
 from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, UniqueConstraint, select
@@ -15,15 +16,26 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import AsyncContextManager
     import sqlmodel
+from alembic import context
+import os
 
-try:
-    _alembic_cfg = alembic.config.Config(Path(__file__).parent.parent / "alembic.ini")
-    _sql_url = _alembic_cfg.file_config._sections['alembic']['sqlalchemy.url']  # TODO this should reside in ~/.local/state/ or similar xdg path
-except:
-    import pdb;pdb.post_mortem()
 
+
+_alembic_cfg = alembic.config.Config(Path(__file__).parent.parent / "alembic.ini")
+
+xdg_data_home = (Path().home()/".local"/"share")
+xdg_data_home.mkdir(parents=True,exist_ok=True)
+app_data = xdg_data_home / "katzenqt"
+app_data.mkdir(exist_ok=True, mode=0o700)
+
+if not (state_file := os.getenv("KQT_STATE", "")):
+    state_file = "katzen"
+state_file += ".sqlite3"
+state_file = app_data / state_file
+_sql_url = f"sqlite+aiosqlite:///{ state_file }"
+print(_sql_url)
 _engine = create_async_engine(_sql_url, echo=True, future=True)
-_engine_sync = create_engine("sqlite:///katzen.sqlite3", echo=True)
+_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True)
 
 
 NAMING_CONVENTION = {

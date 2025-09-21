@@ -82,7 +82,8 @@ async def drain_mixwal(connection: ThinClient):
         if mw.is_read:
             # TODO instead of n queries for this we ought to just get them in the join
             rcw = (await sess.exec(select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==mw.bacap_stream))).one()
-            chan_id, _ = await connection.create_read_channel(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
+            chan_id, _ = await connection.resume_read_channel(read_cap=rcw.read_cap, next_message_index=rcw.next_index,
+                                 ) # reply_index: "int|None" = None)
         else:
             wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
             chan_id, _, _, _ = await connection.create_write_channel(write_cap=wcw.write_cap, message_box_index=wcw.next_index)
@@ -239,6 +240,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     chan_id, read_cap, write_cap, cur_message_index = await connection.create_write_channel(write_cap=wc.write_cap, message_box_index=wc.next_index)
     print("WTF3"*100, len(write_cap), len(read_cap))
     if wc.write_cap is None: # this is a new one
+        chan_id, read_cap, write_cap = await connection.create_write_channel()
         async with persistent.asession() as sess:
             wc = await select(WriteCapWAL).where(id=pwal.bacap_stream)
             wc.write_cap = write_cap
@@ -246,7 +248,8 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
             sess.update(wc)
             await sess.commit()
 
-    send_message_payload , next_next_index = await connection.write_channel(chan_id, pwal.bacap_payload)
+    # send_message_payload , next_next_index = await connection.write_channel(chan_id, pwal.bacap_payload)
+    await connection.resume_write_channel_query(write_cap=wc.write_cap, message_box_index=wc.next_index, envelope_descriptor=pwal.bacap_payload, envelope_hash=)
     await connection.close_channel(chan_id)
 
     courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
@@ -270,7 +273,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
 
     pass
 
-def on_connection_status(status:"Dict[str,Any]"):
+async def on_connection_status(status:"Dict[str,Any]"):
     if status["is_connected"]:
       __mixnet_connected.set()
     else:

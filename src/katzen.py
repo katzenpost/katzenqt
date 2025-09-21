@@ -1071,7 +1071,7 @@ def todo_settings():
 
 # Make the fd global so it doesn't go out of scope when we return
 # since close(2) will unlock:
-already_running_fd: "typing.IO" = open(__file__, "rb")
+already_running_fd: "typing.IO | None" = None
 
 def is_there_already_an_instance_running() -> bool:
     """
@@ -1083,6 +1083,7 @@ def is_there_already_an_instance_running() -> bool:
     """
     # TODO: use a config file entry or something else than __FILE__:
     global already_running_fd
+    already_running_fd = open(persistent.state_file, "rb")
     try:
         fcntl.flock(already_running_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -1101,13 +1102,13 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    if is_there_already_an_instance_running():
-        error_and_exit(app, f"{APP_NAME} is already running.")
-
     try:
         persistent.init_and_migrate()  # this must be run outside the async loop
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
+
+    if is_there_already_an_instance_running():
+        error_and_exit(app, f"{APP_NAME} is already running.")
 
     # Make scrolling suck less, https://bugreports.qt.io/browse/QTBUG-123936
     os.environ["QT_QUICK_FLICKABLE_WHEEL_DECELERATION"] = "14999"
