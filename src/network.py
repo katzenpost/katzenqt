@@ -41,10 +41,10 @@ async def start_background_threads(connection: ThinClient):
     await f3
     # TODO then we don't need       populate_resend_queue(),
 
-    # Loop over PlaintextWAL messages and encrypt them
+    # Loop over old encrypted messages and resend them
     f4 = ensure_future(send_resendable_plaintexts(connection))
 
-    # Loop over PlaintextWAL messages and encrypt them
+    # Loop over things we can read and start reading them:
     f5 = ensure_future(readables_to_mixwal(connection))
     try:
         await asyncio.gather(f1, f4, f5)
@@ -84,23 +84,36 @@ async def drain_mixwal(connection: ThinClient):
             rcw = (await sess.exec(select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==mw.bacap_stream))).one()
             chan_id = await connection.resume_read_channel_query(
                 read_cap=rcw.read_cap, next_message_index=rcw.next_index,
-                envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
-            ) # reply_index: "int|None" = None)
+                envelope_descriptor=mw.envelope_descriptor, #ncrypted_payload,
+                envelope_hash=mw.envelope_hash,
+                reply_index=0,
+            )
         else:
             wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
-            chan_id = await connection.resume_write_channel_query(write_cap=wcw.write_cap, message_box_index=wcw.current_message_index, envelope_descriptor=mw.encrypted_payload, envelope_hash=mw.envelope_hash)
+            chan_id = await connection.resume_write_channel_query(
+                write_cap=wcw.write_cap,
+                message_box_index=mw.current_message_index,
+                envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash)
+            # 20:40:22.483 ERRO katzenpost/client2: resumeWriteChannelQuery: Failed to parse envelope descriptor: cbor: 1999 bytes of extraneous data starting at index 1
+        # for each resent message id we should probably keep listening to the old ones
         message_id = secrets.token_bytes(16)
         orig_message_id = message_id
         __on_message_queues[message_id] = asyncio.Queue()
         reply = False
+        # we kind of want to use send_channel_query_await_reply(timeout_seconds=None) here, but it's not ideal to do that within the database session.
         while not reply:
-            await connection.send_channel_query(
-                channel_id=chan_id,
-                payload=mw.encrypted_payload,
-                dest_node=mw.destination,
-                dest_queue=b'courier',
-                message_id=message_id
-            )
+            try:
+                await connection.send_channel_query(
+                    channel_id=chan_id,
+                    payload=mw.encrypted_payload,
+                    dest_node=mw.destination,
+                    dest_queue=b'courier',
+                    message_id=message_id
+                )
+            except ThinClientOfflineError:
+                print("thin client is offline, can't drain mixwal. retrying in 5s")
+                await asyncio.sleep(5)
+                continue
             reply = await __on_message_queues[message_id].get()
             if reply is None:
                 print("RESENDING QUERY")
@@ -117,13 +130,13 @@ async def drain_mixwal(connection: ThinClient):
         # read new from mixwal
         async with persistent.asession() as sess:
             new_mixwals = (await sess.exec(persistent.MixWAL.get_new(__resend_queue))).all()
-            print("NEW MIXWALS", new_mixwals)
+            print("drain_mixwal: NEW MIXWALS", new_mixwals)
             jobs = []
             for mw in new_mixwals:
                 print("="*100, "new mixwal mw:", mw)
                 __resend_queue.add(mw.bacap_stream)
                 jobs.append(tx_single(sess, mw))
-            print("GATHERING")
+            print(f"drain_mixwal: GATHERING {len(jobs)} JOBS")
             await asyncio.gather(*jobs)
             await sess.commit()
 
@@ -174,20 +187,22 @@ async def readables_to_mixwal(connection):
     global __resend_queue
     async def process_box(sess, cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> None:
         print("process box cpeer-rcw:", cpeer, rcw)
-        chan_id = await connection.create_read_channel(read_cap=rcw.read_cap) #, message_box_index=rcw.next_index)
+        chan_id = await connection.resume_read_channel(read_cap=rcw.read_cap,next_message_index=rcw.next_index) #, message_box_index=rcw.next_index)
         print("process box has chan_id", chan_id)
         #send_message_payload, next_next_index, reply_index
         rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
-        print("process_box got this from read_channel: reply_index:",reply_index)
+        print("process_box got this from read_channel:", rcreply)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
             envelope_hash=rcreply.envelope_hash,
             destination=courier,
             encrypted_payload=rcreply.send_message_payload,
+            envelope_descriptor=rcreply.envelope_descriptor,
             next_message_index=rcreply.next_message_index,
             current_message_index=rcreply.current_message_index,
-            is_read=True
+            # rcreply.reply_index
+            is_read=True,
         )
         sess.add(mw)
     async with persistent.asession() as sess:
@@ -219,6 +234,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
         sendable = sendable.all()
         print("adding to __resend_queue:", set(pw.id for pw in sendable), "it already has:", __resend_queue)
         __resend_queue |= set(pw.id for pw in sendable)
+    print("MAYBE WE CAN RESEND SOMETHING", len(sendable))
     await asyncio.gather(*[
         start_resending(connection, plainwal) for plainwal in sendable
     ])
@@ -246,6 +262,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     """
     if pwal.bacap_stream in __resend_queue:
         print("Why the fuck are we calling start_resending on this?", pwal.bacap_stream)
+        return
         import pdb;pdb.set_trace()
         return
     async with persistent.asession() as sess:
@@ -253,16 +270,19 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
             persistent.WriteCapWAL.get_by_bacap_uuid(pwal.bacap_stream))).one()[0]
 
     if wc.write_cap is None: # this is a new one
+        print("WHY IS WRITE CAP EMPTY HERE")
+        import pdb;pdb.set_trace()
         chan_id, read_cap, write_cap = await connection.create_write_channel()
+        await connection.close_channel(chan_id)
         async with persistent.asession() as sess:
             wc = await select(WriteCapWAL).where(id=pwal.bacap_stream, write_cap=None)
             wc.write_cap = write_cap
             wc.next_index = write_cap[-104:] # TODO why doesn't create_write_channel() give us this?
             sess.add(wc)
+            # we probably want to populate ReadCapWAL too while we are at this
             await sess.commit()
             await sess.refresh(wc)
         # now we have a write_cap and a next_index
-        await connection.close_channel(chan_id)
 
     # now we have:
     # - a plaintext to send to send, pwal.bacap_payload
@@ -273,25 +293,31 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # - persist that to MixWAL
 
     chan_id = await connection.resume_write_channel(write_cap=wc.write_cap, message_box_index=wc.next_index)
+    print("-"*1000, "start_resending made a resume channel")
     wcr = await connection.write_channel(chan_id, payload=pwal.bacap_payload)
+    print("-"*1000, "start_resending wrote to channel", wcr)
     await connection.close_channel(chan_id)
-
+    print("-"*1000, "start_resending closed channel")
+    
     courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     mw = persistent.MixWAL(
         bacap_stream = pwal.bacap_stream,
         envelope_hash = wcr.envelope_hash,
         destination = courier,
         encrypted_payload = wcr.send_message_payload,
+        envelope_descriptor = wcr.envelope_descriptor,
         current_message_index = wcr.current_message_index,
         next_message_index = wcr.next_message_index, # for resends, do we need current_message_index ? 
         is_read = False
     )
+    print("-"*1000, "start_resending made a MixWAL entry")
     async with persistent.asession() as sess:
         sess.add(mw)
         # TODO if we do this, how do we know what to remove from PlaintextWAL?
         # we need to hook network.on_message_reply to look for the returns
         await sess.commit()
 
+    print("-"*1000, "start_resending actually did something")
     # Now we have persisted our intention to resend.
     # Next up is something needs to actually resend, reading from MixWAL
     # and issuing ThinClient.send_channel_query
@@ -303,10 +329,13 @@ async def on_connection_status(status:"Dict[str,Any]"):
       __mixnet_connected.set()
     else:
       __mixnet_connected.clear()
-    if status["err"] is not None:
+    if status["err"] or status.get("Err", None):
         print("ON_CONNECTION_STATUS err:", status)
-        import pdb;pdb.set_trace()
-        pass
+        #ON_CONNECTION_STATUS err: {'is_connected': False, 'err': {'Op': 'read', 'Net': 'tcp', 'Source': {'IP': b'\x7f\x00\x00\x01', 'Port': 51718, 'Zone': ''}, 'Addr': {'IP': b'\x7f\x00\x00\x01', 'Port': 30004, 'Zone': ''}, 'Err': {}}}
+        # why is clientd telling us about the IP addresses its trying to connect to?
+        # and why does it have both status['err'] and status['Err']?
+        #import pdb;pdb.set_trace()
+        return
 
 def on_message_reply(reply):
     """Gets called each time a message reply comes in, whether it's from

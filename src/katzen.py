@@ -346,6 +346,14 @@ class MainWindow(QMainWindow):
                 sess.add(pw)
             await sess.commit()
 
+
+        # Then we pretend that we have received it:
+        await self.receive_msg(
+            conversation_id=convo_state.conversation_id,
+            peer_id=convo_state.own_peer_id,
+            cbor_payload=msg.encode(),
+        )
+
         # TODO we can only do this if we have a self.iothread.kp_client,
         # that is, a connection to the clientd:
         if self.iothread.kp_client:
@@ -353,14 +361,6 @@ class MainWindow(QMainWindow):
                 network.send_resendable_plaintexts(self.iothread.kp_client)
             )
             print("send_resendable_plaintexts", todo)
-
-        # Then we pretend that we have received it:
-
-        await self.receive_msg(
-            conversation_id=convo_state.conversation_id,
-            peer_id=convo_state.own_peer_id,
-            cbor_payload=msg.encode(),
-        )
 
     async def receive_msg(self, conversation_id : int, peer_id: int, cbor_payload: bytes) -> None:
         """Called when a message needs to be written to a conversation log, and the UI

@@ -96,7 +96,8 @@ class MixWAL(SQLModel, table=True):
     # it can't be a foreign_key because we track ReadCapWAL+WriteCapWAL separately.
     envelope_hash: bytes = Field(unique=True) # How do we compute this?
     destination: bytes  # courier this was supposed to be sent to
-    encrypted_payload: bytes
+    encrypted_payload: bytes     # send_message_payload
+    envelope_descriptor : bytes #  envelope private key
     current_message_index: bytes
     next_message_index: bytes
     is_read : bool
