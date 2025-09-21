@@ -26,6 +26,12 @@ make
 
 - TODO: despite `pyside6-rcc` we don't actually load the icons from the qrc, yet
 
+# Where is my data stored?
+
+The persistent data (keys, messages, everything) is stored in a SQLite3 file in `~/.local/share/katzenqt/katzen.sqlite3`.
+
+The environment variable `KQT_STATE` can be used to override the default state file name, e.g. `KQT_STATE=alsokatzen  make` will use `~/.local/share/katzenqt/alsokatzen.sqlite3`. This is useful if you want to talk to yourself, for instance when testing.
+
 # Design notes
 
 This application is a GUI chat client for mixnet group chat.
