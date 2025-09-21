@@ -97,6 +97,7 @@ class MixWAL(SQLModel, table=True):
     envelope_hash: bytes = Field(unique=True) # How do we compute this?
     destination: bytes  # courier this was supposed to be sent to
     encrypted_payload: bytes
+    current_message_index: bytes
     next_message_index: bytes
     is_read : bool
     @classmethod
@@ -152,7 +153,7 @@ class PlaintextWAL(SQLModel, table=True):
     )
     bacap_stream: uuid.UUID = Field(index=True,)
     conversation_id: int = Field(foreign_key="conversation.id", index=True,)
-    bacap_payload: bytes
+    bacap_payload: bytes  # in plaintext
 
     @classmethod
     def find_resendable(cls, resend_queue: "Set[uuid.UUID]") -> sa.sql.selectable.Select:

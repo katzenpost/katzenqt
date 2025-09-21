@@ -685,17 +685,23 @@ class MainWindow(QMainWindow):
         )
         if not ok: return
 
-        chan_id, read_cap, write_cap, next_index = await self.iothread.run_in_io(self.iothread.kp_client.create_write_channel())
-        print("WTF1"*100, len(write_cap), len(read_cap))
-        await self.iothread.run_in_io(self.iothread.kp_client.close_channel(chan_id))
+        # TODO we should be able to create conversations offline, ie purely using UUIDs
+        
+        #chan_id, read_cap, write_cap, next_index = await self.iothread.run_in_io(self.iothread.kp_client.create_write_channel())
+        #print("WTF1"*100, len(write_cap), len(read_cap))
+        #await self.iothread.run_in_io(self.iothread.kp_client.close_channel(chan_id))
         wcapwal = persistent.WriteCapWAL(
-            id=uuid.uuid4(), write_cap=write_cap, next_index=next_index
+            id=uuid.uuid4(), # actual CAP will be provisioned later
+            #write_cap=write_cap, next_index=next_index
         )
         rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
 
         convo = persistent.Conversation(name=conversation_name, write_cap=wcapwal.id, first_unread=0)
 
-        own_peer = persistent.ConversationPeer(name=display_name, read_cap_id=rcapwal.id, active=False, conversation=convo)
+        own_peer = persistent.ConversationPeer(
+            name=display_name, read_cap_id=rcapwal.id,
+            active=False, # we are not reading from ourself
+            conversation=convo)
         convo.own_peer = own_peer
         # TODO this is mainly for debugging:
         first_post = persistent.ConversationLog(
@@ -711,7 +717,11 @@ class MainWindow(QMainWindow):
             sess.add(own_peer)
             sess.add(first_post)
             await sess.commit()
+            await sess.refresh(first_post)
+            await sess.refresh(own_peer)
             await sess.refresh(convo)
+            await sess.refresh(rcapwal)
+            await sess.refresh(wcapwal)
             await add_conversation(self, convo)
 
     @async_cb

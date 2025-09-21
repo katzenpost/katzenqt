@@ -47,9 +47,9 @@ async def start_background_threads(connection: ThinClient):
     # Loop over PlaintextWAL messages and encrypt them
     f5 = ensure_future(readables_to_mixwal(connection))
     try:
-        await f5
+        await asyncio.gather(f1, f4, f5)
     except Exception as xx:
-        print("f5 exception",xx)
+        print("f1-f4-f5 exception",xx)
     async def do_shutdown():
         """TODO this needs some work"""
         await __should_quit.wait()
@@ -82,11 +82,13 @@ async def drain_mixwal(connection: ThinClient):
         if mw.is_read:
             # TODO instead of n queries for this we ought to just get them in the join
             rcw = (await sess.exec(select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==mw.bacap_stream))).one()
-            chan_id, _ = await connection.resume_read_channel(read_cap=rcw.read_cap, next_message_index=rcw.next_index,
-                                 ) # reply_index: "int|None" = None)
+            chan_id = await connection.resume_read_channel_query(
+                read_cap=rcw.read_cap, next_message_index=rcw.next_index,
+                envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
+            ) # reply_index: "int|None" = None)
         else:
             wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
-            chan_id, _, _, _ = await connection.create_write_channel(write_cap=wcw.write_cap, message_box_index=wcw.next_index)
+            chan_id = await connection.resume_write_channel_query(write_cap=wcw.write_cap, message_box_index=wcw.current_message_index, envelope_descriptor=mw.encrypted_payload, envelope_hash=mw.envelope_hash)
         message_id = secrets.token_bytes(16)
         orig_message_id = message_id
         __on_message_queues[message_id] = asyncio.Queue()
@@ -101,9 +103,11 @@ async def drain_mixwal(connection: ThinClient):
             )
             reply = await __on_message_queues[message_id].get()
             if reply is None:
+                print("RESENDING QUERY")
                 message_id = secrets.token_bytes(16) # do we need a new message_id per resend??
                 __on_message_queues[message_id] = __on_message_queues[orig_message_id]
-        #await connection.close_channel(chan_id)
+        await connection.close_channel(chan_id)
+        # TODO may need to advance next_index in DB
         print("RECEIVED REPLY FOR MESSAGE" * 1000, reply)
 
     while True:
@@ -124,51 +128,40 @@ async def drain_mixwal(connection: ThinClient):
             await sess.commit()
 
 async def provision_read_caps(connection: ThinClient):
-    """Long-running process to tead persistent.WriteCapWAL and populate ReadCapWAL"""
-    print("H"*1000)
+    """Long-running process to tread persistent.WriteCapWAL and populate ReadCapWAL"""
+    #print("provision read caps"*100)
     import sqlalchemy as sa
     wait = 0
     while True:
         await asyncio.sleep(wait)
-        wait = 30
+        wait = 5
         async with persistent.asession() as sess:
             for (rcw, wcw) in await sess.exec(sa.select(persistent.ReadCapWAL,persistent.WriteCapWAL).where(persistent.ReadCapWAL.read_cap == None).where(persistent.ReadCapWAL.write_cap_id==persistent.WriteCapWAL.id)): #  &
                 print("UPDATING:"*100, rcw,wcw, wcw.write_cap, wcw.next_index)
-                print("WRITECAP:", len(wcw.write_cap), wcw.write_cap.hex())
-                print("NEXTIDX:", len(wcw.next_index), wcw.next_index.hex())
-                #chan_id, _write_cap, rcw.read_cap, rcw.next_index = await connection.create_write_channel(write_cap=wcw.write_cap[:1], message_box_index=wcw.next_index)
-                tlen = (8 + 32 + 32 + 32  +32)
-                if len(wcw.write_cap) == tlen:
-                    # write cap is too small for Unmarshal:
-                    pub = nacl.public.PrivateKey(wcw.write_cap[:32]).public_key.encode()
-                    print("PUB IS", pub)
-                try:
-                    #chan_id, _write_cap, read_cap, next_index = await connection.create_write_channel(write_cap=wcw.write_cap[:32]+pub+wcw.write_cap[32:], message_box_index=wcw.next_index)
-                    chan_id, read_cap, _write_cap, next_index = await connection.create_write_channel(write_cap=wcw.write_cap, message_box_index=wcw.next_index)
-                    print("WTF2"*100, len(_write_cap), len(read_cap))
-                except Exception as e:
-                    print("BAD TODO", e)
-                    return
-                if chan_id == 0:
-                    print("CHAN ID WAS 0")
+                if wcw.write_cap is None:
+                    try:
+                        chan_id, read_cap, write_cap = await connection.create_write_channel()
+                        await connection.close_channel(chan_id)
+                    except Exception as e:
+                        print("create_write_channel DID NOT WORK"*100)
+                        print(e)
+                        continue
+                    print("GOT NEW WRITE CAP", read_cap, write_cap)
+                    wcw.write_cap = write_cap
+                    wcw.next_index = write_cap[-104:]
+                    rcw.read_cap = read_cap
+                    rcw.next_index = read_cap[-104:]
+                    #assert wcw.next_index == rcw.next_index
+                    sess.add(wcw)
+                    sess.add(rcw)
+                    await sess.commit()
+                    await sess.refresh(wcw)
+                    await sess.refresh(rcw)
                     continue
-                if _write_cap != wcw.write_cap:
-                    print("write_cap mismatch", _write_cap, wcw.write_cap)
+                else:
+                    print("DB was created with old API, new API does not support converting write cap to read cap")
                     continue
-                print("GOT CREATE_WRITE_CHANNEL ANSWER", read_cap, next_index)
-                await connection.close_channel(chan_id)
-                print("CHANNEL CLOSED", read_cap)
-                if not read_cap:
-                    print("ROLLING BACK"*1000, read_cap, pub)
-                    continue
-                print("GOT CWC"*100, rcw.read_cap, read_cap)
-                rcw.read_cap = read_cap
-                rcw.next_index = next_index
-                print("SESS.ADD")
-                sess.add(rcw)
-            print("COMMITTING SESSION")
             await sess.commit()
-    print("provisioning read caps","|"*1000)
 
 async def readables_to_mixwal(connection):
     """
@@ -181,17 +174,19 @@ async def readables_to_mixwal(connection):
     global __resend_queue
     async def process_box(sess, cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> None:
         print("process box cpeer-rcw:", cpeer, rcw)
-        chan_id, _ = await connection.create_read_channel(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
+        chan_id = await connection.create_read_channel(read_cap=rcw.read_cap) #, message_box_index=rcw.next_index)
         print("process box has chan_id", chan_id)
-        send_message_payload, next_next_index, reply_index = await connection.read_channel(chan_id)
+        #send_message_payload, next_next_index, reply_index
+        rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
         print("process_box got this from read_channel: reply_index:",reply_index)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
-            envelope_hash=secrets.token_bytes(32), # TODO
+            envelope_hash=rcreply.envelope_hash,
             destination=courier,
-            encrypted_payload=send_message_payload,
-            next_message_index=next_next_index,
+            encrypted_payload=rcreply.send_message_payload,
+            next_message_index=rcreply.next_message_index,
+            current_message_index=rcreply.current_message_index,
             is_read=True
         )
         sess.add(mw)
@@ -229,6 +224,26 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     ])
 
 async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
+    """
+    called by network:send_resumable_plaintexts, at startup and peridically, guarded by __resend_queue
+    creates MixWAL entries for plaintexts.
+    
+    Given a PlaintextWAL entry (plaintext bacap_payload, bacap_stream uuid)
+    we need to call:
+    - create_write_channel() ->     alice_channel_id, read_cap, write_cap = await alice_thin_client.create_write_channel()
+      - persist to bacap_stream_uuid -> read_cap/write_cap
+        - what do we do about next_index? we can recover it from the write_cap
+        - that lets us call resume_write_channel(write_cap, message_box_index=write_cap[FOO:])
+    - write_reply = await alice_thin_client.write_channel(alice_channel_id, pwal.bacap_payload)
+      - this give us a WriteChannelReply containing:
+        send_message_payload
+        current_message_index
+        next_message_index
+        envelope_descriptor
+        envelope_hash
+      - these we persist to MixWAL
+    
+    """
     if pwal.bacap_stream in __resend_queue:
         print("Why the fuck are we calling start_resending on this?", pwal.bacap_stream)
         import pdb;pdb.set_trace()
@@ -237,28 +252,38 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
         wc: persistent.WriteCapWAL = (await sess.exec(
             persistent.WriteCapWAL.get_by_bacap_uuid(pwal.bacap_stream))).one()[0]
 
-    chan_id, read_cap, write_cap, cur_message_index = await connection.create_write_channel(write_cap=wc.write_cap, message_box_index=wc.next_index)
-    print("WTF3"*100, len(write_cap), len(read_cap))
     if wc.write_cap is None: # this is a new one
         chan_id, read_cap, write_cap = await connection.create_write_channel()
         async with persistent.asession() as sess:
-            wc = await select(WriteCapWAL).where(id=pwal.bacap_stream)
+            wc = await select(WriteCapWAL).where(id=pwal.bacap_stream, write_cap=None)
             wc.write_cap = write_cap
-            wc.next_index = cur_message_index # TODO need to save this if it's the first?
-            sess.update(wc)
+            wc.next_index = write_cap[-104:] # TODO why doesn't create_write_channel() give us this?
+            sess.add(wc)
             await sess.commit()
+            await sess.refresh(wc)
+        # now we have a write_cap and a next_index
+        await connection.close_channel(chan_id)
 
-    # send_message_payload , next_next_index = await connection.write_channel(chan_id, pwal.bacap_payload)
-    await connection.resume_write_channel_query(write_cap=wc.write_cap, message_box_index=wc.next_index, envelope_descriptor=pwal.bacap_payload, envelope_hash=)
+    # now we have:
+    # - a plaintext to send to send, pwal.bacap_payload
+    # - wc has .write_cap, .next_index
+    # and we need to:
+    # - pick a courier
+    # - encrypt the message
+    # - persist that to MixWAL
+
+    chan_id = await connection.resume_write_channel(write_cap=wc.write_cap, message_box_index=wc.next_index)
+    wcr = await connection.write_channel(chan_id, payload=pwal.bacap_payload)
     await connection.close_channel(chan_id)
 
     courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     mw = persistent.MixWAL(
         bacap_stream = pwal.bacap_stream,
-        envelope_hash = secrets.token_bytes(32),
+        envelope_hash = wcr.envelope_hash,
         destination = courier,
-        encrypted_payload = send_message_payload,
-        next_message_index = next_next_index,
+        encrypted_payload = wcr.send_message_payload,
+        current_message_index = wcr.current_message_index,
+        next_message_index = wcr.next_message_index, # for resends, do we need current_message_index ? 
         is_read = False
     )
     async with persistent.asession() as sess:
@@ -355,10 +380,12 @@ async def encrypt_message(msg: str, bacap_write_cap:bytes, bacap_write_index:int
         'version': 0,
         'text': msg
     })
+    print("ENCRYPT_MESSAGE DOES NOT WORK")
+    return
     if connection:
         # TODO try:
         print("WTF7"*100, len(bacap_write_cap), len(read_cap))
-        channel_id, read_cap, write_cap, next_message_index = await connection.create_write_channel(
+        channel_id, read_cap, write_cap = await connection.create_write_channel(
             write_cap=bacap_write_cap,
             message_box_index=bacap_write_index,
         )
