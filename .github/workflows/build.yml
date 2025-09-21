@@ -1,0 +1,28 @@
+# see also
+# https://appimage-builder.readthedocs.io/en/latest/hosted-services/github-actions.html
+name: AppImage x86_64 Build
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-appimage:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@master
+    - name: install dependencies
+      run: sudo apt install desktop-file-utils zsync libxcb-cursor0
+    - name: install python deps
+      run: sudo python -m pip install --system -e .
+    - name: Download building tools & executing AppImage build
+      uses: AppImageCrafters/build-appimage-action@master
+      env:
+        UPDATE_INFO: gh-releases-zsync|katzenpost|katzenqt|*x86_64.AppImage.zsync
+     with:
+       recipe: AppImageBuilder.yml
+    - uses: actions/upload-artifact@v2
+      with:
+        name: AppImage
+...
