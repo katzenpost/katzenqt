@@ -469,7 +469,6 @@ class MainWindow(QMainWindow):
             messages=fmsgs,
             bacap_stream=uuid.uuid4() # TODO look up the right uuid in convo_state.group_chat_state.bacap_uuid
         )
-        print(send_op)
 
         new_write_caps, plaintextwals = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength

@@ -42,6 +42,13 @@ def test_please_add_deserialize_ex1():
         b'\xd2\xd8\xd1_S\xde\xa8(\xd5\x0c`\xe5\x83\xab4j\x04c\x8f\xa2W:\xc7\x13')
 
 
+def test_send_operation_empty():
+    bacap_stream = uuid.uuid4()
+    s = models.SendOperation(messages=[],bacap_stream=bacap_stream)
+    res = s.serialize(chunk_size=1400, conversation_id=123)
+    assert res is not None
+    assert type(res) is tuple
+    assert res != []
 
 test_send_operation_preserves_1 = given(st.integers(min_value=2), st.text())
 @test_send_operation_preserves_1

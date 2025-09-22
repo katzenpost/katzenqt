@@ -63,7 +63,7 @@ class SendOperation(BaseModel):
         if chunk_size <= 1:
             raise Exception("can't serialize if max payload size is < 2 bytes")
         if not self.messages:
-            return [] # There's nothing to send
+            return [], [] # There's nothing to send
         buf = io.BytesIO()
         for msg in self.messages:
             buf.write(msg.to_cbor())
