@@ -370,20 +370,16 @@ class MainWindow(QMainWindow):
         convo_state = self.conversation_state_by_id[conversation_id]
 
         async with persistent.asession() as sess:
-            conversation_order = (await sess.exec(
-                select(func.count())
-                .select_from(persistent.ConversationLog)
-                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
-            )).first()
-            log_entry = persistent.ConversationLog(
+            sess.add(persistent.ConversationLog(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=peer_id,
-                conversation_order=conversation_order,
+                conversation_order=select(func.count())
+                .select_from(persistent.ConversationLog)
+                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id),
                 payload=cbor_payload,
                 # TODO the payload we want to store is the plaintext CBOR payload;
                 # not the plaintext message.
-            )
-            sess.add(log_entry)
+            ))
             await sess.commit()
 
         # And then we can increment the row count to let the UI register it:
@@ -393,7 +389,6 @@ class MainWindow(QMainWindow):
         if convo_state is self.convo_state():
             #   x.1) Scrolling: Conversation is in focus:
             # TODO make which of these to do configurable:
-            print("convo order would scroll", conversation_order)
             convo_state.chat_lines_scroll_idx = 1.0
             root = self.ui.qml_ChatLines.rootObject()
             await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
