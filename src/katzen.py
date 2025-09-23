@@ -375,7 +375,8 @@ class MainWindow(QMainWindow):
                 conversation_peer_id=peer_id,
                 conversation_order=select(func.count())
                 .select_from(persistent.ConversationLog)
-                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id),
+                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
+                .scalar_subquery(),
                 payload=cbor_payload,
                 # TODO the payload we want to store is the plaintext CBOR payload;
                 # not the plaintext message.
