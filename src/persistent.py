@@ -163,17 +163,21 @@ class PlaintextWAL(SQLModel, table=True):
         # - after_stream IS NONE AND after_id IN (sentIDs)
         # - after_stream IN (completedStreams) AND after_id IS NONE
         # - after_stream IN (completedStreams) AND after_id IN (sentIDs)
-        # ... but only if we aren't already resending them (resend_queue).
+        # ... but only if we aren't already resending msgs from this stream (resend_queue).
 
         # alternative:
         """
         @sqlite> SELECT anon_1.id, anon_1.after_id, anon_1.after_stream, anon_1.bacap_stream, anon_1.conversation_id, anon_1.bacap_payload, anon_1.rownum  FROM (SELECT plaintextwal.id AS id, plaintextwal.after_id AS after_id, plaintextwal.after_stream AS after_stream, plaintextwal.bacap_stream AS bacap_stream, plaintextwal.conversation_id AS conversation_id, plaintextwal.bacap_payload AS bacap_payload, row_number() OVER (PARTITION BY plaintextwal.bacap_stream) AS rownum  FROM plaintextwal LEFT JOIN sentlog ON sentlog.id IN (plaintextwal.after_stream, plaintextwal.after_id) WHERE (plaintextwal.id NOT IN (1,2)) AND (plaintextwal.after_id IS NULL OR plaintextwal.after_id=sentlog.id) AND (plaintextwal.after_stream IS NULL OR plaintextwal.after_stream=sentlog.id)) AS anon_1 where anon_1.rownum = 1;
         """
-        sent_cte = sa.select(sa.select(SentLog.id).cte('sent_cte'))
+        sent_cte = sa.select(sa.select(SentLog.id).cte('sent_cte'))  # Successfully sent messages
+        mixwal_bacap_cte = sa.select(sa.select(MixWAL.bacap_stream).cte('mixwal_bacap_cte'))
         # instead of a cte that selects it all we may want to us after_id/after_stream directly
         row = sa.func.row_number().over(partition_by=PlaintextWAL.bacap_stream).label("rownum")
         all_elig= (
             sa.select(PlaintextWAL, row)
+            .where(
+                PlaintextWAL.bacap_stream.not_in(mixwal_bacap_cte),  # one msg per BACAP stream at a time
+            )
             .where(
                 sa.and_(
                     PlaintextWAL.id.not_in(resend_queue),
@@ -186,6 +190,11 @@ class PlaintextWAL(SQLModel, table=True):
             )
         ).subquery()
         # return at most one resendable per bacap_stream:
+        # TODO we need to avoid multiple things being committed to use the same index,
+        # TODO and selecting the first unsent for each BACAP stream means we'll eventually put all of them there.
+        # TODO need to rethink the logic here; should probably not have more than one thing serialized per bacap stream at time.
+        # TODO also dubious to have the insert into MixWAL be in a separate transaction from where we mark the PlaintextWAL as "spent"
+        # TODO - ie, shouldn't have __resend_queue be a python variable, but rather a database concept.
         return sa.select(all_elig).filter(all_elig.c.rownum == 1)
 
 class ConversationPeerLink(SQLModel, table=True):

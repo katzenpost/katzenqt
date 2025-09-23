@@ -680,15 +680,7 @@ class MainWindow(QMainWindow):
         )
         if not ok: return
 
-        # TODO we should be able to create conversations offline, ie purely using UUIDs
-        
-        #chan_id, read_cap, write_cap, next_index = await self.iothread.run_in_io(self.iothread.kp_client.create_write_channel())
-        #print("WTF1"*100, len(write_cap), len(read_cap))
-        #await self.iothread.run_in_io(self.iothread.kp_client.close_channel(chan_id))
-        wcapwal = persistent.WriteCapWAL(
-            id=uuid.uuid4(), # actual CAP will be provisioned later
-            #write_cap=write_cap, next_index=next_index
-        )
+        wcapwal = persistent.WriteCapWAL(id=uuid.uuid4()) # actual CAP will be provisioned later
         rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
 
         convo = persistent.Conversation(name=conversation_name, write_cap=wcapwal.id, first_unread=0)
@@ -718,6 +710,7 @@ class MainWindow(QMainWindow):
             await sess.refresh(rcapwal)
             await sess.refresh(wcapwal)
             await add_conversation(self, convo)
+        # TODO: if this is the first conversation, we should force Qt focus onto the conversation.
 
     @async_cb
     async def invite_contact(self):

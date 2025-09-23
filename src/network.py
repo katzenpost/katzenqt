@@ -227,16 +227,19 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     # - when we get an ACK, we move it from being resent to "sent" (db),
     #   and remove it from the PlaintextWAL, atomically
     global __resend_queue
+    pwals_to_send = set()
     async with persistent.asession() as sess:
         query = persistent.PlaintextWAL.find_resendable(__resend_queue)
         print("send_resendable QUERY:", query, __resend_queue)
-        sendable = await sess.exec(query)
-        sendable = sendable.all()
-        print("adding to __resend_queue:", set(pw.id for pw in sendable), "it already has:", __resend_queue)
-        __resend_queue |= set(pw.id for pw in sendable)
-    print("MAYBE WE CAN RESEND SOMETHING", len(sendable))
+        sendable = (await sess.exec(query)).all()
+    for pwal in sendable:
+        if pwal.bacap_stream not in __resend_queue:
+            pwals_to_send.add(pwal)
+    print("adding to __resend_queue:", set(pw.bacap_stream for pw in pwals_to_send), "it already has:", __resend_queue)
+    __resend_queue |= set(pw.bacap_stream for pw in pwals_to_send)
+    print("MAYBE WE CAN RESEND SOMETHING", len(pwals_to_send))
     await asyncio.gather(*[
-        start_resending(connection, plainwal) for plainwal in sendable
+        start_resending(connection, plainwal) for plainwal in pwals_to_send
     ])
 
 async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
