@@ -34,8 +34,8 @@ state_file += ".sqlite3"
 state_file = app_data / state_file
 _sql_url = f"sqlite+aiosqlite:///{ state_file }"
 print(_sql_url)
-_engine = create_async_engine(_sql_url, echo=True, future=True)
-_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True)
+_engine = create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)
+_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True, pool_size=1000)
 
 
 NAMING_CONVENTION = {
@@ -91,7 +91,7 @@ class MixWAL(SQLModel, table=True):
          - which means we should have a plaintext log of messages we want to send,
            and those should reference an operation ID here.
     """
-    id: int = Field(default=None, primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     # TODO should we store a uuid.UUID for the PlaintextWAL message?
     plaintextwal: uuid.UUID = Field(nullable=True, default=None, index=True, foreign_key="plaintextwal.id")  # TODO constraint to make sure is_read=False for these
     bacap_stream: uuid.UUID = Field(unique=True) # There can only be one active write per stream
@@ -104,8 +104,8 @@ class MixWAL(SQLModel, table=True):
     next_message_index: bytes
     is_read : bool
     @classmethod
-    def get_new(cls, resend_queue:"Set[uuid.UUID]"):
-        return select(cls).where(cls.bacap_stream.not_in(resend_queue))
+    def get_new(cls, resend_queue:"Set[int]"):
+        return select(cls).where(cls.id.not_in(resend_queue))
     @classmethod
     async def resend_queue_from_disk(cls) -> "Set[uuid.UUID]":
         # TODO something needs to restore the connection.ack_queues listeners, which means we need to know the message_id
@@ -139,15 +139,19 @@ class WriteCapWAL(SQLModel, table=True):
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
-    async def mark_sent(cls, sess, mw:MixWAL):
-        # we don't know the UUID which is a problem, persistent.MixWAL.get_new(__resend_queue))).all()
-        async with asession() as sess:
-            pwal = mw.plaintextwal
+    async def mark_sent(cls, mw:MixWAL, resend_queue):
+        """Add SentLog entry, delete corresponding MixWAL and PlaintextWAL entries.
+        Also bump index so we don't just keep writing to the same index??
+        TODO: cleanup WriteCapWAL/ReadCapWAL entries when we are done with them (not urgent, but eventually)
+        """
+        with Session(_engine_sync) as sess:
+            pwal = sess.get(PlaintextWAL, mw.plaintextwal)
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
-            sess.delete(mw)
+            sess.delete(sess.get(MixWAL, mw.id))
             sess.delete(pwal)
             # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
-            await sess.commit()
+            sess.commit()
+            resend_queue.remove(pwal.bacap_stream) # this will fail if it's not there already, but it ought to be. could use discard()
 
 class PlaintextWAL(SQLModel, table=True):
     """Plaintext chunks of (bacap_payload) to insert into (bacap_stream)."""

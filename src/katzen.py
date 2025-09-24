@@ -50,8 +50,16 @@ class AsyncioThread(threading.Thread):
         """Run (fn) in the io loop, to work around QtAsyncio not providing sock_connect etc.
 
         Would be nice to have a "with" context handler I guess.
+
+        TODO: figure out how to get exceptions there
         """
-        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(fn, self.loop))
+        ffff = asyncio.run_coroutine_threadsafe(fn, self.loop)
+        res = await asyncio.wrap_future(ffff)
+        assert res is None
+        assert ffff.exception() is None
+        assert ffff.result() == res
+        print("RUN_IN_IO COMPLETE", res)
+        return res
 
     async def async_main(self):
         self.kp_client = None

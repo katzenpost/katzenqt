@@ -42,21 +42,19 @@ async def start_background_threads(connection: ThinClient):
     f2 = readables_to_mixwal(connection)
     await f2
 
-    # Loop over outgoing queue and start transmitting them to the network.
-    # This needs to happen before we call send_resendable to avoid:
+    # Loop over outgoing queue and start transmitting them to the network. Runs forever.
     f3 = ensure_future(drain_mixwal(connection))
-    await f3
-    # TODO then we don't need       populate_resend_queue(),
 
-    # Loop over old encrypted messages and resend them
+    # Loop over encrypted messages and resend them. Runs forever.
     f4 = ensure_future(send_resendable_plaintexts(connection))
 
     # Loop over things we can read and start reading them:
     f5 = ensure_future(readables_to_mixwal(connection))
     try:
-        await asyncio.gather(f1, f4, f5)
+        await asyncio.gather(f1, f3, f4, f5)
     except Exception as xx:
         print("f1-f4-f5 exception",xx)
+        raise
     async def do_shutdown():
         """TODO this needs some work"""
         await __should_quit.wait()
