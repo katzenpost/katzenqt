@@ -92,9 +92,11 @@ class MixWAL(SQLModel, table=True):
            and those should reference an operation ID here.
     """
     id: int = Field(default=None, primary_key=True)
+    # TODO should we store a uuid.UUID for the PlaintextWAL message?
+    plaintextwal: uuid.UUID = Field(nullable=True, default=None, index=True, foreign_key="plaintextwal.id")  # TODO constraint to make sure is_read=False for these
     bacap_stream: uuid.UUID = Field(unique=True) # There can only be one active write per stream
     # it can't be a foreign_key because we track ReadCapWAL+WriteCapWAL separately.
-    envelope_hash: bytes = Field(unique=True) # How do we compute this?
+    envelope_hash: bytes = Field(unique=True)
     destination: bytes  # courier this was supposed to be sent to
     encrypted_payload: bytes     # send_message_payload
     envelope_descriptor : bytes #  envelope private key
@@ -106,6 +108,8 @@ class MixWAL(SQLModel, table=True):
         return select(cls).where(cls.bacap_stream.not_in(resend_queue))
     @classmethod
     async def resend_queue_from_disk(cls) -> "Set[uuid.UUID]":
+        # TODO something needs to restore the connection.ack_queues listeners, which means we need to know the message_id
+        # TODO associated with MixWALs that we send out
         __resend_queue = set()
         async with asession() as sess:
             for stream in await sess.exec(select(cls.bacap_stream)):
@@ -133,7 +137,17 @@ class WriteCapWAL(SQLModel, table=True):
         return sa.select(cls).where(cls.id==uuid)
 
 class SentLog(SQLModel, table=True):
-    id: uuid.UUID = Field(primary_key=True)
+    id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
+    @classmethod
+    async def mark_sent(cls, sess, mw:MixWAL):
+        # we don't know the UUID which is a problem, persistent.MixWAL.get_new(__resend_queue))).all()
+        async with asession() as sess:
+            pwal = mw.plaintextwal
+            sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
+            sess.delete(mw)
+            sess.delete(pwal)
+            # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
+            await sess.commit()
 
 class PlaintextWAL(SQLModel, table=True):
     """Plaintext chunks of (bacap_payload) to insert into (bacap_stream)."""
@@ -273,6 +287,11 @@ class ConversationLog(SQLModel, table=True):
     # this thing here needs to turn into
     # conversation_log.setModel(cl)
     # conversation_log.setRootIndex(cl)
+
+    # TODO should we keep track of whether this has been sent? we will have a corresponding Sentlog
+    # TODO entry, but we will also want to expunge the Sentlog periodically to conserve disk space.
+    # TODO could maybe just have a boolean. But for display purposes we'll want this information
+    # TODO indefinitey; for our own messages.
 
     # TODO: envelope_hash: bytes - do we need this?
     payload: bytes  # This contains binary CBOR

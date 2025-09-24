@@ -357,10 +357,9 @@ class MainWindow(QMainWindow):
         # TODO we can only do this if we have a self.iothread.kp_client,
         # that is, a connection to the clientd:
         if self.iothread.kp_client:
-            todo = await self.iothread.run_in_io(
-                network.send_resendable_plaintexts(self.iothread.kp_client)
+            await self.iothread.run_in_io(
+                network.check_for_new()
             )
-            print("send_resendable_plaintexts", todo)
 
     async def receive_msg(self, conversation_id : int, peer_id: int, cbor_payload: bytes) -> None:
         """Called when a message needs to be written to a conversation log, and the UI
@@ -485,7 +484,7 @@ class MainWindow(QMainWindow):
 
         if self.iothread.kp_client:
             todo = await self.iothread.run_in_io(
-                network.send_resendable_plaintexts(self.iothread.kp_client)
+              network.check_for_new()
             )
             #import pdb;pdb.set_trace()
 
