@@ -11,6 +11,7 @@ from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, Uniq
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 import aiosqlite # https://pypi.org/project/aiosqlite/
+import struct
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -147,11 +148,15 @@ class SentLog(SQLModel, table=True):
         with Session(_engine_sync) as sess:
             pwal = sess.get(PlaintextWAL, mw.plaintextwal)
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
+            wcw = sess.get(WriteCapWAL, mw.bacap_stream)
+            print("updating wcw: ", struct.unpack('<2Q', wcw.next_index[:8] + mw.next_message_index[:8]))
+            wcw.next_index = mw.next_message_index
+            sess.add(wcw)
             sess.delete(sess.get(MixWAL, mw.id))
             sess.delete(pwal)
             # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
             sess.commit()
-            resend_queue.remove(pwal.bacap_stream) # this will fail if it's not there already, but it ought to be. could use discard()
+            resend_queue.remove(pwal.bacap_stream) # this will fail if it's not there already, but it ought to be. could use discard() # TODOTOD is this resend_queue thing still being used?
 
 class PlaintextWAL(SQLModel, table=True):
     """Plaintext chunks of (bacap_payload) to insert into (bacap_stream)."""

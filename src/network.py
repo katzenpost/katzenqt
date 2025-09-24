@@ -344,7 +344,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     
     courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     mw = persistent.MixWAL(
-        bacap_stream = pwal.bacap_stream,
+        bacap_stream=pwal.bacap_stream,
         plaintextwal=pwal.id,
         envelope_hash = wcr.envelope_hash,
         destination = courier,
