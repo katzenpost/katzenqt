@@ -105,8 +105,8 @@ class MixWAL(SQLModel, table=True):
     next_message_index: bytes
     is_read : bool
     @classmethod
-    def get_new(cls, resend_queue:"Set[int]"):
-        return select(cls).where(cls.id.not_in(resend_queue))
+    def get_new(cls, except_these:"Set[uuid.UUID]"):
+        return select(cls).where(cls.id.not_in(except_these))
     @classmethod
     async def resend_queue_from_disk(cls) -> "Set[uuid.UUID]":
         # TODO something needs to restore the connection.ack_queues listeners, which means we need to know the message_id

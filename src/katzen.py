@@ -833,6 +833,9 @@ class MainWindow(QMainWindow):
             sess.add(cp)
             await sess.commit()
         print("OK THEY ARE HERE")
+        await self.iothread.run_in_io(
+            network.signal_readables_to_mixwal()
+        )
         # Then ask them for the Conversation name (or just default to the display name for now)
         # Then we need to persist the contact:
         # - persistent.ConversationPeer(name=..., read_cap=...)

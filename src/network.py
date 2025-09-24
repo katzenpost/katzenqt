@@ -3,6 +3,7 @@ import katzenpost_thinclient
 from katzenpost_thinclient import ThinClient
 from katzenpost_thinclient import Config as ThinClientConfig
 import cbor2
+import struct
 import nacl.public
 
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
@@ -14,6 +15,9 @@ import persistent
 __resend_queue: "Set[uuid.UUID]" = set()
 #__plaintextwal_updated = asyncio.Event()
 #__plaintextwal_updated.set()
+readables_to_mixwal_event = asyncio.Event()
+async def signal_readables_to_mixwal():
+    readables_to_mixwal_event.set()
 resendable_event = asyncio.Event()  # signals send_resendable_plaintexts to check if it can do something
 resendable_event.set()
 async def check_for_new():
@@ -39,8 +43,6 @@ async def start_background_threads(connection: ThinClient):
     f1 = ensure_future(provision_read_caps(connection))
 
     await __mixnet_connected.wait()
-    f2 = readables_to_mixwal(connection)
-    await f2
 
     # Loop over outgoing queue and start transmitting them to the network. Runs forever.
     f3 = ensure_future(drain_mixwal(connection))
@@ -59,7 +61,6 @@ async def start_background_threads(connection: ThinClient):
         """TODO this needs some work"""
         await __should_quit.wait()
         f1.cancel()
-        f2.cancel()
         f3.cancel()
         f4.cancel()
         f5.cancel()
@@ -88,7 +89,7 @@ async def drain_mixwal(connection: ThinClient):
             # TODO instead of n queries for this we ought to just get them in the join
             rcw = (await sess.exec(select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==mw.bacap_stream))).one()
             chan_id = await connection.resume_read_channel_query(
-                read_cap=rcw.read_cap, next_message_index=rcw.next_index,
+                read_cap=rcw.read_cap, next_message_index=mw.current_message_index,
                 envelope_descriptor=mw.envelope_descriptor, #ncrypted_payload,
                 envelope_hash=mw.envelope_hash,
                 reply_index=0,
@@ -156,14 +157,34 @@ async def drain_mixwal(connection: ThinClient):
                 del connection.ack_queues[message_id]
                 await asyncio.sleep(5)
                 continue
-            reply = await __on_message_queues[message_id].get()
+            try:
+                got_reply = create_task( __on_message_queues[message_id].get() )
+                done, not_done = await asyncio.wait((got_reply,), timeout=30)
+                if got_reply in done:
+                    print("GOT_REPLY", got_reply)
+                    reply = got_reply.result()
+                else:
+                    print("GOT_REPLY timeout")
+                    reply = None
+            except Exception as e:
+                print(e)
+                import pdb;pdb.set_trace()
             if reply is None:
-                print("RESENDING QUERY")
-                message_id = secrets.token_bytes(16) # do we need a new message_id per resend??
+                message_id = secrets.token_bytes(16) # new message_id for each resend
+                print("RESENDING QUERY with new message_id", message_id.hex())
                 __on_message_queues[message_id] = __on_message_queues[orig_message_id]
         await connection.close_channel(chan_id)
-        # TODO may need to advance next_index in DB
+        rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
         print("RECEIVED REPLY FOR MESSAGE" * 1000, reply)
+        print("bumping read cap next_index from", struct.unpack('<3Q', rcw.next_index[:8] + mw.current_message_index[:8] + mw.next_message_index[:8]  ))
+        rcw.next_index = mw.next_message_index
+        sess.add(rcw)  # update ReadCapWAL.next_index in DB to mw.next_message_index
+        await sess.delete(mw)  # delete MixWAL read command so we can read something else
+        # receive_msg(conversation_id=, peer_id=, cbor_payload=reply["payload"])
+        # TODO - update ConversationLog
+        await sess.commit()
+        print("SIGNALING WE CAN READ MORE readables_to_mixwal_event.set()")
+        readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
 
     draining_right_now : "Set[uuid.UUID]" = set()
     async def with_own_sess(mw):
@@ -230,12 +251,13 @@ async def readables_to_mixwal(connection):
     print("READABLES READING")
     from sqlmodel import select  # TODO move to persistent
     global __resend_queue
-    async def process_box(sess, cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> None:
-        print("process box cpeer-rcw:", cpeer, rcw)
-        chan_id = await connection.resume_read_channel(read_cap=rcw.read_cap,next_message_index=rcw.next_index) #, message_box_index=rcw.next_index)
-        print("process box has chan_id", chan_id)
-        #send_message_payload, next_next_index, reply_index
-        rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
+    async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
+        print("process box cpeer-rcw:", cpeer, struct.unpack('<Q', rcw.next_index[:8]))
+        try:
+            chan_id = await connection.resume_read_channel(read_cap=rcw.read_cap,next_message_index=rcw.next_index)
+            rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
+        except Exception as e:
+            print("readables-to-mixwal", e)
         print("process_box got this from read_channel:", rcreply)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
@@ -250,20 +272,25 @@ async def readables_to_mixwal(connection):
             # rcreply.reply_index
             is_read=True,
         )
-        sess.add(mw)
-    async with persistent.asession() as sess:
-        readable_peers = (await sess.exec(select(
-            persistent.ConversationPeer, persistent.ReadCapWAL
-        ).where(persistent.ConversationPeer.active==True
-                ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
-                        ).where(
-                            persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream))
-                        ))).all()
-        print("READABLE"*100, readable_peers)
-        await asyncio.gather(*[process_box(sess, *cprw) for cprw in readable_peers])
-        await sess.commit()
-    if len(readable_peers):
-        __mixwal_updated.set()
+        return mw
+    while True:
+        _, _ = await asyncio.wait((create_task(readables_to_mixwal_event.wait()),), timeout=60)
+        readables_to_mixwal_event.clear()
+        async with persistent.asession() as sess:
+            # TODO are these guaranteed to be distinct?
+            readable_peers = (await sess.exec(select(
+                persistent.ConversationPeer, persistent.ReadCapWAL
+            ).where(persistent.ConversationPeer.active==True
+                    ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
+                            ).where(
+                                persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream))
+                            ))).all()
+            for (cpeer, rcw) in readable_peers:
+                print("going to process_box", cpeer.name, rcw.next_index[:8].hex())
+                sess.add(await process_box(cpeer, rcw))
+            await sess.commit()
+        if len(readable_peers):
+            __mixwal_updated.set()
 
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
     # TODO this needs to be protected by a mutex or use an asyncio.Event
@@ -390,7 +417,7 @@ def on_message_reply(reply):
     # {'message_id': b'\n\x90\xc2\x0cr\xa8\xa2+\x17Y\xcb\x837\xcc\x0f\x9b', 'surbid': None, 'payload': None}
     if async_queue := __on_message_queues.get(reply['message_id'], None):
         print("got reply for something we have a queue for", reply['message_id'].hex(), reply['payload'])
-        async_queue.put_nowait(reply['payload'])
+        async_queue.put_nowait(reply)
     else:
         print("on_message_reply"*100, reply)
     return
