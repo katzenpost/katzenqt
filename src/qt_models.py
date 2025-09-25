@@ -143,7 +143,17 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 if role == ROLE_CHAT_AUTHOR:
                     return cl.conversation_peer.name
                 elif role == 0:
-                    return cl.payload.decode()
+                    if cl.payload.startswith(b'F'):                        
+                        try:
+                            from models import GroupChatMessage
+                            cm = GroupChatMessage.from_cbor(cl.payload[1:])
+                            return cm.text
+                        except Exception as e:
+                            print(e, cl.payload)
+                            return cl.payload.decode()
+                    else:
+                        return cl.payload.decode()
+                # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent
         #print(self,"data", index, repr(QtCore.Qt.ItemDataRole(role)))
         #return f"hi {self.convo_id}"
     def headerData(self, section:int, orientation:QtCore.Qt.Orientation, role:QtCore.Qt.ItemDataRole|None):

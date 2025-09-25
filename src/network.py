@@ -12,10 +12,12 @@ from asyncio import ensure_future, create_task
 from pydantic.dataclasses import dataclass
 import persistent
 
+conversation_update_queue = asyncio.Queue() # queue of `int` which are Conversation.id, when we have written to ConversationLog
 __resend_queue: "Set[uuid.UUID]" = set()
 #__plaintextwal_updated = asyncio.Event()
 #__plaintextwal_updated.set()
 readables_to_mixwal_event = asyncio.Event()
+readables_to_mixwal_event.set()
 async def signal_readables_to_mixwal():
     readables_to_mixwal_event.set()
 resendable_event = asyncio.Event()  # signals send_resendable_plaintexts to check if it can do something
@@ -64,11 +66,15 @@ async def start_background_threads(connection: ThinClient):
         f3.cancel()
         f4.cancel()
         f5.cancel()
-        f6.cancel()
     shutdown_task = asyncio.create_task(do_shutdown())
 
-
 async def drain_mixwal(connection: ThinClient):
+    try:
+        await drain_mixwal2(connection) # todo why the fuck does this not catch ?
+    except Exception as e:
+        print("drain_mixwal:", e)
+
+async def drain_mixwal2(connection: ThinClient):
     """Read from MixWAL and put the messages on the network."""
     """"Send messages to mixnet from MixWAL.
 
@@ -130,6 +136,7 @@ async def drain_mixwal(connection: ThinClient):
             async def got_read_ack():
                 """this is a read reply, if it's not empty then we can advance state"""
                 reply = await connection.ack_queues[message_id].get()
+                resendable_event.set()
                 if reply['error_code']:
                     print("Tried to read a box, but we got an error", reply)
                     return
@@ -142,8 +149,16 @@ async def drain_mixwal(connection: ThinClient):
                 asyncio.create_task(got_read_ack())
             if not mw.is_read:
                 asyncio.create_task(got_write_ack())
+        print("entering while not reply: loop")
         while not reply:
-            wait_for_ack(message_id, mw)
+            try:
+                wait_for_ack(message_id, mw) # only need one of these TODO, and when we get one we should cancel
+            except Exception as e:
+                print(e)
+                await asyncio.sleep(10)
+                continue
+            print(f"is_read:{mw.is_read} chan:{chan_id}")
+            # should maybe open a new channel for each of these
             try:
                 await connection.send_channel_query(
                     channel_id=chan_id,
@@ -155,14 +170,21 @@ async def drain_mixwal(connection: ThinClient):
             except ThinClientOfflineError:
                 print("thin client is offline, can't drain mixwal. retrying in 5s")
                 del connection.ack_queues[message_id]
-                await asyncio.sleep(5)
+                await asyncio.sleep(15)
                 continue
             try:
                 got_reply = create_task( __on_message_queues[message_id].get() )
-                done, not_done = await asyncio.wait((got_reply,), timeout=30)
+                done, not_done = await asyncio.wait((got_reply,), timeout=60)
+                for not_done_job in not_done:
+                    print('cancelling got_reply')
+                    not_done_job.cancel()
+                    print('cancelleDD got_reply.')
                 if got_reply in done:
                     print("GOT_REPLY", got_reply)
                     reply = got_reply.result()
+                    if not reply['payload']:
+                        print("no payload for ",reply)
+                        reply = None
                 else:
                     print("GOT_REPLY timeout")
                     reply = None
@@ -173,24 +195,53 @@ async def drain_mixwal(connection: ThinClient):
                 message_id = secrets.token_bytes(16) # new message_id for each resend
                 print("RESENDING QUERY with new message_id", message_id.hex())
                 __on_message_queues[message_id] = __on_message_queues[orig_message_id]
-        await connection.close_channel(chan_id)
+                if not __on_message_queues[message_id]:
+                    print("RESENDQUERY we have no listener __on_message_queues for", message_id.hex(), orig_message_id.hex())
+                    import pdb;pdb.set_trace()
+                    print("---")
+        print("got reply now looking up bacap_stream, expect to see RECEIVED REPLY")
+        asyncio.create_task(connection.close_channel(chan_id))
         rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-        print("RECEIVED REPLY FOR MESSAGE" * 1000, reply)
+        print("RECEIVED REPLY FOR MESSAGE" * 100, reply)
         print("bumping read cap next_index from", struct.unpack('<3Q', rcw.next_index[:8] + mw.current_message_index[:8] + mw.next_message_index[:8]  ))
         rcw.next_index = mw.next_message_index
+        print('updating rcw')
         sess.add(rcw)  # update ReadCapWAL.next_index in DB to mw.next_message_index
+        print('deleting mw')
         await sess.delete(mw)  # delete MixWAL read command so we can read something else
-        # receive_msg(conversation_id=, peer_id=, cbor_payload=reply["payload"])
-        # TODO - update ConversationLog
+        print('getting cp')
+        cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
+        # we need to persist to ConversationLog before we commit the next rcw.next_message_index
+        print('creating conversationlog')
+        import sqlalchemy
+        try:
+            sess.add(persistent.ConversationLog(
+                conversation_id=cp.conversation.id,
+                conversation_peer_id=cp.id,
+                conversation_order=select(sqlalchemy.func.count())
+                .select_from(persistent.ConversationLog)
+                .where(persistent.ConversationLog.conversation_id == cp.conversation.id)
+                .scalar_subquery(),
+                payload=reply['payload'], # TODO 
+            ))
+        except Exception as e:
+            print("FAILED", e)
+            raise e
+        print("committing conversationlog update")
+        c_id = cp.conversation.id
         await sess.commit()
+        print('putting on conversation_update_queue')
+        await conversation_update_queue.put(c_id)
         print("SIGNALING WE CAN READ MORE readables_to_mixwal_event.set()")
         readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
+        print("SIGNALED.")
 
     draining_right_now : "Set[uuid.UUID]" = set()
     async def with_own_sess(mw):
         async with persistent.asession() as sess:
             await tx_single(sess, mw)
         draining_right_now.remove(mw.id)
+        __mixwal_updated.set()  # if we were blocking something then it can be sent now
     while True:
         _, _ = await asyncio.wait((create_task(__mixwal_updated.wait()),), timeout=60)
         __mixwal_updated.clear()
@@ -198,9 +249,8 @@ async def drain_mixwal(connection: ThinClient):
         # TODO drain new from mixwal, this should NOT be a long-running session like it currently is
         async with persistent.asession() as sess:
             new_mixwals = (await sess.exec(persistent.MixWAL.get_new(draining_right_now))).all()
-        print("drain_mixwal: NEW MIXWALS", new_mixwals)    
-        jobs = []
         for mw in new_mixwals:
+            print("drain_mixwal: NEW MIXWAL:", struct.unpack("<1Q", mw.current_message_index[:8]), mw.is_read, mw.bacap_stream)
             draining_right_now.add(mw.id) # this is the uuid PK
             print("="*100, "new mixwal mw:", mw)
             #__resend_queue.add(mw.bacap_stream)  # TODO unsure if this does is still used?
@@ -274,8 +324,11 @@ async def readables_to_mixwal(connection):
         )
         return mw
     while True:
-        _, _ = await asyncio.wait((create_task(readables_to_mixwal_event.wait()),), timeout=60)
+        print("SLEEPING FOR READABLES_TO_MIXWAL"*40)
+        a, b = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=60)
+        print("wtf"*60, a, b)
         readables_to_mixwal_event.clear()
+        print("IN READABLES_TO_MIXWAL_LOOP", a,b)
         async with persistent.asession() as sess:
             # TODO are these guaranteed to be distinct?
             readable_peers = (await sess.exec(select(
@@ -285,12 +338,17 @@ async def readables_to_mixwal(connection):
                             ).where(
                                 persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream))
                             ))).all()
+            print("readable_peers", len(readable_peers))
             for (cpeer, rcw) in readable_peers:
                 print("going to process_box", cpeer.name, rcw.next_index[:8].hex())
-                sess.add(await process_box(cpeer, rcw))
+                sess.add(await process_box(cpeer, rcw)) ## HERE?
+                print("finished one peer", cpeer.name)
+            print("committing")
             await sess.commit()
+        print("done readables_to_mixwal", len(readable_peers))
         if len(readable_peers):
             __mixwal_updated.set()
+            print("__mixwal_updated.set() from readables_to_mixwal")
 
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
     # TODO this needs to be protected by a mutex or use an asyncio.Event
@@ -393,7 +451,6 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # Next up is something needs to actually resend, reading from MixWAL
     # and issuing ThinClient.send_channel_query
     __mixwal_updated.set()
-    pass
 
 async def on_connection_status(status:"Dict[str,Any]"):
     if status["is_connected"]:
@@ -418,6 +475,7 @@ def on_message_reply(reply):
     if async_queue := __on_message_queues.get(reply['message_id'], None):
         print("got reply for something we have a queue for", reply['message_id'].hex(), reply['payload'])
         async_queue.put_nowait(reply)
+        print("its now on queue")
     else:
         print("on_message_reply"*100, reply)
     return

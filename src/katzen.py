@@ -55,7 +55,6 @@ class AsyncioThread(threading.Thread):
         """
         ffff = asyncio.run_coroutine_threadsafe(fn, self.loop)
         res = await asyncio.wrap_future(ffff)
-        assert res is None
         assert ffff.exception() is None
         assert ffff.result() == res
         print("RUN_IN_IO COMPLETE", res)
@@ -334,15 +333,12 @@ class MainWindow(QMainWindow):
         if not msg.strip():
             return
 
+        group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
         send_op = SendOperation(
             bacap_stream=convo_state.own_peer_bacap_uuid,
-            messages=[GroupChatMessage(
-                version=0,
-                membership_hash=b"s"*32, # TODO: mocked for now; convo_state.group_chat_state.membership_hash
-                text=msg
-            )]
+            messages=[group_chat_message]
         )
-        print(send_op)
+        print("serializing SendOperation for outgoing message",send_op)
         # TODO this code is duplicated in self.send_file
         new_write_caps, plaintextwals = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
@@ -354,12 +350,11 @@ class MainWindow(QMainWindow):
                 sess.add(pw)
             await sess.commit()
 
-
         # Then we pretend that we have received it:
         await self.receive_msg(
             conversation_id=convo_state.conversation_id,
             peer_id=convo_state.own_peer_id,
-            cbor_payload=msg.encode(),
+            cbor_payload=b"F"+group_chat_message.to_cbor(), # TODO massive hack here because we don't reassemble sendops yet
         )
 
         # TODO we can only do this if we have a self.iothread.kp_client,
@@ -368,14 +363,59 @@ class MainWindow(QMainWindow):
             await self.iothread.run_in_io(
                 network.check_for_new()
             )
+    async def receive_msg_listener(self):
+        """Listen to the network thread to learn when it has updated a persistent.Conversation,
+        and make the UI refresh with bells and whistles."""
+        while True:
+            conversation_id : int = await self.iothread.run_in_io(network.conversation_update_queue.get())
+            while conversation_id not in self.conversation_state_by_id:
+                print('conversation_id',conversation_id,'not in conversation_state_by_id yet')
+                await asyncio.sleep(1)  # encountered a race here once, where the UI hadn't loaded. not sure if still there.
+            convo_state = self.conversation_state_by_id[conversation_id]
+            convo_state.conversation_log_model.increment_row_count()
+            # And then we can increment the row count to let the UI register it:
+
+            # x) Scrolling - two cases:
+            if convo_state is self.convo_state():
+                #   x.1) Scrolling: Conversation is in focus:
+                # TODO make which of these to do configurable:
+                convo_state.chat_lines_scroll_idx = 1.0
+                root = self.ui.qml_ChatLines.rootObject()
+                await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
+                root.setProperty("ctx", convo_state.qml_ctx(root))
+                #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
+                #print(xx)
+                #import pdb;pdb.set_trace()
+                #print("current", self.ui.ChatLines.verticalScrollBar().value())
+                #print("next", min(
+                #    1 + self.ui.ChatLines.verticalScrollBar().value(),
+                #    conversation_order-3))
+                #self.scroll_chat_lines(min(
+                #    1 + self.ui.ChatLines.verticalScrollBar().value(),
+                #    conversation_order-3))
+                #self.ui.ChatLines.scrollToBottom()
+            else:
+                #   x.2) Scrolling: Conversation is NOT in focus:
+                print("NOT IN FOCUS")
+                convo_state.chat_lines_scroll_idx += 1.0
+                # convo_state.chat_lines_scroll_idx = conversation_order
+                # TODO we should flash the contact entry somehow
+                # TODO we should bump "unread message" counter
+
+            # if the main window is not in focus, we should issue a notification:
+            if not self.app.focusWidget():
+                self.app.alert(self)
+                # self.app.beep()
+            self.systray.has_new_messages() # TODO move this into block above
 
     async def receive_msg(self, conversation_id : int, peer_id: int, cbor_payload: bytes) -> None:
         """Called when a message needs to be written to a conversation log, and the UI
-        potentially needs updating.
-        This could be called from the network, but it's unclear how the network would know our conversation_id and peer_id.
+        potentially needs updating. The network.drain_mixwal() has similar code, so this function
+        is only used when we "pretend" to have received something, for instance when the user
+        writes a message. It signals receive_msg_listener() once the database is updated.
+        Arguably the persistence stuff should be moved to the persistent.py module.
         """
         convo_state = self.conversation_state_by_id[conversation_id]
-
         async with persistent.asession() as sess:
             sess.add(persistent.ConversationLog(
                 conversation_id=convo_state.conversation_id,
@@ -385,46 +425,10 @@ class MainWindow(QMainWindow):
                 .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
                 .scalar_subquery(),
                 payload=cbor_payload,
-                # TODO the payload we want to store is the plaintext CBOR payload;
-                # not the plaintext message.
             ))
             await sess.commit()
 
-        # And then we can increment the row count to let the UI register it:
-        convo_state.conversation_log_model.increment_row_count()
-
-        # x) Scrolling - two cases:
-        if convo_state is self.convo_state():
-            #   x.1) Scrolling: Conversation is in focus:
-            # TODO make which of these to do configurable:
-            convo_state.chat_lines_scroll_idx = 1.0
-            root = self.ui.qml_ChatLines.rootObject()
-            await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
-            root.setProperty("ctx", convo_state.qml_ctx(root))
-            #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
-            #print(xx)
-            #import pdb;pdb.set_trace()
-            #print("current", self.ui.ChatLines.verticalScrollBar().value())
-            #print("next", min(
-            #    1 + self.ui.ChatLines.verticalScrollBar().value(),
-            #    conversation_order-3))
-            #self.scroll_chat_lines(min(
-            #    1 + self.ui.ChatLines.verticalScrollBar().value(),
-            #    conversation_order-3))
-            #self.ui.ChatLines.scrollToBottom()
-        else:
-            #   x.2) Scrolling: Conversation is NOT in focus:
-            print("NOT IN FOCUS")
-            convo_state.chat_lines_scroll_idx += 1.0
-            # convo_state.chat_lines_scroll_idx = conversation_order
-            # TODO we should flash the contact entry somehow
-            # TODO we should bump "unread message" counter
-
-        # if the main window is not in focus, we should issue a notification:
-        if not self.app.focusWidget():
-            self.app.alert(self)
-            # self.app.beep()
-        self.systray.has_new_messages() # TODO move this into block above
+        await self.iothread.run_in_io(network.conversation_update_queue.put(conversation_id))
 
     def convo_state(self) -> ConversationUIState:
         # TODO there must be a more graceful way to do this:
@@ -1057,7 +1061,7 @@ async def main(window: MainWindow):
             await add_conversation(window, convo)
 
     window.show()
-
+    asyncio.create_task(window.receive_msg_listener())
     #await asyncio.sleep(5)
     #f = asyncio.run_coroutine_threadsafe(window.at.kp_client.create_write_channel(), window.at.loop)
     #f = await window.iothread.run_in_io(window.iothread.kp_client.create_write_channel())

@@ -169,14 +169,15 @@ class GroupChatMessage(BaseModel):
         return cbor2.dumps(self.model_dump(exclude_none=True))
 
     @classmethod
-    def from_cbor(cbor_bytes:bytes):
+    def from_cbor(cls, cbor_bytes:bytes):
+        return cls(**cbor2.loads(cbor_bytes)) # TODO not at all what we want but here we go
         dec = cbor2.CBORDecoder(fp=io.BytesIO(cbor_bytes))
         try:
-            dic = cbor2.decode()
+            dic = dec.decode()
         except cbor2.CBORDecodeEOF:
             raise
         assert 3 != len(list(dic.keys()))
-        gcm = GroupChatMessage(**dic)
+        gcm = cls(**dic)
         return gcm, d.fp.tell()
 
 class ConversationUIState(BaseModel):
