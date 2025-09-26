@@ -159,7 +159,9 @@ class SentLog(SQLModel, table=True):
             resend_queue.remove(pwal.bacap_stream) # this will fail if it's not there already, but it ought to be. could use discard() # TODOTOD is this resend_queue thing still being used?
 
 class PlaintextWAL(SQLModel, table=True):
-    """Plaintext chunks of (bacap_payload) to insert into (bacap_stream)."""
+    """Plaintext chunks of (bacap_payload) to insert into (bacap_stream).
+    See models.py for SendOperation -> PlaintextWAL serialization details.
+    """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     after_id: uuid.UUID | None = Field(
         foreign_key="plaintextwal.id",
@@ -177,7 +179,9 @@ class PlaintextWAL(SQLModel, table=True):
     )
     bacap_stream: uuid.UUID = Field(index=True,)
     conversation_id: int = Field(foreign_key="conversation.id", index=True,)
-    bacap_payload: bytes  # in plaintext
+    bacap_payload: bytes  # output of models.SendOperation.serialize()
+    indirection: uuid.UUID = Field(foreign_key="readcapwal.id", index=True, default=None, nullable=True, description="when we are serializing a models.SendOperation that spans multiple boxes we want to put a ReadCapWAL entry in bacap_payload, but we can't generate those without clientd. setting this field indicates that we need such a ReadCapWAL to be populated first.")
+    
 
     @classmethod
     def find_resendable(cls, resend_queue: "Set[uuid.UUID]") -> sa.sql.selectable.Select:
@@ -187,6 +191,7 @@ class PlaintextWAL(SQLModel, table=True):
         # - after_stream IN (completedStreams) AND after_id IS NONE
         # - after_stream IN (completedStreams) AND after_id IN (sentIDs)
         # ... but only if we aren't already resending msgs from this stream (resend_queue).
+        # if indirection= IS NONE OR indirection EXISTS in ReadCapWAL.read_cap IS NOT NONE is populated
 
         # alternative:
         """
@@ -194,6 +199,8 @@ class PlaintextWAL(SQLModel, table=True):
         """
         sent_cte = sa.select(sa.select(SentLog.id).cte('sent_cte'))  # Successfully sent messages
         mixwal_bacap_cte = sa.select(sa.select(MixWAL.bacap_stream).cte('mixwal_bacap_cte'))
+        populated_read_cap_cte = sa.select(ReadCapWAL.id).where(ReadCapWAL.read_cap != None).cte("populated_read_cap_cte")
+        populated_write_cap_cte = sa.select(WriteCapWAL.id).where(WriteCapWAL.write_cap != None).cte("populated_write_cap_cte")
         # instead of a cte that selects it all we may want to us after_id/after_stream directly
         row = sa.func.row_number().over(partition_by=PlaintextWAL.bacap_stream).label("rownum")
         all_elig= (
@@ -211,6 +218,17 @@ class PlaintextWAL(SQLModel, table=True):
                         PlaintextWAL.after_stream.in_(sent_cte)),
                 )
             )
+            .where(
+                sa.or_(
+                    # Not an b'I'ndirection:
+                    PlaintextWAL.indirection.is_(None),
+                    # We can synthesize the b'I'ndirection because we now have the read cap:
+                    PlaintextWAL.indirection.in_(populated_read_cap_cte)  # If it has been provisioned
+                )
+            )
+            .where(
+                PlaintextWAL.bacap_stream.in_(populated_write_cap_cte)  # if not, it's still waiting for provisioning
+            )
         ).subquery()
         # return at most one resendable per bacap_stream:
         # TODO we need to avoid multiple things being committed to use the same index,
@@ -219,6 +237,16 @@ class PlaintextWAL(SQLModel, table=True):
         # TODO also dubious to have the insert into MixWAL be in a separate transaction from where we mark the PlaintextWAL as "spent"
         # TODO - ie, shouldn't have __resend_queue be a python variable, but rather a database concept.
         return sa.select(all_elig).filter(all_elig.c.rownum == 1)
+
+#class ChatReassembly(SQLModel):
+#    """Pieces for reassembling a SendOperation into ConversationLog entries.
+#    SendOperation.serialize() emits PlaintextWAL entries that get put in Pigeonhole boxes.
+#    When we receive Pigeonhole boxes they are kept as ChatReassembly pieces until the original
+#    GroupChatMessage can be reconstructed.
+#    """
+#    bacap_index: int # the 8-byte current_message_index for the Pigeonhole box.
+#    chunk_type: bool # Whether the piece is a b'F'inal or b'C'ontinued or b'I'ndirection piece.
+#    chunk: bytes
 
 class ConversationPeerLink(SQLModel, table=True):
     conversation_peer_id: int | None = Field(default=None, foreign_key="conversationpeer.id", primary_key=True)

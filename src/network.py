@@ -280,12 +280,9 @@ async def provision_read_caps(connection: ThinClient):
                     wcw.next_index = write_cap[-104:]
                     rcw.read_cap = read_cap
                     rcw.next_index = read_cap[-104:]
-                    #assert wcw.next_index == rcw.next_index
                     sess.add(wcw)
                     sess.add(rcw)
                     await sess.commit()
-                    await sess.refresh(wcw)
-                    await sess.refresh(rcw)
                     continue
                 else:
                     print("DB was created with old API, new API does not support converting write cap to read cap")
@@ -336,8 +333,10 @@ async def readables_to_mixwal(connection):
             ).where(persistent.ConversationPeer.active==True
                     ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
                             ).where(
-                                persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream))
-                            ))).all()
+                                persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?
+                            )
+                )
+            ).all()
             print("readable_peers", len(readable_peers))
             for (cpeer, rcw) in readable_peers:
                 print("going to process_box", cpeer.name, rcw.next_index[:8].hex())
@@ -368,6 +367,19 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
             query = persistent.PlaintextWAL.find_resendable(__resend_queue)
             print("send_resendable QUERY:", query, __resend_queue)
             sendable = (await sess.exec(query)).all()
+            for pwal in sendable:
+                if pwal.indirection is None:
+                    continue
+                # This is an indirection message, we need to fill the read cap.
+                # find_resendable should only give us these entries if the needed read cap has been provisioned.
+                print("Got a PWAL entry that requires an indirection", pwal.indirection)
+                if not pwal.bacap_payload:
+                    # TODO this ought to be a SQL UPDATE plaintextwal USING readcapwal, but for now we do it by hand.
+                    rcw = sess.get(persistent.ReadCapWAL, pwal.indirection)
+                    pwal.bacap_payload = b'I' + rcw.write_cap
+                    await sess.update(pwal)
+                    await sess.refresh(pwal)
+            await sess.commit()
         for pwal in sendable:
             if pwal.bacap_stream not in __resend_queue:
                 asyncio.create_task(start_resending(connection, pwal))
@@ -398,19 +410,9 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
             persistent.WriteCapWAL.get_by_bacap_uuid(pwal.bacap_stream))).one()[0]
 
     if wc.write_cap is None: # this is a new one
-        print("WHY IS WRITE CAP EMPTY HERE")
+        print("WHY IS WRITE CAP EMPTY HERE this code should be deleted.")
         import pdb;pdb.set_trace()
-        chan_id, read_cap, write_cap = await connection.create_write_channel()
-        await connection.close_channel(chan_id)
-        async with persistent.asession() as sess:
-            wc = await select(WriteCapWAL).where(id=pwal.bacap_stream, write_cap=None)
-            wc.write_cap = write_cap
-            wc.next_index = write_cap[-104:] # TODO why doesn't create_write_channel() give us this?
-            sess.add(wc)
-            # we probably want to populate ReadCapWAL too while we are at this
-            await sess.commit()
-            await sess.refresh(wc)
-        # now we have a write_cap and a next_index
+        raise Exception("Why is write cap empty in start_resending")
 
     # now we have:
     # - a plaintext to send to send, pwal.bacap_payload

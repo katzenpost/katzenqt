@@ -109,7 +109,11 @@ class SendOperation(BaseModel):
         assert buf_tell == buf.seek(0, 2)  # assert that we were at the end
 
         # Put the release in the original bacap stream:
-        agg_stream_read_cap = b"abcdef" # TODO
+        # 1. We need a ReadCapWal that points to the `agg_bacap_stream`:
+        rcw = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=agg_bacap_stream, active=False)
+        agg.append(rcw)
+        # 2. the b'I'ndirection entry needs to point to rcw.id, so the read cap can be filled once we have
+        #    received it from clientd, and only then can this operation be churned out as a WriteCap:
         agg.append(
             persistent.PlaintextWAL(
                 id=None,
@@ -117,7 +121,8 @@ class SendOperation(BaseModel):
                 after_stream=agg_bacap_stream,
                 bacap_stream=self.bacap_stream,
                 conversation_id=conversation_id,
-                bacap_payload=b'I' + agg_stream_read_cap,
+                bacap_payload=b'', # b'I' + agg_stream_read_cap,
+                indirection=rcw.id,
             )
         )
         return [agg_bacap_stream], agg
@@ -181,6 +186,7 @@ class GroupChatMessage(BaseModel):
         return gcm, d.fp.tell()
 
 class ConversationUIState(BaseModel):
+    """Per-conversation runtime state used by the Qt UI."""
     model_config = {
         'validate_assignment': True,
         'arbitrary_types_allowed': True

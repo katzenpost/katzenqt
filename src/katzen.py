@@ -340,14 +340,14 @@ class MainWindow(QMainWindow):
         )
         print("serializing SendOperation for outgoing message",send_op)
         # TODO this code is duplicated in self.send_file
-        new_write_caps, plaintextwals = send_op.serialize(
+        new_write_caps, db_entries = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo_state.conversation_id)
         async with persistent.asession() as sess:
             for cap_uuid in new_write_caps:
                 sess.add(persistent.WriteCapWAL(id=cap_uuid))
-            for pw in plaintextwals:
-                sess.add(pw)
+            for obj in db_entries:
+                sess.add(obj)
             await sess.commit()
 
         # Then we pretend that we have received it:
@@ -482,7 +482,7 @@ class MainWindow(QMainWindow):
             bacap_stream=uuid.uuid4() # TODO look up the right uuid in convo_state.group_chat_state.bacap_uuid
         )
 
-        new_write_caps, plaintextwals = send_op.serialize(
+        new_write_caps, db_entries = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo.conversation_id)
 
@@ -490,8 +490,8 @@ class MainWindow(QMainWindow):
         async with persistent.asession() as sess:
             for cap_uuid in new_write_caps:
                 sess.add(persistent.WriteCapWAL(id=cap_uuid))  # the network writer needs to create these before it can process plaintextwals
-            for wal_entry in plaintextwals:
-                sess.add(wal_entry)  # These are the actual payloads
+            for db_obj in db_entries:
+                sess.add(db_obj)  # These are PlaintextWAL and ReadCapWal entries
             await sess.commit()
 
         if self.iothread.kp_client:
