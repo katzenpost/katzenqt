@@ -73,7 +73,7 @@ class SendOperation(BaseModel):
             # message fits in a single chunk
             return [], [
                 persistent.PlaintextWAL(
-                    id=None,
+                    id=uuid.uuid4(),
                     after_id=None,
                     after_stream=None,
                     bacap_stream=self.bacap_stream,

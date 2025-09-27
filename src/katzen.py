@@ -33,6 +33,8 @@ from ui_mixchat import Ui_MainWindow  # ui_mixchat.py
 from sqlmodel import select
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory
 
+from katzen_util import create_task
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Dict, List
@@ -42,6 +44,9 @@ if TYPE_CHECKING:
 class AsyncioThread(threading.Thread):
     def run(self):
         self.loop = asyncio.new_event_loop()
+        def report_exception3(*args, **kwargs):
+            print("report_exception3", args, kwargs)
+        self.loop.set_exception_handler(report_exception3)
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
         self.loop.run_forever()
@@ -343,19 +348,30 @@ class MainWindow(QMainWindow):
         new_write_caps, db_entries = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo_state.conversation_id)
+
         async with persistent.asession() as sess:
             for cap_uuid in new_write_caps:
                 sess.add(persistent.WriteCapWAL(id=cap_uuid))
             for obj in db_entries:
                 sess.add(obj)
+            final_pwal_id = db_entries[-1].id  # relying on this being a plaintextwal is a little bit of an assumption about the internal of .serialize() ....
+
+            # Then we pretend that we have received it:
+            sess.add(persistent.ConversationLog(
+                conversation_id=convo_state.conversation_id,
+                conversation_peer_id=convo_state.own_peer_id,
+                conversation_order=select(func.count())
+                .select_from(persistent.ConversationLog)
+                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
+                .scalar_subquery(),
+                payload=b"F"+group_chat_message.to_cbor(), # TODO massive hack here because we don't reassemble sendops yet
+                network_status=1,
+                outgoing_pwal=final_pwal_id,
+            ))
             await sess.commit()
 
-        # Then we pretend that we have received it:
-        await self.receive_msg(
-            conversation_id=convo_state.conversation_id,
-            peer_id=convo_state.own_peer_id,
-            cbor_payload=b"F"+group_chat_message.to_cbor(), # TODO massive hack here because we don't reassemble sendops yet
-        )
+        # signal self.receive_msg_listener() that we have news for it:
+        await self.iothread.run_in_io(network.conversation_update_queue.put(convo_state.conversation_id))
 
         # TODO we can only do this if we have a self.iothread.kp_client,
         # that is, a connection to the clientd:
@@ -407,28 +423,6 @@ class MainWindow(QMainWindow):
                 self.app.alert(self)
                 # self.app.beep()
             self.systray.has_new_messages() # TODO move this into block above
-
-    async def receive_msg(self, conversation_id : int, peer_id: int, cbor_payload: bytes) -> None:
-        """Called when a message needs to be written to a conversation log, and the UI
-        potentially needs updating. The network.drain_mixwal() has similar code, so this function
-        is only used when we "pretend" to have received something, for instance when the user
-        writes a message. It signals receive_msg_listener() once the database is updated.
-        Arguably the persistence stuff should be moved to the persistent.py module.
-        """
-        convo_state = self.conversation_state_by_id[conversation_id]
-        async with persistent.asession() as sess:
-            sess.add(persistent.ConversationLog(
-                conversation_id=convo_state.conversation_id,
-                conversation_peer_id=peer_id,
-                conversation_order=select(func.count())
-                .select_from(persistent.ConversationLog)
-                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
-                .scalar_subquery(),
-                payload=cbor_payload,
-            ))
-            await sess.commit()
-
-        await self.iothread.run_in_io(network.conversation_update_queue.put(conversation_id))
 
     def convo_state(self) -> ConversationUIState:
         # TODO there must be a more graceful way to do this:
@@ -1007,6 +1001,10 @@ def rebuild_pydantic_models():
     pass
 
 async def main(window: MainWindow):
+    def report_exception2(*args, **kwargs):
+        print("report_exception2", args, kwargs)
+    asyncio.get_running_loop().set_exception_handler(report_exception2)
+
     rebuild_pydantic_models()
     """
     import trio
@@ -1061,14 +1059,7 @@ async def main(window: MainWindow):
             await add_conversation(window, convo)
 
     window.show()
-    asyncio.create_task(window.receive_msg_listener())
-    #await asyncio.sleep(5)
-    #f = asyncio.run_coroutine_threadsafe(window.at.kp_client.create_write_channel(), window.at.loop)
-    #f = await window.iothread.run_in_io(window.iothread.kp_client.create_write_channel())
-    #print("new write channel", f)
-    #import pdb;pdb.set_trace()
-    pass
-
+    create_task(window.receive_msg_listener())
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html

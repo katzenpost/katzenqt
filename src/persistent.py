@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import aiosqlite # https://pypi.org/project/aiosqlite/
 import struct
 from typing import TYPE_CHECKING
-
+from katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
     import sqlmodel
@@ -106,7 +106,7 @@ class MixWAL(SQLModel, table=True):
     is_read : bool
     @classmethod
     def get_new(cls, except_these:"Set[uuid.UUID]"):
-        return select(cls).where(cls.id.not_in(except_these))
+        return select(cls).where(cls.bacap_stream.not_in(except_these))
     @classmethod
     async def resend_queue_from_disk(cls) -> "Set[uuid.UUID]":
         # TODO something needs to restore the connection.ack_queues listeners, which means we need to know the message_id
@@ -140,27 +140,54 @@ class WriteCapWAL(SQLModel, table=True):
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
-    async def mark_sent(cls, mw:MixWAL, resend_queue):
+    async def mark_sent(cls, mw:MixWAL, resend_queue) -> int:
         """Add SentLog entry, delete corresponding MixWAL and PlaintextWAL entries.
         Also bump index so we don't just keep writing to the same index??
         TODO: cleanup WriteCapWAL/ReadCapWAL entries when we are done with them (not urgent, but eventually)
+
+        Returns the Conversation.id for the MixWAL entry so UI can be updated.
         """
+        conversation_id = None
         with Session(_engine_sync) as sess:
             pwal = sess.get(PlaintextWAL, mw.plaintextwal)
+            if not pwal:
+                print("pwal lookup failed for mw.plaintextwal", mw.is_read, mw)
+                # this is not great; if mw.is_read==False then we really ought to have a corresponding plaintextwal.
+                # either we put the wrong id here; or something went wrong making the entry; or we have already mark_sent something
+                # for this plaintextwal entry. It seems most likely that we would end up here if we have resent the write
+                # and only later gotten the ACK.
+                real_next, our_next = struct.unpack('<2Q', sess.get(WriteCapWAL, mw.bacap_stream).next_index[:8] + mw.next_message_index[:8])
+                if real_next == our_next:
+                    print("in mark_sent, but we already advanced from idx", mw.current_message_index[:8].hex())
+                    resend_queue.discard(mw.bacap_stream)  # TODO not sure if we still use this?
+                    return
+                import pdb; pdb.set_trace()
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
             wcw = sess.get(WriteCapWAL, mw.bacap_stream)
             print("updating wcw: ", struct.unpack('<2Q', wcw.next_index[:8] + mw.next_message_index[:8]))
             wcw.next_index = mw.next_message_index
+            if pwal.bacap_payload[:1] in (b'F',b'I'):
+                # This is either:
+                #   I: an Indirection release pointing to something else
+                #   F: a Final message
+                # If it's at a top level, we would have a local ConversationLog entry already,
+                # and we can update that to reflect that message has been sent.
+                if convlog := sess.exec(select(ConversationLog).where(ConversationLog.outgoing_pwal == pwal.id)).first():
+                    conversation_id = convlog.conversation_id
+                    convlog.network_status = 2
+                    sess.add(convlog)
             sess.add(wcw)
             sess.delete(sess.get(MixWAL, mw.id))
             sess.delete(pwal)
             # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
             sess.commit()
-            resend_queue.remove(pwal.bacap_stream) # this will fail if it's not there already, but it ought to be. could use discard() # TODOTOD is this resend_queue thing still being used?
+            resend_queue.discard(pwal.bacap_stream)  # TODO not sure if we still use this?
+        return conversation_id
 
 class PlaintextWAL(SQLModel, table=True):
     """Plaintext chunks of (bacap_payload) to insert into (bacap_stream).
     See models.py for SendOperation -> PlaintextWAL serialization details.
+    These are removed once the MixWAL entries have been ACK'ed by a courier - see SentLog.mark_sent().
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     after_id: uuid.UUID | None = Field(
@@ -199,8 +226,8 @@ class PlaintextWAL(SQLModel, table=True):
         """
         sent_cte = sa.select(sa.select(SentLog.id).cte('sent_cte'))  # Successfully sent messages
         mixwal_bacap_cte = sa.select(sa.select(MixWAL.bacap_stream).cte('mixwal_bacap_cte'))
-        populated_read_cap_cte = sa.select(ReadCapWAL.id).where(ReadCapWAL.read_cap != None).cte("populated_read_cap_cte")
-        populated_write_cap_cte = sa.select(WriteCapWAL.id).where(WriteCapWAL.write_cap != None).cte("populated_write_cap_cte")
+        populated_read_cap_cte = sa.select(sa.select(ReadCapWAL.id).where(ReadCapWAL.read_cap != None).cte("populated_read_cap_cte"))
+        populated_write_cap_cte = sa.select(sa.select(WriteCapWAL.id).where(WriteCapWAL.write_cap != None).cte("populated_write_cap_cte"))
         # instead of a cte that selects it all we may want to us after_id/after_stream directly
         row = sa.func.row_number().over(partition_by=PlaintextWAL.bacap_stream).label("rownum")
         all_elig= (
@@ -332,3 +359,11 @@ class ConversationLog(SQLModel, table=True):
 
     # TODO: envelope_hash: bytes - do we need this?
     payload: bytes  # This contains binary CBOR
+
+    network_status: int = Field(default=0) # 0: received; 1:pending; 2: fully sent
+    outgoing_pwal: uuid.UUID | None = Field(
+        default=None,
+        foreign_key="plaintextwal.id",
+        index=True,
+        description="""the PlaintextWAL entry for the final message that marks this sent""",
+    )

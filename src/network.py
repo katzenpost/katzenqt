@@ -8,7 +8,9 @@ import nacl.public
 
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
 import asyncio
-from asyncio import ensure_future, create_task
+import traceback
+from asyncio import ensure_future
+from katzen_util import create_task
 from pydantic.dataclasses import dataclass
 import persistent
 
@@ -66,7 +68,7 @@ async def start_background_threads(connection: ThinClient):
         f3.cancel()
         f4.cancel()
         f5.cancel()
-    shutdown_task = asyncio.create_task(do_shutdown())
+    shutdown_task = create_task(do_shutdown())
 
 async def drain_mixwal(connection: ThinClient):
     try:
@@ -131,8 +133,11 @@ async def drain_mixwal2(connection: ThinClient):
                 - bump drain_mixwal
                 """
                 print("got write ack; kicking off the next send", reply)
-                await persistent.SentLog.mark_sent(mw, __resend_queue)
+                conv_id = await persistent.SentLog.mark_sent(mw, __resend_queue)
                 resendable_event.set()  # signal send_resendable_plaintexts
+                if conv_id:
+                    # update the UX:
+                    pass # await conversation_update_queue.put(conv_id) can't actually use this because it will bump item count too
             async def got_read_ack():
                 """this is a read reply, if it's not empty then we can advance state"""
                 reply = await connection.ack_queues[message_id].get()
@@ -146,9 +151,9 @@ async def drain_mixwal2(connection: ThinClient):
                 import pdb;pdb.set_trace()
                 return
             if mw.is_read:
-                asyncio.create_task(got_read_ack())
+                create_task(got_read_ack())
             if not mw.is_read:
-                asyncio.create_task(got_write_ack())
+                create_task(got_write_ack())
         print("entering while not reply: loop")
         while not reply:
             try:
@@ -200,7 +205,7 @@ async def drain_mixwal2(connection: ThinClient):
                     import pdb;pdb.set_trace()
                     print("---")
         print("got reply now looking up bacap_stream, expect to see RECEIVED REPLY")
-        asyncio.create_task(connection.close_channel(chan_id))
+        create_task(connection.close_channel(chan_id))
         rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
         print("RECEIVED REPLY FOR MESSAGE" * 100, reply)
         print("bumping read cap next_index from", struct.unpack('<3Q', rcw.next_index[:8] + mw.current_message_index[:8] + mw.next_message_index[:8]  ))
@@ -240,7 +245,7 @@ async def drain_mixwal2(connection: ThinClient):
     async def with_own_sess(mw):
         async with persistent.asession() as sess:
             await tx_single(sess, mw)
-        draining_right_now.remove(mw.id)
+        draining_right_now.remove(mw.bacap_stream)
         __mixwal_updated.set()  # if we were blocking something then it can be sent now
     while True:
         _, _ = await asyncio.wait((create_task(__mixwal_updated.wait()),), timeout=60)
@@ -251,10 +256,9 @@ async def drain_mixwal2(connection: ThinClient):
             new_mixwals = (await sess.exec(persistent.MixWAL.get_new(draining_right_now))).all()
         for mw in new_mixwals:
             print("drain_mixwal: NEW MIXWAL:", struct.unpack("<1Q", mw.current_message_index[:8]), mw.is_read, mw.bacap_stream)
-            draining_right_now.add(mw.id) # this is the uuid PK
-            print("="*100, "new mixwal mw:", mw)
+            draining_right_now.add(mw.bacap_stream) # this is the uuid PK
             #__resend_queue.add(mw.bacap_stream)  # TODO unsure if this does is still used?
-            asyncio.create_task(with_own_sess(mw))
+            create_task(with_own_sess(mw))
 
 async def provision_read_caps(connection: ThinClient):
     """Long-running process to tread persistent.WriteCapWAL and populate ReadCapWAL"""
@@ -365,7 +369,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
         pwals_to_send = set()
         async with persistent.asession() as sess:
             query = persistent.PlaintextWAL.find_resendable(__resend_queue)
-            print("send_resendable QUERY:", query, __resend_queue)
+            #print("send_resendable QUERY:", query, __resend_queue)
             sendable = (await sess.exec(query)).all()
             for pwal in sendable:
                 if pwal.indirection is None:
@@ -382,7 +386,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
             await sess.commit()
         for pwal in sendable:
             if pwal.bacap_stream not in __resend_queue:
-                asyncio.create_task(start_resending(connection, pwal))
+                create_task(start_resending(connection, pwal))
 
 async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     """
@@ -423,11 +427,8 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # - persist that to MixWAL
 
     chan_id = await connection.resume_write_channel(write_cap=wc.write_cap, message_box_index=wc.next_index)
-    print("-"*1000, "start_resending made a resume channel")
     wcr = await connection.write_channel(chan_id, payload=pwal.bacap_payload)
-    print("-"*1000, "start_resending wrote to channel", wcr)
-    await connection.close_channel(chan_id)
-    print("-"*1000, "start_resending closed channel")
+    create_task(connection.close_channel(chan_id))
     
     courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     mw = persistent.MixWAL(
@@ -441,14 +442,11 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
         next_message_index = wcr.next_message_index, # for resends, do we need current_message_index ? 
         is_read = False
     )
-    print("-"*1000, "start_resending made a MixWAL entry")
     async with persistent.asession() as sess:
         sess.add(mw)
         # TODO if we do this, how do we know what to remove from PlaintextWAL?
         # we need to hook network.on_message_reply to look for the returns
         await sess.commit()
-
-    print("-"*1000, "start_resending actually did something")
     # Now we have persisted our intention to resend.
     # Next up is something needs to actually resend, reading from MixWAL
     # and issuing ThinClient.send_channel_query

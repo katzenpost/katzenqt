@@ -141,6 +141,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                         persistent.ConversationLog.conversation_order==index_row).first()
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
+                    if cl.network_status == 1:
+                        return cl.conversation_peer.name + f"[sending][{cl.outgoing_pwal}]"
                     return cl.conversation_peer.name
                 elif role == 0:
                     if cl.payload.startswith(b'F'):                        
