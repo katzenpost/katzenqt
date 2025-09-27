@@ -168,7 +168,7 @@ TreeView {
             id: hellodog
             textFormat: Text.PlainText
             text: model.author + (ctx.first_unread <= row ? " (*)" : "") + (
-              model.network_status == 1 ? " ⏩ ❓  🖂  ⛶ ⮍ " : ""
+              model.network_status == 1 ? " ⏩ ❓  🖂  ⛶ ⮍ 🕊" : ""
 	    )
           }
           TextArea {
