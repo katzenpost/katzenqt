@@ -62,19 +62,26 @@ def test_send_operation_preserves_1(chunk_size, text):
     recon = b''
     if len(ser) > 1:
         assert len(ser) >= 3, "at least one message, one readcapwal for it, and one indirection message"
-        for x in ser[:-1]:
-            if isinstance(x, persistent.PlaintextWAL):
-                assert bacap_stream != x.bacap_stream
-                recon += x.bacap_payload[1:]
-                assert ser[-3].bacap_payload[0:1] == b"F"  # final
-                assert isinstance(ser[-2], persistent.ReadCapWAL)
-                assert ser[-1].bacap_payload == b""  # indirect
-                assert ser[-1].indirection is not None
-            elif isinstance(x, persistent.ReadCapWAL):
-                pass
-            else:
-                raise Exception("Expecting PlaintextWAL or ReadCapWAL")
-        assert ser[-1].bacap_stream == bacap_stream
+        for pwal in ser[:-2]:
+            assert isinstance(pwal, persistent.PlaintextWAL)
+            assert bacap_stream != pwal.bacap_stream
+            recon += pwal.bacap_payload[1:]
+            assert len(pwal.bacap_payload) >= 2
+            assert pwal.indirection is None
+
+        final = ser[-3]
+        assert isinstance(final, persistent.PlaintextWAL), "the third-last item should be a PWAL with a b'F' tag"
+        assert final.bacap_payload[0:1] == b"F"
+
+        temp_cap = ser[-2]
+        assert isinstance(temp_cap, persistent.ReadCapWAL), "second-last should be a read cap for the temp stream"
+        assert temp_cap.write_cap_id == final.bacap_stream
+
+        release = ser[-1]
+        assert isinstance(release, persistent.PlaintextWAL)
+        assert release.bacap_stream == bacap_stream, "final PWAL should write to original BACAP stream"
+        assert release.bacap_payload == b""  # Indirect waits for filling from network
+        assert release.indirection == temp_cap.id
     else:
         assert isinstance(ser[0], persistent.PlaintextWAL)
         assert ser[0].bacap_payload[0:1] == b"F"  # final
