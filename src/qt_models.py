@@ -5,7 +5,9 @@ from PySide6.QtGui import QPainter
 
 import persistent
 
+import functools
 from functools import lru_cache
+
 # should probably look into paginating some SQL here so we don't do one query per line
 # but err lru_cache makes it bearable for now, with the assumption chat messages don't change.
 # TODO, but seems reasonable as long as we are not doing "sent yesterday" etc.
@@ -36,6 +38,20 @@ class FilterProxyModel(QtCore.QSortFilterProxyModel):
 
 ROLE_CHAT_AUTHOR = 0x100  # see ConversationLogModel.roleNames()
 ROLE_CHAT_NETWORK_STATUS = 0x101  # ConversationLog.network_status
+
+def lru_cache_for_data_roles(maxsize=10000):
+    """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
+    def decorator(func):
+        cached_func = lru_cache(maxsize=maxsize)(func)
+        @functools.wraps(func)
+        def wrapper(clm:"ConversationLogModel", index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):
+            if role != ROLE_CHAT_NETWORK_STATUS:
+                # def data(self, index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):
+                return cached_func(clm, index, role)
+            else:
+                return func(clm, index, role)
+        return wrapper
+    return decorator
 
 class ConversationLogModel(QtCore.QAbstractItemModel):
     # https://doc.qt.io/qt-6/model-view-programming.html
@@ -92,8 +108,12 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         qmi = QModelIndex()
         print("beginInsertRows", self.row_count)
         self.beginInsertRows(qmi, self.row_count-1, self.row_count-1)
-        #self.beginInsertRows(qmi, self.row_count-2, self.row_count-1)
         self.row_count += 1
+        self.endInsertRows()
+
+    def redraw_network_status(self):
+        qmi = QModelIndex()
+        self.beginInsertRows(qmi, 1,0)
         self.endInsertRows()
 
     def columnCount(self, parent:QModelIndex|QPersistentModelIndex|None) -> int:
@@ -124,7 +144,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         else:
             raise Exception("TODO2")
 
-    @lru_cache(maxsize=1000)
+    @lru_cache_for_data_roles()
     def data(self, index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):
         """returns data for index
         PySide6.QtCore.Qt.DisplayRole
@@ -144,7 +164,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
                     if cl.network_status == 1:
-                        return cl.conversation_peer.name + f"[PWAL:{cl.outgoing_pwal}]"
+                        return cl.conversation_peer.name
                     return cl.conversation_peer.name
                 elif role == ROLE_CHAT_NETWORK_STATUS:
                     return cl.network_status

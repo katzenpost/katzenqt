@@ -62,7 +62,7 @@ class AsyncioThread(threading.Thread):
         res = await asyncio.wrap_future(ffff)
         assert ffff.exception() is None
         assert ffff.result() == res
-        print("RUN_IN_IO COMPLETE", res)
+        #print("RUN_IN_IO COMPLETE", res)
         return res
 
     async def async_main(self):
@@ -375,7 +375,7 @@ class MainWindow(QMainWindow):
             await sess.commit()
 
         # signal self.receive_msg_listener() that we have news for it:
-        await self.iothread.run_in_io(network.conversation_update_queue.put(convo_state.conversation_id))
+        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id,False)))
 
         # Signal the network module that we have a new outgoing message:
         await self.iothread.run_in_io(
@@ -386,11 +386,14 @@ class MainWindow(QMainWindow):
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
         while True:
-            conversation_id : int = await self.iothread.run_in_io(network.conversation_update_queue.get())
+            (conversation_id, redraw_only) = await self.iothread.run_in_io(network.conversation_update_queue.get())
             while conversation_id not in self.conversation_state_by_id:
                 print('conversation_id',conversation_id,'not in conversation_state_by_id yet')
                 await asyncio.sleep(1)  # encountered a race here once, where the UI hadn't loaded. not sure if still there.
             convo_state = self.conversation_state_by_id[conversation_id]
+            if redraw_only:
+                convo_state.conversation_log_model.redraw_network_status()
+                continue
             convo_state.conversation_log_model.increment_row_count()
             # And then we can increment the row count to let the UI register it:
 

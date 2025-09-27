@@ -14,7 +14,7 @@ from katzen_util import create_task
 from pydantic.dataclasses import dataclass
 import persistent
 
-conversation_update_queue = asyncio.Queue() # queue of `int` which are Conversation.id, when we have written to ConversationLog
+conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
 __resend_queue: "Set[uuid.UUID]" = set()
 #__plaintextwal_updated = asyncio.Event()
 #__plaintextwal_updated.set()
@@ -98,7 +98,7 @@ async def drain_mixwal2(connection: ThinClient):
             rcw = (await sess.exec(select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==mw.bacap_stream))).one()
             chan_id = await connection.resume_read_channel_query(
                 read_cap=rcw.read_cap, next_message_index=mw.current_message_index,
-                envelope_descriptor=mw.envelope_descriptor, #ncrypted_payload,
+                envelope_descriptor=mw.envelope_descriptor,
                 envelope_hash=mw.envelope_hash,
                 reply_index=0,
             )
@@ -115,7 +115,7 @@ async def drain_mixwal2(connection: ThinClient):
         __on_message_queues[message_id] = asyncio.Queue()
         reply = False
         # we kind of want to use send_channel_query_await_reply(timeout_seconds=None) here, but it's not ideal to do that within the database session.
-        def wait_for_ack(message_id: bytes, mw: persistent.MixWAL):
+        def wait_for_ack(message_id: bytes, mw: persistent.MixWAL, acked_event:asyncio.Event):
             connection.ack_queues[message_id] = asyncio.Queue(1)
             async def got_write_ack():
                 """
@@ -133,11 +133,12 @@ async def drain_mixwal2(connection: ThinClient):
                 - bump drain_mixwal
                 """
                 print("got write ack; kicking off the next send", reply)
+                acked_event.set() # stop resending this mixwal entry
                 conv_id = await persistent.SentLog.mark_sent(mw, __resend_queue)
                 resendable_event.set()  # signal send_resendable_plaintexts
                 if conv_id:
                     # update the UX:
-                    pass # await conversation_update_queue.put(conv_id) can't actually use this because it will bump item count too
+                    create_task(conversation_update_queue.put((conv_id,True)))
             async def got_read_ack():
                 """this is a read reply, if it's not empty then we can advance state"""
                 reply = await connection.ack_queues[message_id].get()
@@ -145,6 +146,7 @@ async def drain_mixwal2(connection: ThinClient):
                 if reply['error_code']:
                     print("Tried to read a box, but we got an error", reply)
                     return
+                acked_event.set() # stop resending this mixwal entry
                 if not reply['payload']:
                     print("Read a box, but it was empty. Keep reading.")
                     return
@@ -155,9 +157,10 @@ async def drain_mixwal2(connection: ThinClient):
             if not mw.is_read:
                 create_task(got_write_ack())
         print("entering while not reply: loop")
+        acked_event = asyncio.Event()  # once *one* of our resends are satisfied we can cancel the rest
         while not reply:
             try:
-                wait_for_ack(message_id, mw) # only need one of these TODO, and when we get one we should cancel
+                wait_for_ack(message_id, mw, acked_event) # only need one of these TODO, and when we get one we should cancel
             except Exception as e:
                 print(e)
                 await asyncio.sleep(10)
@@ -175,15 +178,21 @@ async def drain_mixwal2(connection: ThinClient):
             except ThinClientOfflineError:
                 print("thin client is offline, can't drain mixwal. retrying in 5s")
                 del connection.ack_queues[message_id]
-                await asyncio.sleep(15)
+                await asyncio.sleep(5)
                 continue
             try:
                 got_reply = create_task( __on_message_queues[message_id].get() )
-                done, not_done = await asyncio.wait((got_reply,), timeout=60)
+                got_ack_in_other_thread = create_task(acked_event.wait())
+                done, not_done = await asyncio.wait((
+                    got_reply, got_ack_in_other_thread,
+                ), timeout=15)
                 for not_done_job in not_done:
                     print('cancelling got_reply')
                     not_done_job.cancel()
                     print('cancelleDD got_reply.')
+                if got_ack_in_other_thread in done:
+                    print("got ack in other thread")
+                    return
                 if got_reply in done:
                     print("GOT_REPLY", got_reply)
                     reply = got_reply.result()
@@ -236,7 +245,7 @@ async def drain_mixwal2(connection: ThinClient):
         c_id = cp.conversation.id
         await sess.commit()
         print('putting on conversation_update_queue')
-        await conversation_update_queue.put(c_id)
+        await conversation_update_queue.put((c_id,False))
         print("SIGNALING WE CAN READ MORE readables_to_mixwal_event.set()")
         readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
         print("SIGNALED.")
