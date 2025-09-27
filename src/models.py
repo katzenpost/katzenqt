@@ -193,6 +193,7 @@ class ConversationUIState(BaseModel):
     }
     conversation_id : int
     own_peer_id : int = Field(description="ConversationPeer.id for self")
+    own_peer_name : str = Field(description="ConversationPeer.name for self")
     own_peer_bacap_uuid: uuid.UUID
     chat_lineEdit_buffer : str
     conversation_log_model: ConversationLogModel

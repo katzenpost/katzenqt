@@ -654,7 +654,7 @@ class MainWindow(QMainWindow):
         # Restore new single line input buffer
         self.ui.chat_lineEdit.setText(convo_state.chat_lineEdit_buffer)
         # Update the label we display at the top left corner of the chat view:
-        self.ui.ContactName.setText(selected)
+        self.ui.ContactName.setText(f"{selected} (your name: {convo_state.own_peer_name})")
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
 
@@ -961,6 +961,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     clm = ConversationLogModel(convo.id)
     convo_state = ConversationUIState(
         own_peer_id=convo.own_peer_id,
+        own_peer_name=convo.own_peer.name,
         own_peer_bacap_uuid=convo.write_cap,
         conversation_id=convo.id,
         chat_lineEdit_buffer="",

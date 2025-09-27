@@ -35,6 +35,7 @@ class FilterProxyModel(QtCore.QSortFilterProxyModel):
         return res
 
 ROLE_CHAT_AUTHOR = 0x100  # see ConversationLogModel.roleNames()
+ROLE_CHAT_NETWORK_STATUS = 0x101  # ConversationLog.network_status
 
 class ConversationLogModel(QtCore.QAbstractItemModel):
     # https://doc.qt.io/qt-6/model-view-programming.html
@@ -63,6 +64,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             #5: QByteArray(b'whatsThis'),
             #3: QByteArray(b'toolTip'),
             ROLE_CHAT_AUTHOR: QByteArray(b'author'),
+            ROLE_CHAT_NETWORK_STATUS: QByteArray(b'network_status'),
         }
 
     @lru_cache(maxsize=1000)
@@ -127,7 +129,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         """returns data for index
         PySide6.QtCore.Qt.DisplayRole
         """
-        if role not in (0, ROLE_CHAT_AUTHOR):
+        if role not in (0, ROLE_CHAT_AUTHOR, ROLE_CHAT_NETWORK_STATUS):
             return None
         index_row : int = index.row()
         #print("DATA: INDEX ROW IS", index_row, repr(index))
@@ -142,8 +144,10 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
                     if cl.network_status == 1:
-                        return cl.conversation_peer.name + f"[sending][{cl.outgoing_pwal}]"
+                        return cl.conversation_peer.name + f"[PWAL:{cl.outgoing_pwal}]"
                     return cl.conversation_peer.name
+                elif role == ROLE_CHAT_NETWORK_STATUS:
+                    return cl.network_status
                 elif role == 0:
                     if cl.payload.startswith(b'F'):                        
                         try:
