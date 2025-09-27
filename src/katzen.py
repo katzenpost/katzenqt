@@ -71,7 +71,8 @@ class AsyncioThread(threading.Thread):
             try:
                 self.kp_client = await network.reconnect()
             except (ConnectionRefusedError,BrokenPipeError) as e:
-                print(e)
+                print("Failed to connect:", e)
+                import traceback; traceback.print_exc()
                 await asyncio.sleep(1)
 
 # matplotlib in qt:
@@ -329,6 +330,7 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def chat_msg_single_line(self):
+        """Send a single line message to the currently selected chat window."""
         msg = self.ui.chat_lineEdit.text()
         self.ui.chat_lineEdit.setText("")
         convo_state = self.convo_state()
@@ -339,6 +341,8 @@ class MainWindow(QMainWindow):
             return
 
         group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
+
+        # TODO: this is general code that should live in a shared place:
         send_op = SendOperation(
             bacap_stream=convo_state.own_peer_bacap_uuid,
             messages=[group_chat_message]
@@ -373,12 +377,11 @@ class MainWindow(QMainWindow):
         # signal self.receive_msg_listener() that we have news for it:
         await self.iothread.run_in_io(network.conversation_update_queue.put(convo_state.conversation_id))
 
-        # TODO we can only do this if we have a self.iothread.kp_client,
-        # that is, a connection to the clientd:
-        if self.iothread.kp_client:
-            await self.iothread.run_in_io(
-                network.check_for_new()
-            )
+        # Signal the network module that we have a new outgoing message:
+        await self.iothread.run_in_io(
+            network.check_for_new()
+        )
+
     async def receive_msg_listener(self):
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
@@ -488,11 +491,10 @@ class MainWindow(QMainWindow):
                 sess.add(db_obj)  # These are PlaintextWAL and ReadCapWal entries
             await sess.commit()
 
-        if self.iothread.kp_client:
-            todo = await self.iothread.run_in_io(
-              network.check_for_new()
-            )
-            #import pdb;pdb.set_trace()
+        # Signal network.py that we have written a new SendOperation to PlaintextWAL
+        await self.iothread.run_in_io(
+            network.check_for_new()
+        )
 
         # Remove sent files from model and view:
         convo.attached_files.clear()
@@ -1006,28 +1008,6 @@ async def main(window: MainWindow):
     asyncio.get_running_loop().set_exception_handler(report_exception2)
 
     rebuild_pydantic_models()
-    """
-    import trio
-    async def kp_async():
-        try:
-            print("KP RECON")
-            kp_client = await network.reconnect()
-            print("KP RECON2")
-        except FileNotFoundError as e:
-            print("KP RECON FNE")
-            error_and_exit(window.app, "Cannot find mixnet configuration file:\n" + e.filename, window)
-        pass
-    qloop = asyncio.get_running_loop()
-    def donecb(out):
-        print("DONECB",out)
-    def sooncb(fn):
-        print("SOONCB", fn)
-        qloop.call_soon_threadsafe(fn)
-    trio.lowlevel.start_guest_run(
-        kp_async,
-        run_sync_soon_threadsafe=qloop.call_soon_threadsafe,
-        done_callback=donecb)
-    """
     echomix_icon = QIcon()
     window.echomix_icon = echomix_icon
     for sz in (16,32,48,160,256):

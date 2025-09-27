@@ -515,8 +515,7 @@ async def reconnect() -> ThinClient:
         #on_new_pki_document=...
     )
     client = ThinClient(cfg)
-    # TODO can .start fail?
-    await client.start(asyncio.get_running_loop())
+    await client.start(asyncio.get_running_loop())  # this can throw exceptions
     return client
 
 # events: we should keep track of ConnectionStatusEvent.IsConnected so we can tell the user whether the mixnet client is working

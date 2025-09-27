@@ -4,6 +4,7 @@ from hypothesis import given, example
 import hypothesis
 import hypothesis.strategies as st
 import pydantic
+import persistent
 
 test_please_add_deserialize = given(st.text(), st.binary())
 @test_please_add_deserialize
@@ -60,13 +61,23 @@ def test_send_operation_preserves_1(chunk_size, text):
     new_bacap, ser = s.serialize(chunk_size=chunk_size, conversation_id=123)
     recon = b''
     if len(ser) > 1:
+        assert len(ser) >= 3, "at least one message, one readcapwal for it, and one indirection message"
         for x in ser[:-1]:
-            assert bacap_stream != x.bacap_stream
-            recon += x.bacap_payload[1:]
-        assert ser[-2].bacap_payload[0:1] == b"F"  # final
-        assert ser[-1].bacap_payload[0:1] == b"I"  # indirect
+            if isinstance(x, persistent.PlaintextWAL):
+                assert bacap_stream != x.bacap_stream
+                recon += x.bacap_payload[1:]
+                assert ser[-3].bacap_payload[0:1] == b"F"  # final
+                assert isinstance(ser[-2], persistent.ReadCapWAL)
+                assert ser[-1].bacap_payload == b""  # indirect
+                assert ser[-1].indirection is not None
+            elif isinstance(x, persistent.ReadCapWAL):
+                pass
+            else:
+                raise Exception("Expecting PlaintextWAL or ReadCapWAL")
+        assert ser[-1].bacap_stream == bacap_stream
     else:
+        assert isinstance(ser[0], persistent.PlaintextWAL)
         assert ser[0].bacap_payload[0:1] == b"F"  # final
         recon += ser[0].bacap_payload[1:]
-    assert ser[-1].bacap_stream == bacap_stream
+        assert ser[-1].bacap_stream == bacap_stream
     assert recon == m.to_cbor()

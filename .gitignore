@@ -3,4 +3,8 @@ __pycache__/
 *.egg-info/
 src/resources_rc.py
 src/ui_mixchat.py
-
+\#*#
+.#*
+*~
+*.swp
+*.log
