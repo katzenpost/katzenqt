@@ -15,7 +15,10 @@ from pydantic.dataclasses import dataclass
 import persistent
 
 conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
-__resend_queue: "Set[uuid.UUID]" = set()
+
+__resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
+__resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
+
 #__plaintextwal_updated = asyncio.Event()
 #__plaintextwal_updated.set()
 readables_to_mixwal_event = asyncio.Event()
@@ -37,12 +40,10 @@ __should_quit = asyncio.Event()
 def shutdown():
     __should_quit.set()
 
-async def populate_resend_queue():
-    global __resend_queue
-    __resend_queue |= await persistent.MixWAL.resend_queue_from_disk()
-
 async def start_background_threads(connection: ThinClient):
-    """This should be called on startup, after establishing a connection to the mixnet."""
+    """This should be called on startup, after establishing a connection to the mixnet.
+    It runs forever.
+    """
     # Loop over our write caps and retrive read caps for them:
     f1 = ensure_future(provision_read_caps(connection))
 
@@ -51,7 +52,7 @@ async def start_background_threads(connection: ThinClient):
     # Loop over outgoing queue and start transmitting them to the network. Runs forever.
     f3 = ensure_future(drain_mixwal(connection))
 
-    # Loop over encrypted messages and resend them. Runs forever.
+    # Loop over PlaintextWAL messages, encrypt them, and put them in MixWAL. Runs forever.
     f4 = ensure_future(send_resendable_plaintexts(connection))
 
     # Loop over things we can read and start reading them:
@@ -248,7 +249,6 @@ async def drain_mixwal2(connection: ThinClient):
         await conversation_update_queue.put((c_id,False))
         print("SIGNALING WE CAN READ MORE readables_to_mixwal_event.set()")
         readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
-        print("SIGNALED.")
 
     draining_right_now : "Set[uuid.UUID]" = set()
     async def with_own_sess(mw):
@@ -266,7 +266,7 @@ async def drain_mixwal2(connection: ThinClient):
         for mw in new_mixwals:
             print("drain_mixwal: NEW MIXWAL:", struct.unpack("<1Q", mw.current_message_index[:8]), mw.is_read, mw.bacap_stream)
             draining_right_now.add(mw.bacap_stream) # this is the uuid PK
-            #__resend_queue.add(mw.bacap_stream)  # TODO unsure if this does is still used?
+            # __resend_queue.add(mw.bacap_stream)
             create_task(with_own_sess(mw))
 
 async def provision_read_caps(connection: ThinClient):
@@ -283,7 +283,7 @@ async def provision_read_caps(connection: ThinClient):
                 if wcw.write_cap is None:
                     try:
                         chan_id, read_cap, write_cap = await connection.create_write_channel()
-                        await connection.close_channel(chan_id)
+                        create_task(connection.close_channel(chan_id))
                     except Exception as e:
                         print("create_write_channel DID NOT WORK"*100)
                         print(e)
@@ -296,6 +296,8 @@ async def provision_read_caps(connection: ThinClient):
                     sess.add(wcw)
                     sess.add(rcw)
                     await sess.commit()
+                    resendable_event.set() # start sending PlaintextWAL msgs that were waiting on this WriteCap
+                    readables_to_mixwal_event.set() # start reading the ReadCap if it's active
                     continue
                 else:
                     print("DB was created with old API, new API does not support converting write cap to read cap")
@@ -311,6 +313,7 @@ async def readables_to_mixwal(connection):
     print("READABLES READING")
     from sqlmodel import select  # TODO move to persistent
     global __resend_queue
+    await __resend_queue_populated.wait()
     async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
         print("process box cpeer-rcw:", cpeer, struct.unpack('<Q', rcw.next_index[:8]))
         try:
@@ -362,16 +365,29 @@ async def readables_to_mixwal(connection):
             __mixwal_updated.set()
             print("__mixwal_updated.set() from readables_to_mixwal")
 
+def on_error(task, func, *args, **kwargs):
+    """calls func(*args,**kwargs) if task has an exception.
+    Usage: task.add_done_callback(on_error(lambda: foo.bar()))
+    """
+    def on_error_done(task):
+        try:
+            task.result()
+        except Exception:
+            func(*args, **kwargs)
+            raise
+    task.add_done_callback(on_error_done)
+    return task
+
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
-    # TODO this needs to be protected by a mutex or use an asyncio.Event
     # look at persistent.PlaintextWAL:
-    # PICK OUT stuff in plaintextwall that we aren't currently resending
+    # PICK OUT stuff in PlaintextWAL that we aren't currently resending
     # - mark them as "being resent" (in memory)
     # - when we get an ACK, we move it from being resent to "sent" (db),
     #   and remove it from the PlaintextWAL, atomically
     global __resend_queue
+    __resend_queue |= await persistent.MixWAL.resend_queue_from_disk()
+    __resend_queue_populated.set()
     while True:
-        print("WAITING FOR RESENDABLE")
         _, _ = await asyncio.wait((create_task(resendable_event.wait()),), timeout=60)
         resendable_event.clear()
         print("SEND_RESENDABLE RUNNING")
@@ -395,7 +411,10 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
             await sess.commit()
         for pwal in sendable:
             if pwal.bacap_stream not in __resend_queue:
-                create_task(start_resending(connection, pwal))
+                __resend_queue.add(pwal.bacap_stream)
+                t = create_task(start_resending(connection, pwal))
+                on_error(t, lambda: resend_queue.discard(pwal.bacap_stream))
+
 
 async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     """
@@ -419,13 +438,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     
     """
     async with persistent.asession() as sess:
-        wc: persistent.WriteCapWAL = (await sess.exec(
-            persistent.WriteCapWAL.get_by_bacap_uuid(pwal.bacap_stream))).one()[0]
-
-    if wc.write_cap is None: # this is a new one
-        print("WHY IS WRITE CAP EMPTY HERE this code should be deleted.")
-        import pdb;pdb.set_trace()
-        raise Exception("Why is write cap empty in start_resending")
+        wc: persistent.WriteCapWAL = await sess.get(persistent.WriteCapWAL, pwal.bacap_stream)
 
     # now we have:
     # - a plaintext to send to send, pwal.bacap_payload

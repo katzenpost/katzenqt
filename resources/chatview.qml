@@ -78,7 +78,6 @@ TreeView {
         // save scroll position
         //print("onContentYChanged", contentY, bottomRow, topRow)
         // forceLayout()
-        // positionViewAtRow(rowAtIndex(index), Qt.AlignVCenter)
         // atYEnd
         // atYBeginning
         // contentY
@@ -90,10 +89,9 @@ TreeView {
 
      //signal scrollToBottom: { positionViewAtCell(Qt.point(columns - 1, rows - 1), TableView.AlignLeft | TableView.AlignBottom) }
 
-     onLayoutChanged: {
+     //onLayoutChanged: {
         //print("layout changed", contentY, contentHeight, vscrollbar.position)
-       //positionViewAtRow(10, TableView.Contain)
-     }
+     //}
 
      //required property QtObject backend
      //Connections {
@@ -109,6 +107,7 @@ TreeView {
      //onModelChanged: console.log(vscrollbar.position, ctx.conversation_scroll)
     //property int savedIndex:  0
     //onCurrentIndexChanged: savedIndex = currentIndex //eventually check against != 0 first
+
 
     anchors.centerIn: parent
         //Layout.fillWidth: true
@@ -139,7 +138,12 @@ TreeView {
         Connections {
           target: chatTreeView
           function onModelChanged() {
-            console.log("model changed", vscrollbar.position, ctx.conversation_scroll, ctx.first_unread)
+            console.log("model changed", vscrollbar.position, ctx.conversation_scroll, ctx.first_unread, rows)
+	    // if there's a new message and bottomRow would still be in view, we scroll to the bottom:
+            if (rows && bottomRow + (bottomRow - topRow)-1 > rows-1) {
+	      // for some absurd reason scrolling past bottomRow+1 in one go positions the view at the beginning, so we do increments:
+	      while (bottomRow < rows - 1) { positionViewAtCell(Qt.point(0, bottomRow+1), TableView.AlignLeft | TableView.AlignBottom) }
+	    }
           }
         }
      }
@@ -160,7 +164,7 @@ TreeView {
           implicitHeight: Math.max(itemMessageTextArea.implicitHeight, hellodog.implicitHeight) // tallest element
 
           background: Rectangle {
-//            color: "red";
+//            color: "gray";
           }
 
           contentItem: Row {  /// contentItem is the thing that gets displayed
@@ -170,6 +174,7 @@ TreeView {
             text: model.author + (ctx.first_unread <= row ? " (*)" : "") + (
               model.network_status == 1 ? " ⏩ ❓  🖂  ⛶ ⮍ 🕊 ✈ " : ""
 	    )
+	    color: (model.network_status > 0 ? "red" : "black")
           }
           TextArea {
             id: itemMessageTextArea

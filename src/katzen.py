@@ -412,9 +412,6 @@ class MainWindow(QMainWindow):
                 #print("next", min(
                 #    1 + self.ui.ChatLines.verticalScrollBar().value(),
                 #    conversation_order-3))
-                #self.scroll_chat_lines(min(
-                #    1 + self.ui.ChatLines.verticalScrollBar().value(),
-                #    conversation_order-3))
                 #self.ui.ChatLines.scrollToBottom()
             else:
                 #   x.2) Scrolling: Conversation is NOT in focus:
@@ -622,12 +619,7 @@ class MainWindow(QMainWindow):
             # backend.set_convo_model_and_scroll()
             vscrollbar = root.findChild(object, "vscrollbar")
             #vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
-            print('set first restored scroll to', convo_state.chat_lines_scroll_idx, vscrollbar.property("position"))
-            async def in_a_bit():
-                vscrollbar = root.findChild(object, "vscrollbar")
-                vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
-            #asyncio.get_running_loop().call_soon(lambda :ensure_future(in_a_bit()))
-            #import pdb;pdb.set_trace()
+            #print('set first restored scroll to', convo_state.chat_lines_scroll_idx, vscrollbar.property("position"))
         else:
             props = convo_state.qml_ctx(None)
             print("root context", self.ui.qml_ChatLines.rootContext())
@@ -649,10 +641,6 @@ class MainWindow(QMainWindow):
             #self.ui.qml_ChatLines.rootContext().setProperty("backend", backend)
             #self.ui.qml_ChatLines.rootContext().setContextProperty("backend2", backend)
             #backend.set_convo_model_and_scroll()
-
-
-        #if convo_state.chat_lines_scroll_idx is not None:
-        #    self.scroll_chat_lines(convo_state.chat_lines_scroll_idx)
 
         # Restore new single line input buffer
         self.ui.chat_lineEdit.setText(convo_state.chat_lineEdit_buffer)
@@ -846,28 +834,6 @@ class MainWindow(QMainWindow):
         # TODO: how do we know the write_cap? should we make them select from a list of outstanding
         # invitations and / or existing groups?
 
-    def scroll_chat_lines(self, value:int) -> None:
-        """Scroll main_window.ui.ChatLines to item offset (value)."""
-        # Nice workaround for Qt state shenanigans, changing the scrollbar doesn't
-        # *actually* render anything unless we do it a little bit later.
-        # TODO maybe we can do this instead:
-        # https://doc.qt.io/qtforpython-6/PySide6/QtCore/QCoreApplication.html#PySide6.QtCore.QCoreApplication.sendPostedEvents
-        # There's also this very information article:
-        # https://typevar.dev/en/docs/qt/qtreeview/scrollContentsBy
-        def in_a_bit2():
-            c=self.ui.qml_ChatLines.rootObject()
-            convo_state = self.convo_state()
-            vscrollbar = c.findChild(object,"vscrollbar")
-            vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
-            print('set restored scroll to', convo_state.chat_lines_scroll_idx, vscrollbar.property("position"))
-        async def in_a_bit():
-            in_a_bit2()
-            #self.ui.ChatLines.verticalScrollBar().setValue(
-            #    value
-            #)
-        #asyncio.get_running_loop().call_soon(lambda :ensure_future(in_a_bit()))
-        #in_a_bit2()
-
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):
             self.app.quit()
@@ -1007,8 +973,9 @@ def rebuild_pydantic_models():
     pass
 
 async def main(window: MainWindow):
-    def report_exception2(*args, **kwargs):
-        print("report_exception2", args, kwargs)
+    def report_exception2(*args):
+        for m in args:
+            print("report_exception2", m)
     asyncio.get_running_loop().set_exception_handler(report_exception2)
 
     rebuild_pydantic_models()

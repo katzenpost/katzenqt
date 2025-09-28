@@ -43,13 +43,18 @@ def lru_cache_for_data_roles(maxsize=10000):
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
     def decorator(func):
         cached_func = lru_cache(maxsize=maxsize)(func)
+        indices_with_stable_network_status = dict()
         @functools.wraps(func)
         def wrapper(clm:"ConversationLogModel", index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):
             if role != ROLE_CHAT_NETWORK_STATUS:
-                # def data(self, index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):
-                return cached_func(clm, index, role)
+                return cached_func(clm, index, role) ## call item.data() and cache it
+            elif (status := indices_with_stable_network_status.get(index, None)) is not None:
+                return status
             else:
-                return func(clm, index, role)
+                ret = func(clm, index, role)
+                if ret != 1:  # received or sent, but not "pending"
+                    indices_with_stable_network_status[index] = ret
+                return ret
         return wrapper
     return decorator
 
@@ -83,14 +88,14 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_NETWORK_STATUS: QByteArray(b'network_status'),
         }
 
-    @lru_cache(maxsize=1000)
+    @lru_cache(maxsize=10000)
     def index(self, row:int, column:int, parent:QModelIndex | None) -> QModelIndex:
         if parent and parent.isValid():
             return QModelIndex()
         qmi = self.createIndex(row,column, id=row*(column+1))
         return qmi
 
-    @lru_cache(maxsize=1000)
+    @lru_cache(maxsize=10000)
     def parent(self, child:QModelIndex|QPersistentModelIndex) -> QModelIndex:
         """Since we don't have any trees here, nochild indices have parents"""
         return QModelIndex()
@@ -103,15 +108,15 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         if not parent or parent.row() == -1:
             return self.row_count
         return 0
+
     def increment_row_count(self):
-        #qmi = self.createIndex(-1,-1)
         qmi = QModelIndex()
-        print("beginInsertRows", self.row_count)
         self.beginInsertRows(qmi, self.row_count-1, self.row_count-1)
         self.row_count += 1
         self.endInsertRows()
 
     def redraw_network_status(self):
+        """Force the view to refresh without actually changing anything."""
         qmi = QModelIndex()
         self.beginInsertRows(qmi, 1,0)
         self.endInsertRows()
@@ -120,29 +125,6 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         if parent.isValid():
             return 0
         return 1
-
-    def multiData(self, idx : QModelIndex|QPersistentModelIndex, span: QModelRoleData|QModelRoleDataSpan) -> None:
-        """basically this lets us do like data() but for all the roles.
-        since we only set the text role (0 == DisplayRole), we just ignore
-        all the others.
-        important to note that this is a span of data roles, not a span of data indices.
-        TODO: doesn't seem to be used by QML
-        """
-        #https://doc.qt.io/qtforpython-6/PySide6/QtCore/QModelRoleDataSpan.html
-        if isinstance(span, QModelRoleData):
-            # TODO unsure if this can happen, not tested
-            if span.role() == 0:
-                span.setData(self.data(idx, 0))
-        elif isinstance(span, QModelRoleDataSpan):
-            for roleData in span:  # type: ignore[attr-defined]
-                if roleData.role() == 0:
-                    roleData.setData(self.data(idx, 0))
-                elif roleData.role() == 0x0100:
-                    roleData.setData("TODO call data(idx, 0x100)")
-                else:
-                    print("roleData.role()", roleData, roleData.role())
-        else:
-            raise Exception("TODO2")
 
     @lru_cache_for_data_roles()
     def data(self, index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):

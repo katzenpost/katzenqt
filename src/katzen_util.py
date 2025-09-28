@@ -9,6 +9,7 @@ def create_task(coro):
         except Exception:
             print(f"create_task {task.exception()}")
             traceback.print_exc()
+            raise
     task = asyncio.create_task(coro)
     task.add_done_callback(throw_if_needed)
     return task

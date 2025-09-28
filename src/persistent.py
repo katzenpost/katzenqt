@@ -111,12 +111,11 @@ class MixWAL(SQLModel, table=True):
     async def resend_queue_from_disk(cls) -> "Set[uuid.UUID]":
         # TODO something needs to restore the connection.ack_queues listeners, which means we need to know the message_id
         # TODO associated with MixWALs that we send out
-        __resend_queue = set()
+        bacap_streams = set()
         async with asession() as sess:
             for stream in await sess.exec(select(cls.bacap_stream)):
-                print("RESEND QUEUE FROM DISK:", stream)
-                __resend_queue.add(stream)
-        return __resend_queue
+                bacap_streams.add(stream)
+        return bacap_streams
 
 class ReadCapWAL(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)
@@ -157,8 +156,8 @@ class SentLog(SQLModel, table=True):
                 # for this plaintextwal entry. It seems most likely that we would end up here if we have resent the write
                 # and only later gotten the ACK.
                 real_next, our_next = struct.unpack('<2Q', sess.get(WriteCapWAL, mw.bacap_stream).next_index[:8] + mw.next_message_index[:8])
-                if real_next == our_next:
-                    print("in mark_sent, but we already advanced from idx", mw.current_message_index[:8].hex())
+                if real_next >= our_next:
+                    print(f"in mark_sent, but db next {real_next} >= {our_next} we already advanced from idx", mw.current_message_index[:8].hex())
                     resend_queue.discard(mw.bacap_stream)  # TODO not sure if we still use this?
                     return
                 import pdb; pdb.set_trace()
