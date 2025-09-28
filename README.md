@@ -53,7 +53,6 @@ This application is a GUI chat client for mixnet group chat.
     - would need a QAbstractListModel
 - https://doc.qt.io/qt-6/qiodevice.html for audio capture
 - https://github.com/alexandrvicente/talkie/blob/master/src/main.cpp
-- need to show "ACK" symbols for messages in WAL / messages ACK'ed by courier
 - dark mode
   - bg: #131212
   - fg: #E0E0E0 / #FAFAFA
@@ -102,5 +101,6 @@ The procedure is:
 4. If everything works, you need to `git add` the file in  `migrations/versions/1234_added_a_....py` to ensure everybody else gets it.
 
 ### UI editing
-Our UI is *mainly* defined in `mixchat.ui`, which can be edited with `pyside6-designer` (a WYSIWYG program for Qt).
+- Our UI is *mainly* defined in `mixchat.ui`, which can be edited with `pyside6-designer` (a WYSIWYG program for Qt).
 When changes have been made, the UI code needs to be regenerated with `pyside6-uic mixchat.ui -o ui_mixchat.py` - `make` does that for you.
+- The UI for the chat messages (the "conversation log") resides in `resources/chatview.qml`. This file is in [QML format](https://en.wikipedia.org/wiki/QML).

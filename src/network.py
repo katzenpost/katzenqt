@@ -186,7 +186,7 @@ async def drain_mixwal2(connection: ThinClient):
                 got_ack_in_other_thread = create_task(acked_event.wait())
                 done, not_done = await asyncio.wait((
                     got_reply, got_ack_in_other_thread,
-                ), timeout=15)
+                ), timeout=15, return_when=asyncio.FIRST_COMPLETED)
                 for not_done_job in not_done:
                     print('cancelling got_reply')
                     not_done_job.cancel()
@@ -246,8 +246,9 @@ async def drain_mixwal2(connection: ThinClient):
         c_id = cp.conversation.id
         await sess.commit()
         print('putting on conversation_update_queue')
-        await conversation_update_queue.put((c_id,False))
+        create_task(conversation_update_queue.put((c_id,False)))
         print("SIGNALING WE CAN READ MORE readables_to_mixwal_event.set()")
+        __resend_queue.remove(mw.bacap_stream)
         readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
 
     draining_right_now : "Set[uuid.UUID]" = set()
