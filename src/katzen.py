@@ -280,6 +280,8 @@ class MainWindow(QMainWindow):
 
         # failed attempt to firewall external resource access:
         eng = self.ui.qml_ChatLines.engine()
+        chat_image_provider = ChatImageProvider()
+        eng.addImageProvider("ChatImageProvider", chat_image_provider)
         nwa = eng.networkAccessManager()
         #import pdb;pdb.set_trace()
         fnamf = FirewallNetworkAccessManagerFactory()

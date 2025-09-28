@@ -168,15 +168,18 @@ TreeView {
           implicitWidth: parent.parent.width || 1
 
           // NB: without this, it looks like shit if you scroll up:
-          implicitHeight: Math.max(itemMessageTextArea.implicitHeight, hellodog.implicitHeight) // tallest element
+          implicitHeight: Math.max(itemMessageTextArea.implicitHeight,
+	                    Math.max(contact_name.implicitHeight, entry_picture.height
+			    )) // tallest element
 
           background: Rectangle {
 //            color: "gray";
           }
 
           contentItem: Row {  /// contentItem is the thing that gets displayed
+
           Text {
-            id: hellodog
+            id: contact_name
             textFormat: Text.PlainText
             text: model.author + (ctx.first_unread <= row ? " (*)" : "") + (
               model.network_status == 1 ? " ⏩ ❓  🖂  ⛶ ⮍ 🕊 ✈ " : ""
@@ -184,8 +187,23 @@ TreeView {
 	    font.pointSize: (ctx.contact_name_text_size ? ctx.contact_name_text_size : 20)
 	    color: (model.network_status > 0 ? "red" : "black")
           }
+
+	  RowLayout {
+	       spacing: 1
+	       visible: model.picture_path ? model.picture_path : false
+	       Image {
+                 id: entry_picture
+                 source: "image://ChatImageProvider/" + model.picture_path
+                 // QQmlEngine.addImageProvider(QQuickImageProvider(def requestImage())
+                 // https://stackoverflow.com/a/20693161
+	         asynchronous: true
+	         fillMode: Image.PreserveAspectFit
+	     }
+	  }
+
           TextArea {
             id: itemMessageTextArea
+	    visible: model.display != ""
             // can't select text in QML Label, so we use a read-only text editor.: https://bugreports.qt.io/browse/QTBUG-14077
             textFormat: Text.PlainText // https://doc.qt.io/qt-6/qml-qtquick-text.html#textFormat-prop
             readOnly: true
@@ -193,7 +211,7 @@ TreeView {
 	    font.pointSize: (ctx.chat_text_size ? ctx.chat_text_size : 11)
             //Layout.fillWidth: parent
             //property alias maxWidth: "chatTreeView"
-            width: parent.width - hellodog.width
+            width: parent.width - contact_name.width
             //implicitWidth: 100;
             //anchors.fill: parent
             //openExternalLinks: false

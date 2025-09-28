@@ -1,7 +1,8 @@
 from PySide6 import QtCore
 from PySide6.QtWidgets import QStyledItemDelegate, QLabel, QStyleOptionViewItem, QMainWindow
 from PySide6.QtCore import QFile, QSize, QModelIndex, QPersistentModelIndex, QModelRoleDataSpan, QModelRoleData, Slot, QObject, QByteArray
-from PySide6.QtGui import QPainter
+from PySide6.QtGui import QPainter, QImage
+from PySide6.QtQuick import QQuickImageProvider
 
 import persistent
 
@@ -176,3 +177,12 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         # https://doc.qt.io/qtforpython-6/PySide6/QtCore/Qt.html#PySide6.QtCore.Qt.ItemFlag
         return QtCore.Qt.NoItemFlags
 
+class ChatImageProvider(QQuickImageProvider):
+    def __init__(self):
+        super(ChatImageProvider, self).__init__(QQuickImageProvider.Image)
+    def requestImage(self, path: str, size: QtCore.QSize, requestedSize: QtCore.QSize) -> QImage:
+        # path is whatever we give to QML's Image:
+        # size/requestedSize are QtCore.QSize
+        img = QImage(123,400, QImage.Format_RGBA8888)
+        img.fill(QtCore.Qt.red)
+        return img
