@@ -74,6 +74,14 @@ TreeView {
 
      }
 
+     Keys.onPressed: function(event) {
+       switch(event.key) {
+       // scrolling the conversation log with pgup/pgdn:
+       case Qt.Key_PageUp: chatTreeView.contentY -= chatTreeView.height / 3 * 2; break
+       case Qt.Key_PageDown: chatTreeView.contentY += chatTreeView.height / 3 * 2; break
+       }
+     }
+
      onContentYChanged: {
         // save scroll position
         //print("onContentYChanged", contentY, bottomRow, topRow)
@@ -86,8 +94,6 @@ TreeView {
         // bottomRow: This property holds the bottom-most row that is currently visible inside the view.
         // rows: total amount of rows in model
      }
-
-     //signal scrollToBottom: { positionViewAtCell(Qt.point(columns - 1, rows - 1), TableView.AlignLeft | TableView.AlignBottom) }
 
      //onLayoutChanged: {
         //print("layout changed", contentY, contentHeight, vscrollbar.position)
@@ -138,11 +144,12 @@ TreeView {
         Connections {
           target: chatTreeView
           function onModelChanged() {
-            console.log("model changed", vscrollbar.position, ctx.conversation_scroll, ctx.first_unread, rows)
+            //console.log("model changed", vscrollbar.position, ctx.conversation_scroll, ctx.first_unread, rows)
 	    // if there's a new message and bottomRow would still be in view, we scroll to the bottom:
             if (rows && bottomRow + (bottomRow - topRow)-1 > rows-1) {
+	      chatTreeView.contentY = chatTreeView.contentHeight
 	      // for some absurd reason scrolling past bottomRow+1 in one go positions the view at the beginning, so we do increments:
-	      while (bottomRow < rows - 1) { positionViewAtCell(Qt.point(0, bottomRow+1), TableView.AlignLeft | TableView.AlignBottom) }
+	      //while (bottomRow < rows - 1) { positionViewAtCell(Qt.point(0, bottomRow+1), TableView.AlignLeft | TableView.AlignBottom) }
 	    }
           }
         }
@@ -174,6 +181,7 @@ TreeView {
             text: model.author + (ctx.first_unread <= row ? " (*)" : "") + (
               model.network_status == 1 ? " ⏩ ❓  🖂  ⛶ ⮍ 🕊 ✈ " : ""
 	    )
+	    font.pointSize: (ctx.contact_name_text_size ? ctx.contact_name_text_size : 20)
 	    color: (model.network_status > 0 ? "red" : "black")
           }
           TextArea {
@@ -182,6 +190,7 @@ TreeView {
             textFormat: Text.PlainText // https://doc.qt.io/qt-6/qml-qtquick-text.html#textFormat-prop
             readOnly: true
             wrapMode: Text.Wrap
+	    font.pointSize: (ctx.chat_text_size ? ctx.chat_text_size : 11)
             //Layout.fillWidth: parent
             //property alias maxWidth: "chatTreeView"
             width: parent.width - hellodog.width

@@ -213,6 +213,8 @@ class ConversationUIState(BaseModel):
             "chatTreeViewModel": self.conversation_log_model,
             "conversation_scroll": self.chat_lines_scroll_idx,
             "first_unread": self.first_unread,
+            "chat_text_size": 11, # governs text size of chat messages
+            "contact_name_text_size": 11, # governs text size of contact names
         })
         return props
 
