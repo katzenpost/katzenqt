@@ -169,7 +169,7 @@ TreeView {
 
           // NB: without this, it looks like shit if you scroll up:
           implicitHeight: Math.max(itemMessageTextArea.implicitHeight,
-	                    Math.max(contact_name.implicitHeight, entry_picture.height
+	                    Math.max(contact_name.implicitHeight, (entry_picture.visible ? entry_picture.height : 0)
 			    )) // tallest element
 
           background: Rectangle {
@@ -190,6 +190,7 @@ TreeView {
 
 	  RowLayout {
 	       spacing: 1
+	       id : entry_picture_row
 	       visible: model.picture_path ? model.picture_path : false
 	       Image {
                  id: entry_picture

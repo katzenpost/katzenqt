@@ -550,8 +550,6 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def conversation_selected(self, selected:QTreeWidgetItem, old:QTreeWidgetItem|None):
-        self.foo = getattr(self, "foo", 0)
-        self.foo += 1
         # https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QTreeWidget.html
         # scrollToItem ; setCurrentItem
         if not selected:
@@ -690,7 +688,7 @@ class MainWindow(QMainWindow):
             active=False, # we are not reading from ourself
             conversation=convo)
         convo.own_peer = own_peer
-        # TODO this is mainly for debugging:
+        # TODO this is mainly for debugging, but our view requires at least one message or we can't send new msgs:
         first_post = persistent.ConversationLog(
             conversation=convo,
             conversation_peer=own_peer,
@@ -709,8 +707,7 @@ class MainWindow(QMainWindow):
             await sess.refresh(convo)
             await sess.refresh(rcapwal)
             await sess.refresh(wcapwal)
-            await add_conversation(self, convo)
-        # TODO: if this is the first conversation, we should force Qt focus onto the conversation.
+        await add_conversation(self, convo)
 
     @async_cb
     async def invite_contact(self):
@@ -953,21 +950,23 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         )).first()
         convo_state.conversation_log_model.row_count = msg_count
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
-    # qtwi: select all contactpeers under here
-    window.all_contacts.appendRow(qtwi)
-    for peer in convo.peers:
-        if peer.id != convo.own_peer_id:
-            print("TODO: start fetching ReadCaps for ", peer.name, peer.read_cap_id)
-        else:
-            print("Not fetching ReadCap for own", peer.name, peer.read_cap_id)
 
-    #window.ui.contacts_treeWidget.model().invalidate()
-    #window.ui.contacts_treeWidget.model()
-    #contacts.addTopLevelItem(qtwi)
-    #contacts.expandItem(qtwi)
+    # Append the new conversation to the "real" model window.all_contacts,
+    # then figure out where that sits in the FilterProxyModel used for sorting contacts,
+    # and make the new convo selected:
+    window.all_contacts.appendRow(qtwi)
+    real_index = window.all_contacts.index(window.all_contacts.rowCount()-1, 0)
+    pwmi = window.ui.contacts_treeWidget.model().mapFromSource(real_index)
+    if pwmi.isValid():
+        # Select the new conversation, if the filter would display it.
+        # We could maybe clear the existing filter in case it doesn't.
+        window.ui.contacts_treeWidget.setCurrentIndex(pwmi)
+
     # ULTRA TODO THIS IS FOR DEBUGGING ONLY
     #qts = QAbstractItemModelTester(clm)
     #print(qts)
+    for _ in range(3): # yield a bunch to make Qt not complain ...
+        await asyncio.sleep(0.001)
 
 def rebuild_pydantic_models():
     """Updated pydantic models with the classes defined in this file"""
