@@ -186,7 +186,7 @@ QTreeView::branch:open:has-children:!has-siblings {
           <property name="styleSheet">
            <string notr="true">QTreeView::item:selected {
       background-color: #2ABf9E;
-       qlineargradient(spread:reflect, x1:0.5, y1:0.5, x2:0.5, y2:1, stop:0.497436 rgba(42, 191, 158, 234), stop:0.882051 rgba(255, 255, 255, 208));
+       /* qlineargradient(spread:reflect, x1:0.5, y1:0.5, x2:0.5, y2:1, stop:0.497436 rgba(42, 191, 158, 234), stop:0.882051 rgba(255, 255, 255, 208));*/
 }
 QTreeView::item {
     height: 1.6em;
@@ -208,6 +208,12 @@ QTreeView::item {
           <property name="editTriggers">
            <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
           </property>
+          <property name="showDropIndicator" stdset="0">
+           <bool>false</bool>
+          </property>
+          <property name="alternatingRowColors">
+           <bool>true</bool>
+          </property>
           <property name="textElideMode">
            <enum>Qt::TextElideMode::ElideRight</enum>
           </property>
@@ -224,6 +230,9 @@ QTreeView::item {
            <bool>true</bool>
           </property>
           <property name="sortingEnabled">
+           <bool>true</bool>
+          </property>
+          <property name="wordWrap">
            <bool>true</bool>
           </property>
           <property name="headerHidden">
@@ -726,7 +735,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
      <x>0</x>
      <y>0</y>
      <width>1223</width>
-     <height>21</height>
+     <height>19</height>
     </rect>
    </property>
   </widget>
