@@ -56,7 +56,7 @@ async def start_background_threads(connection: ThinClient):
     f4 = ensure_future(send_resendable_plaintexts(connection))
 
     # Loop over things we can read and start reading them:
-    f5 = ensure_future(readables_to_mixwal(connection))
+    f5 = create_task(readables_to_mixwal(connection))
     try:
         await asyncio.gather(f1, f3, f4, f5)
     except Exception as xx:
@@ -77,6 +77,8 @@ async def drain_mixwal(connection: ThinClient):
     except Exception as e:
         print("drain_mixwal:", e)
 
+import secrets
+
 async def drain_mixwal2(connection: ThinClient):
     """Read from MixWAL and put the messages on the network."""
     """"Send messages to mixnet from MixWAL.
@@ -92,16 +94,19 @@ async def drain_mixwal2(connection: ThinClient):
         - bump MessageBoxIndex
     """
     async def tx_single(sess, mw:persistent.MixWAL):
-        print("TX_SINGLE"*100, mw.is_read)
+        mw_current_idx = struct.unpack('<Q', mw.current_message_index[:8])[0]
+        print(f"TX_SINGLE is_read={mw.is_read} idx:{mw_current_idx} ")
         from sqlmodel import select  # TODO mess
         if mw.is_read:
             # TODO instead of n queries for this we ought to just get them in the join
             rcw = (await sess.exec(select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==mw.bacap_stream))).one()
+            random_reply_index = secrets.choice([0,1])
+            print(f"bacap idx {mw_current_idx} mw random reply index: {random_reply_index}")
             chan_id = await connection.resume_read_channel_query(
                 read_cap=rcw.read_cap, next_message_index=mw.current_message_index,
                 envelope_descriptor=mw.envelope_descriptor,
                 envelope_hash=mw.envelope_hash,
-                reply_index=0,
+                reply_index=random_reply_index,
             )
         else:
             wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
@@ -186,11 +191,9 @@ async def drain_mixwal2(connection: ThinClient):
                 got_ack_in_other_thread = create_task(acked_event.wait())
                 done, not_done = await asyncio.wait((
                     got_reply, got_ack_in_other_thread,
-                ), timeout=15, return_when=asyncio.FIRST_COMPLETED)
+                ), timeout=25, return_when=asyncio.FIRST_COMPLETED)
                 for not_done_job in not_done:
-                    print('cancelling got_reply')
                     not_done_job.cancel()
-                    print('cancelleDD got_reply.')
                 if got_ack_in_other_thread in done:
                     print("got ack in other thread")
                     return
@@ -217,15 +220,42 @@ async def drain_mixwal2(connection: ThinClient):
         print("got reply now looking up bacap_stream, expect to see RECEIVED REPLY")
         create_task(connection.close_channel(chan_id))
         rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-        print("RECEIVED REPLY FOR MESSAGE" * 100, reply)
-        print("bumping read cap next_index from", struct.unpack('<3Q', rcw.next_index[:8] + mw.current_message_index[:8] + mw.next_message_index[:8]  ))
+        print("RECEIVED REPLY FOR MESSAGE" * 12, reply)
+        mw_current_index = struct.unpack('<Q', mw.current_message_index[:8])[0]
+        print("bumping read cap next_index from", mw_current_index, struct.unpack('<2Q', rcw.next_index[:8] + mw.next_message_index[:8]  ))
         rcw.next_index = mw.next_message_index
         print('updating rcw')
         sess.add(rcw)  # update ReadCapWAL.next_index in DB to mw.next_message_index
-        print('deleting mw')
-        await sess.delete(mw)  # delete MixWAL read command so we can read something else
-        print('getting cp')
+        if reply['payload'].startswith(b"I"):
+            print("received indirection", reply)
+            import pdb;pdb.set_trace()
+            pass
+        elif reply['payload'].startswith(b"F"):
+            # it's a discrete message
+            print("received Final message", reply)
+            pass
+        elif reply["payload"].startswith(b"C"):
+            print("received C message", reply)
+            pass
+        else:
+            print("received message with invalid prefix, going to stop reading this peer", reply)
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
+            cp.active = False
+            sess.add(cp)
+            await sess.delete(mw)
+            await sess.commit()
+            return
         cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
+        # Here we should write to the ReceivedPiece table:
+        # 
+        sess.add(persistent.ReceivedPiece(
+           read_cap=mw.bacap_stream,
+           bacap_index=mw.current_message_index[:8],
+           chunk_type=reply['payload'][:1],
+           chunk=reply['payload'][1:]
+        ))
+        # If chunk_type==b"F" that means we have something to reassemble that should be put in a ConversationLog.
+        # If chunk_type==b"I" we need to start reading that indirect thing.
         # we need to persist to ConversationLog before we commit the next rcw.next_message_index
         print('creating conversationlog')
         import sqlalchemy
@@ -242,14 +272,17 @@ async def drain_mixwal2(connection: ThinClient):
         except Exception as e:
             print("FAILED", e)
             raise e
-        print("committing conversationlog update")
+        await sess.delete(mw)  # delete MixWAL read command so we can read something else
+        print("committing conversationlog update", mw_current_index)
         c_id = cp.conversation.id
+        bacap_uuid = mw.bacap_stream
         await sess.commit()
         print('putting on conversation_update_queue')
         create_task(conversation_update_queue.put((c_id,False)))
         print("SIGNALING WE CAN READ MORE readables_to_mixwal_event.set()")
-        __resend_queue.remove(mw.bacap_stream)
+        __resend_queue.discard(bacap_uuid)  # this should be .remove(), but why is it empty?
         readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
+        print("made it to the end")
 
     draining_right_now : "Set[uuid.UUID]" = set()
     async def with_own_sess(mw):
@@ -276,7 +309,7 @@ async def provision_read_caps(connection: ThinClient):
     import sqlalchemy as sa
     wait = 0
     while True:
-        await asyncio.sleep(wait)
+        await asyncio.sleep(wait)  # could make this smoother with an asyncio.Event(), but 5s is fine for now.
         wait = 5
         async with persistent.asession() as sess:
             for (rcw, wcw) in await sess.exec(sa.select(persistent.ReadCapWAL,persistent.WriteCapWAL).where(persistent.ReadCapWAL.read_cap == None).where(persistent.ReadCapWAL.write_cap_id==persistent.WriteCapWAL.id)): #  &
@@ -322,6 +355,7 @@ async def readables_to_mixwal(connection):
             rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
         except Exception as e:
             print("readables-to-mixwal", e)
+            import pdb;pdb.set_trace()
         print("process_box got this from read_channel:", rcreply)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
@@ -338,11 +372,13 @@ async def readables_to_mixwal(connection):
         )
         return mw
     while True:
-        print("SLEEPING FOR READABLES_TO_MIXWAL"*40)
+        print("SLEEPING FOR READABLES_TO_MIXWAL"*2)
         a, b = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=60)
-        print("wtf"*60, a, b)
+        if not len(a):
+            print('readables_to_mixwal_event.wait() timed out, nothing new to read?')
+            continue
         readables_to_mixwal_event.clear()
-        print("IN READABLES_TO_MIXWAL_LOOP", a,b)
+        print("IN READABLES_TO_MIXWAL_LOOP")
         async with persistent.asession() as sess:
             # TODO are these guaranteed to be distinct?
             readable_peers = (await sess.exec(select(
@@ -414,8 +450,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
             if pwal.bacap_stream not in __resend_queue:
                 __resend_queue.add(pwal.bacap_stream)
                 t = create_task(start_resending(connection, pwal))
-                on_error(t, lambda: resend_queue.discard(pwal.bacap_stream))
-
+                on_error(t, lambda: __resend_queue.discard(pwal.bacap_stream))  # when cancelled/exception
 
 async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     """
@@ -498,7 +533,7 @@ def on_message_reply(reply):
     if async_queue := __on_message_queues.get(reply['message_id'], None):
         print("got reply for something we have a queue for", reply['message_id'].hex(), reply['payload'])
         async_queue.put_nowait(reply)
-        print("its now on queue")
+        print("its now on queue", reply['message_id'].hex())
     else:
         print("on_message_reply"*100, reply)
     return
@@ -520,7 +555,7 @@ def on_message_sent(reply):
     {'message_id': b'\xe1\xb85\xe8u]\xf8\x85\xa9\xa7\xac\xf7\xcc\xe6\xdfQ',
     'surbid': b'\xf3\xa1\xfdni\r2\xe9\xbalH\xcfK\x89\x8e\xee',
     'sent_at': 1751741438,
-    'reply_eta': 0,
+    'reply_eta': 0,  # TODO we should make the resend try to match the reply_eta
     'err': 'client/conn: PKI error: client2: failed to find destination service node: pki: service not found'}
     """
     if err := reply.get('err', None):
@@ -581,3 +616,30 @@ async def encrypt_message(msg: str, bacap_write_cap:bytes, bacap_write_index:int
         encrypted=b"encrypted:{payload}:{bacap_write_cap}:{bacap_write_index}",
         next_write_index=b"1234"
     )
+
+def create_new_keypair(seed: bytes):
+    """Makes a new WriteCap/ReadCap pair from a 32byte seed"""
+    assert len(seed) >= 32
+    assert isinstance(seed, bytes)
+    from nacl.hash import blake2b
+    def gen_bytes(purpose:bytes, length:int) -> bytes:
+        return blake2b(
+            data=b'KP:'+purpose,
+            key=seed, # IKM
+            salt=b'',
+            person=b'', digest_size=length, encoder=nacl.encoding.RawEncoder
+        )
+    start_idx_raw:bytes = gen_bytes(b'start_idx', 16)
+    idx1, idx2 = struct.unpack('<2Q', start_idx_raw)
+    start_idx = struct.pack('<Q', (idx1 + idx2) & 0x7fffffffffffffff)
+    from nacl.signing import SigningKey
+    priv_obj = SigningKey(gen_bytes(b'signing_key', 32))
+    first_message_index = start_idx + gen_bytes(b'blinding_factor', 32) + gen_bytes(b'encryption_key', 32) + gen_bytes(b'HKDF_state',32)
+    assert len(first_message_index) == 104 # 8 + 32 + 32 + 32
+    write_cap = priv_obj.encode() + first_message_index
+    read_cap = priv_obj.verify_key.encode() + first_message_index
+    assert write_cap[32:] == read_cap[32:]
+    assert write_cap[:32] != read_cap[:32]
+    assert len(write_cap) == 32 + 104
+    assert len(read_cap)  == 32 + 104
+    return write_cap, read_cap

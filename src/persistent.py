@@ -264,15 +264,20 @@ class PlaintextWAL(SQLModel, table=True):
         # TODO - ie, shouldn't have __resend_queue be a python variable, but rather a database concept.
         return sa.select(all_elig).filter(all_elig.c.rownum == 1)
 
-#class ChatReassembly(SQLModel):
-#    """Pieces for reassembling a SendOperation into ConversationLog entries.
-#    SendOperation.serialize() emits PlaintextWAL entries that get put in Pigeonhole boxes.
-#    When we receive Pigeonhole boxes they are kept as ChatReassembly pieces until the original
-#    GroupChatMessage can be reconstructed.
-#    """
-#    bacap_index: int # the 8-byte current_message_index for the Pigeonhole box.
-#    chunk_type: bool # Whether the piece is a b'F'inal or b'C'ontinued or b'I'ndirection piece.
-#    chunk: bytes
+class ReceivedPiece(SQLModel, table=True):
+    """Pieces for reassembling a SendOperation into ConversationLog entries.
+    SendOperation.serialize() emits PlaintextWAL entries that get put in Pigeonhole boxes.
+    When we receive Pigeonhole boxes they are kept as ChatReassembly pieces until the original
+    GroupChatMessage can be reconstructed.
+    """
+    # Composite PK:
+    read_cap : uuid.UUID = Field(primary_key=True, foreign_key="readcapwal.id", index=True, description="RCW this RP came from.")
+    bacap_index : bytes = Field(primary_key=True,min_length=8,max_length = 8) # the 8-byte current_message_index for the Pigeonhole box. SQLite doesn't support 64bit unsigned ints, so we can't use a numeric type here.
+    
+    chunk_type: bytes = Field(min_length=1,max_length=1) # Whether the piece is a b'F'inal or b'C'ontinued or b'I'ndirection piece.
+    chunk: bytes = Field(description="Received payload, excluding the chunk_type")
+    # When we have unlocked a chunk_type=b"F" we need to look for the parent stream so we know where to insert it.
+    # We should also mark sess.get(ReadCapWAL, rp.read_cap).active=False unless it's referred to by a ConversationPeer directly.
 
 class ConversationPeerLink(SQLModel, table=True):
     conversation_peer_id: int | None = Field(default=None, foreign_key="conversationpeer.id", primary_key=True)

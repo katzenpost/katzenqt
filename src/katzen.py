@@ -44,8 +44,11 @@ if TYPE_CHECKING:
 class AsyncioThread(threading.Thread):
     def run(self):
         self.loop = asyncio.new_event_loop()
-        def report_exception3(*args, **kwargs):
-            print("report_exception3", args, kwargs)
+        def report_exception3(loop, exception):
+            if 'exception' in exception:
+                if isinstance(exception['exception'], asyncio.CancelledError):
+                    return
+            print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
@@ -237,6 +240,17 @@ class MainWindow(QMainWindow):
         import pdb;pdb.set_trace()
         pass
 
+    def testme(self):
+        print("testing")
+        import secrets
+        x = secrets.token_bytes(32)
+        import base64
+        #print(base64.z85encode(x))
+        print(base64.b64encode(x))
+        a,b = network.create_new_keypair(x)
+        print(a)
+        print(b)
+
     def push_to_talk_pressed(self):
         """The shortcut has autoRepeat=True, so we will keep getting these at regular intervals.
         Instead of relying on receiving a keyReleased event, we do a "dead man's switch" thing
@@ -303,6 +317,7 @@ class MainWindow(QMainWindow):
 
         # item delegates define custom looks for view items
 
+        self.ui.action_testme.triggered.connect(self.testme)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
         self.ui.action_accept_invitation.triggered.connect(self.accept_invitation)
