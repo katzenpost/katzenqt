@@ -679,7 +679,7 @@ async def test_keypair(connection, write_cap, read_cap):
     read_msg_id = secrets.token_bytes(16)
     courier = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     print("courier:",courier)
-    does_destination_exist(connection)
+    courier_destination_exists(connection, courier)
     write_chan = await connection.resume_write_channel(write_cap=write_cap, message_box_index=write_cap[-104:])
     wcr : WriteChannelReply = await connection.write_channel(write_chan, payload=b'hello')
     await connection.send_channel_query(channel_id=write_chan, payload=wcr.send_message_payload, dest_node=courier, dest_queue=b'courier',message_id=write_msg_id)

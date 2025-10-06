@@ -12,10 +12,10 @@ dynamic = ["version"]
 
 dependencies = [
 "pynacl==1.6.0",
-"pyside6~=6.9",
+"pyside6~=6.9.3",
 # sqlalchemy
 "sqlmodel>=0",
-"alembic~=1.16.2",
+"alembic~=1.16.5",
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
 "cbor2~=5.6.5", # kp_thinclient pins old minor version
