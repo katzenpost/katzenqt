@@ -1,7 +1,8 @@
 import secrets
 import katzenpost_thinclient
-from katzenpost_thinclient import ThinClient
+from katzenpost_thinclient import ThinClient, ThinClientOfflineError
 from katzenpost_thinclient import Config as ThinClientConfig
+import hashlib
 import cbor2
 import struct
 import nacl.public
@@ -57,25 +58,30 @@ async def start_background_threads(connection: ThinClient):
 
     # Loop over things we can read and start reading them:
     f5 = create_task(readables_to_mixwal(connection))
-    try:
-        await asyncio.gather(f1, f3, f4, f5)
-    except Exception as xx:
-        print("f1-f4-f5 exception",xx)
-        raise
     async def do_shutdown():
         """TODO this needs some work"""
         await __should_quit.wait()
+        print("shutting down")
         f1.cancel()
         f3.cancel()
         f4.cancel()
         f5.cancel()
     shutdown_task = create_task(do_shutdown())
+    try:
+        for task in asyncio.as_completed([f1, f3, f4, f5, shutdown_task]):
+            await task
+            print("start_background_threads completed: ",task)
+    except Exception as xx:
+        print("f1-f4-f5 exception",xx)
+        raise
 
 async def drain_mixwal(connection: ThinClient):
     try:
         await drain_mixwal2(connection) # todo why the fuck does this not catch ?
     except Exception as e:
-        print("drain_mixwal:", e)
+        print("drain_mixwal: exception", e)
+        import traceback
+        traceback.print_exc()
 
 import secrets
 
@@ -93,7 +99,8 @@ async def drain_mixwal2(connection: ThinClient):
         - delete from MixWAL
         - bump MessageBoxIndex
     """
-    async def tx_single(sess, mw:persistent.MixWAL):
+    async def tx_single(sess, mw:persistent.MixWAL) -> bool:
+        """Return True if we have removed the MixWAL entry."""
         mw_current_idx = struct.unpack('<Q', mw.current_message_index[:8])[0]
         print(f"TX_SINGLE is_read={mw.is_read} idx:{mw_current_idx} ")
         from sqlmodel import select  # TODO mess
@@ -140,11 +147,12 @@ async def drain_mixwal2(connection: ThinClient):
                 """
                 print("got write ack; kicking off the next send", reply)
                 acked_event.set() # stop resending this mixwal entry
-                conv_id = await persistent.SentLog.mark_sent(mw, __resend_queue)
+                conv_id = await asyncio.shield(persistent.SentLog.mark_sent(mw, __resend_queue))
                 resendable_event.set()  # signal send_resendable_plaintexts
                 if conv_id:
                     # update the UX:
                     create_task(conversation_update_queue.put((conv_id,True)))
+                create_task(connection.close_channel(chan_id))
             async def got_read_ack():
                 """this is a read reply, if it's not empty then we can advance state"""
                 reply = await connection.ack_queues[message_id].get()
@@ -159,18 +167,14 @@ async def drain_mixwal2(connection: ThinClient):
                 import pdb;pdb.set_trace()
                 return
             if mw.is_read:
-                create_task(got_read_ack())
+                return create_task(got_read_ack())
             if not mw.is_read:
-                create_task(got_write_ack())
+                return create_task(got_write_ack())
         print("entering while not reply: loop")
         acked_event = asyncio.Event()  # once *one* of our resends are satisfied we can cancel the rest
         while not reply:
-            try:
-                wait_for_ack(message_id, mw, acked_event) # only need one of these TODO, and when we get one we should cancel
-            except Exception as e:
-                print(e)
-                await asyncio.sleep(10)
-                continue
+            # set up listeners before we send:
+            listener = wait_for_ack(message_id, mw, acked_event)
             print(f"is_read:{mw.is_read} chan:{chan_id}")
             # should maybe open a new channel for each of these
             try:
@@ -190,13 +194,15 @@ async def drain_mixwal2(connection: ThinClient):
                 got_reply = create_task( __on_message_queues[message_id].get() )
                 got_ack_in_other_thread = create_task(acked_event.wait())
                 done, not_done = await asyncio.wait((
-                    got_reply, got_ack_in_other_thread,
+                    got_reply, got_ack_in_other_thread, listener,
                 ), timeout=25, return_when=asyncio.FIRST_COMPLETED)
                 for not_done_job in not_done:
                     not_done_job.cancel()
+                if listener in done:
+                    print("LISTENER IN DONE!")
                 if got_ack_in_other_thread in done:
                     print("got ack in other thread")
-                    return
+                    return False
                 if got_reply in done:
                     print("GOT_REPLY", got_reply)
                     reply = got_reply.result()
@@ -244,7 +250,7 @@ async def drain_mixwal2(connection: ThinClient):
             sess.add(cp)
             await sess.delete(mw)
             await sess.commit()
-            return
+            return True
         cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
         # Here we should write to the ReceivedPiece table:
         # 
@@ -270,7 +276,7 @@ async def drain_mixwal2(connection: ThinClient):
                 payload=reply['payload'], # TODO 
             ))
         except Exception as e:
-            print("FAILED", e)
+            print("adding ConversationLog FAILED", e)
             raise e
         await sess.delete(mw)  # delete MixWAL read command so we can read something else
         print("committing conversationlog update", mw_current_index)
@@ -283,21 +289,26 @@ async def drain_mixwal2(connection: ThinClient):
         __resend_queue.discard(bacap_uuid)  # this should be .remove(), but why is it empty?
         readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
         print("made it to the end")
+        return True
 
     draining_right_now : "Set[uuid.UUID]" = set()
     async def with_own_sess(mw):
         async with persistent.asession() as sess:
-            await tx_single(sess, mw)
-        draining_right_now.remove(mw.bacap_stream)
+            done_with_this = await tx_single(sess, mw)
+        if done_with_this:
+            draining_right_now.remove(mw.bacap_stream)
+        # __resend_queue.remove(mw.bacap_stream)
         __mixwal_updated.set()  # if we were blocking something then it can be sent now
     while True:
         _, _ = await asyncio.wait((create_task(__mixwal_updated.wait()),), timeout=60)
         __mixwal_updated.clear()
-        print("DRAIN_MIXWAL", draining_right_now)
+        print(f"DRAIN_MIXWAL draining_right_now:{draining_right_now} __resend_queue:{__resend_queue}")
         # TODO drain new from mixwal, this should NOT be a long-running session like it currently is
         async with persistent.asession() as sess:
             new_mixwals = (await sess.exec(persistent.MixWAL.get_new(draining_right_now))).all()
         for mw in new_mixwals:
+            if not courier_destination_exists(connection, mw.destination):
+                print("mw courier is currently not in PKI")
             print("drain_mixwal: NEW MIXWAL:", struct.unpack("<1Q", mw.current_message_index[:8]), mw.is_read, mw.bacap_stream)
             draining_right_now.add(mw.bacap_stream) # this is the uuid PK
             # __resend_queue.add(mw.bacap_stream)
@@ -352,7 +363,9 @@ async def readables_to_mixwal(connection):
         print("process box cpeer-rcw:", cpeer, struct.unpack('<Q', rcw.next_index[:8]))
         try:
             chan_id = await connection.resume_read_channel(read_cap=rcw.read_cap,next_message_index=rcw.next_index)
+            print(f"cpeer got chan_id:{chan_id}, waiting for read_channel")
             rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
+            print(f"cpeer got read_channel reply")
         except Exception as e:
             print("readables-to-mixwal", e)
             import pdb;pdb.set_trace()
@@ -618,10 +631,11 @@ async def encrypt_message(msg: str, bacap_write_cap:bytes, bacap_write_index:int
     )
 
 def create_new_keypair(seed: bytes):
-    """Makes a new WriteCap/ReadCap pair from a 32byte seed"""
-    assert len(seed) >= 32
+    """Makes a new WriteCap/ReadCap pair from a 32byte seed, using blake2b as KDF"""
+    assert len(seed) == 32
     assert isinstance(seed, bytes)
     from nacl.hash import blake2b
+    from nacl.signing import SigningKey
     def gen_bytes(purpose:bytes, length:int) -> bytes:
         return blake2b(
             data=b'KP:'+purpose,
@@ -632,14 +646,47 @@ def create_new_keypair(seed: bytes):
     start_idx_raw:bytes = gen_bytes(b'start_idx', 16)
     idx1, idx2 = struct.unpack('<2Q', start_idx_raw)
     start_idx = struct.pack('<Q', (idx1 + idx2) & 0x7fffffffffffffff)
-    from nacl.signing import SigningKey
     priv_obj = SigningKey(gen_bytes(b'signing_key', 32))
     first_message_index = start_idx + gen_bytes(b'blinding_factor', 32) + gen_bytes(b'encryption_key', 32) + gen_bytes(b'HKDF_state',32)
     assert len(first_message_index) == 104 # 8 + 32 + 32 + 32
-    write_cap = priv_obj.encode() + first_message_index
     read_cap = priv_obj.verify_key.encode() + first_message_index
-    assert write_cap[32:] == read_cap[32:]
+    write_cap = priv_obj.encode() + read_cap
+    assert write_cap[32:] == read_cap[:]
     assert write_cap[:32] != read_cap[:32]
-    assert len(write_cap) == 32 + 104
+    assert len(write_cap) == 32 + 32 + 104
     assert len(read_cap)  == 32 + 104
     return write_cap, read_cap
+
+def courier_destination_exists(connection, destination) -> bool:
+    """Check that an old destination (hash of the IdentityKey) exists in this PKI, and that the node is a Courier.
+    We should not be resending MixWAL entries whose courier has gone away.
+    """
+    pki = connection.pki_document()
+    import cbor2
+    for sn in pki['ServiceNodes']:
+        snd = cbor2.loads(sn)
+        if 'courier' not in snd['Kaetzchen']:
+            continue
+        snd_dest = hashlib.blake2b(snd['IdentityKey'], digest_size=32).digest()
+        if snd_dest == destination:
+            return True
+    return False
+
+async def test_keypair(connection, write_cap, read_cap):
+    """Test that create_new_keypair() results in usable+matching write/read caps."""
+    import secrets
+    write_msg_id = secrets.token_bytes(16)
+    read_msg_id = secrets.token_bytes(16)
+    courier = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
+    print("courier:",courier)
+    does_destination_exist(connection)
+    write_chan = await connection.resume_write_channel(write_cap=write_cap, message_box_index=write_cap[-104:])
+    wcr : WriteChannelReply = await connection.write_channel(write_chan, payload=b'hello')
+    await connection.send_channel_query(channel_id=write_chan, payload=wcr.send_message_payload, dest_node=courier, dest_queue=b'courier',message_id=write_msg_id)
+    create_task(connection.close_channel(write_chan))
+    await asyncio.sleep(20)
+    read_chan = await connection.resume_read_channel(read_cap=read_cap, next_message_index=read_cap[-104:])
+    rcr : ReadChannelReply = await connection.read_channel(read_chan, message_box_index=read_cap[-104:])
+    for i in range(3):
+        await connection.send_channel_query(channel_id=read_chan, payload=rcr.send_message_payload, dest_node=courier, dest_queue=b'courier',message_id=read_msg_id)
+        await asyncio.sleep(5)
