@@ -19,23 +19,22 @@ class FilterProxyModel(QtCore.QSortFilterProxyModel):
         super(FilterProxyModel, self).__index__(self)
     def __init__(self, window: "QMainWindow"):
         self.window = window
-        super().__init__()
-    def filterAcceptsRow(self, p_int, qmi:QModelIndex | QPersistentModelIndex):
-        if qmi.isValid():
-            return False
-        res = super(FilterProxyModel, self).filterAcceptsRow(p_int, qmi )
-        idx = self.sourceModel().index(p_int,0, qmi)
+        super().__init__(recursiveFilteringEnabled=False)
 
-        if self.sourceModel().hasChildren(idx):
-            num_items = self.sourceModel().rowCount(idx)
-            for i in range(num_items):
-                res = res or self.filterAcceptsRow(i, idx)
-        if idx.data():
-            if self.window.ui.contactFilterLineEdit.text() in idx.data():
-                return True
-            else:
-                return False
-        return res
+    def invalidate(self):
+        super().invalidate()
+        self.window.ui.contacts_treeWidget.expandAll()  # ensure we expand all expandable after filtering.
+
+    def filterAcceptsRow(self, source_row, qmi:QModelIndex | QPersistentModelIndex):
+        model = self.sourceModel()
+        source_idx = model.index(source_row, 0, qmi)
+        filterstr = self.window.ui.contactFilterLineEdit.text().lower()
+        if filterstr in source_idx.data():
+            return True
+        parent = source_idx.parent()
+        if parent.isValid():
+            return filterstr in parent.data()
+        return any((self.filterAcceptsRow(child_row, source_idx) for child_row in range(model.rowCount(source_idx))))
 
 ROLE_CHAT_AUTHOR = 0x100  # see ConversationLogModel.roleNames()
 ROLE_CHAT_NETWORK_STATUS = 0x101  # ConversationLog.network_status
