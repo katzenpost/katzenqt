@@ -316,7 +316,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
               <property name="autoFillBackground">
                <bool>true</bool>
               </property>
-              <layout class="QVBoxLayout" name="_2" stretch="0,8,1">
+              <layout class="QVBoxLayout" name="_2" stretch="0,1">
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayout" stretch="1,1">
                  <property name="sizeConstraint">
@@ -343,28 +343,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   </widget>
                  </item>
                 </layout>
-               </item>
-               <item>
-                <widget class="QQuickWidget" name="qml_ChatLines">
-                 <property name="sizePolicy">
-                  <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-                   <horstretch>0</horstretch>
-                   <verstretch>0</verstretch>
-                  </sizepolicy>
-                 </property>
-                 <property name="acceptDrops">
-                  <bool>false</bool>
-                 </property>
-                 <property name="statusTip">
-                  <string>chat history lines QML</string>
-                 </property>
-                 <property name="autoFillBackground">
-                  <bool>true</bool>
-                 </property>
-                 <property name="resizeMode">
-                  <enum>QQuickWidget::ResizeMode::SizeRootObjectToView</enum>
-                 </property>
-                </widget>
                </item>
                <item>
                 <widget class="QTabWidget" name="singlemultitab">
@@ -425,6 +403,28 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                      </property>
                      <property name="placeholderText">
                       <string>single line message</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
+                    <widget class="QQuickWidget" name="qml_ChatLines">
+                     <property name="sizePolicy">
+                      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+                       <horstretch>0</horstretch>
+                       <verstretch>0</verstretch>
+                      </sizepolicy>
+                     </property>
+                     <property name="acceptDrops">
+                      <bool>false</bool>
+                     </property>
+                     <property name="statusTip">
+                      <string>chat history lines QML</string>
+                     </property>
+                     <property name="autoFillBackground">
+                      <bool>true</bool>
+                     </property>
+                     <property name="resizeMode">
+                      <enum>QQuickWidget::ResizeMode::SizeRootObjectToView</enum>
                      </property>
                     </widget>
                    </item>
