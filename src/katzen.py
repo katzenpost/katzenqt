@@ -240,16 +240,18 @@ class MainWindow(QMainWindow):
         import pdb;pdb.set_trace()
         pass
 
-    def testme(self):
+    @async_cb
+    async def testme(self):
         print("testing")
         import secrets
         x = secrets.token_bytes(32)
         import base64
         #print(base64.z85encode(x))
         print(base64.b64encode(x))
-        a,b = network.create_new_keypair(x)
-        print(a)
-        print(b)
+        write_cap , read_cap = network.create_new_keypair(x)
+        print(write_cap)
+        print(read_cap)
+        await self.iothread.run_in_io(network.test_keypair(self.iothread.kp_client, write_cap, read_cap))
 
     def push_to_talk_pressed(self):
         """The shortcut has autoRepeat=True, so we will keep getting these at regular intervals.
@@ -447,6 +449,8 @@ class MainWindow(QMainWindow):
     def convo_state(self) -> ConversationUIState:
         # TODO there must be a more graceful way to do this:
         idx = self.ui.contacts_treeWidget.selectionModel().currentIndex()
+        if idx.parent().isValid():
+            idx = idx.parent()
         idx = self.ui.contacts_treeWidget.model().mapToSource(idx)
         q = self.all_contacts.item(idx.row(), idx.column())
         #q = self.ui.contacts_treeWidget.currentItem()
@@ -571,6 +575,9 @@ class MainWindow(QMainWindow):
             return
         #import pdb;pdb.set_trace()
         print("selected", selected)
+        if selected.parent().isValid():
+            # peer name selected under a conversation, we want to look up the data for the conversation:
+            selected = selected.parent()
         selected_qmi = selected.model().mapToSource(selected)
         selected_id = self.all_contacts.item(selected_qmi.row(), selected_qmi.column()).conversation_id
         selected = selected.data()  # type: ignore[call-arg]
@@ -976,7 +983,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         # Select the new conversation, if the filter would display it.
         # We could maybe clear the existing filter in case it doesn't.
         window.ui.contacts_treeWidget.setCurrentIndex(pwmi)
-
+        window.ui.contacts_treeWidget.expand(pwmi)
     # ULTRA TODO THIS IS FOR DEBUGGING ONLY
     #qts = QAbstractItemModelTester(clm)
     #print(qts)
