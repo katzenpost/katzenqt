@@ -1,6 +1,8 @@
 APP_ORGANIZATION = "Mixnetwork"
 APP_NAME = "KatzenQt"
 
+import logging
+import argparse
 import threading
 import PySide6.QtAsyncio as QtAsyncio
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
@@ -40,6 +42,8 @@ if TYPE_CHECKING:
     from typing import Dict, List
     import typing
 
+logger = logging.getLogger("katzen")
+logger.setLevel("INFO")
 
 class AsyncioThread(threading.Thread):
     def run(self):
@@ -242,15 +246,15 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def testme(self):
-        print("testing")
+        logger.info("testing")
         import secrets
         x = secrets.token_bytes(32)
         import base64
         #print(base64.z85encode(x))
         print(base64.b64encode(x))
         write_cap , read_cap = network.create_new_keypair(x)
-        print(write_cap)
-        print(read_cap)
+        logger.critical(write_cap)
+        logger.critical(read_cap)
         await self.iothread.run_in_io(network.test_keypair(self.iothread.kp_client, write_cap, read_cap))
 
     def push_to_talk_pressed(self):
@@ -844,7 +848,7 @@ class MainWindow(QMainWindow):
             )
             sess.add(cp)
             await sess.commit()
-        print("OK THEY ARE HERE")
+        logging.warning("Peer added. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(
             network.signal_readables_to_mixwal()
         )
@@ -857,6 +861,7 @@ class MainWindow(QMainWindow):
 
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):
+            logger.critical("QUITTING")
             self.app.quit()
     def closeEvent(self, event, **kwargs):
         if getattr(self, "systray", False):
@@ -908,12 +913,12 @@ class MixSystrayIcon(QSystemTrayIcon):
         # https://doc.qt.io/qt-6/qapplication.html#alert
 
     def has_new_messages(self) -> None:
-        print("has_new_messages")
+        logger.warning("has_new_messages")
         self.setIcon(self.mw.echomix_icon_new_message)
         self.mw.setWindowIcon(self.mw.echomix_icon_new_message)
 
     def has_read_messages(self) -> None:
-        print("has_read_messages")
+        logger.warning("has_read_messages")
         self.setIcon(self.mw.echomix_icon)
         self.mw.setWindowIcon(self.mw.echomix_icon)
 
@@ -1074,16 +1079,54 @@ def error_and_exit(app: QApplication, why: str, main_window: QMainWindow | None=
     app.quit()
     sys.exit(why)
 
+def get_all_loggers():
+    return set(logging.root.manager.loggerDict.keys())
+
+def add_log_args(parser: argparse.ArgumentParser):
+    for ln in get_all_loggers():
+        fmt = logging.Formatter("%(name)s - %(levelname)s")
+        lnlog = logging.getLogger(ln)
+        if lnlog.hasHandlers():
+            lnlog.handlers.clear()
+        ch = logging.StreamHandler()
+        fmt = logging.Formatter("%(asctime)s %(name)s: %(levelname)s: %(message)s")
+        ch.setFormatter(fmt)
+        lnlog.addHandler(ch)
+        print("log fmt set", ln)
+        lnlog.critical("test")
+    parser.add_argument(
+        '--level',
+        type=str, nargs=2,
+        metavar=("LOGGER", "LEVEL"),
+        help=f"Override log level for LOGGER. Available loggers: {', '.join(get_all_loggers())}",
+        action="append",
+    )
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    parser = argparse.ArgumentParser()
+    add_log_args(parser)
+    args = parser.parse_args()
     app.setStyle("Fusion")
 
+    logger.critical("going to init_and_migrate")
     try:
         persistent.init_and_migrate()  # this must be run outside the async loop
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
 
+    logging.getLogger('sqlalchemy.engine.Engine').disabled=True
+    if args.level:
+        for logger_name, level in args.level:
+            log_level = getattr(logging, level.upper(), None)
+            if log_level:
+                logging.getLogger(logger_name).disabled = False
+                logging.getLogger(logger_name).setLevel(log_level)
+                logging.getLogger(logger_name).critical(f"set to {level.upper()}({log_level})")
+            else:
+                logging.getLogger(logger_name).disabled = True
+
+    logger.critical("checking for instance")
     if is_there_already_an_instance_running():
         error_and_exit(app, f"{APP_NAME} is already running.")
 
@@ -1093,6 +1136,7 @@ if __name__ == "__main__":
     iothread = AsyncioThread()
     iothread.start()
 
+    logger.critical("asyncio started")
     window = MainWindow(app)
     window.iothread = iothread
 

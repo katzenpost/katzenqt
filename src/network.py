@@ -6,7 +6,7 @@ import hashlib
 import cbor2
 import struct
 import nacl.public
-
+import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
 import asyncio
 import traceback
@@ -14,6 +14,8 @@ from asyncio import ensure_future
 from katzen_util import create_task
 from pydantic.dataclasses import dataclass
 import persistent
+
+logger = logging.getLogger("katzen.network")
 
 conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
 
@@ -678,8 +680,7 @@ async def test_keypair(connection, write_cap, read_cap):
     write_msg_id = secrets.token_bytes(16)
     read_msg_id = secrets.token_bytes(16)
     courier = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
-    print("courier:",courier)
-    courier_destination_exists(connection, courier)
+    logger.debug("courier exists? %s %s", courier, courier_destination_exists(connection, courier))
     write_chan = await connection.resume_write_channel(write_cap=write_cap, message_box_index=write_cap[-104:])
     wcr : WriteChannelReply = await connection.write_channel(write_chan, payload=b'hello')
     await connection.send_channel_query(channel_id=write_chan, payload=wcr.send_message_payload, dest_node=courier, dest_queue=b'courier',message_id=write_msg_id)
