@@ -181,9 +181,9 @@ TreeView {
           Text {
             id: contact_name
             textFormat: Text.PlainText
-            text: model.author + (ctx.first_unread <= row ? " (*)" : "") + (
-              model.network_status == 1 ? " ⏩ ❓  🖂  ⛶ ⮍ 🕊 ✈ " : ""
-	    )
+            text: (
+              model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "    " : "")
+	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.pointSize: (ctx.contact_name_text_size ? ctx.contact_name_text_size : 20)
 	    color: (model.network_status > 0 ? "red" : "black")
           }
@@ -209,6 +209,7 @@ TreeView {
             textFormat: Text.PlainText // https://doc.qt.io/qt-6/qml-qtquick-text.html#textFormat-prop
             readOnly: true
             wrapMode: Text.Wrap
+	    // hovered: when mouse is over
 	    font.pointSize: (ctx.chat_text_size ? ctx.chat_text_size : 11)
             //Layout.fillWidth: parent
             //property alias maxWidth: "chatTreeView"
@@ -221,6 +222,9 @@ TreeView {
             text: model.display
             // this needs to be bigger
             font.family: "Serif"
+	    background: Rectangle {
+	      color: hovered ? "#eeeeff" : "white"
+	    }
           } // Text
 } // contentItem: Row
         } // delegate: TreeViewDelegate

@@ -20,6 +20,7 @@ class FilterProxyModel(QtCore.QSortFilterProxyModel):
     def __init__(self, window: "QMainWindow"):
         self.window = window
         super().__init__(recursiveFilteringEnabled=False)
+        # self.setAutoAcceptChildRows(True)
 
     def invalidate(self):
         super().invalidate()
