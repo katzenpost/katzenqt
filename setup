@@ -1,0 +1,13 @@
+#!/usr/bin/bash
+
+python3 -m venv myvenv
+source myvenv/bin/activate
+pip install --upgrade pip
+pip install 'git+https://github.com/katzenpost/thin_client@a5f87b9623eb349ba376d7e7555c3154302216e8'
+pip install -e .
+
+echo
+echo "Activate environment: 'source myvenv/bin/activate'"
+echo
+echo "Run 'make' or 'KQT_STATE=somethingelse  make'"
+echo

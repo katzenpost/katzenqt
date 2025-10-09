@@ -2,20 +2,122 @@
 <ui version="4.0">
  <class>MainWindow</class>
  <widget class="QMainWindow" name="MainWindow">
+  <property name="windowModality">
+   <enum>Qt::WindowModality::NonModal</enum>
+  </property>
   <property name="geometry">
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>935</width>
-    <height>572</height>
+    <width>1220</width>
+    <height>918</height>
    </rect>
+  </property>
+  <property name="sizePolicy">
+   <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+    <horstretch>0</horstretch>
+    <verstretch>0</verstretch>
+   </sizepolicy>
   </property>
   <property name="windowTitle">
    <string>MainWindow</string>
   </property>
+  <property name="statusTip">
+   <string/>
+  </property>
+  <property name="autoFillBackground">
+   <bool>true</bool>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">QLineEdit:focus {
+  /* override background on focused input to make it abundantly clear where the cursor is */
+  background: rgb(173, 213, 251) !important;
+}
+
+QTreeView {
+    show-decoration-selected: 1;
+}
+
+QTreeView::item {
+    /*border-top-color: transparent;
+    border-bottom-color: transparent;*/
+}
+
+QTreeView *::item:hover {
+/*    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #e7effd, stop: 1 #cbdaf1);
+    border: 1px solid #bfcde4;*/
+}
+
+QTreeView::item:selected {
+    border: 1px solid #567dbc;
+}
+
+QTreeView::item:selected:active{
+ /*   background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6ea1f1, stop: 1 #567dbc);*/
+}
+
+QTreeView::item:selected:!active {
+ /*   background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6b9be8, stop: 1 #577fbf);*/
+}
+QTreeView::branch {
+/*        background: palette(base);
+        border: 1px solid black;*/
+}
+QTreeView::branch * {
+/*       border: 2px solid red;*/
+}
+
+/*
+QTreeView::branch:has-siblings:!adjoins-item {
+        background: cyan;
+}
+
+QTreeView::branch:has-siblings:adjoins-item {
+        background: red;
+}
+
+QTreeView#ChatLines::branch:!has-children:!has-siblings:adjoins-item {
+        background: blue;
+}
+
+QTreeView::branch:closed:has-children:has-siblings {
+        background: pink;
+}
+
+QTreeView::branch:has-children:!has-siblings:closed {
+        background: gray;
+}
+
+QTreeView::branch:open:has-children:has-siblings {
+        background: magenta;
+}
+
+QTreeView::branch:open:has-children:!has-siblings {
+        background: green;
+}
+*/</string>
+  </property>
+  <property name="toolButtonStyle">
+   <enum>Qt::ToolButtonStyle::ToolButtonTextBesideIcon</enum>
+  </property>
+  <property name="documentMode">
+   <bool>false</bool>
+  </property>
+  <property name="dockOptions">
+   <set>QMainWindow::DockOption::AllowTabbedDocks|QMainWindow::DockOption::AnimatedDocks</set>
+  </property>
   <widget class="QWidget" name="centralwidget">
+   <property name="sizePolicy">
+    <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+     <horstretch>0</horstretch>
+     <verstretch>0</verstretch>
+    </sizepolicy>
+   </property>
+   <property name="autoFillBackground">
+    <bool>true</bool>
+   </property>
    <layout class="QGridLayout" name="gridLayout">
-    <item row="1" column="1">
+    <item row="0" column="0">
      <widget class="QSplitter" name="splitter">
       <property name="orientation">
        <enum>Qt::Orientation::Horizontal</enum>
@@ -121,7 +223,7 @@ QTreeView::item {
              <bool>true</bool>
             </property>
             <attribute name="headerDefaultSectionSize">
-             <number>47</number>
+             <number>36</number>
             </attribute>
            </widget>
           </item>
@@ -585,13 +687,12 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     </item>
    </layout>
   </widget>
-  <widget class="QStatusBar" name="statusbar"/>
-  <widget class="QMenuBar" name="menuBar">
+  <widget class="QMenuBar" name="menubar">
    <property name="geometry">
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>935</width>
+     <width>1220</width>
      <height>20</height>
     </rect>
    </property>
@@ -599,13 +700,43 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <property name="title">
      <string>Settings</string>
     </property>
-    <addaction name="actionFont"/>
+    <addaction name="actionSetting_1"/>
+    <addaction name="actionSetting_2"/>
    </widget>
    <addaction name="menuSettings"/>
   </widget>
   <widget class="QToolBar" name="toolBar">
+   <property name="sizePolicy">
+    <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+     <horstretch>0</horstretch>
+     <verstretch>0</verstretch>
+    </sizepolicy>
+   </property>
+   <property name="contextMenuPolicy">
+    <enum>Qt::ContextMenuPolicy::PreventContextMenu</enum>
+   </property>
    <property name="windowTitle">
     <string>toolBar</string>
+   </property>
+   <property name="autoFillBackground">
+    <bool>true</bool>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">.QToolBar [text~=&quot;Quit&quot;]:hover  {
+  color: red;
+}
+.QToolBar [text~=&quot;Quit&quot;] {
+  /* TODO[text~=&quot;Quit&quot;] not sure how this works with translations, oh well. */
+   margin-left: auto;
+   margin-right: 0;
+}
+</string>
+   </property>
+   <property name="movable">
+    <bool>false</bool>
+   </property>
+   <property name="orientation">
+    <enum>Qt::Orientation::Horizontal</enum>
    </property>
    <attribute name="toolBarArea">
     <enum>TopToolBarArea</enum>
@@ -615,27 +746,15 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    </attribute>
    <addaction name="action_testme"/>
    <addaction name="action_new_conversation"/>
-   <addaction name="action_invite_contact"/>
    <addaction name="action_accept_invitation"/>
+   <addaction name="action_invite_contact"/>
    <addaction name="action_quit"/>
   </widget>
-  <action name="action_space">
-   <property name="text">
-    <string>space</string>
-   </property>
-   <property name="shortcut">
-    <string>Space</string>
-   </property>
-   <property name="menuRole">
-    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
-   </property>
-  </action>
-  <action name="actionFont">
-   <property name="text">
-    <string>Font</string>
-   </property>
-  </action>
+  <widget class="QStatusBar" name="statusbar"/>
   <action name="action_testme">
+   <property name="icon">
+    <iconset theme="applications-science"/>
+   </property>
    <property name="text">
     <string>Testme</string>
    </property>
@@ -649,9 +768,18 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
    </property>
   </action>
-  <action name="action_new_conversation">
+  <action name="action_accept_invitation">
+   <property name="icon">
+    <iconset theme="applications-science"/>
+   </property>
    <property name="text">
-    <string>New conversation</string>
+    <string>Accept invitation</string>
+   </property>
+   <property name="toolTip">
+    <string>Accept invitation received from contact</string>
+   </property>
+   <property name="statusTip">
+    <string>Accept invitation received from contact</string>
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
@@ -685,18 +813,33 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <enum>QAction::MenuRole::QuitRole</enum>
    </property>
   </action>
-  <action name="action_accept_invitation">
+  <action name="action_new_conversation">
    <property name="text">
-    <string>Accept invitation</string>
-   </property>
-   <property name="toolTip">
-    <string>Accept invitation received from contact</string>
-   </property>
-   <property name="statusTip">
-    <string>Accept invitation received from contact</string>
+    <string>New conversation</string>
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
+   </property>
+  </action>
+  <action name="action_space">
+   <property name="text">
+    <string>space</string>
+   </property>
+   <property name="shortcut">
+    <string>Space</string>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
+   </property>
+  </action>
+  <action name="actionSetting_1">
+   <property name="text">
+    <string>Setting 1</string>
+   </property>
+  </action>
+  <action name="actionSetting_2">
+   <property name="text">
+    <string>Font</string>
    </property>
   </action>
  </widget>
@@ -707,6 +850,25 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    <header location="global">QtQuickWidgets/QQuickWidget</header>
   </customwidget>
  </customwidgets>
- <resources/>
+ <resources>
+  <include location="resources/resources.qrc"/>
+ </resources>
  <connections/>
+ <designerdata>
+  <property name="gridDeltaX">
+   <number>10</number>
+  </property>
+  <property name="gridDeltaY">
+   <number>10</number>
+  </property>
+  <property name="gridSnapX">
+   <bool>true</bool>
+  </property>
+  <property name="gridSnapY">
+   <bool>true</bool>
+  </property>
+  <property name="gridVisible">
+   <bool>true</bool>
+  </property>
+ </designerdata>
 </ui>
