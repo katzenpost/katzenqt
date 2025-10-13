@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, UniqueConstraint, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
+import sqlalchemy
+count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
 import struct
 from typing import TYPE_CHECKING
@@ -371,3 +373,20 @@ class ConversationLog(SQLModel, table=True):
         index=True,
         description="""the PlaintextWAL entry for the final message that marks this sent""",
     )
+    @classmethod
+    def append_from(cls, conversation_peer: ConversationPeer, payload) -> "ConversationLog":
+        """Add payload to the end end of conversation_peer. It is the caller's responsibility to add
+        the new ConversationLog instance to a Session and commit it; this constructor merely creates
+        the Python object.
+        """
+        return cls(
+            conversation_id=conversation_peer.conversation.id,
+            conversation_peer=conversation_peer,
+            payload=payload,
+            conversation_order=(
+                select(count())
+                .select_from(cls)
+                .where(cls.conversation_id == conversation_peer.conversation.id)
+                .scalar_subquery()),
+        )
+

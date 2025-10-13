@@ -6,7 +6,7 @@ cd katzenqt
 python3 -m venv myvenv
 source myvenv/bin/activate
 pip install --upgrade pip
-pip install 'git+https://github.com/katzenpost/thin_client@a5f87b9623eb349ba376d7e7555c3154302216e8'
+pip install 'git+https://github.com/katzenpost/thin_client@487d2b8e46440abba5bb4db95a168353de2d45d9'
 pip install -e .
 ```
 
@@ -14,6 +14,8 @@ Most debian systems will already have this package, but it is required:
 ```shell
 apt install libxcb-cursor0 # version (0.1.4-1)
 ```
+
+At the moment, this program only works with the `tb/debug2025-09-21` branch of https://github.com/katzenpost/katzenpost .
 
 # Running the application
 

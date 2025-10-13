@@ -13,7 +13,7 @@ from pathlib import Path
 import uuid
 import math
 from asyncio import ensure_future
-from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox, QFontDialog
 from PySide6.QtGui import QIcon, QPixmap, QStandardItemModel, QStandardItem, QAction, QKeySequence, QShortcut
 from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings, Signal, QThread
 from PySide6.QtMultimedia import QMediaCaptureSession, QAudioBufferInput, QAudioBufferOutput, QMediaRecorder, QAudioFormat, QAudioInput
@@ -44,6 +44,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
+
+def font_example():
+    font, ok = QFontDialog.getFont()
+    if ok:
+        # font.family()
+        # font.pointSize()
+        # Text { font.family: ..  font.pointSize: .. }
+        pass
 
 class AsyncioThread(threading.Thread):
     def run(self):
