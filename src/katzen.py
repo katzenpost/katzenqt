@@ -973,10 +973,23 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         first_unread=convo.first_unread or 0,
     )
     window.conversation_state_by_id[convo.id] = convo_state
+
+    window.all_contacts.appendRow(qtwi)  # append conversation to model
+
     for peer in convo.peers:
         #ptwi = QTreeWidgetItem([peer.name])
         ptwi = QStandardItem(peer.name)
-        qtwi.setChild(0, ptwi)
+        qtwi.appendRow(ptwi)
+        # Append the new conversation to the "real" model window.all_contacts,
+        # then figure out where that sits in the FilterProxyModel used for sorting contacts,
+        # and make the new convo selected:
+        real_index = window.all_contacts.index(window.all_contacts.rowCount()-1, 0)
+        pwmi = window.ui.contacts_treeWidget.model().mapFromSource(real_index)
+        if pwmi.isValid():
+            # Select the new conversation, if the filter would display it.
+            # We could maybe clear the existing filter in case it doesn't.
+            window.ui.contacts_treeWidget.setCurrentIndex(pwmi)
+            window.ui.contacts_treeWidget.expand(pwmi)
     async with persistent.asession() as sess:
         msg_count = (await sess.exec(
             select(func.count())
@@ -986,17 +999,6 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         convo_state.conversation_log_model.row_count = msg_count
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
-    # Append the new conversation to the "real" model window.all_contacts,
-    # then figure out where that sits in the FilterProxyModel used for sorting contacts,
-    # and make the new convo selected:
-    window.all_contacts.appendRow(qtwi)
-    real_index = window.all_contacts.index(window.all_contacts.rowCount()-1, 0)
-    pwmi = window.ui.contacts_treeWidget.model().mapFromSource(real_index)
-    if pwmi.isValid():
-        # Select the new conversation, if the filter would display it.
-        # We could maybe clear the existing filter in case it doesn't.
-        window.ui.contacts_treeWidget.setCurrentIndex(pwmi)
-        window.ui.contacts_treeWidget.expand(pwmi)
     # ULTRA TODO THIS IS FOR DEBUGGING ONLY
     #qts = QAbstractItemModelTester(clm)
     #print(qts)

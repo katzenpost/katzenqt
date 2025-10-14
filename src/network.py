@@ -765,6 +765,8 @@ def create_new_keypair(seed: bytes):
 def courier_destination_exists(connection, destination) -> bool:
     """Check that an old destination (hash of the IdentityKey) exists in this PKI, and that the node is a Courier.
     We should not be resending MixWAL entries whose courier has gone away.
+
+    TODO: when ensuring courier exists we usually also want to make sure there are (some) replicas present.
     """
     pki = connection.pki_document()
     for sn in pki['ServiceNodes']:
