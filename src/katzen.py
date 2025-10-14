@@ -590,6 +590,8 @@ class MainWindow(QMainWindow):
         if selected.parent().isValid():
             # peer name selected under a conversation, we want to look up the data for the conversation:
             selected = selected.parent()
+        if old.parent().isValid():
+            old = old.parent()
         selected_qmi = selected.model().mapToSource(selected)
         selected_id = self.all_contacts.item(selected_qmi.row(), selected_qmi.column()).conversation_id
         selected = selected.data()  # type: ignore[call-arg]
@@ -599,7 +601,7 @@ class MainWindow(QMainWindow):
         old_convo = None
         if old and old.model():
             old = old.model().mapToSource(old)
-            old_id = self.all_contacts.item(old.row(), old.column()).conversation_id
+            old_id = self.all_contacts.item(old.row(), 0).conversation_id
             old_convo = self.conversation_state_by_id[old_id]
         print("conversation selected", selected)
         ### TODO this was how far we got
@@ -974,22 +976,11 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     )
     window.conversation_state_by_id[convo.id] = convo_state
 
-    window.all_contacts.appendRow(qtwi)  # append conversation to model
-
     for peer in convo.peers:
         #ptwi = QTreeWidgetItem([peer.name])
         ptwi = QStandardItem(peer.name)
-        qtwi.appendRow(ptwi)
-        # Append the new conversation to the "real" model window.all_contacts,
-        # then figure out where that sits in the FilterProxyModel used for sorting contacts,
-        # and make the new convo selected:
-        real_index = window.all_contacts.index(window.all_contacts.rowCount()-1, 0)
-        pwmi = window.ui.contacts_treeWidget.model().mapFromSource(real_index)
-        if pwmi.isValid():
-            # Select the new conversation, if the filter would display it.
-            # We could maybe clear the existing filter in case it doesn't.
-            window.ui.contacts_treeWidget.setCurrentIndex(pwmi)
-            window.ui.contacts_treeWidget.expand(pwmi)
+        qtwi.setChild(qtwi.rowCount(), ptwi)
+
     async with persistent.asession() as sess:
         msg_count = (await sess.exec(
             select(func.count())
@@ -998,6 +989,18 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         )).first()
         convo_state.conversation_log_model.row_count = msg_count
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
+
+    # Append the new conversation to the "real" model window.all_contacts,
+    # then figure out where that sits in the FilterProxyModel used for sorting contacts,
+    # and make the new convo selected:
+    window.all_contacts.appendRow(qtwi)  # append conversation to model
+    real_index = window.all_contacts.index(window.all_contacts.rowCount()-1, 0)
+    pwmi = window.ui.contacts_treeWidget.model().mapFromSource(real_index)
+    if pwmi.isValid():
+        # Select the new conversation, if the filter would display it.
+        # We could maybe clear the existing filter in case it doesn't.
+        window.ui.contacts_treeWidget.setCurrentIndex(pwmi)
+        window.ui.contacts_treeWidget.expand(pwmi)
 
     # ULTRA TODO THIS IS FOR DEBUGGING ONLY
     #qts = QAbstractItemModelTester(clm)
