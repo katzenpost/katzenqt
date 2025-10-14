@@ -150,7 +150,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 dest_queue=b'courier',
                 message_id=message_id
             )
-            await asyncio.sleep(4)
+            if i == 0:  # First message gets a bit longer
+                asyncio.sleep(2)
+            await asyncio.sleep(4+secrets.randbelow(5))
 
     # wait for either a message or an empty ACK,
     # or a timeout (in case the message got dropped)
