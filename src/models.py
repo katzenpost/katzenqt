@@ -3,6 +3,7 @@ from typing_extensions import Annotated
 from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict
 from qt_models import *
 from PySide6.QtQml import QQmlPropertyMap
+from PySide6.QtGui import QStandardItem
 import cbor2
 from enum import Enum
 import uuid
@@ -211,6 +212,7 @@ class ConversationUIState(BaseModel):
     own_peer_bacap_uuid: uuid.UUID
     chat_lineEdit_buffer : str
     conversation_log_model: ConversationLogModel
+    contacts_standard_item : QStandardItem = Field(description="the entry in the Contacts pane for the conversation")
     chat_lines_scroll_idx : float = 0.0
     # TODO: should store scroll state of self.ui.ChatLines
     # ie self.ui.ChatLines.scrollToBottom() for default new ones

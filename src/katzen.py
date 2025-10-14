@@ -264,6 +264,15 @@ class MainWindow(QMainWindow):
         logger.critical(write_cap)
         logger.critical(read_cap)
         await self.iothread.run_in_io(network.test_keypair(self.iothread.kp_client, write_cap, read_cap))
+        # we want to make a regular conversation,
+        # give it a name,
+        # pick a name for ourselves
+        # set up Conversation + ConversationLog in persistent
+        # make RCW + WCW
+        # upload the RCW to the deterministic stream via a models.GroupChatPleaseAdd
+        # or even better a GroupChatReplyWho(please_adds=...) for the conversation
+        
+        
 
     def push_to_talk_pressed(self):
         """The shortcut has autoRepeat=True, so we will keep getting these at regular intervals.
@@ -858,6 +867,11 @@ class MainWindow(QMainWindow):
             )
             sess.add(cp)
             await sess.commit()
+
+        # update UI to show the new peer in the member list:
+        ptwi = QStandardItem(please_add.display_name)
+        convo.contacts_standard_item.appendRow(ptwi)
+
         logging.warning("Peer added. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(
             network.signal_readables_to_mixwal()
@@ -955,7 +969,7 @@ class MixSystrayIcon(QSystemTrayIcon):
     def messageClicked(self,*args,**kwargs):
         print("Someone clicked message", args, kwargs)
 
-
+    
 async def add_conversation(window, convo: persistent.Conversation) -> None:
     window.conversation_log_models = getattr(window, "conversation_log_models", dict())
 
@@ -969,6 +983,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         own_peer_name=convo.own_peer.name,
         own_peer_bacap_uuid=convo.write_cap,
         conversation_id=convo.id,
+        contacts_standard_item=qtwi,
         chat_lineEdit_buffer="",
         conversation_log_model=clm,
         chat_lines_scroll_idx=1.0,
@@ -979,7 +994,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     for peer in convo.peers:
         #ptwi = QTreeWidgetItem([peer.name])
         ptwi = QStandardItem(peer.name)
-        qtwi.setChild(qtwi.rowCount(), ptwi)
+        qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
     async with persistent.asession() as sess:
         msg_count = (await sess.exec(
