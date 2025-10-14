@@ -599,7 +599,16 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <property name="title">
      <string>Settings</string>
     </property>
-    <addaction name="actionFont"/>
+    <widget class="QMenu" name="menuFont">
+     <property name="title">
+      <string>Font</string>
+     </property>
+     <property name="toolTipsVisible">
+      <bool>true</bool>
+     </property>
+     <addaction name="actiontest"/>
+    </widget>
+    <addaction name="menuFont"/>
    </widget>
    <addaction name="menuSettings"/>
   </widget>
@@ -628,11 +637,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
-   </property>
-  </action>
-  <action name="actionFont">
-   <property name="text">
-    <string>Font</string>
    </property>
   </action>
   <action name="action_testme">
@@ -697,6 +701,11 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
+   </property>
+  </action>
+  <action name="actiontest">
+   <property name="text">
+    <string>test</string>
    </property>
   </action>
  </widget>
