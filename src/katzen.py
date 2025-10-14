@@ -590,6 +590,8 @@ class MainWindow(QMainWindow):
         if selected.parent().isValid():
             # peer name selected under a conversation, we want to look up the data for the conversation:
             selected = selected.parent()
+        if old.parent().isValid():
+            old = old.parent()
         selected_qmi = selected.model().mapToSource(selected)
         selected_id = self.all_contacts.item(selected_qmi.row(), selected_qmi.column()).conversation_id
         selected = selected.data()  # type: ignore[call-arg]
@@ -599,7 +601,7 @@ class MainWindow(QMainWindow):
         old_convo = None
         if old and old.model():
             old = old.model().mapToSource(old)
-            old_id = self.all_contacts.item(old.row(), old.column()).conversation_id
+            old_id = self.all_contacts.item(old.row(), 0).conversation_id
             old_convo = self.conversation_state_by_id[old_id]
         print("conversation selected", selected)
         ### TODO this was how far we got
