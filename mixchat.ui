@@ -2,189 +2,71 @@
 <ui version="4.0">
  <class>MainWindow</class>
  <widget class="QMainWindow" name="MainWindow">
-  <property name="windowModality">
-   <enum>Qt::WindowModality::NonModal</enum>
-  </property>
   <property name="geometry">
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1223</width>
-    <height>1030</height>
+    <width>935</width>
+    <height>572</height>
    </rect>
-  </property>
-  <property name="sizePolicy">
-   <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
-    <horstretch>0</horstretch>
-    <verstretch>0</verstretch>
-   </sizepolicy>
   </property>
   <property name="windowTitle">
    <string>MainWindow</string>
   </property>
-  <property name="statusTip">
-   <string/>
-  </property>
-  <property name="autoFillBackground">
-   <bool>true</bool>
-  </property>
-  <property name="styleSheet">
-   <string notr="true">QLineEdit:focus {
-  /* override background on focused input to make it abundantly clear where the cursor is */
-  background: rgb(173, 213, 251) !important;
-}
-
-QTreeView {
-    show-decoration-selected: 1;
-}
-
-QTreeView::item {
-    /*border-top-color: transparent;
-    border-bottom-color: transparent;*/
-}
-
-QTreeView *::item:hover {
-/*    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #e7effd, stop: 1 #cbdaf1);
-    border: 1px solid #bfcde4;*/
-}
-
-QTreeView::item:selected {
-    border: 1px solid #567dbc;
-}
-
-QTreeView::item:selected:active{
- /*   background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6ea1f1, stop: 1 #567dbc);*/
-}
-
-QTreeView::item:selected:!active {
- /*   background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6b9be8, stop: 1 #577fbf);*/
-}
-QTreeView::branch {
-/*        background: palette(base);
-        border: 1px solid black;*/
-}
-QTreeView::branch * {
-/*       border: 2px solid red;*/
-}
-
-/*
-QTreeView::branch:has-siblings:!adjoins-item {
-        background: cyan;
-}
-
-QTreeView::branch:has-siblings:adjoins-item {
-        background: red;
-}
-
-QTreeView#ChatLines::branch:!has-children:!has-siblings:adjoins-item {
-        background: blue;
-}
-
-QTreeView::branch:closed:has-children:has-siblings {
-        background: pink;
-}
-
-QTreeView::branch:has-children:!has-siblings:closed {
-        background: gray;
-}
-
-QTreeView::branch:open:has-children:has-siblings {
-        background: magenta;
-}
-
-QTreeView::branch:open:has-children:!has-siblings {
-        background: green;
-}
-*/</string>
-  </property>
-  <property name="toolButtonStyle">
-   <enum>Qt::ToolButtonStyle::ToolButtonTextBesideIcon</enum>
-  </property>
-  <property name="documentMode">
-   <bool>false</bool>
-  </property>
-  <property name="dockOptions">
-   <set>QMainWindow::DockOption::AllowTabbedDocks|QMainWindow::DockOption::AnimatedDocks</set>
-  </property>
   <widget class="QWidget" name="centralwidget">
-   <property name="sizePolicy">
-    <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-     <horstretch>0</horstretch>
-     <verstretch>0</verstretch>
-    </sizepolicy>
-   </property>
-   <property name="autoFillBackground">
-    <bool>true</bool>
-   </property>
    <layout class="QGridLayout" name="gridLayout">
-    <item row="1" column="0">
+    <item row="1" column="1">
      <widget class="QSplitter" name="splitter">
-      <property name="sizePolicy">
-       <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-        <horstretch>0</horstretch>
-        <verstretch>0</verstretch>
-       </sizepolicy>
-      </property>
-      <property name="layoutDirection">
-       <enum>Qt::LayoutDirection::LeftToRight</enum>
-      </property>
-      <property name="autoFillBackground">
-       <bool>true</bool>
-      </property>
       <property name="orientation">
        <enum>Qt::Orientation::Horizontal</enum>
       </property>
-      <property name="handleWidth">
-       <number>12</number>
-      </property>
-      <property name="childrenCollapsible">
-       <bool>true</bool>
-      </property>
-      <widget class="QWidget" name="layoutWidget">
+      <widget class="QGroupBox" name="contactGroupBox_3">
+       <property name="title">
+        <string>Contacts</string>
+       </property>
        <layout class="QVBoxLayout" name="verticalLayout">
-        <property name="sizeConstraint">
-         <enum>QLayout::SizeConstraint::SetMaximumSize</enum>
-        </property>
         <item>
-         <widget class="QLineEdit" name="contactFilterLineEdit">
-          <property name="sizePolicy">
-           <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-            <horstretch>0</horstretch>
-            <verstretch>0</verstretch>
-           </sizepolicy>
-          </property>
-          <property name="focusPolicy">
-           <enum>Qt::FocusPolicy::ClickFocus</enum>
-          </property>
-          <property name="statusTip">
-           <string>Type to filter contacts</string>
-          </property>
-          <property name="autoFillBackground">
-           <bool>false</bool>
-          </property>
-          <property name="alignment">
-           <set>Qt::AlignmentFlag::AlignCenter</set>
-          </property>
-          <property name="placeholderText">
-           <string>Type to filter contacts...</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QTreeView" name="contacts_treeWidget">
-          <property name="sizePolicy">
-           <sizepolicy hsizetype="Maximum" vsizetype="MinimumExpanding">
-            <horstretch>0</horstretch>
-            <verstretch>0</verstretch>
-           </sizepolicy>
-          </property>
-          <property name="font">
-           <font>
-            <pointsize>13</pointsize>
-           </font>
-          </property>
-          <property name="styleSheet">
-           <string notr="true">QTreeView::item:selected {
+         <layout class="QVBoxLayout" name="contactsVerticalLayout">
+          <item>
+           <widget class="QLineEdit" name="contactFilterLineEdit">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="focusPolicy">
+             <enum>Qt::FocusPolicy::ClickFocus</enum>
+            </property>
+            <property name="statusTip">
+             <string>Type to filter contacts</string>
+            </property>
+            <property name="autoFillBackground">
+             <bool>false</bool>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignCenter</set>
+            </property>
+            <property name="placeholderText">
+             <string>Type to filter contacts...</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QTreeView" name="contacts_treeWidget">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Maximum" vsizetype="MinimumExpanding">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="font">
+             <font>
+              <pointsize>13</pointsize>
+             </font>
+            </property>
+            <property name="styleSheet">
+             <string notr="true">QTreeView::item:selected {
       background-color: #2ABf9E;
        /* qlineargradient(spread:reflect, x1:0.5, y1:0.5, x2:0.5, y2:1, stop:0.497436 rgba(42, 191, 158, 234), stop:0.882051 rgba(255, 255, 255, 208));*/
 }
@@ -198,50 +80,52 @@ QTreeView::item {
     /*margin-left: 1em; margin-right: 1em;*/
     qproperty-alignment: AlignCenter;
 }</string>
-          </property>
-          <property name="horizontalScrollBarPolicy">
-           <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
-          </property>
-          <property name="sizeAdjustPolicy">
-           <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustIgnored</enum>
-          </property>
-          <property name="editTriggers">
-           <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
-          </property>
-          <property name="showDropIndicator" stdset="0">
-           <bool>false</bool>
-          </property>
-          <property name="alternatingRowColors">
-           <bool>true</bool>
-          </property>
-          <property name="textElideMode">
-           <enum>Qt::TextElideMode::ElideRight</enum>
-          </property>
-          <property name="updateThreshold">
-           <number>500</number>
-          </property>
-          <property name="indentation">
-           <number>20</number>
-          </property>
-          <property name="rootIsDecorated">
-           <bool>false</bool>
-          </property>
-          <property name="uniformRowHeights">
-           <bool>true</bool>
-          </property>
-          <property name="sortingEnabled">
-           <bool>true</bool>
-          </property>
-          <property name="wordWrap">
-           <bool>true</bool>
-          </property>
-          <property name="headerHidden">
-           <bool>true</bool>
-          </property>
-          <attribute name="headerDefaultSectionSize">
-           <number>36</number>
-          </attribute>
-         </widget>
+            </property>
+            <property name="horizontalScrollBarPolicy">
+             <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
+            </property>
+            <property name="sizeAdjustPolicy">
+             <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustIgnored</enum>
+            </property>
+            <property name="editTriggers">
+             <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
+            </property>
+            <property name="showDropIndicator" stdset="0">
+             <bool>false</bool>
+            </property>
+            <property name="alternatingRowColors">
+             <bool>true</bool>
+            </property>
+            <property name="textElideMode">
+             <enum>Qt::TextElideMode::ElideRight</enum>
+            </property>
+            <property name="updateThreshold">
+             <number>500</number>
+            </property>
+            <property name="indentation">
+             <number>20</number>
+            </property>
+            <property name="rootIsDecorated">
+             <bool>false</bool>
+            </property>
+            <property name="uniformRowHeights">
+             <bool>true</bool>
+            </property>
+            <property name="sortingEnabled">
+             <bool>true</bool>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="headerHidden">
+             <bool>true</bool>
+            </property>
+            <attribute name="headerDefaultSectionSize">
+             <number>47</number>
+            </attribute>
+           </widget>
+          </item>
+         </layout>
         </item>
        </layout>
       </widget>
@@ -330,7 +214,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
               <property name="autoFillBackground">
                <bool>true</bool>
               </property>
-              <layout class="QVBoxLayout" name="_2" stretch="0,8,1">
+              <layout class="QVBoxLayout" name="_2" stretch="0,1">
                <item>
                 <layout class="QHBoxLayout" name="horizontalLayout" stretch="1,1">
                  <property name="sizeConstraint">
@@ -359,28 +243,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                 </layout>
                </item>
                <item>
-                <widget class="QQuickWidget" name="qml_ChatLines">
-                 <property name="sizePolicy">
-                  <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-                   <horstretch>0</horstretch>
-                   <verstretch>0</verstretch>
-                  </sizepolicy>
-                 </property>
-                 <property name="acceptDrops">
-                  <bool>false</bool>
-                 </property>
-                 <property name="statusTip">
-                  <string>chat history lines QML</string>
-                 </property>
-                 <property name="autoFillBackground">
-                  <bool>true</bool>
-                 </property>
-                 <property name="resizeMode">
-                  <enum>QQuickWidget::ResizeMode::SizeRootObjectToView</enum>
-                 </property>
-                </widget>
-               </item>
-               <item>
                 <widget class="QTabWidget" name="singlemultitab">
                  <property name="sizePolicy">
                   <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
@@ -401,7 +263,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <enum>QTabWidget::TabShape::Rounded</enum>
                  </property>
                  <property name="currentIndex">
-                  <number>1</number>
+                  <number>0</number>
                  </property>
                  <widget class="QWidget" name="singleline_tab">
                   <property name="sizePolicy">
@@ -417,6 +279,28 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                    <string>Single-line</string>
                   </attribute>
                   <layout class="QVBoxLayout" name="verticalLayout_5">
+                   <item>
+                    <widget class="QQuickWidget" name="qml_ChatLines">
+                     <property name="sizePolicy">
+                      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+                       <horstretch>0</horstretch>
+                       <verstretch>0</verstretch>
+                      </sizepolicy>
+                     </property>
+                     <property name="acceptDrops">
+                      <bool>false</bool>
+                     </property>
+                     <property name="statusTip">
+                      <string>chat history lines QML</string>
+                     </property>
+                     <property name="autoFillBackground">
+                      <bool>true</bool>
+                     </property>
+                     <property name="resizeMode">
+                      <enum>QQuickWidget::ResizeMode::SizeRootObjectToView</enum>
+                     </property>
+                    </widget>
+                   </item>
                    <item>
                     <widget class="QLineEdit" name="chat_lineEdit">
                      <property name="sizePolicy">
@@ -439,6 +323,72 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                      </property>
                      <property name="placeholderText">
                       <string>single line message</string>
+                     </property>
+                    </widget>
+                   </item>
+                  </layout>
+                 </widget>
+                 <widget class="QWidget" name="multilinetab">
+                  <property name="sizePolicy">
+                   <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
+                    <horstretch>0</horstretch>
+                    <verstretch>0</verstretch>
+                   </sizepolicy>
+                  </property>
+                  <property name="autoFillBackground">
+                   <bool>true</bool>
+                  </property>
+                  <attribute name="title">
+                   <string>Multi-line</string>
+                  </attribute>
+                  <layout class="QGridLayout" name="gridLayout_2">
+                   <item row="0" column="1">
+                    <widget class="QPlainTextEdit" name="chatInput">
+                     <property name="sizePolicy">
+                      <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+                       <horstretch>0</horstretch>
+                       <verstretch>0</verstretch>
+                      </sizepolicy>
+                     </property>
+                     <property name="statusTip">
+                      <string>multi-line message entry</string>
+                     </property>
+                     <property name="autoFillBackground">
+                      <bool>true</bool>
+                     </property>
+                     <property name="horizontalScrollBarPolicy">
+                      <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
+                     </property>
+                     <property name="sizeAdjustPolicy">
+                      <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustToContents</enum>
+                     </property>
+                     <property name="textInteractionFlags">
+                      <set>Qt::TextInteractionFlag::NoTextInteraction</set>
+                     </property>
+                     <property name="placeholderText">
+                      <string>multi-line message</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item row="0" column="0">
+                    <widget class="QPushButton" name="pushButton_2">
+                     <property name="sizePolicy">
+                      <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                       <horstretch>0</horstretch>
+                       <verstretch>0</verstretch>
+                      </sizepolicy>
+                     </property>
+                     <property name="statusTip">
+                      <string>Send message to the chat</string>
+                     </property>
+                     <property name="whatsThis">
+                      <string>button to press to send chat</string>
+                     </property>
+                     <property name="autoFillBackground">
+                      <bool>true</bool>
+                     </property>
+                     <property name="text">
+                      <string>Send!</string>
                      </property>
                     </widget>
                    </item>
@@ -584,72 +534,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                    </item>
                   </layout>
                  </widget>
-                 <widget class="QWidget" name="multilinetab">
-                  <property name="sizePolicy">
-                   <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-                    <horstretch>0</horstretch>
-                    <verstretch>0</verstretch>
-                   </sizepolicy>
-                  </property>
-                  <property name="autoFillBackground">
-                   <bool>true</bool>
-                  </property>
-                  <attribute name="title">
-                   <string>Multi-line</string>
-                  </attribute>
-                  <layout class="QGridLayout" name="gridLayout_2">
-                   <item row="0" column="1">
-                    <widget class="QPlainTextEdit" name="chatInput">
-                     <property name="sizePolicy">
-                      <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
-                       <horstretch>0</horstretch>
-                       <verstretch>0</verstretch>
-                      </sizepolicy>
-                     </property>
-                     <property name="statusTip">
-                      <string>multi-line message entry</string>
-                     </property>
-                     <property name="autoFillBackground">
-                      <bool>true</bool>
-                     </property>
-                     <property name="horizontalScrollBarPolicy">
-                      <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
-                     </property>
-                     <property name="sizeAdjustPolicy">
-                      <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustToContents</enum>
-                     </property>
-                     <property name="textInteractionFlags">
-                      <set>Qt::TextInteractionFlag::NoTextInteraction</set>
-                     </property>
-                     <property name="placeholderText">
-                      <string>multi-line message</string>
-                     </property>
-                    </widget>
-                   </item>
-                   <item row="0" column="0">
-                    <widget class="QPushButton" name="pushButton_2">
-                     <property name="sizePolicy">
-                      <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
-                       <horstretch>0</horstretch>
-                       <verstretch>0</verstretch>
-                      </sizepolicy>
-                     </property>
-                     <property name="statusTip">
-                      <string>Send message to the chat</string>
-                     </property>
-                     <property name="whatsThis">
-                      <string>button to press to send chat</string>
-                     </property>
-                     <property name="autoFillBackground">
-                      <bool>true</bool>
-                     </property>
-                     <property name="text">
-                      <string>Send!</string>
-                     </property>
-                    </widget>
-                   </item>
-                  </layout>
-                 </widget>
                  <widget class="QWidget" name="ptt_tab">
                   <attribute name="icon">
                    <iconset theme="QIcon::ThemeIcon::MediaRecord"/>
@@ -699,85 +583,38 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
       </widget>
      </widget>
     </item>
-    <item row="0" column="0">
-     <widget class="QLabel" name="mdstatus">
-      <property name="sizePolicy">
-       <sizepolicy hsizetype="Expanding" vsizetype="Maximum">
-        <horstretch>0</horstretch>
-        <verstretch>0</verstretch>
-       </sizepolicy>
-      </property>
-      <property name="text">
-       <string>## Katzen mixnet group chat</string>
-      </property>
-      <property name="textFormat">
-       <enum>Qt::TextFormat::MarkdownText</enum>
-      </property>
-      <property name="scaledContents">
-       <bool>false</bool>
-      </property>
-      <property name="wordWrap">
-       <bool>true</bool>
-      </property>
-      <property name="textInteractionFlags">
-       <set>Qt::TextInteractionFlag::NoTextInteraction</set>
-      </property>
-      <property name="buddy">
-       <cstring>mywidget</cstring>
-      </property>
-     </widget>
-    </item>
    </layout>
   </widget>
-  <widget class="QMenuBar" name="menubar">
+  <widget class="QStatusBar" name="statusbar"/>
+  <widget class="QMenuBar" name="menuBar">
    <property name="geometry">
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1223</width>
-     <height>19</height>
+     <width>935</width>
+     <height>20</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuSettings">
     <property name="title">
      <string>Settings</string>
     </property>
-    <addaction name="actionSetting_1"/>
+    <widget class="QMenu" name="menuFont">
+     <property name="title">
+      <string>Font</string>
+     </property>
+     <property name="toolTipsVisible">
+      <bool>true</bool>
+     </property>
+     <addaction name="actiontest"/>
+    </widget>
+    <addaction name="menuFont"/>
    </widget>
    <addaction name="menuSettings"/>
   </widget>
   <widget class="QToolBar" name="toolBar">
-   <property name="sizePolicy">
-    <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-     <horstretch>0</horstretch>
-     <verstretch>0</verstretch>
-    </sizepolicy>
-   </property>
-   <property name="contextMenuPolicy">
-    <enum>Qt::ContextMenuPolicy::PreventContextMenu</enum>
-   </property>
    <property name="windowTitle">
     <string>toolBar</string>
-   </property>
-   <property name="autoFillBackground">
-    <bool>true</bool>
-   </property>
-   <property name="styleSheet">
-    <string notr="true">.QToolBar [text~=&quot;Quit&quot;]:hover  {
-  color: red;
-}
-.QToolBar [text~=&quot;Quit&quot;] {
-  /* TODO[text~=&quot;Quit&quot;] not sure how this works with translations, oh well. */
-   margin-left: auto;
-   margin-right: 0;
-}
-</string>
-   </property>
-   <property name="movable">
-    <bool>false</bool>
-   </property>
-   <property name="orientation">
-    <enum>Qt::Orientation::Horizontal</enum>
    </property>
    <attribute name="toolBarArea">
     <enum>TopToolBarArea</enum>
@@ -787,15 +624,22 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    </attribute>
    <addaction name="action_testme"/>
    <addaction name="action_new_conversation"/>
-   <addaction name="action_accept_invitation"/>
    <addaction name="action_invite_contact"/>
+   <addaction name="action_accept_invitation"/>
    <addaction name="action_quit"/>
   </widget>
-  <widget class="QStatusBar" name="statusbar"/>
-  <action name="action_testme">
-   <property name="icon">
-    <iconset theme="applications-science"/>
+  <action name="action_space">
+   <property name="text">
+    <string>space</string>
    </property>
+   <property name="shortcut">
+    <string>Space</string>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
+   </property>
+  </action>
+  <action name="action_testme">
    <property name="text">
     <string>Testme</string>
    </property>
@@ -809,18 +653,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
    </property>
   </action>
-  <action name="action_accept_invitation">
-   <property name="icon">
-    <iconset theme="applications-science"/>
-   </property>
+  <action name="action_new_conversation">
    <property name="text">
-    <string>Accept invitation</string>
-   </property>
-   <property name="toolTip">
-    <string>Accept invitation received from contact</string>
-   </property>
-   <property name="statusTip">
-    <string>Accept invitation received from contact</string>
+    <string>New conversation</string>
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
@@ -854,28 +689,23 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <enum>QAction::MenuRole::QuitRole</enum>
    </property>
   </action>
-  <action name="action_new_conversation">
+  <action name="action_accept_invitation">
    <property name="text">
-    <string>New conversation</string>
+    <string>Accept invitation</string>
+   </property>
+   <property name="toolTip">
+    <string>Accept invitation received from contact</string>
+   </property>
+   <property name="statusTip">
+    <string>Accept invitation received from contact</string>
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
    </property>
   </action>
-  <action name="action_space">
+  <action name="actiontest">
    <property name="text">
-    <string>space</string>
-   </property>
-   <property name="shortcut">
-    <string>Space</string>
-   </property>
-   <property name="menuRole">
-    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
-   </property>
-  </action>
-  <action name="actionSetting_1">
-   <property name="text">
-    <string>Setting 1</string>
+    <string>test</string>
    </property>
   </action>
  </widget>
@@ -886,25 +716,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    <header location="global">QtQuickWidgets/QQuickWidget</header>
   </customwidget>
  </customwidgets>
- <resources>
-  <include location="resources/resources.qrc"/>
- </resources>
+ <resources/>
  <connections/>
- <designerdata>
-  <property name="gridDeltaX">
-   <number>10</number>
-  </property>
-  <property name="gridDeltaY">
-   <number>10</number>
-  </property>
-  <property name="gridSnapX">
-   <bool>true</bool>
-  </property>
-  <property name="gridSnapY">
-   <bool>true</bool>
-  </property>
-  <property name="gridVisible">
-   <bool>true</bool>
-  </property>
- </designerdata>
 </ui>
