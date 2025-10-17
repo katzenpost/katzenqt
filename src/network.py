@@ -151,7 +151,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 message_id=message_id
             )
             if i == 0:  # First message gets a bit longer
-                asyncio.sleep(2)
+                await asyncio.sleep(2)
             await asyncio.sleep(4+secrets.randbelow(5))
 
     # wait for either a message or an empty ACK,
@@ -186,8 +186,17 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         async with persistent.asession() as sess:
             rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
             idx_old, idx_new = struct.unpack("<2Q", rcw.next_index[:8] + mw.next_message_index[:8])
-            assert idx_new == idx_old + 1
+            if idx_old >= idx_new:
+                logger.warning(f"not advancing idx to {idx_new} from old {idx_old}, we probably already handled this?")
+                try:
+                    await sess.delete(mw)
+                    await sess.commit()
+                except Exception as e:
+                    logger.critical(f"error committing deletion of stray MW")
+                readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
+                return
             logger.info(f"advancing read to idx {idx_new}")
+            assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
             rcw.next_index = mw.next_message_index
             sess.add(rcw)
 
