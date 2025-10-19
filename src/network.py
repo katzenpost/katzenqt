@@ -173,6 +173,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
           - Remove the MixWAL entry to have a new envelope be made
     """
     assert mw.is_read
+    bacap_uuid = mw.bacap_stream
 
     # we should check that mw.destination exists:
     if not courier_destination_exists(connection, mw.destination):
