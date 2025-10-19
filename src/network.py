@@ -309,9 +309,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             bacap_uuid = mw.bacap_stream
             await sess.commit()
         create_task(conversation_update_queue.put((c_id,False)))
-        draining_right_now.discard(bacap_uuid)
-        __resend_queue.discard(bacap_uuid)  # this should be .remove(), but why is it empty?
-        readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
         done = []  # disregard the ack_task
     else:
         logger.critical("NO MESSAGE REPLY, making new envelope"*100)
@@ -336,6 +333,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     """
 
     # TODO clean up connection.ack_queues[message_id] and __on_message_queues
+    draining_right_now.discard(bacap_uuid)
+    __resend_queue.discard(bacap_uuid)  # this should be .remove(), but why is it empty?
+    readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
     __mixwal_updated.set()
 
 
