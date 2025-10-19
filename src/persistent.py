@@ -178,6 +178,8 @@ class SentLog(SQLModel, table=True):
                     convlog.network_status = 2
                     sess.add(convlog)
             sess.add(wcw)
+            if mw.bacap_stream != pwal.bacap_stream:
+                logger.error("mw.bacap_stream doesn't match pwal.bacap_stream")
             sess.delete(sess.get(MixWAL, mw.id))
             sess.delete(pwal)
             # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
