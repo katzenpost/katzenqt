@@ -14,59 +14,65 @@
    <string>MainWindow</string>
   </property>
   <widget class="QWidget" name="centralwidget">
-   <layout class="QGridLayout" name="gridLayout">
-    <item row="1" column="1">
-     <widget class="QSplitter" name="splitter">
-      <property name="orientation">
-       <enum>Qt::Orientation::Horizontal</enum>
-      </property>
-      <widget class="QGroupBox" name="contactGroupBox_3">
-       <property name="title">
-        <string>Contacts</string>
-       </property>
-       <layout class="QVBoxLayout" name="verticalLayout">
+   <widget class="QSplitter" name="splitter">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>140</y>
+      <width>700</width>
+      <height>340</height>
+     </rect>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+    <widget class="QGroupBox" name="contactGroupBox_3">
+     <property name="title">
+      <string>Contacts</string>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout">
+      <item>
+       <layout class="QVBoxLayout" name="contactsVerticalLayout">
         <item>
-         <layout class="QVBoxLayout" name="contactsVerticalLayout">
-          <item>
-           <widget class="QLineEdit" name="contactFilterLineEdit">
-            <property name="sizePolicy">
-             <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-              <horstretch>0</horstretch>
-              <verstretch>0</verstretch>
-             </sizepolicy>
-            </property>
-            <property name="focusPolicy">
-             <enum>Qt::FocusPolicy::ClickFocus</enum>
-            </property>
-            <property name="statusTip">
-             <string>Type to filter contacts</string>
-            </property>
-            <property name="autoFillBackground">
-             <bool>false</bool>
-            </property>
-            <property name="alignment">
-             <set>Qt::AlignmentFlag::AlignCenter</set>
-            </property>
-            <property name="placeholderText">
-             <string>Type to filter contacts...</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QTreeView" name="contacts_treeWidget">
-            <property name="sizePolicy">
-             <sizepolicy hsizetype="Maximum" vsizetype="MinimumExpanding">
-              <horstretch>0</horstretch>
-              <verstretch>0</verstretch>
-             </sizepolicy>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>13</pointsize>
-             </font>
-            </property>
-            <property name="styleSheet">
-             <string notr="true">QTreeView::item:selected {
+         <widget class="QLineEdit" name="contactFilterLineEdit">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="focusPolicy">
+           <enum>Qt::FocusPolicy::ClickFocus</enum>
+          </property>
+          <property name="statusTip">
+           <string>Type to filter contacts</string>
+          </property>
+          <property name="autoFillBackground">
+           <bool>false</bool>
+          </property>
+          <property name="alignment">
+           <set>Qt::AlignmentFlag::AlignCenter</set>
+          </property>
+          <property name="placeholderText">
+           <string>Type to filter contacts...</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QTreeView" name="contacts_treeWidget">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Maximum" vsizetype="MinimumExpanding">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="font">
+           <font>
+            <pointsize>13</pointsize>
+           </font>
+          </property>
+          <property name="styleSheet">
+           <string notr="true">QTreeView::item:selected {
       background-color: #2ABf9E;
        /* qlineargradient(spread:reflect, x1:0.5, y1:0.5, x2:0.5, y2:1, stop:0.497436 rgba(42, 191, 158, 234), stop:0.882051 rgba(255, 255, 255, 208));*/
 }
@@ -80,94 +86,94 @@ QTreeView::item {
     /*margin-left: 1em; margin-right: 1em;*/
     qproperty-alignment: AlignCenter;
 }</string>
-            </property>
-            <property name="horizontalScrollBarPolicy">
-             <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
-            </property>
-            <property name="sizeAdjustPolicy">
-             <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustIgnored</enum>
-            </property>
-            <property name="editTriggers">
-             <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
-            </property>
-            <property name="showDropIndicator" stdset="0">
-             <bool>false</bool>
-            </property>
-            <property name="alternatingRowColors">
-             <bool>true</bool>
-            </property>
-            <property name="textElideMode">
-             <enum>Qt::TextElideMode::ElideRight</enum>
-            </property>
-            <property name="updateThreshold">
-             <number>500</number>
-            </property>
-            <property name="indentation">
-             <number>20</number>
-            </property>
-            <property name="rootIsDecorated">
-             <bool>false</bool>
-            </property>
-            <property name="uniformRowHeights">
-             <bool>true</bool>
-            </property>
-            <property name="sortingEnabled">
-             <bool>true</bool>
-            </property>
-            <property name="wordWrap">
-             <bool>true</bool>
-            </property>
-            <property name="headerHidden">
-             <bool>true</bool>
-            </property>
-            <attribute name="headerDefaultSectionSize">
-             <number>47</number>
-            </attribute>
-           </widget>
-          </item>
-         </layout>
-        </item>
-       </layout>
-      </widget>
-      <widget class="QGroupBox" name="groupBox">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="autoFillBackground">
-        <bool>true</bool>
-       </property>
-       <property name="title">
-        <string>Chats</string>
-       </property>
-       <property name="alignment">
-        <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
-       </property>
-       <layout class="QVBoxLayout" name="verticalLayout_3">
-        <item>
-         <widget class="QTabWidget" name="chatTabs">
-          <property name="sizePolicy">
-           <sizepolicy hsizetype="Expanding" vsizetype="MinimumExpanding">
-            <horstretch>0</horstretch>
-            <verstretch>0</verstretch>
-           </sizepolicy>
           </property>
-          <property name="minimumSize">
-           <size>
-            <width>100</width>
-            <height>300</height>
-           </size>
+          <property name="horizontalScrollBarPolicy">
+           <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
           </property>
-          <property name="whatsThis">
-           <string>Tabs with active chats</string>
+          <property name="sizeAdjustPolicy">
+           <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustIgnored</enum>
           </property>
-          <property name="autoFillBackground">
+          <property name="editTriggers">
+           <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
+          </property>
+          <property name="showDropIndicator" stdset="0">
+           <bool>false</bool>
+          </property>
+          <property name="alternatingRowColors">
            <bool>true</bool>
           </property>
-          <property name="styleSheet">
-           <string notr="true">QTabBar::tab:selected {
+          <property name="textElideMode">
+           <enum>Qt::TextElideMode::ElideRight</enum>
+          </property>
+          <property name="updateThreshold">
+           <number>500</number>
+          </property>
+          <property name="indentation">
+           <number>20</number>
+          </property>
+          <property name="rootIsDecorated">
+           <bool>false</bool>
+          </property>
+          <property name="uniformRowHeights">
+           <bool>true</bool>
+          </property>
+          <property name="sortingEnabled">
+           <bool>true</bool>
+          </property>
+          <property name="wordWrap">
+           <bool>true</bool>
+          </property>
+          <property name="headerHidden">
+           <bool>true</bool>
+          </property>
+          <attribute name="headerDefaultSectionSize">
+           <number>47</number>
+          </attribute>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+    <widget class="QGroupBox" name="groupBox">
+     <property name="sizePolicy">
+      <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
+       <horstretch>0</horstretch>
+       <verstretch>0</verstretch>
+      </sizepolicy>
+     </property>
+     <property name="autoFillBackground">
+      <bool>true</bool>
+     </property>
+     <property name="title">
+      <string>Chats</string>
+     </property>
+     <property name="alignment">
+      <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout_3">
+      <item>
+       <widget class="QTabWidget" name="chatTabs">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Expanding" vsizetype="MinimumExpanding">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>100</width>
+          <height>300</height>
+         </size>
+        </property>
+        <property name="whatsThis">
+         <string>Tabs with active chats</string>
+        </property>
+        <property name="autoFillBackground">
+         <bool>true</bool>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QTabBar::tab:selected {
   /* selected tab */
   /*background-color: rgba(255,0,0,.5);*/
 }	
@@ -176,414 +182,467 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    /* border: 1em solid #02C7CB;*/
     /*min-width: 30%;*/
 /*}*/</string>
-          </property>
-          <property name="tabPosition">
-           <enum>QTabWidget::TabPosition::South</enum>
-          </property>
-          <property name="tabShape">
-           <enum>QTabWidget::TabShape::Triangular</enum>
-          </property>
-          <property name="currentIndex">
-           <number>0</number>
-          </property>
-          <property name="documentMode">
-           <bool>true</bool>
-          </property>
-          <property name="tabsClosable">
-           <bool>true</bool>
-          </property>
-          <property name="tabBarAutoHide">
-           <bool>true</bool>
-          </property>
-          <widget class="QWidget" name="defaultcontext">
-           <property name="autoFillBackground">
-            <bool>true</bool>
-           </property>
-           <attribute name="title">
-            <string>Contact1</string>
-           </attribute>
-           <layout class="QVBoxLayout" name="verticalLayout_4">
-            <item>
-             <widget class="QWidget" name="mywidget" native="true">
-              <property name="sizePolicy">
-               <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-                <horstretch>1</horstretch>
-                <verstretch>1</verstretch>
-               </sizepolicy>
-              </property>
-              <property name="autoFillBackground">
-               <bool>true</bool>
-              </property>
-              <layout class="QVBoxLayout" name="_2" stretch="0,1">
-               <item>
-                <layout class="QHBoxLayout" name="horizontalLayout" stretch="1,1">
-                 <property name="sizeConstraint">
-                  <enum>QLayout::SizeConstraint::SetNoConstraint</enum>
+        </property>
+        <property name="tabPosition">
+         <enum>QTabWidget::TabPosition::South</enum>
+        </property>
+        <property name="tabShape">
+         <enum>QTabWidget::TabShape::Triangular</enum>
+        </property>
+        <property name="currentIndex">
+         <number>0</number>
+        </property>
+        <property name="documentMode">
+         <bool>true</bool>
+        </property>
+        <property name="tabsClosable">
+         <bool>true</bool>
+        </property>
+        <property name="tabBarAutoHide">
+         <bool>true</bool>
+        </property>
+        <widget class="QWidget" name="defaultcontext">
+         <property name="autoFillBackground">
+          <bool>true</bool>
+         </property>
+         <attribute name="title">
+          <string>Contact1</string>
+         </attribute>
+         <layout class="QVBoxLayout" name="verticalLayout_4">
+          <item>
+           <widget class="QWidget" name="mywidget" native="true">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+              <horstretch>1</horstretch>
+              <verstretch>1</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="autoFillBackground">
+             <bool>true</bool>
+            </property>
+            <layout class="QVBoxLayout" name="_2" stretch="0,1">
+             <item>
+              <layout class="QHBoxLayout" name="horizontalLayout" stretch="1,1">
+               <property name="sizeConstraint">
+                <enum>QLayout::SizeConstraint::SetNoConstraint</enum>
+               </property>
+               <item alignment="Qt::AlignmentFlag::AlignHCenter">
+                <widget class="QLabel" name="ContactName">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
                  </property>
-                 <item alignment="Qt::AlignmentFlag::AlignHCenter">
-                  <widget class="QLabel" name="ContactName">
+                 <property name="text">
+                  <string>Chat with contact A</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QLineEdit" name="search_in_chat">
+                 <property name="placeholderText">
+                  <string>Search in chat...(TODO)</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </item>
+             <item>
+              <widget class="QTabWidget" name="singlemultitab">
+               <property name="sizePolicy">
+                <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+                 <horstretch>0</horstretch>
+                 <verstretch>50</verstretch>
+                </sizepolicy>
+               </property>
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>0</height>
+                </size>
+               </property>
+               <property name="tabPosition">
+                <enum>QTabWidget::TabPosition::South</enum>
+               </property>
+               <property name="tabShape">
+                <enum>QTabWidget::TabShape::Rounded</enum>
+               </property>
+               <property name="currentIndex">
+                <number>0</number>
+               </property>
+               <widget class="QWidget" name="singleline_tab">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="autoFillBackground">
+                 <bool>true</bool>
+                </property>
+                <attribute name="title">
+                 <string>Single-line</string>
+                </attribute>
+                <layout class="QVBoxLayout" name="verticalLayout_5">
+                 <item>
+                  <widget class="QQuickWidget" name="qml_ChatLines">
                    <property name="sizePolicy">
-                    <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
+                    <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
                      <horstretch>0</horstretch>
                      <verstretch>0</verstretch>
                     </sizepolicy>
                    </property>
-                   <property name="text">
-                    <string>Chat with contact A</string>
+                   <property name="acceptDrops">
+                    <bool>false</bool>
+                   </property>
+                   <property name="statusTip">
+                    <string>chat history lines QML</string>
+                   </property>
+                   <property name="autoFillBackground">
+                    <bool>true</bool>
+                   </property>
+                   <property name="resizeMode">
+                    <enum>QQuickWidget::ResizeMode::SizeRootObjectToView</enum>
                    </property>
                   </widget>
                  </item>
                  <item>
-                  <widget class="QLineEdit" name="search_in_chat">
+                  <widget class="QLineEdit" name="chat_lineEdit">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
+                   </property>
+                   <property name="statusTip">
+                    <string>single-line message entry</string>
+                   </property>
+                   <property name="autoFillBackground">
+                    <bool>false</bool>
+                   </property>
+                   <property name="text">
+                    <string/>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
+                   </property>
                    <property name="placeholderText">
-                    <string>Search in chat...(TODO)</string>
+                    <string>single line message</string>
                    </property>
                   </widget>
                  </item>
                 </layout>
-               </item>
-               <item>
-                <widget class="QTabWidget" name="singlemultitab">
-                 <property name="sizePolicy">
-                  <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
-                   <horstretch>0</horstretch>
-                   <verstretch>50</verstretch>
-                  </sizepolicy>
-                 </property>
-                 <property name="minimumSize">
-                  <size>
-                   <width>0</width>
-                   <height>0</height>
-                  </size>
-                 </property>
-                 <property name="tabPosition">
-                  <enum>QTabWidget::TabPosition::South</enum>
-                 </property>
-                 <property name="tabShape">
-                  <enum>QTabWidget::TabShape::Rounded</enum>
-                 </property>
-                 <property name="currentIndex">
-                  <number>0</number>
-                 </property>
-                 <widget class="QWidget" name="singleline_tab">
-                  <property name="sizePolicy">
-                   <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-                    <horstretch>0</horstretch>
-                    <verstretch>0</verstretch>
-                   </sizepolicy>
-                  </property>
-                  <property name="autoFillBackground">
-                   <bool>true</bool>
-                  </property>
-                  <attribute name="title">
-                   <string>Single-line</string>
-                  </attribute>
-                  <layout class="QVBoxLayout" name="verticalLayout_5">
+               </widget>
+               <widget class="QWidget" name="multilinetab">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="autoFillBackground">
+                 <bool>true</bool>
+                </property>
+                <attribute name="title">
+                 <string>Multi-line</string>
+                </attribute>
+                <layout class="QGridLayout" name="gridLayout_2">
+                 <item row="0" column="1">
+                  <widget class="QPlainTextEdit" name="chatInput">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
+                   </property>
+                   <property name="statusTip">
+                    <string>multi-line message entry</string>
+                   </property>
+                   <property name="autoFillBackground">
+                    <bool>true</bool>
+                   </property>
+                   <property name="horizontalScrollBarPolicy">
+                    <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
+                   </property>
+                   <property name="sizeAdjustPolicy">
+                    <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustToContents</enum>
+                   </property>
+                   <property name="textInteractionFlags">
+                    <set>Qt::TextInteractionFlag::NoTextInteraction</set>
+                   </property>
+                   <property name="placeholderText">
+                    <string>multi-line message</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="0">
+                  <widget class="QPushButton" name="pushButton_2">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
+                   </property>
+                   <property name="statusTip">
+                    <string>Send message to the chat</string>
+                   </property>
+                   <property name="whatsThis">
+                    <string>button to press to send chat</string>
+                   </property>
+                   <property name="autoFillBackground">
+                    <bool>true</bool>
+                   </property>
+                   <property name="text">
+                    <string>Send!</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </widget>
+               <widget class="QWidget" name="attach_file_tab">
+                <attribute name="title">
+                 <string>Send file</string>
+                </attribute>
+                <layout class="QGridLayout" name="gridLayout_4">
+                 <item row="0" column="0">
+                  <layout class="QHBoxLayout" name="horizontalLayout_2">
                    <item>
-                    <widget class="QQuickWidget" name="qml_ChatLines">
-                     <property name="sizePolicy">
-                      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-                       <horstretch>0</horstretch>
-                       <verstretch>0</verstretch>
-                      </sizepolicy>
+                    <layout class="QFormLayout" name="formLayout">
+                     <property name="sizeConstraint">
+                      <enum>QLayout::SizeConstraint::SetDefaultConstraint</enum>
                      </property>
-                     <property name="acceptDrops">
-                      <bool>false</bool>
+                     <property name="fieldGrowthPolicy">
+                      <enum>QFormLayout::FieldGrowthPolicy::FieldsStayAtSizeHint</enum>
                      </property>
-                     <property name="statusTip">
-                      <string>chat history lines QML</string>
+                     <property name="rowWrapPolicy">
+                      <enum>QFormLayout::RowWrapPolicy::WrapAllRows</enum>
                      </property>
-                     <property name="autoFillBackground">
-                      <bool>true</bool>
+                     <property name="labelAlignment">
+                      <set>Qt::AlignmentFlag::AlignCenter</set>
                      </property>
-                     <property name="resizeMode">
-                      <enum>QQuickWidget::ResizeMode::SizeRootObjectToView</enum>
+                     <property name="formAlignment">
+                      <set>Qt::AlignmentFlag::AlignBottom|Qt::AlignmentFlag::AlignHCenter</set>
                      </property>
-                    </widget>
-                   </item>
-                   <item>
-                    <widget class="QLineEdit" name="chat_lineEdit">
-                     <property name="sizePolicy">
-                      <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
-                       <horstretch>0</horstretch>
-                       <verstretch>0</verstretch>
-                      </sizepolicy>
-                     </property>
-                     <property name="statusTip">
-                      <string>single-line message entry</string>
-                     </property>
-                     <property name="autoFillBackground">
-                      <bool>false</bool>
-                     </property>
-                     <property name="text">
-                      <string/>
-                     </property>
-                     <property name="alignment">
-                      <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
-                     </property>
-                     <property name="placeholderText">
-                      <string>single line message</string>
-                     </property>
-                    </widget>
-                   </item>
-                  </layout>
-                 </widget>
-                 <widget class="QWidget" name="multilinetab">
-                  <property name="sizePolicy">
-                   <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-                    <horstretch>0</horstretch>
-                    <verstretch>0</verstretch>
-                   </sizepolicy>
-                  </property>
-                  <property name="autoFillBackground">
-                   <bool>true</bool>
-                  </property>
-                  <attribute name="title">
-                   <string>Multi-line</string>
-                  </attribute>
-                  <layout class="QGridLayout" name="gridLayout_2">
-                   <item row="0" column="1">
-                    <widget class="QPlainTextEdit" name="chatInput">
-                     <property name="sizePolicy">
-                      <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
-                       <horstretch>0</horstretch>
-                       <verstretch>0</verstretch>
-                      </sizepolicy>
-                     </property>
-                     <property name="statusTip">
-                      <string>multi-line message entry</string>
-                     </property>
-                     <property name="autoFillBackground">
-                      <bool>true</bool>
-                     </property>
-                     <property name="horizontalScrollBarPolicy">
-                      <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
-                     </property>
-                     <property name="sizeAdjustPolicy">
-                      <enum>QAbstractScrollArea::SizeAdjustPolicy::AdjustToContents</enum>
-                     </property>
-                     <property name="textInteractionFlags">
-                      <set>Qt::TextInteractionFlag::NoTextInteraction</set>
-                     </property>
-                     <property name="placeholderText">
-                      <string>multi-line message</string>
-                     </property>
-                    </widget>
-                   </item>
-                   <item row="0" column="0">
-                    <widget class="QPushButton" name="pushButton_2">
-                     <property name="sizePolicy">
-                      <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
-                       <horstretch>0</horstretch>
-                       <verstretch>0</verstretch>
-                      </sizepolicy>
-                     </property>
-                     <property name="statusTip">
-                      <string>Send message to the chat</string>
-                     </property>
-                     <property name="whatsThis">
-                      <string>button to press to send chat</string>
-                     </property>
-                     <property name="autoFillBackground">
-                      <bool>true</bool>
-                     </property>
-                     <property name="text">
-                      <string>Send!</string>
-                     </property>
-                    </widget>
-                   </item>
-                  </layout>
-                 </widget>
-                 <widget class="QWidget" name="attach_file_tab">
-                  <attribute name="title">
-                   <string>Send file</string>
-                  </attribute>
-                  <layout class="QGridLayout" name="gridLayout_4">
-                   <item row="0" column="0">
-                    <layout class="QHBoxLayout" name="horizontalLayout_2">
-                     <item>
-                      <layout class="QFormLayout" name="formLayout">
-                       <property name="sizeConstraint">
-                        <enum>QLayout::SizeConstraint::SetDefaultConstraint</enum>
-                       </property>
-                       <property name="fieldGrowthPolicy">
-                        <enum>QFormLayout::FieldGrowthPolicy::FieldsStayAtSizeHint</enum>
-                       </property>
-                       <property name="rowWrapPolicy">
-                        <enum>QFormLayout::RowWrapPolicy::WrapAllRows</enum>
-                       </property>
-                       <property name="labelAlignment">
-                        <set>Qt::AlignmentFlag::AlignCenter</set>
-                       </property>
-                       <property name="formAlignment">
-                        <set>Qt::AlignmentFlag::AlignBottom|Qt::AlignmentFlag::AlignHCenter</set>
-                       </property>
-                       <item row="1" column="0">
-                        <widget class="QToolButton" name="send_file_button">
-                         <property name="autoFillBackground">
-                          <bool>true</bool>
-                         </property>
-                         <property name="text">
-                          <string>&amp;Send!</string>
-                         </property>
-                         <property name="icon">
-                          <iconset theme="QIcon::ThemeIcon::MailSend"/>
-                         </property>
-                         <property name="shortcut">
-                          <string>S</string>
-                         </property>
-                         <property name="autoExclusive">
-                          <bool>true</bool>
-                         </property>
-                         <property name="toolButtonStyle">
-                          <enum>Qt::ToolButtonStyle::ToolButtonTextUnderIcon</enum>
-                         </property>
-                        </widget>
-                       </item>
-                       <item row="0" column="1">
-                        <widget class="QToolButton" name="attach_file_button">
-                         <property name="autoFillBackground">
-                          <bool>true</bool>
-                         </property>
-                         <property name="text">
-                          <string>&amp;Attach file(s)</string>
-                         </property>
-                         <property name="icon">
-                          <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
-                         </property>
-                         <property name="shortcut">
-                          <string>A</string>
-                         </property>
-                        </widget>
-                       </item>
-                      </layout>
-                     </item>
-                     <item>
-                      <widget class="QListWidget" name="attached_files_QListWidget">
-                       <property name="sizePolicy">
-                        <sizepolicy hsizetype="MinimumExpanding" vsizetype="Ignored">
-                         <horstretch>0</horstretch>
-                         <verstretch>0</verstretch>
-                        </sizepolicy>
-                       </property>
-                       <property name="minimumSize">
-                        <size>
-                         <width>0</width>
-                         <height>50</height>
-                        </size>
-                       </property>
-                       <property name="focusPolicy">
-                        <enum>Qt::FocusPolicy::ClickFocus</enum>
-                       </property>
-                       <property name="acceptDrops">
-                        <bool>true</bool>
-                       </property>
+                     <item row="1" column="0">
+                      <widget class="QToolButton" name="send_file_button">
                        <property name="autoFillBackground">
                         <bool>true</bool>
                        </property>
-                       <property name="styleSheet">
-                        <string notr="true">QListWidget::item {
-   /* margin-top: 0.5em; */
-}</string>
+                       <property name="text">
+                        <string>&amp;Send!</string>
                        </property>
-                       <property name="editTriggers">
-                        <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
+                       <property name="icon">
+                        <iconset theme="QIcon::ThemeIcon::MailSend"/>
                        </property>
-                       <property name="showDropIndicator" stdset="0">
-                        <bool>false</bool>
+                       <property name="shortcut">
+                        <string>S</string>
                        </property>
-                       <property name="defaultDropAction">
-                        <enum>Qt::DropAction::ActionMask</enum>
-                       </property>
-                       <property name="alternatingRowColors">
+                       <property name="autoExclusive">
                         <bool>true</bool>
                        </property>
-                       <property name="selectionMode">
-                        <enum>QAbstractItemView::SelectionMode::NoSelection</enum>
+                       <property name="toolButtonStyle">
+                        <enum>Qt::ToolButtonStyle::ToolButtonTextUnderIcon</enum>
                        </property>
-                       <property name="selectionBehavior">
-                        <enum>QAbstractItemView::SelectionBehavior::SelectRows</enum>
-                       </property>
-                       <property name="verticalScrollMode">
-                        <enum>QAbstractItemView::ScrollMode::ScrollPerPixel</enum>
-                       </property>
-                       <property name="horizontalScrollMode">
-                        <enum>QAbstractItemView::ScrollMode::ScrollPerPixel</enum>
-                       </property>
-                       <property name="resizeMode">
-                        <enum>QListView::ResizeMode::Adjust</enum>
-                       </property>
-                       <property name="layoutMode">
-                        <enum>QListView::LayoutMode::Batched</enum>
-                       </property>
-                       <property name="viewMode">
-                        <enum>QListView::ViewMode::IconMode</enum>
-                       </property>
-                       <property name="wordWrap">
+                      </widget>
+                     </item>
+                     <item row="0" column="1">
+                      <widget class="QToolButton" name="attach_file_button">
+                       <property name="autoFillBackground">
                         <bool>true</bool>
                        </property>
-                       <property name="itemAlignment">
-                        <set>Qt::AlignmentFlag::AlignCenter</set>
+                       <property name="text">
+                        <string>&amp;Attach file(s)</string>
                        </property>
-                       <property name="sortingEnabled">
-                        <bool>true</bool>
+                       <property name="icon">
+                        <iconset theme="QIcon::ThemeIcon::DocumentOpen"/>
+                       </property>
+                       <property name="shortcut">
+                        <string>A</string>
                        </property>
                       </widget>
                      </item>
                     </layout>
                    </item>
-                  </layout>
-                 </widget>
-                 <widget class="QWidget" name="ptt_tab">
-                  <attribute name="icon">
-                   <iconset theme="QIcon::ThemeIcon::MediaRecord"/>
-                  </attribute>
-                  <attribute name="title">
-                   <string>&amp;Push to talk (voice)</string>
-                  </attribute>
-                  <layout class="QGridLayout" name="gridLayout_3">
-                   <item row="0" column="0">
-                    <widget class="QLabel" name="ptt_cancel">
-                     <property name="text">
-                      <string>**TODO**: *ToolButton to cancel in-progress recording*</string>
+                   <item>
+                    <widget class="QListWidget" name="attached_files_QListWidget">
+                     <property name="sizePolicy">
+                      <sizepolicy hsizetype="MinimumExpanding" vsizetype="Ignored">
+                       <horstretch>0</horstretch>
+                       <verstretch>0</verstretch>
+                      </sizepolicy>
                      </property>
-                     <property name="textFormat">
-                      <enum>Qt::TextFormat::MarkdownText</enum>
+                     <property name="minimumSize">
+                      <size>
+                       <width>0</width>
+                       <height>50</height>
+                      </size>
                      </property>
-                     <property name="alignment">
+                     <property name="focusPolicy">
+                      <enum>Qt::FocusPolicy::ClickFocus</enum>
+                     </property>
+                     <property name="acceptDrops">
+                      <bool>true</bool>
+                     </property>
+                     <property name="autoFillBackground">
+                      <bool>true</bool>
+                     </property>
+                     <property name="styleSheet">
+                      <string notr="true">QListWidget::item {
+   /* margin-top: 0.5em; */
+}</string>
+                     </property>
+                     <property name="editTriggers">
+                      <set>QAbstractItemView::EditTrigger::NoEditTriggers</set>
+                     </property>
+                     <property name="showDropIndicator" stdset="0">
+                      <bool>false</bool>
+                     </property>
+                     <property name="defaultDropAction">
+                      <enum>Qt::DropAction::ActionMask</enum>
+                     </property>
+                     <property name="alternatingRowColors">
+                      <bool>true</bool>
+                     </property>
+                     <property name="selectionMode">
+                      <enum>QAbstractItemView::SelectionMode::NoSelection</enum>
+                     </property>
+                     <property name="selectionBehavior">
+                      <enum>QAbstractItemView::SelectionBehavior::SelectRows</enum>
+                     </property>
+                     <property name="verticalScrollMode">
+                      <enum>QAbstractItemView::ScrollMode::ScrollPerPixel</enum>
+                     </property>
+                     <property name="horizontalScrollMode">
+                      <enum>QAbstractItemView::ScrollMode::ScrollPerPixel</enum>
+                     </property>
+                     <property name="resizeMode">
+                      <enum>QListView::ResizeMode::Adjust</enum>
+                     </property>
+                     <property name="layoutMode">
+                      <enum>QListView::LayoutMode::Batched</enum>
+                     </property>
+                     <property name="viewMode">
+                      <enum>QListView::ViewMode::IconMode</enum>
+                     </property>
+                     <property name="wordWrap">
+                      <bool>true</bool>
+                     </property>
+                     <property name="itemAlignment">
                       <set>Qt::AlignmentFlag::AlignCenter</set>
                      </property>
-                     <property name="textInteractionFlags">
-                      <set>Qt::TextInteractionFlag::NoTextInteraction</set>
+                     <property name="sortingEnabled">
+                      <bool>true</bool>
                      </property>
                     </widget>
                    </item>
-                   <item row="1" column="0">
-                    <widget class="QLabel" name="ptt_hold_space_label">
-                     <property name="text">
-                      <string>Hold space to record audio</string>
-                     </property>
-                     <property name="alignment">
-                      <set>Qt::AlignmentFlag::AlignCenter</set>
-                     </property>
-                    </widget>
-                   </item>
                   </layout>
-                 </widget>
-                </widget>
-               </item>
-              </layout>
-             </widget>
-            </item>
-           </layout>
-          </widget>
-         </widget>
-        </item>
-       </layout>
+                 </item>
+                </layout>
+               </widget>
+               <widget class="QWidget" name="ptt_tab">
+                <attribute name="icon">
+                 <iconset theme="QIcon::ThemeIcon::MediaRecord"/>
+                </attribute>
+                <attribute name="title">
+                 <string>&amp;Push to talk (voice)</string>
+                </attribute>
+                <layout class="QGridLayout" name="gridLayout_3">
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="ptt_cancel">
+                   <property name="text">
+                    <string>**TODO**: *ToolButton to cancel in-progress recording*</string>
+                   </property>
+                   <property name="textFormat">
+                    <enum>Qt::TextFormat::MarkdownText</enum>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignmentFlag::AlignCenter</set>
+                   </property>
+                   <property name="textInteractionFlags">
+                    <set>Qt::TextInteractionFlag::NoTextInteraction</set>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="ptt_hold_space_label">
+                   <property name="text">
+                    <string>Hold space to record audio</string>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignmentFlag::AlignCenter</set>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </widget>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </widget>
+   <widget class="QWidget" name="layoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>60</x>
+      <y>40</y>
+      <width>478</width>
+      <height>24</height>
+     </rect>
+    </property>
+    <layout class="QHBoxLayout" name="horizontalLayout_3">
+     <property name="spacing">
+      <number>26</number>
+     </property>
+     <item>
+      <widget class="QPushButton" name="pushButton_5">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(194, 218, 255);</string>
+       </property>
+       <property name="text">
+        <string>Testme-x</string>
+       </property>
       </widget>
-     </widget>
-    </item>
-   </layout>
+     </item>
+     <item>
+      <widget class="QPushButton" name="pushButton_3">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(194, 218, 255);</string>
+       </property>
+       <property name="text">
+        <string>New conversation-x</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="pushButton">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(194, 218, 255);</string>
+       </property>
+       <property name="text">
+        <string>Invite contact-x</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="pushButton_4">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(194, 218, 255);</string>
+       </property>
+       <property name="text">
+        <string>Accept invitation-x</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
   <widget class="QMenuBar" name="menuBar">
