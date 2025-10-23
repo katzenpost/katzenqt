@@ -3,12 +3,14 @@ from typing_extensions import Annotated
 from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict
 from qt_models import *
 from PySide6.QtQml import QQmlPropertyMap
+from PySide6.QtGui import QStandardItem
 import cbor2
 from enum import Enum
 import uuid
 import secrets
 import io
 import persistent
+import hashlib
 from base64 import b64encode, b64decode
 from typing import List
 
@@ -18,7 +20,7 @@ class GroupChatTEXT(BaseModel):
     payload: str
 
 class GroupChatPleaseAdd(BaseModel):
-    """https://katzenpost.network/docs/specs/group_chat.html"""
+    """https://katzenpost.network/docs/specs/group_chat.html - Invitation"""
     model_config = {
         'validate_assignment': True
     }
@@ -31,6 +33,19 @@ class GroupChatPleaseAdd(BaseModel):
     @classmethod
     def from_human_readable(cls, text:str) -> "GroupChatPleaseAdd":
         return cls(**cbor2.loads(b64decode(text.strip().encode()))) # TODO this can obv fail
+
+class GroupChatReplyWho(BaseModel):
+    model_config = {
+        'validate_assignment': True
+    }
+    please_adds : list[GroupChatPleaseAdd] = Field()
+    def to_cbor(self) -> bytes:
+        # TODO 
+        return cbor2.dumps(self.model_dump(exclude_none=True))
+    def membership_hash(self) -> bytes:
+        return hashlib.blake2b(self.to_cbor(), digest_size=32).digest()
+    # the conversation hash should be available
+    
 
 class GroupChatTypeEnum(Enum):
     TEXT = 0
@@ -197,6 +212,7 @@ class ConversationUIState(BaseModel):
     own_peer_bacap_uuid: uuid.UUID
     chat_lineEdit_buffer : str
     conversation_log_model: ConversationLogModel
+    contacts_standard_item : QStandardItem = Field(description="the entry in the Contacts pane for the conversation")
     chat_lines_scroll_idx : float = 0.0
     # TODO: should store scroll state of self.ui.ChatLines
     # ie self.ui.ChatLines.scrollToBottom() for default new ones

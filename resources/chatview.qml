@@ -82,6 +82,13 @@ TreeView {
        }
      }
 
+     Behavior on contentY {
+        NumberAnimation {
+	   duration: 300
+	   easing.type: Easing.InOutQuad
+	}
+     }
+
      onContentYChanged: {
         // save scroll position
         //print("onContentYChanged", contentY, bottomRow, topRow)
