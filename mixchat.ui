@@ -9,8 +9,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1223</width>
-    <height>1030</height>
+    <width>750</width>
+    <height>598</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -116,36 +116,18 @@ QTreeView::branch:open:has-children:!has-siblings {
    <property name="autoFillBackground">
     <bool>true</bool>
    </property>
-   <layout class="QGridLayout" name="gridLayout">
-    <item row="1" column="0">
+   <layout class="QGridLayout" name="gridLayout_3">
+    <item row="0" column="0">
      <widget class="QSplitter" name="splitter">
-      <property name="sizePolicy">
-       <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-        <horstretch>0</horstretch>
-        <verstretch>0</verstretch>
-       </sizepolicy>
-      </property>
-      <property name="layoutDirection">
-       <enum>Qt::LayoutDirection::LeftToRight</enum>
-      </property>
-      <property name="autoFillBackground">
-       <bool>true</bool>
-      </property>
       <property name="orientation">
        <enum>Qt::Orientation::Horizontal</enum>
       </property>
-      <property name="handleWidth">
-       <number>12</number>
-      </property>
-      <property name="childrenCollapsible">
-       <bool>true</bool>
-      </property>
-      <widget class="QWidget" name="layoutWidget">
-       <layout class="QVBoxLayout" name="verticalLayout">
-        <property name="sizeConstraint">
-         <enum>QLayout::SizeConstraint::SetMaximumSize</enum>
-        </property>
-        <item>
+      <widget class="QGroupBox" name="groupBox">
+       <property name="title">
+        <string>Conversations and contacts</string>
+       </property>
+       <layout class="QGridLayout" name="gridLayout_2">
+        <item row="0" column="0">
          <widget class="QLineEdit" name="contactFilterLineEdit">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
@@ -170,7 +152,7 @@ QTreeView::branch:open:has-children:!has-siblings {
           </property>
          </widget>
         </item>
-        <item>
+        <item row="1" column="0">
          <widget class="QTreeView" name="contacts_treeWidget">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Maximum" vsizetype="MinimumExpanding">
@@ -245,24 +227,12 @@ QTreeView::item {
         </item>
        </layout>
       </widget>
-      <widget class="QGroupBox" name="groupBox">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Expanding" vsizetype="Minimum">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="autoFillBackground">
-        <bool>true</bool>
-       </property>
+      <widget class="QGroupBox" name="groupBox_1">
        <property name="title">
-        <string>Chats</string>
+        <string>Messages</string>
        </property>
-       <property name="alignment">
-        <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
-       </property>
-       <layout class="QVBoxLayout" name="verticalLayout_3">
-        <item>
+       <layout class="QGridLayout" name="gridLayout">
+        <item row="0" column="0">
          <widget class="QTabWidget" name="chatTabs">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Expanding" vsizetype="MinimumExpanding">
@@ -318,7 +288,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
            <attribute name="title">
             <string>Contact1</string>
            </attribute>
-           <layout class="QVBoxLayout" name="verticalLayout_4">
+           <layout class="QVBoxLayout" name="verticalLayout_8">
             <item>
              <widget class="QWidget" name="mywidget" native="true">
               <property name="sizePolicy">
@@ -330,9 +300,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
               <property name="autoFillBackground">
                <bool>true</bool>
               </property>
-              <layout class="QVBoxLayout" name="_2" stretch="0,8,1">
+              <layout class="QVBoxLayout" name="_3" stretch="0,8,1">
                <item>
-                <layout class="QHBoxLayout" name="horizontalLayout" stretch="1,1">
+                <layout class="QHBoxLayout" name="horizontalLayout_3" stretch="1,1">
                  <property name="sizeConstraint">
                   <enum>QLayout::SizeConstraint::SetNoConstraint</enum>
                  </property>
@@ -401,7 +371,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <enum>QTabWidget::TabShape::Rounded</enum>
                  </property>
                  <property name="currentIndex">
-                  <number>1</number>
+                  <number>0</number>
                  </property>
                  <widget class="QWidget" name="singleline_tab">
                   <property name="sizePolicy">
@@ -416,7 +386,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <attribute name="title">
                    <string>Single-line</string>
                   </attribute>
-                  <layout class="QVBoxLayout" name="verticalLayout_5">
+                  <layout class="QVBoxLayout" name="verticalLayout_9">
                    <item>
                     <widget class="QLineEdit" name="chat_lineEdit">
                      <property name="sizePolicy">
@@ -448,11 +418,11 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <attribute name="title">
                    <string>Send file</string>
                   </attribute>
-                  <layout class="QGridLayout" name="gridLayout_4">
+                  <layout class="QGridLayout" name="gridLayout_5">
                    <item row="0" column="0">
-                    <layout class="QHBoxLayout" name="horizontalLayout_2">
+                    <layout class="QHBoxLayout" name="horizontalLayout_4">
                      <item>
-                      <layout class="QFormLayout" name="formLayout">
+                      <layout class="QFormLayout" name="formLayout_2">
                        <property name="sizeConstraint">
                         <enum>QLayout::SizeConstraint::SetDefaultConstraint</enum>
                        </property>
@@ -597,7 +567,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <attribute name="title">
                    <string>Multi-line</string>
                   </attribute>
-                  <layout class="QGridLayout" name="gridLayout_2">
+                  <layout class="QGridLayout" name="gridLayout_6">
                    <item row="0" column="1">
                     <widget class="QPlainTextEdit" name="chatInput">
                      <property name="sizePolicy">
@@ -627,7 +597,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                     </widget>
                    </item>
                    <item row="0" column="0">
-                    <widget class="QPushButton" name="pushButton_2">
+                    <widget class="QPushButton" name="pushButton_3">
                      <property name="sizePolicy">
                       <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
                        <horstretch>0</horstretch>
@@ -657,7 +627,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <attribute name="title">
                    <string>&amp;Push to talk (voice)</string>
                   </attribute>
-                  <layout class="QGridLayout" name="gridLayout_3">
+                  <layout class="QGridLayout" name="gridLayout_7">
                    <item row="0" column="0">
                     <widget class="QLabel" name="ptt_cancel">
                      <property name="text">
@@ -699,34 +669,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
       </widget>
      </widget>
     </item>
-    <item row="0" column="0">
-     <widget class="QLabel" name="mdstatus">
-      <property name="sizePolicy">
-       <sizepolicy hsizetype="Expanding" vsizetype="Maximum">
-        <horstretch>0</horstretch>
-        <verstretch>0</verstretch>
-       </sizepolicy>
-      </property>
-      <property name="text">
-       <string>## Katzen mixnet group chat</string>
-      </property>
-      <property name="textFormat">
-       <enum>Qt::TextFormat::MarkdownText</enum>
-      </property>
-      <property name="scaledContents">
-       <bool>false</bool>
-      </property>
-      <property name="wordWrap">
-       <bool>true</bool>
-      </property>
-      <property name="textInteractionFlags">
-       <set>Qt::TextInteractionFlag::NoTextInteraction</set>
-      </property>
-      <property name="buddy">
-       <cstring>mywidget</cstring>
-      </property>
-     </widget>
-    </item>
    </layout>
   </widget>
   <widget class="QMenuBar" name="menubar">
@@ -734,8 +676,8 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1223</width>
-     <height>19</height>
+     <width>750</width>
+     <height>20</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuSettings">
