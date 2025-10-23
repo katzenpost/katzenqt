@@ -599,7 +599,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <property name="title">
      <string>Settings</string>
     </property>
-    <addaction name="actionFont"/>
    </widget>
    <addaction name="menuSettings"/>
   </widget>
@@ -619,22 +618,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    <addaction name="action_accept_invitation"/>
    <addaction name="action_quit"/>
   </widget>
-  <action name="action_space">
-   <property name="text">
-    <string>space</string>
-   </property>
-   <property name="shortcut">
-    <string>Space</string>
-   </property>
-   <property name="menuRole">
-    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
-   </property>
-  </action>
-  <action name="actionFont">
-   <property name="text">
-    <string>Font</string>
-   </property>
-  </action>
   <action name="action_testme">
    <property name="text">
     <string>Testme</string>
