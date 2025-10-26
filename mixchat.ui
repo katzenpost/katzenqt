@@ -9,8 +9,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>750</width>
-    <height>598</height>
+    <width>840</width>
+    <height>576</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -117,7 +117,7 @@ QTreeView::branch:open:has-children:!has-siblings {
     <bool>true</bool>
    </property>
    <layout class="QGridLayout" name="gridLayout_3">
-    <item row="0" column="0">
+    <item row="0" column="0" colspan="2">
      <widget class="QSplitter" name="splitter">
       <property name="orientation">
        <enum>Qt::Orientation::Horizontal</enum>
@@ -676,7 +676,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>750</width>
+     <width>840</width>
      <height>20</height>
     </rect>
    </property>
@@ -685,8 +685,27 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
      <string>Settings</string>
     </property>
     <addaction name="actionSetting_1"/>
+    <addaction name="actionDisplay_language"/>
+   </widget>
+   <widget class="QMenu" name="menuMixnet_status">
+    <property name="title">
+     <string>Mixnet status</string>
+    </property>
+   </widget>
+   <widget class="QMenu" name="menuDocumentation">
+    <property name="title">
+     <string>Documentation</string>
+    </property>
+   </widget>
+   <widget class="QMenu" name="menuQuit">
+    <property name="title">
+     <string>Quit</string>
+    </property>
    </widget>
    <addaction name="menuSettings"/>
+   <addaction name="menuMixnet_status"/>
+   <addaction name="menuDocumentation"/>
+   <addaction name="menuQuit"/>
   </widget>
   <widget class="QToolBar" name="toolBar">
    <property name="sizePolicy">
@@ -817,7 +836,12 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
   </action>
   <action name="actionSetting_1">
    <property name="text">
-    <string>Setting 1</string>
+    <string>Display font</string>
+   </property>
+  </action>
+  <action name="actionDisplay_language">
+   <property name="text">
+    <string>Display language</string>
    </property>
   </action>
  </widget>
