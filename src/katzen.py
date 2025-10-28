@@ -13,7 +13,7 @@ from pathlib import Path
 import uuid
 import math
 from asyncio import ensure_future
-from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox, QFontDialog
+from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox, QFontDialog, QTextBrowser
 from PySide6.QtGui import QIcon, QPixmap, QStandardItemModel, QStandardItem, QAction, QKeySequence, QShortcut
 from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings, Signal, QThread
 from PySide6.QtMultimedia import QMediaCaptureSession, QAudioBufferInput, QAudioBufferOutput, QMediaRecorder, QAudioFormat, QAudioInput
@@ -32,6 +32,7 @@ import time
 #from ui_mixchat_chatview import Ui_ChatForm
 from qt_models import *  # qt_models.py
 from ui_mixchat import Ui_MainWindow  # ui_mixchat.py
+from ui_font_settings import Ui_Dialog # ui_font_settings.py
 from sqlmodel import select
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory
 
@@ -252,6 +253,15 @@ class MainWindow(QMainWindow):
         import pdb;pdb.set_trace()
         pass
 
+    def font_settings_dialog(self):
+        if not getattr(self, 'font_settings_qdialog', None):
+            q = QDialog()
+            u = Ui_Dialog()
+            u.setupUi(q)
+            self.font_settings_qdialog = q # avoid it going out of scope
+        self.font_settings_qdialog.show()
+        #font_example()
+
     @async_cb
     async def testme(self):
         logger.info("testing")
@@ -339,7 +349,7 @@ class MainWindow(QMainWindow):
         #self.keyRelease.triggered.connect(lambda: print("key up"))
 
         # item delegates define custom looks for view items
-
+        self.ui.action_display_font.triggered.connect(self.font_settings_dialog)
         self.ui.action_testme.triggered.connect(self.testme)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
