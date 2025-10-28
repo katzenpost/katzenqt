@@ -223,14 +223,15 @@ class ConversationUIState(BaseModel):
     # (projected) ConversationLog.conversation_order of first message the user
     # hasn't "read" yet - it doesn't have to exist in ConversationLog yet.
 
-    def qml_ctx(self, rootObject:QObject|None) -> QQmlPropertyMap:
+    def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
         props = QQmlPropertyMap(rootObject)
         props.insert({
+            **settings,
             "chatTreeViewModel": self.conversation_log_model,
             "conversation_scroll": self.chat_lines_scroll_idx,
             "first_unread": self.first_unread,
             "chat_text_size": 11, # governs text size of chat messages
-            "contact_name_text_size": 11, # governs text size of contact names
+            "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
         })
         return props
 

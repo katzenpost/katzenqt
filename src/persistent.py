@@ -74,6 +74,11 @@ def id_field(table_name: str):
         sa_column_kwargs={"server_default": sequence.next_value()},
     )
 
+class AppSetting(SQLModel, table=True):
+    id: str = Field(primary_key=True)  # name of the setting
+    type: str = Field(nullable=False)  # "str" or "int", I guess
+    value: str = Field(nullable=True)  # value or NULL
+
 class MixWAL(SQLModel, table=True):
     """
     Stores WriteChannelReply from ThinClient.write_channel_message

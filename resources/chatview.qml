@@ -191,7 +191,8 @@ TreeView {
             text: (
               model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "    " : "")
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
-	    font.pointSize: (ctx.contact_name_text_size ? ctx.contact_name_text_size : 20)
+	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
+	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 16)
 	    color: (model.network_status > 0 ? "red" : "black")
           }
 
@@ -217,7 +218,6 @@ TreeView {
             readOnly: true
             wrapMode: Text.Wrap
 	    // hovered: when mouse is over
-	    font.pointSize: (ctx.chat_text_size ? ctx.chat_text_size : 11)
             //Layout.fillWidth: parent
             //property alias maxWidth: "chatTreeView"
             width: parent.width - contact_name.width
@@ -228,7 +228,8 @@ TreeView {
             //selectByMouse: true
             text: model.display
             // this needs to be bigger
-            font.family: "Serif"
+	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
+	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
 	    background: Rectangle {
 	      color: hovered ? "#eeeeff" : "white"
 	    }

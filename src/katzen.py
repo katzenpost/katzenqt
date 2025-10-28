@@ -13,7 +13,7 @@ from pathlib import Path
 import uuid
 import math
 from asyncio import ensure_future
-from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox, QFontDialog, QTextBrowser
+from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox, QFontDialog, QTextBrowser, QToolButton
 from PySide6.QtGui import QIcon, QPixmap, QStandardItemModel, QStandardItem, QAction, QKeySequence, QShortcut
 from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings, Signal, QThread
 from PySide6.QtMultimedia import QMediaCaptureSession, QAudioBufferInput, QAudioBufferOutput, QMediaRecorder, QAudioFormat, QAudioInput
@@ -32,7 +32,7 @@ import time
 #from ui_mixchat_chatview import Ui_ChatForm
 from qt_models import *  # qt_models.py
 from ui_mixchat import Ui_MainWindow  # ui_mixchat.py
-from ui_font_settings import Ui_Dialog # ui_font_settings.py
+from ui_font_settings import Ui_FontSettingsDialog # ui_font_settings.py
 from sqlmodel import select
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory
 
@@ -45,14 +45,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
-
-def font_example():
-    font, ok = QFontDialog.getFont()
-    if ok:
-        # font.family()
-        # font.pointSize()
-        # Text { font.family: ..  font.pointSize: .. }
-        pass
 
 class AsyncioThread(threading.Thread):
     def run(self):
@@ -254,13 +246,45 @@ class MainWindow(QMainWindow):
         pass
 
     def font_settings_dialog(self):
+        def font_example(qtoolbtn):
+            ok, font = QFontDialog.getFont() # returns a QFont
+            if not ok:
+                return
+            qtoolbtn.setText(f"{font.family()} {font.pointSize()}")
+            option = qtoolbtn.objectName().replace("_toolButton", "")
+            new = {
+              f"{option}.font.family": font.family(),
+              f"{option}.font.pointSize": font.pointSize(),
+            }
+            self.settings = {**self.settings, **new}
+            with persistent.Session(persistent._engine_sync) as sess:
+                for n,v in new.items():
+                  if not (ex := sess.get(persistent.AppSetting, n)):
+                      ex = persistent.AppSetting(id=n)
+                  ex.type = 'int' if isinstance(v,int) else 'str'
+                  ex.value = v
+                  sess.add(ex)
+                sess.commit()
+            # In theory we could now redraw the conversation QML, but we don't have
+            # a way to trigger a full redraw. We should have something similar to
+            # "on another conversation selected", but which we could force-redraw with.
+
         if not getattr(self, 'font_settings_qdialog', None):
             q = QDialog()
-            u = Ui_Dialog()
+            u = Ui_FontSettingsDialog()
             u.setupUi(q)
             self.font_settings_qdialog = q # avoid it going out of scope
+            for el in q.children():
+                if not isinstance(el, QToolButton):
+                    continue
+                def stupid_scoping(x):
+                    return lambda: font_example(x)
+                el.clicked.connect(stupid_scoping(el))
+                # restore font choice from DB, if any:
+                which = el.objectName().replace("_toolButton","")
+                if old_text := (self.settings.get(f"{which}.font.family","") + " " + str(self.settings.get(f"{which}.font.pointSize",""))).strip():
+                    el.setText(old_text)
         self.font_settings_qdialog.show()
-        #font_example()
 
     @async_cb
     async def testme(self):
@@ -438,7 +462,7 @@ class MainWindow(QMainWindow):
         while True:
             (conversation_id, redraw_only) = await self.iothread.run_in_io(network.conversation_update_queue.get())
             while conversation_id not in self.conversation_state_by_id:
-                print('conversation_id',conversation_id,'not in conversation_state_by_id yet')
+                logger.debug(f"conversation_id {conversation_id} not in conversation_state_by_id yet")
                 await asyncio.sleep(1)  # encountered a race here once, where the UI hadn't loaded. not sure if still there.
             convo_state = self.conversation_state_by_id[conversation_id]
             if redraw_only:
@@ -454,7 +478,7 @@ class MainWindow(QMainWindow):
                 convo_state.chat_lines_scroll_idx = 1.0
                 root = self.ui.qml_ChatLines.rootObject()
                 await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
-                root.setProperty("ctx", convo_state.qml_ctx(root))
+                root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
                 #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
                 #print(xx)
                 #import pdb;pdb.set_trace()
@@ -668,7 +692,7 @@ class MainWindow(QMainWindow):
             # >>> rctx.setContextProperties([PySide6.QtQml.QQmlContext.PropertyPair(name="ctx", value=1)])
 
             #import pdb;pdb.set_trace()
-            props = convo_state.qml_ctx(root)
+            props = convo_state.qml_ctx(root, settings=self.settings)
             root.setProperty("ctx", props)
             #convo_state = self.convo_state()
             # backend.set_convo_model_and_scroll()
@@ -676,7 +700,7 @@ class MainWindow(QMainWindow):
             #vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
             #print('set first restored scroll to', convo_state.chat_lines_scroll_idx, vscrollbar.property("position"))
         else:
-            props = convo_state.qml_ctx(None)
+            props = convo_state.qml_ctx(None, settings=self.settings)
             print("root context", self.ui.qml_ChatLines.rootContext())
             self.ui.qml_ChatLines.setInitialProperties({
                 "ctx": props,
@@ -684,7 +708,7 @@ class MainWindow(QMainWindow):
             self.ui.qml_ChatLines.setSource("resources/chatview.qml")
             self.app.processEvents()  # wait for .rootObject() to be created
             root = self.ui.qml_ChatLines.rootObject()
-            root.setProperty("ctx", convo_state.qml_ctx(root))
+            root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
             print("init first_unread", self.ui.qml_ChatLines.rootObject().property("ctx").value("first_unread"))
 
             #self.ui.qml_ChatLines.rootObject().setProperty("ctx", props)
@@ -1067,11 +1091,20 @@ async def main(window: MainWindow):
     #window.ui.mdstatus.setText("# HEI")
     contacts : QTreeView = window.ui.contacts_treeWidget
 
-    # populate contacts from persistent.py:
+    # populate setting and contacts from persistent.py:
+    window.settings: dict[str, str|int|None] = dict()
     async with persistent.asession() as session:
+        settings = await session.exec(select(persistent.AppSetting))
+        for setting in settings:
+            parsed = None
+            if setting.type == 'str':
+                parsed = setting.value
+            elif setting.type == 'int':
+                parsed = int(setting.value)
+            window.settings[setting.id] = parsed
         a = await session.exec(
             select(persistent.Conversation)
-        )
+        ) # TODO sometimes this doesn't work when the network asyncio is also just getting started.
         for convo in a:
             await add_conversation(window, convo)
 

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>Dialog</class>
- <widget class="QDialog" name="Dialog">
+ <class>FontSettingsDialog</class>
+ <widget class="QDialog" name="FontSettingsDialog">
   <property name="geometry">
    <rect>
     <x>0</x>
@@ -53,42 +53,42 @@
         <number>10</number>
        </property>
        <item row="0" column="0">
-        <widget class="QLabel" name="label_2">
+        <widget class="QLabel" name="contactName_label">
          <property name="text">
           <string>Contact name</string>
          </property>
         </widget>
        </item>
        <item row="0" column="1">
-        <widget class="QToolButton" name="toolButton">
+        <widget class="QToolButton" name="contactName_toolButton">
          <property name="text">
           <string>Change font...</string>
          </property>
         </widget>
        </item>
        <item row="1" column="0">
-        <widget class="QLabel" name="label_3">
+        <widget class="QLabel" name="messageText_label">
          <property name="text">
           <string>Message text</string>
          </property>
         </widget>
        </item>
        <item row="1" column="1">
-        <widget class="QToolButton" name="toolButton_2">
+        <widget class="QToolButton" name="messageText_toolButton">
          <property name="text">
           <string>Change font...</string>
          </property>
         </widget>
        </item>
        <item row="2" column="0">
-        <widget class="QLabel" name="label_4">
+        <widget class="QLabel" name="everythingElse_label">
          <property name="text">
           <string>Everything else</string>
          </property>
         </widget>
        </item>
        <item row="2" column="1">
-        <widget class="QToolButton" name="toolButton_3">
+        <widget class="QToolButton" name="everythingElse_toolButton">
          <property name="text">
           <string>Change font...</string>
          </property>
@@ -115,7 +115,7 @@
   <connection>
    <sender>buttonBox</sender>
    <signal>accepted()</signal>
-   <receiver>Dialog</receiver>
+   <receiver>FontSettingsDialog</receiver>
    <slot>accept()</slot>
    <hints>
     <hint type="sourcelabel">
@@ -131,7 +131,7 @@
   <connection>
    <sender>buttonBox</sender>
    <signal>rejected()</signal>
-   <receiver>Dialog</receiver>
+   <receiver>FontSettingsDialog</receiver>
    <slot>reject()</slot>
    <hints>
     <hint type="sourcelabel">
