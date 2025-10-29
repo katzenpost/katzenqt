@@ -1093,8 +1093,8 @@ async def main(window: MainWindow):
 
     # populate setting and contacts from persistent.py:
     window.settings: dict[str, str|int|None] = dict()
-    async with persistent.asession() as session:
-        settings = await session.exec(select(persistent.AppSetting))
+    with persistent.Session(persistent._engine_sync) as sess:
+        settings = sess.exec(select(persistent.AppSetting))
         for setting in settings:
             parsed = None
             if setting.type == 'str':
@@ -1102,7 +1102,7 @@ async def main(window: MainWindow):
             elif setting.type == 'int':
                 parsed = int(setting.value)
             window.settings[setting.id] = parsed
-        a = await session.exec(
+        a = sess.exec(
             select(persistent.Conversation)
         ) # TODO sometimes this doesn't work when the network asyncio is also just getting started.
         for convo in a:
