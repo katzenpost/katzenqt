@@ -9,13 +9,13 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1003</width>
-    <height>937</height>
+    <width>859</width>
+    <height>809</height>
    </rect>
   </property>
   <property name="sizePolicy">
    <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
-    <horstretch>0</horstretch>
+    <horstretch>7</horstretch>
     <verstretch>0</verstretch>
    </sizepolicy>
   </property>
@@ -32,6 +32,11 @@
    <string notr="true">QLineEdit:focus {
   /* override background on focused input to make it abundantly clear where the cursor is */
   background: rgb(173, 213, 251) !important;
+}
+
+QToolBar :hover {
+   /* active item in the toolbar */
+   background-color: #8effc3 !important;
 }
 
 QTreeView {
@@ -116,9 +121,14 @@ QTreeView::branch:open:has-children:!has-siblings {
    <property name="autoFillBackground">
     <bool>true</bool>
    </property>
-   <layout class="QGridLayout" name="gridLayout_3">
+   <layout class="QGridLayout" name="gridLayout_4">
     <item row="0" column="0">
      <widget class="QSplitter" name="splitter">
+      <property name="font">
+       <font>
+        <pointsize>14</pointsize>
+       </font>
+      </property>
       <property name="orientation">
        <enum>Qt::Orientation::Horizontal</enum>
       </property>
@@ -324,22 +334,76 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
               <property name="autoFillBackground">
                <bool>true</bool>
               </property>
-              <layout class="QVBoxLayout" name="_3" stretch="0,8,0">
-               <item>
-                <layout class="QHBoxLayout" name="horizontalLayout_3" stretch="1,1">
-                 <property name="sizeConstraint">
-                  <enum>QLayout::SizeConstraint::SetNoConstraint</enum>
+              <layout class="QGridLayout" name="gridLayout_3">
+               <item row="0" column="0">
+                <widget class="QLabel" name="ContactName">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
                  </property>
-                 <item alignment="Qt::AlignmentFlag::AlignHCenter">
-                  <widget class="QLabel" name="ContactName">
-                   <property name="sizePolicy">
-                    <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
-                     <horstretch>0</horstretch>
-                     <verstretch>0</verstretch>
-                    </sizepolicy>
+                 <property name="font">
+                  <font>
+                   <pointsize>12</pointsize>
+                   <bold>true</bold>
+                  </font>
+                 </property>
+                 <property name="text">
+                  <string>You have no conversations yet. Click &quot;New conversation&quot; to get started.</string>
+                 </property>
+                 <property name="scaledContents">
+                  <bool>false</bool>
+                 </property>
+                 <property name="alignment">
+                  <set>Qt::AlignmentFlag::AlignCenter</set>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                 <property name="margin">
+                  <number>10</number>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <layout class="QHBoxLayout" name="horizontalLayout">
+                 <property name="spacing">
+                  <number>80</number>
+                 </property>
+                 <item>
+                  <widget class="QToolButton" name="invite_contact_toolButton">
+                   <property name="font">
+                    <font>
+                     <bold>true</bold>
+                    </font>
+                   </property>
+                   <property name="styleSheet">
+                    <string notr="true">
+QToolButton:hover:!pressed
+{
+  background-color: #8effc3
+}
+
+QToolButton {
+    background-color: #d2ecf8;
+}</string>
                    </property>
                    <property name="text">
-                    <string>Chat with contact A</string>
+                    <string>  Invite a contact</string>
+                   </property>
+                   <property name="icon">
+                    <iconset>
+                     <normaloff>resources/invite.png</normaloff>resources/invite.png</iconset>
+                   </property>
+                   <property name="iconSize">
+                    <size>
+                     <width>25</width>
+                     <height>25</height>
+                    </size>
+                   </property>
+                   <property name="toolButtonStyle">
+                    <enum>Qt::ToolButtonStyle::ToolButtonTextBesideIcon</enum>
                    </property>
                   </widget>
                  </item>
@@ -352,7 +416,14 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                  </item>
                 </layout>
                </item>
-               <item>
+               <item row="2" column="0">
+                <layout class="QHBoxLayout" name="horizontalLayout_3">
+                 <property name="sizeConstraint">
+                  <enum>QLayout::SizeConstraint::SetNoConstraint</enum>
+                 </property>
+                </layout>
+               </item>
+               <item row="3" column="0">
                 <widget class="QQuickWidget" name="qml_ChatLines">
                  <property name="sizePolicy">
                   <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
@@ -374,7 +445,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                  </property>
                 </widget>
                </item>
-               <item>
+               <item row="4" column="0">
                 <widget class="QTabWidget" name="singlemultitab">
                  <property name="enabled">
                   <bool>true</bool>
@@ -881,6 +952,12 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   </property>
                   <attribute name="title">
                    <string>Single-line</string>
+                  </attribute>
+                  <attribute name="toolTip">
+                   <string>Type a message in a single-line input field. The message length can be longer than what is visble.</string>
+                  </attribute>
+                  <attribute name="whatsThis">
+                   <string>gggggg</string>
                   </attribute>
                   <layout class="QVBoxLayout" name="verticalLayout_9">
                    <item>
@@ -1391,6 +1468,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <attribute name="title">
                    <string>Send file</string>
                   </attribute>
+                  <attribute name="toolTip">
+                   <string>Send a file to the current conversation.</string>
+                  </attribute>
                   <layout class="QGridLayout" name="gridLayout_5">
                    <item row="0" column="0">
                     <layout class="QHBoxLayout" name="horizontalLayout_4">
@@ -1549,6 +1629,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <attribute name="title">
                    <string>Multi-line</string>
                   </attribute>
+                  <attribute name="toolTip">
+                   <string>Type a message in a multiline entry field for easier editing.</string>
+                  </attribute>
                   <layout class="QGridLayout" name="gridLayout_6">
                    <item row="0" column="1">
                     <widget class="QPlainTextEdit" name="chatInput">
@@ -1618,6 +1701,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                   <attribute name="title">
                    <string>&amp;Push to talk (voice)</string>
                   </attribute>
+                  <attribute name="toolTip">
+                   <string>Send a voice message to the current conversation.</string>
+                  </attribute>
                   <layout class="QGridLayout" name="gridLayout_7">
                    <item row="0" column="0">
                     <widget class="QLabel" name="ptt_cancel">
@@ -1670,7 +1756,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1003</width>
+     <width>859</width>
      <height>20</height>
     </rect>
    </property>
@@ -1689,11 +1775,17 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <addaction name="action_theme"/>
    </widget>
    <widget class="QMenu" name="menuMixnetStatus">
+    <property name="enabled">
+     <bool>false</bool>
+    </property>
     <property name="title">
      <string>Mixnet status</string>
     </property>
    </widget>
    <widget class="QMenu" name="menuAbout">
+    <property name="enabled">
+     <bool>false</bool>
+    </property>
     <property name="title">
      <string>About</string>
     </property>
@@ -2229,7 +2321,6 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <bool>false</bool>
    </attribute>
    <addaction name="action_new_conversation"/>
-   <addaction name="action_invite_contact"/>
    <addaction name="action_accept_invitation"/>
    <addaction name="actionDocumentation"/>
    <addaction name="action_quit"/>
@@ -2357,18 +2448,10 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
    </property>
   </action>
-  <action name="action_space">
-   <property name="text">
-    <string>space</string>
-   </property>
-   <property name="shortcut">
-    <string>Space</string>
-   </property>
-   <property name="menuRole">
-    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
-   </property>
-  </action>
   <action name="action_display_font">
+   <property name="enabled">
+    <bool>true</bool>
+   </property>
    <property name="icon">
     <iconset>
      <normaloff>fugue-icons-3.5.6/icons/edit-small-caps.png</normaloff>fugue-icons-3.5.6/icons/edit-small-caps.png</iconset>
@@ -2378,6 +2461,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    </property>
   </action>
   <action name="action_display_language">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
    <property name="icon">
     <iconset>
      <normaloff>fugue-icons-3.5.6/icons/edit-language.png</normaloff>fugue-icons-3.5.6/icons/edit-language.png</iconset>
@@ -2390,6 +2476,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    </property>
   </action>
   <action name="action_theme">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
    <property name="icon">
     <iconset>
      <normaloff>fugue-icons-3.5.6/icons/contrast.png</normaloff>fugue-icons-3.5.6/icons/contrast.png</iconset>
@@ -2399,6 +2488,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
    </property>
   </action>
   <action name="actionDocumentation">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
    <property name="icon">
     <iconset>
      <normaloff>resources/information.png</normaloff>resources/information.png</iconset>
@@ -2421,6 +2513,17 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
     <enum>QAction::MenuRole::NoRole</enum>
    </property>
   </action>
+  <action name="action_space">
+   <property name="text">
+    <string>space</string>
+   </property>
+   <property name="shortcut">
+    <string>Space</string>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
+   </property>
+  </action>
  </widget>
  <customwidgets>
   <customwidget>
@@ -2432,7 +2535,24 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
  <resources>
   <include location="resources/resources.qrc"/>
  </resources>
- <connections/>
+ <connections>
+  <connection>
+   <sender>invite_contact_toolButton</sender>
+   <signal>clicked()</signal>
+   <receiver>action_invite_contact</receiver>
+   <slot>trigger()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>518</x>
+     <y>152</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
  <designerdata>
   <property name="gridDeltaX">
    <number>10</number>
