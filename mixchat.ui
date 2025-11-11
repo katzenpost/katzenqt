@@ -9,8 +9,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>859</width>
-    <height>809</height>
+    <width>668</width>
+    <height>592</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -148,6 +148,9 @@ QTreeView::branch:open:has-children:!has-siblings {
          <bold>true</bold>
         </font>
        </property>
+       <property name="whatsThis">
+        <string>TODO-convosandcontacts</string>
+       </property>
        <property name="title">
         <string>Conversations and contacts</string>
        </property>
@@ -258,6 +261,9 @@ QTreeView::item {
          <pointsize>11</pointsize>
          <bold>true</bold>
         </font>
+       </property>
+       <property name="whatsThis">
+        <string>TODO-messages</string>
        </property>
        <property name="title">
         <string>Messages</string>
@@ -847,6 +853,9 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                      <bold>true</bold>
                     </font>
                    </property>
+                   <property name="toolTip">
+                    <string>Generate an invitation code for this conversation</string>
+                   </property>
                    <property name="styleSheet">
                     <string notr="true">
 QToolButton:hover:!pressed
@@ -878,6 +887,12 @@ QToolButton {
                  </item>
                  <item>
                   <widget class="QLineEdit" name="search_in_chat">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
+                   <property name="toolTip">
+                    <string>Search the messages for keywords</string>
+                   </property>
                    <property name="placeholderText">
                     <string>Search in chat...(TODO)</string>
                    </property>
@@ -1401,10 +1416,7 @@ QToolButton {
                    <string>Single-line</string>
                   </attribute>
                   <attribute name="toolTip">
-                   <string>Type a message in a single-line input field. The message length can be longer than what is visble.</string>
-                  </attribute>
-                  <attribute name="whatsThis">
-                   <string>gggggg</string>
+                   <string>Type a message in a single-line input field. The message length can be longer than what is visible.</string>
                   </attribute>
                   <layout class="QVBoxLayout" name="verticalLayout_9">
                    <item>
@@ -1897,7 +1909,7 @@ QToolButton {
                       <set>Qt::AlignmentFlag::AlignLeading|Qt::AlignmentFlag::AlignLeft|Qt::AlignmentFlag::AlignVCenter</set>
                      </property>
                      <property name="placeholderText">
-                      <string>single line message</string>
+                      <string>Single-line message</string>
                      </property>
                     </widget>
                    </item>
@@ -1916,7 +1928,7 @@ QToolButton {
                    <string>Send file</string>
                   </attribute>
                   <attribute name="toolTip">
-                   <string>Send a file to the current conversation.</string>
+                   <string>Send a file to contacts in this conversation</string>
                   </attribute>
                   <layout class="QGridLayout" name="gridLayout_5">
                    <item row="0" column="0">
@@ -1943,6 +1955,11 @@ QToolButton {
                          <property name="enabled">
                           <bool>false</bool>
                          </property>
+                         <property name="font">
+                          <font>
+                           <pointsize>10</pointsize>
+                          </font>
+                         </property>
                          <property name="autoFillBackground">
                           <bool>true</bool>
                          </property>
@@ -1967,6 +1984,11 @@ QToolButton {
                         <widget class="QToolButton" name="attach_file_button">
                          <property name="enabled">
                           <bool>false</bool>
+                         </property>
+                         <property name="font">
+                          <font>
+                           <pointsize>10</pointsize>
+                          </font>
                          </property>
                          <property name="autoFillBackground">
                           <bool>true</bool>
@@ -2077,7 +2099,7 @@ QToolButton {
                    <string>Multi-line</string>
                   </attribute>
                   <attribute name="toolTip">
-                   <string>Type a message in a multiline entry field for easier editing.</string>
+                   <string>Type a message in a multi-line entry field for easier editing</string>
                   </attribute>
                   <layout class="QGridLayout" name="gridLayout_6">
                    <item row="0" column="1">
@@ -2092,7 +2114,7 @@ QToolButton {
                       </sizepolicy>
                      </property>
                      <property name="statusTip">
-                      <string>multi-line message entry</string>
+                      <string>Multi-line message entry</string>
                      </property>
                      <property name="autoFillBackground">
                       <bool>true</bool>
@@ -2107,7 +2129,7 @@ QToolButton {
                       <set>Qt::TextInteractionFlag::NoTextInteraction</set>
                      </property>
                      <property name="placeholderText">
-                      <string>multi-line message</string>
+                      <string>Multi-line message</string>
                      </property>
                     </widget>
                    </item>
@@ -2122,11 +2144,16 @@ QToolButton {
                        <verstretch>0</verstretch>
                       </sizepolicy>
                      </property>
+                     <property name="font">
+                      <font>
+                       <pointsize>10</pointsize>
+                      </font>
+                     </property>
                      <property name="statusTip">
                       <string>Send message to the chat</string>
                      </property>
                      <property name="whatsThis">
-                      <string>button to press to send chat</string>
+                      <string/>
                      </property>
                      <property name="autoFillBackground">
                       <bool>true</bool>
@@ -2149,7 +2176,7 @@ QToolButton {
                    <string>&amp;Push to talk (voice)</string>
                   </attribute>
                   <attribute name="toolTip">
-                   <string>Send a voice message to the current conversation.</string>
+                   <string>Send a voice message to the current conversation</string>
                   </attribute>
                   <layout class="QGridLayout" name="gridLayout_7">
                    <item row="0" column="0">
@@ -2174,7 +2201,7 @@ QToolButton {
                       <bool>false</bool>
                      </property>
                      <property name="text">
-                      <string>Hold space to record audio</string>
+                      <string>Hold space bar to record audio.</string>
                      </property>
                      <property name="alignment">
                       <set>Qt::AlignmentFlag::AlignCenter</set>
@@ -2225,7 +2252,7 @@ QToolButton {
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>859</width>
+     <width>668</width>
      <height>20</height>
     </rect>
    </property>
@@ -2765,6 +2792,9 @@ QToolButton {
    <property name="windowTitle">
     <string>toolBar</string>
    </property>
+   <property name="whatsThis">
+    <string/>
+   </property>
    <property name="autoFillBackground">
     <bool>true</bool>
    </property>
@@ -2808,7 +2838,7 @@ QToolButton {
     <string> Testme</string>
    </property>
    <property name="toolTip">
-    <string>Accept invitation received from contact</string>
+    <string>I am going away</string>
    </property>
    <property name="statusTip">
     <string>Accept invitation received from contact</string>
@@ -2833,6 +2863,9 @@ QToolButton {
    </property>
    <property name="statusTip">
     <string>Accept invitation received from contact</string>
+   </property>
+   <property name="whatsThis">
+    <string>TODO-acceptinvitation</string>
    </property>
    <property name="font">
     <font>
@@ -2887,6 +2920,9 @@ QToolButton {
    <property name="statusTip">
     <string>Quit the application</string>
    </property>
+   <property name="whatsThis">
+    <string>TODO-quit</string>
+   </property>
    <property name="font">
     <font>
      <bold>true</bold>
@@ -2906,6 +2942,9 @@ QToolButton {
    </property>
    <property name="iconText">
     <string> New conversation   </string>
+   </property>
+   <property name="whatsThis">
+    <string>TODO-newconversation</string>
    </property>
    <property name="font">
     <font>
@@ -2927,6 +2966,9 @@ QToolButton {
    </property>
    <property name="text">
     <string>Display font</string>
+   </property>
+   <property name="whatsThis">
+    <string/>
    </property>
   </action>
   <action name="action_display_language">
@@ -2972,6 +3014,9 @@ QToolButton {
    </property>
    <property name="toolTip">
     <string>Quick help for users</string>
+   </property>
+   <property name="whatsThis">
+    <string>TODO-documentation</string>
    </property>
    <property name="font">
     <font>

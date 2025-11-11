@@ -746,7 +746,7 @@ class MainWindow(QMainWindow):
         conversation_name , ok = QInputDialog.getText(
             self,
             "New conversation",
-            "Choose conversation name:",
+            "Choose conversation title:",
         )
         if not ok: return
         # TODO this crap out while something is awaiting the write_channel:
@@ -862,7 +862,7 @@ class MainWindow(QMainWindow):
         invite_string , ok = QInputDialog.getText(
             self,
             "Accept invitation",
-            "Copy-paste the invite you received:",
+            "Enter an invitation you received:",
         )
         if not ok:
             return
@@ -877,7 +877,7 @@ class MainWindow(QMainWindow):
 
         # Now we need to parse it, validate the cap,
         #   and confirm with the user that they like the display name
-        dlg = QMessageBox.critical(self, f"TODO ask", f"is this name ok? {please_add.display_name}")
+        dlg = QMessageBox.critical(self, f"TODO ask", f"Is this name OK? {please_add.display_name}")
 
         convo = self.convo_state()
         from sqlmodel import select
