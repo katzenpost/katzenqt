@@ -192,7 +192,7 @@ TreeView {
               model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "    " : "")
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
-	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 16)
+	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)
 	    color: (model.network_status > 0 ? "red" : "black")
           }
 
@@ -227,7 +227,6 @@ TreeView {
             //textInteractionFlags: TextSelectableByMouse
             //selectByMouse: true
             text: model.display
-            // this needs to be bigger
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
 	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
 	    background: Rectangle {
