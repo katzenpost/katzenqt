@@ -772,7 +772,7 @@ class MainWindow(QMainWindow):
             conversation=convo,
             conversation_peer=own_peer,
             conversation_order=0,
-            payload=b"hello " + own_peer.name.encode(),
+            payload=b"Your name in this conversation is " + own_peer.name.encode(),
         )
         async with persistent.asession() as sess:
             sess.add(wcapwal)
