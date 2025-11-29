@@ -37,3 +37,14 @@ sequenceDiagram
     Bob->>+Bob: Poll the second VoucherSeq box until Alice replies
     VoucherSeq->>+Bob: VoucherReply
 ```
+
+## Self-authenticating BACAP payload
+The first message sent (The VoucherPayload) is authenticated in the following manner:
+- The VoucherPayload is computed (first).
+- A cryptographic hash of the VoucherPayload is computed. This hash **is** the *Voucher**.
+- The **Voucher** is then used to derive a BACAP read/write capability set.
+- The VoucherPayload is uploaded to the sequence described by the capability (at index 0).
+- Anyone who intercepts the **Voucher** can read **and** write the sequence.
+- But: Since the **Voucher** is a hash over the VoucherPayload, writing the sequence with anything but the VoucherPayload will be detectable by the recipient.
+- This means that the contents *cannot* be undetectably be modified by the interceptor.
+
