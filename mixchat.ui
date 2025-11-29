@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+﻿<?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
  <class>MainWindow</class>
  <widget class="QMainWindow" name="MainWindow">
@@ -31,7 +31,7 @@
   <property name="styleSheet">
    <string notr="true">QLineEdit:focus {
   /* override background on focused input to make it abundantly clear where the cursor is */
-  background: rgb(173, 213, 251) !important;
+  background: rgb(173, 213, 251) !important; /* bg of the selected input boxes */
 }
 
 QToolBar :hover {
@@ -40,7 +40,7 @@ QToolBar :hover {
 }
 
 QTreeView {
-    show-decoration-selected: 1;
+    show-decoration-selected: 1; /* adds top and bottom stripe at left of contacts */
 }
 
 QTreeView::item {
@@ -50,26 +50,28 @@ QTreeView::item {
 
 QTreeView *::item:hover {
 /*    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #e7effd, stop: 1 #cbdaf1);
-    border: 1px solid #bfcde4;*/
+    border: 1px solid #bfcde4;*/ /* ? */
 }
-
 QTreeView::item:selected {
-    border: 1px solid #567dbc;
+    border: 1px solid #567dbc; /* thin border, indented for contacts */
 }
 
 QTreeView::item:selected:active{
- /*   background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6ea1f1, stop: 1 #567dbc);*/
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6ea1f1, stop: 1 #567dbc);
 }
 
 QTreeView::item:selected:!active {
  /*   background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6b9be8, stop: 1 #577fbf);*/
 }
+
+/* important */
+
 QTreeView::branch {
-/*        background: palette(base);
-        border: 1px solid black;*/
+        /* background: palette(base);
+        border: 1px solid black; */ /* has something to do with controlling outer indent on contacts */
 }
 QTreeView::branch * {
-/*       border: 2px solid red;*/
+/*       border: 2px solid red;*/  /* ? */
 }
 
 /*
@@ -111,6 +113,8 @@ QTreeView::branch:open:has-children:!has-siblings {
   <property name="dockOptions">
    <set>QMainWindow::DockOption::AllowTabbedDocks|QMainWindow::DockOption::AnimatedDocks</set>
   </property>
+
+
   <widget class="QWidget" name="centralwidget">
    <property name="sizePolicy">
     <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
@@ -181,6 +185,10 @@ QTreeView::branch:open:has-children:!has-siblings {
          </widget>
         </item>
         <item row="1" column="0">
+
+
+
+
          <widget class="QTreeView" name="contacts_treeWidget">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
@@ -190,7 +198,7 @@ QTreeView::branch:open:has-children:!has-siblings {
           </property>
           <property name="font">
            <font>
-            <pointsize>13</pointsize>
+            <pointsize>13</pointsize> /* font size in tree */
            </font>
           </property>
           <property name="styleSheet">
@@ -198,12 +206,13 @@ QTreeView::branch:open:has-children:!has-siblings {
       background-color: #2ABf9E;
        /* qlineargradient(spread:reflect, x1:0.5, y1:0.5, x2:0.5, y2:1, stop:0.497436 rgba(42, 191, 158, 234), stop:0.882051 rgba(255, 255, 255, 208));*/
 }
+
 QTreeView::item {
     height: 1.6em;
     margin-top: 0.2em;
     margin-bottom: 0.2em;
     padding-left: 1em; padding-right: 1em;
-    background-color: qlineargradient(spread:reflect, x1:0.5, y1:0.5, x2:0.5, y2:1, stop:0.497436 rgba(216, 216, 216, 234), stop:0.882051 rgba(255, 255, 255, 208));
+    background-color: qlineargradient(spread:reflect, x1:0.5, y1:0.5, x2:0.5, y2:1, stop:0.497436 rgba(216, 216, 216, 234), stop:0.882051 rgba(255, 255, 255, 208)); /* bg of an item without focus */
 
     /*margin-left: 1em; margin-right: 1em;*/
     qproperty-alignment: AlignCenter;
@@ -255,6 +264,11 @@ QTreeView::item {
         </item>
        </layout>
       </widget>
+
+
+
+
+
       <widget class="QGroupBox" name="groupBox_1">
        <property name="font">
         <font>
