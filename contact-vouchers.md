@@ -19,9 +19,12 @@ This design mitigates two potential problem with the former way of doing it:
 
 ```mermaid
 sequenceDiagram
+    actor Bob
+    participant VoucherSeq@{ "type" : "database" }
+    actor Alice
     Bob->>+Bob: Generates VoucherKeypair. <br>Generates BACAP write/read cap.<br>VoucherPayload := read cap || VoucherPublicKey<br>Voucher := Hash(VoucherPayload)
     Bob->>+VoucherSeq: Publish: VoucherPayload
-    Bob->>+Alice: [Sent OOB] Voucher
+    Bob-->>Alice: [Sent OOB] Voucher
 
 
     Alice->>+Alice: Derive VoucherSeq read/write caps from Voucher
