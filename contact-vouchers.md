@@ -22,22 +22,22 @@ sequenceDiagram
     actor Bob
     participant VoucherSeq@{ "type" : "database" }
     actor Alice
-    Bob->>+Bob: Generates VoucherKeypair. <br>Generates BACAP write/read cap.<br>VoucherPayload := read cap || VoucherPublicKey<br>Voucher := Hash(VoucherPayload)
+    Bob-->>+Bob: Generates VoucherKeypair. <br>Generates BACAP write/read cap.<br>VoucherPayload := read cap || VoucherPublicKey<br>Voucher := Hash(VoucherPayload)
     Bob->>+VoucherSeq: Publish: VoucherPayload
     Bob-->>Alice: [Sent OOB] Voucher
 
 
-    Alice->>+Alice: Derive VoucherSeq read/write caps from Voucher
+    Alice-->>+Alice: Derive VoucherSeq read/write caps from Voucher.<br>Read the first box in VoucherSeq
     VoucherSeq->>+Alice: VoucherPayload
  
-    Alice->>+Alice: VoucherReply := Encrypt(WhoReply + VoucherSalt)<br> to VoucherPublicKey<br><br>Derive Bob's ReadCap from<br>VoucherPayload + VoucherSalt
+    Alice-->>+Alice: VoucherReply := Encrypt(WhoReply + VoucherSalt)<br> to VoucherPublicKey<br><br>Derive Bob's ReadCap from<br>VoucherPayload + VoucherSalt
     par_over All-Or-Nothing using COPY service
     Alice->>+VoucherSeq: VoucherReply
     Alice->>+Alice's Group: WhoReply<br>(incl. Bob's new ReadCap)
     Alice->>+VoucherSeq: Tombstone VoucherPayload<br>to prevent Voucher reuse
     end
 
-    Bob->>+Bob: Poll the second VoucherSeq box until Alice replies
+    Bob-->>+Bob: Poll the second VoucherSeq box until Alice replies
     VoucherSeq->>+Bob: VoucherReply
 ```
 
