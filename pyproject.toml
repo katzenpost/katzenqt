@@ -6,7 +6,7 @@ readme = "README.md"
 classifiers = [
             "Programming Language :: Python :: 3.12"
 ]
-
+license = { text = "Public Domain" }
 requires-python = ">=3.11"
 dynamic = ["version"]
 
