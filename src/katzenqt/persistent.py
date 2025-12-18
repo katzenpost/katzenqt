@@ -24,7 +24,7 @@ import os
 
 
 
-_alembic_cfg = alembic.config.Config(Path(__file__).parent.parent / "alembic.ini")
+_alembic_cfg = alembic.config.Config(Path(__file__).parent.parent / "config" / "alembic.ini")
 
 xdg_data_home = (Path().home()/".local"/"share")
 xdg_data_home.mkdir(parents=True,exist_ok=True)
