@@ -1,11 +1,11 @@
 __pycache__/
+build/
 *.sqlite3
 *.egg-info/
-src/resources_rc.py
-src/ui_mixchat.py
-src/ui_font_settings.py
 \#*#
 .#*
 *~
 *.swp
 *.log
+.python-version
+.venv
