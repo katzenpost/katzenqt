@@ -135,7 +135,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     while final_task not in done:
         send_message_task = create_task(send_message())
         resend_tasks.add(send_message_task)
-        done, _ = await asyncio.wait([final_task], timeout=10 + random.random()*4)
+        done, _ = await asyncio.wait([final_task], timeout=5 + random.random()*10)
 
     for unneeded in resend_tasks:
         unneeded.cancel()
@@ -204,12 +204,30 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     message_ids = []
     reply_tasks = []
     ack_tasks = []
+    not_found = {chan: asyncio.Event() for chan in chans}
+    async def never_found():
+        for chan in chans:
+            await not_found[chan].wait()
     async def retry_fetch(chan_id: int):
         for i in range(attempts):
+            if not_found[chan_id].is_set():
+                logger.warning(f"not_found for {chan_id} so skipping resend of read")
+                await asyncio.sleep(10)
+                continue
             message_id = secrets.token_bytes(16)
+            # TODO: clean up these queues
             __on_message_queues[message_id] = reply_queue  # populated by global on_message_reply
             connection.ack_queues[message_id] = asyncio.Queue(1)
-            ack_task = create_task(connection.ack_queues[message_id].get())
+            async def handle_ack(chan_id):
+                """TODO: we could stop sending to this chan_id if we get a 'BoxNotFound' since that will never succeed."""
+                ack = await connection.ack_queues[message_id].get()
+                if ack['error_code'] != 0:
+                    logger.critical(f"channel {chan_id} ack: {ack}")
+                    if ack['error_code'] == 22:  # box not found; at the moment that means further reads will never work.
+                        not_found[chan_id].set()
+                else:
+                    logger.critical(f"DEBUG READ: got {ack}")
+            ack_task = create_task(handle_ack(chan_id))
             ack_tasks.append(ack_task)
             # IFF we get an ack, and the error code in the ACK says "box not found" then we need to abort reading from this
             # reply index.
@@ -231,13 +249,15 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # OR: another thread finished handling this
 
     done, not_done = await asyncio.wait(
-        [reply_task] + [create_task(retry_fetch(chan_id)) for chan_id in chans],
+        [reply_task, create_task(never_found())] + [create_task(retry_fetch(chan_id)) for chan_id in chans],
         timeout=10*attempts,
         return_when=asyncio.FIRST_COMPLETED
     )
 
     for task in not_done:
         task.cancel()
+    for ack_task in ack_tasks:
+        ack_task.cancel()
     for chan_id in chans:
         create_task(connection.close_channel(chan_id))
 
