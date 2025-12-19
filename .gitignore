@@ -10,3 +10,6 @@ build/
 .python-version
 .venv
 katzenpost/
+.system-setup.stamp
+.coverage
+.hypothesis/
