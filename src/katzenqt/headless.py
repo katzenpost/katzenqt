@@ -1,7 +1,7 @@
 """
 TODO: Run the client without the Qt GUI
 """
-import network
+from . import network
 import asyncio
 import traceback
 

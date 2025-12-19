@@ -37,7 +37,7 @@ release = [
 ]
 
 [project.scripts]
-katzen = "katzen:cli"
+katzenqt = "katzenqt:cli"
 
 [project.urls]
 Homepage = "https://katzenpost.network/"

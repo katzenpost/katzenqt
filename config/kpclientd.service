@@ -1,0 +1,45 @@
+# Put this file in ~/.config/systemd/user/kpclientd.service
+#
+# Per-user Katzenpost thin client daemon for use as a systemd user service.
+#
+# Requirements:
+#   - kpclientd installed at: %h/.local/bin/kpclientd
+#   - config at:              %h/.local/katzenpost/client2.toml
+#
+# Install like so:
+#
+#   install -d -m 0700 ~/.config/systemd/user
+#   install -m 0644 kpclientd.service ~/.config/systemd/user/kpclientd.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kpclientd
+#
+# This user service has user logging as well which can be viewed with
+# journalctl:
+#
+#   journalctl --user -u kpclientd -f
+#
+# It is possible but not required to have the process stick around by enabling
+# lingering:
+#
+#   loginctl enable-linger user
+#
+# IMPORTANT:
+#   This daemon listens on an abstract AF_UNIX socket ("@katzenpost") and
+#   conflcits with the system service. Pick one or reconfigure your client to
+#   have a different socket.
+
+[Unit]
+Description=Katzenpost thin client daemon (user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+ExecStart=%h/.local/bin/kpclientd -c %h/.local/katzenpost/client2.toml
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
