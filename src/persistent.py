@@ -108,8 +108,8 @@ class MixWAL(SQLModel, table=True):
     destination: bytes  # courier this was supposed to be sent to
     encrypted_payload: bytes     # send_message_payload
     envelope_descriptor : bytes #  envelope private key
-    current_message_index: bytes
-    next_message_index: bytes
+    current_message_index: bytes = Field(min_length=104, max_length=104)
+    next_message_index: bytes = Field(min_length=104, max_length=104)
     is_read : bool
     @classmethod
     def get_new(cls, except_these:"Set[uuid.UUID]"):
