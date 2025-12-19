@@ -1,5 +1,7 @@
-Network = "tcp"
-Address = "localhost:64331"
+#Network = "tcp"
+#Address = "localhost:64331"
+Network = "unix"
+Address = "@katzenpost"
 
 [SphinxGeometry]
   PacketLength = 3082
@@ -17,11 +19,13 @@ Address = "localhost:64331"
   NIKEName = "x25519"
   KEMName = ""
 
+
 [PigeonholeGeometry]
-  BoxPayloadLength = 1556
-  CourierQueryReadLength = 360
+  MaxPlaintextPayloadLength = 1553
+  CourierQueryReadLength = 359
   CourierQueryWriteLength = 2000
-  CourierQueryReplyReadLength = 1701
+  CourierQueryReplyReadLength = 1698
   CourierQueryReplyWriteLength = 50
   NIKEName = "CTIDH1024-X25519"
   SignatureSchemeName = "Ed25519"
+

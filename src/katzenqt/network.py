@@ -13,9 +13,9 @@ import logging
 import asyncio
 import traceback
 from asyncio import ensure_future
-from katzen_util import create_task
+from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
-import persistent
+from . import persistent
 
 logger = logging.getLogger("katzen.network")
 
@@ -672,7 +672,7 @@ async def on_message_sent(reply):
 # from katzenpost_thinclient import ThinClient, Config
 async def reconnect() -> ThinClient:
     cfg = ThinClientConfig(
-        "thinclient.toml",
+        "config/thinclient.toml",
         on_message_reply=on_message_reply,
         on_message_sent=on_message_sent,
         on_connection_status=on_connection_status,

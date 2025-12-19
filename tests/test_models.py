@@ -1,10 +1,11 @@
-import models
 import uuid
-from hypothesis import given, example
+
 import hypothesis
 import hypothesis.strategies as st
 import pydantic
-import persistent
+from hypothesis import example, given
+
+from katzenqt import models, persistent
 
 test_please_add_deserialize = given(st.text(), st.binary())
 @test_please_add_deserialize
