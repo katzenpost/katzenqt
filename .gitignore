@@ -9,3 +9,5 @@ src/ui_font_settings.py
 *~
 *.swp
 *.log
+.python-version
+.venv

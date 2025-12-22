@@ -31,10 +31,8 @@ release = [
     "nuitka~=2.7.12"
 ]
 
-#[project.urls]
-# Documentation =
-# Source = =
-# Tracker =
+[project.scripts]
+katzen = "katzen:cli"
 
 #[tool.pyside6-project]
 #files = ["main.py", "main_window.py"]
