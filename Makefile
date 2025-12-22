@@ -52,7 +52,7 @@ default_pip_setup: system-setup setup-pip setup test kpclientd install-kpclient 
 
 help:
 	@printf '%s\n' \
-		'If in doubt, run `make deps` and `make run`' \
+		'If in doubt, run `make deps` and `source ~/.profile` and `make run`' \
 		'' \
 		'Usage:' \
 		'  make deps                  Install system packages and venv' \
