@@ -173,6 +173,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
           - Remove the MixWAL entry to have a new envelope be made
     """
     assert mw.is_read
+    assert len(rcw_read_cap) == 168
     bacap_uuid = mw.bacap_stream
 
     # we should check that mw.destination exists:
@@ -190,6 +191,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     chan_tasks = []
     chans = []
     for reply_index in [0,1]:
+        assert len(mw.current_message_index) == 104
         chan_task = create_task(connection.resume_read_channel_query(
             read_cap=rcw_read_cap, next_message_index=mw.current_message_index,
             envelope_descriptor=mw.envelope_descriptor,
