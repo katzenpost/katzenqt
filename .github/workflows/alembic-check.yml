@@ -28,4 +28,5 @@ jobs:
 
       - name: Run alembic check
         run: |
+          uv run alembic -c config/alembic.ini upgrade head
           uv run alembic -c config/alembic.ini check
