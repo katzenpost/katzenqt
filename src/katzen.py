@@ -840,7 +840,7 @@ class MainWindow(QMainWindow):
         # We still don't have theirs.
         print()
         print(intro.to_human_readable())
-        dlg = QMessageBox.critical(self, f"Invite code: {APP_NAME}", f"Here is your invitation. Pass it to your new contact:\n{intro.to_human_readable()}")
+        dlg = QMessageBox.information(self, f"Invite code: {APP_NAME}", f"Here is your invitation. Pass it to your new contact:\n{intro.to_human_readable()}")
         print()
         # TODO instead of print, we want a GUI element diplaying this, with a button to copy to
         # clipboard
