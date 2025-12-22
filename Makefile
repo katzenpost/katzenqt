@@ -23,17 +23,35 @@ GEN_UI_FONT := src/katzenqt/ui_font_settings.py
 PYPROJECT := pyproject.toml
 UV_LOCK := $(wildcard uv.lock)
 
-.PHONY: help \
+# make alembic-revision-uv ALEMBIC_MSG='some changeset details'
+ALEMBIC_MSG ?=
+ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
+
+.PHONY: default default_uv_setup default_pip_setup help \
 	system-setup install-debian-packages install-uv clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
 	run test status code-generator regen-code \
-	run-uv run-pip test-uv test-pip alembic-check-uv alembic-check-pip \
+	run-uv run-pip test-uv test-pip \
+	alembic-check-uv alembic-check-pip \
+	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd install-kpclient kpclientd.service \
-	clean clean-venv
+	clean clean-venv deps
+
+deps: default_uv_setup
+
+default: default_uv_setup
+
+default_uv_setup: system-setup setup-uv setup test kpclientd install-kpclient \
+		kpclientd.service status
+default_pip_setup: system-setup setup-pip setup test kpclientd install-kpclient \
+		kpclientd.service status
 
 help:
 	@printf '%s\n' \
+		'If in doubt, run `make deps` and `make run`' \
+		''\
 		'Usage:' \
+		'  make deps                  Install system packages and venv' \
 		'  make system-setup          Install system packages (Debian/Ubuntu) and uv (via pipx)' \
 		'  make setup-uv              Create or update .venv using uv' \
 		'  make setup-pip             Create or update .venv using pip/venv' \
@@ -47,6 +65,10 @@ help:
 		'Code generation:' \
 		'  make code-generator        Generate Qt code only if needed (missing or inputs changed)' \
 		'  make regen-code            Force regenerate Qt code' \
+		'  make alembic-check-uv      Alembic check using uv'\
+		'  make alembic-check-pip     Alembic check using pip'\
+		'  make alembic-revision-uv   Alembic revision using uv (requires ALEMBIC_MSG="msg")'\
+		'  make alembic-revision-pip  Alembic revision using pip (requires ALEMBIC_MSG="msg")'\
 		'' \
 		'Katzenpost / kpclientd:' \
 		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
@@ -211,11 +233,25 @@ alembic-check-uv:
 	@uv run alembic -c config/alembic.ini check
 
 alembic-check-pip:
-	@$(VENV)/bin/alemic -c config/alembic.ini check
+	@$(VENV)/bin/alembic -c config/alembic.ini check
+
+alembic-revision-uv:
+	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
+		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
+		exit 2; \
+	fi
+	@uv run alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+
+alembic-revision-pip:
+	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
+		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
+		exit 2; \
+	fi
+	@$(VENV)/bin/alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
 
 clean-venv:
-	@rm -rf $(VENV)
+	@rm -r $(VENV)
 
 clean:
-	@rm -rf $(VENV)
+	@rm -r $(VENV)
 	@rm $(SYSTEM_STAMP)
