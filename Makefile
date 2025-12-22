@@ -40,7 +40,7 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	run-uv run-pip test-uv test-pip \
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
-	katzenpost-update kpclientd install-kpclient kpclientd.service \
+	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
 	clean clean-venv deps
 
 deps: default_uv_setup
@@ -78,7 +78,8 @@ help:
 		'' \
 		'Katzenpost / kpclientd:' \
 		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
-		'  make kpclientd             Build kpclientd from ./katzenpost' \
+		'  make kpclientd             Build kpclientd (golang native build; falls back to podman' \
+		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
 		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
 		'' \
@@ -223,7 +224,14 @@ katzenpost-update: $(KATZENPOST_DIR)
 	@cd $(KATZENPOST_DIR) && git pull --ff-only >/dev/null 2>&1
 
 kpclientd: $(KATZENPOST_DIR)
-	@cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1
+	@set +e; \
+	cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1; \
+	rc=$$?; \
+	set -e; \
+	if [[ $$rc -ne 0 ]]; then \
+		printf '%s\n' "warn: native kpclientd build failed; falling back to kpclientd-podman"; \
+		$(MAKE) kpclientd-podman; \
+	fi
 
 kpclientd-podman:
 	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=debian \
