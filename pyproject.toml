@@ -68,10 +68,6 @@ include-package-data = true
 [tool.setuptools.package-data]
 katzen=["configs/*", "resources/*"]
 
-[tool.alembic]
-script_location = "%(here)s/migrations"
-prepend_sys_path = ["."]
-
 [tool.flit.module]
 name = "katzenqt"
 
