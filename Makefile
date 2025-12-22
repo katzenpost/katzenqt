@@ -98,7 +98,7 @@ clean-system-stamp:
 
 install-debian-packages:
 	@sudo apt install -y \
-		libxcb-cursor0 libegl1 \
+		libxcb-cursor0 libegl1 libpulse0 \
 		build-essential pkg-config \
 		golang-go git \
 		pipx python3 python3-venv >/dev/null
@@ -228,6 +228,8 @@ kpclientd: $(KATZENPOST_DIR)
 
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
+	@install -m 0666 config/client2.toml ~/.local/katzenpost/client2.toml
+	@install -m 0666 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
