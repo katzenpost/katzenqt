@@ -1,5 +1,5 @@
 [project]
-name = "katzen"
+name = "katzenqt"
 authors = []
 description = "Mixnet chat application"
 readme = "README.md"
@@ -8,24 +8,29 @@ classifiers = [
 ]
 license = { text = "Public Domain" }
 requires-python = ">=3.11"
-dynamic = ["version"]
+version = "0.0.1"
 
 dependencies = [
 "pynacl==1.6.0",
 "pyside6~=6.9.3",
-# sqlalchemy
 "sqlmodel>=0",
 "alembic~=1.16.5",
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
-"cbor2~=5.6.5", # kp_thinclient pins old minor version
-"katzenpost_thinclient~=0.0.10"
+"cbor2~=5.6.5",
+"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@487d2b8e46440abba5bb4db95a168353de2d45d9"
 ]
 
 [dependency-groups]
 dev = [
+    "pip",
     "pytest>=8.4.0",
     "hypothesis>=6.135.17",
+    "mypy>=1.18.2",
+    "pytest>=9.0.1",
+    "pytest-cov>=7.0.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.14.6",
 ]
 release = [
     "nuitka~=2.7.12"
@@ -48,3 +53,40 @@ prepend_sys_path = ["."]
 Homepage = "https://katzenpost.network/"
 Repository = "https://github.com/katzenpost/katzenqt"
 Issues = "https://github.com/katzenpost/katzenqt/issues"
+
+[build-system]
+requires = ["flit_core>=3.9"]
+build-backend = "flit_core.buildapi"
+
+[tool.setuptools.packages.find]
+where = ["src/katzenqt/"]
+exclude = [".gitignore"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+katzen=['configs/*']
+
+[tool.alembic]
+script_location = "%(here)s/migrations"
+prepend_sys_path = ["."]
+
+[tool.flit.module]
+name = "katzenqt"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "--cov=src/katzenqt --cov-report=term-missing --doctest-modules -vv"
+testpaths = [
+    "src",
+    "tests",
+]
+
+[tool.ruff]
+line-length = 78
+target-version = "py312"
