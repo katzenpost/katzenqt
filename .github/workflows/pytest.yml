@@ -23,6 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          make deps
           uv sync --all-extras --dev
 
       - name: Run tests
