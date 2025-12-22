@@ -227,6 +227,7 @@ kpclientd: $(KATZENPOST_DIR)
 
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
+	@install -d -m 0700 ~/.local/katzenpost/
 	@install -m 0666 config/client2.toml ~/.local/katzenpost/client2.toml
 	@install -m 0666 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
