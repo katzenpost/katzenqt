@@ -127,7 +127,7 @@ class MixWAL(SQLModel, table=True):
 class ReadCapWAL(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)
     write_cap_id : uuid.UUID | None = Field(foreign_key="writecapwal.id", index=True)
-    read_cap: bytes | None = Field(None, min_length=168, max_length=168)
+    read_cap: bytes | None = Field(None, min_length=136, max_length=136)
     next_index: bytes | None = Field(None, min_length=104, max_length=104)
     @classmethod
     async def get_by_bacap_stream(cls, stream: uuid.UUID):
@@ -135,7 +135,7 @@ class ReadCapWAL(SQLModel, table=True):
 
 class WriteCapWAL(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)
-    write_cap: bytes | None = Field(None, min_length=136, max_length=136)
+    write_cap: bytes | None = Field(None, min_length=168, max_length=168)
     next_index: bytes | None = Field(None, min_length=104, max_length=104)
     @classmethod
     def get_by_bacap_uuid(cls, uuid):

@@ -16,7 +16,7 @@ test_please_add_deserialize = given(st.text(), st.binary())
 @example(
     # The test always failed when commented parts were varied together.
     orig_display_name="hello",  # or any other generated value
-    orig_read_cap=b"a"*168,  # or any other generated value
+    orig_read_cap=b"a"*136,  # or any other generated value
 ).via("discovered failure")
 def test_please_add_deserialize(orig_display_name, orig_read_cap):
     try:

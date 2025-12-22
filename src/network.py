@@ -173,7 +173,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
           - Remove the MixWAL entry to have a new envelope be made
     """
     assert mw.is_read
-    assert len(rcw_read_cap) == 168
+    assert len(rcw_read_cap) == 136
     bacap_uuid = mw.bacap_stream
 
     # we should check that mw.destination exists:
@@ -396,6 +396,8 @@ async def drain_mixwal2(connection: ThinClient):
                     draining_right_now.add(mw.bacap_stream)
                     __resend_queue.add(mw.bacap_stream)
                     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+                    if len(rcw.read_cap) != 136:
+                      raise Exception(f"ReadCapWAL.rcw from persistent has incorrect size: len(rcw.read_cap) {repr(rcw)} (from {mw.bacap_stream}")
                     read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
                     read_task.add_done_callback(lambda task: readables_to_mixwal_event.set())
                 else:

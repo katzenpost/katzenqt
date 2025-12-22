@@ -25,7 +25,7 @@ class GroupChatPleaseAdd(BaseModel):
         'validate_assignment': True
     }
     display_name: str = Field(min_length=1, max_length=30)
-    read_cap: bytes # TODO length should be 168 or whatever
+    read_cap: bytes = Field(min_length=136, max_length=136)
     def to_cbor(self) -> bytes:
         return cbor2.dumps(self.model_dump(exclude_none=True))
     def to_human_readable(self) -> str:
