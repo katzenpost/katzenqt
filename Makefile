@@ -27,7 +27,7 @@ UV_LOCK := $(wildcard uv.lock)
 	system-setup install-debian-packages install-uv clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
 	run test status code-generator regen-code \
-	run-uv run-pip test-uv test-pip \
+	run-uv run-pip test-uv test-pip alembic-check-uv alembic-check-pip \
 	katzenpost-update kpclientd install-kpclient kpclientd.service \
 	clean clean-venv
 
@@ -206,6 +206,12 @@ kpclientd.service: install-kpclient
 	@install -m 0644 config/kpclientd.service ~/.config/systemd/user/kpclientd.service
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now kpclientd >/dev/null 2>&1
+
+alembic-check-uv:
+	@uv run alembic -c config/alembic.ini check
+
+alembic-check-pip:
+	@$(VENV)/bin/alemic -c config/alembic.ini check
 
 clean-venv:
 	@rm -rf $(VENV)
