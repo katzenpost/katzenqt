@@ -5,6 +5,10 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 MAKEFLAGS += --no-print-directory
 
+# override uv with:
+#   make setup-uv UV=$$HOME/.local/bin/uv
+UV ?= uv
+
 VENV := .venv
 BACKEND_UV := $(VENV)/.backend-uv
 BACKEND_PIP := $(VENV)/.backend-pip
@@ -49,7 +53,7 @@ default_pip_setup: system-setup setup-pip setup test kpclientd install-kpclient 
 help:
 	@printf '%s\n' \
 		'If in doubt, run `make deps` and `make run`' \
-		''\
+		'' \
 		'Usage:' \
 		'  make deps                  Install system packages and venv' \
 		'  make system-setup          Install system packages (Debian/Ubuntu) and uv (via pipx)' \
@@ -125,11 +129,12 @@ $(STAMP_UV): system-setup $(PYPROJECT) $(UV_LOCK)
 		exit 1; \
 	fi
 	@mkdir -p $(VENV)
+	@command -v "$(UV)" >/dev/null 2>&1 || { printf '%s\n' "error: uv not found (set UV=/path/to/uv)"; exit 1; }
 	@if [[ ! -f "$(VENV)/pyvenv.cfg" ]]; then \
-		uv venv >/dev/null 2>&1; \
+		$(UV) venv >/dev/null 2>&1; \
 	fi
-	@uv pip install . >/dev/null 2>&1
-	@uv pip install -U pytest >/dev/null 2>&1
+	@$(UV) pip install . >/dev/null 2>&1
+	@$(UV) pip install -U pytest >/dev/null 2>&1
 	@touch $(BACKEND_UV)
 	@touch $(STAMP_UV)
 
@@ -189,7 +194,7 @@ run: setup code-generator
 	fi
 
 run-uv: $(STAMP_UV) code-generator
-	@uv run katzenqt
+	@$(UV) run katzenqt
 
 run-pip: $(STAMP_PIP) code-generator
 	@$(VENV)/bin/katzenqt
@@ -205,7 +210,7 @@ test: setup
 	fi
 
 test-uv: $(STAMP_UV)
-	@uv run pytest
+	@$(UV) run pytest
 
 test-pip: $(STAMP_PIP)
 	@$(VENV)/bin/pytest
@@ -230,7 +235,7 @@ kpclientd.service: install-kpclient
 	@systemctl --user enable --now kpclientd >/dev/null 2>&1
 
 alembic-check-uv:
-	@uv run alembic -c config/alembic.ini check
+	@$(UV) run alembic -c config/alembic.ini check
 
 alembic-check-pip:
 	@$(VENV)/bin/alembic -c config/alembic.ini check
@@ -240,7 +245,7 @@ alembic-revision-uv:
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@uv run alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(UV) run alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
 
 alembic-revision-pip:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
@@ -255,3 +260,4 @@ clean-venv:
 clean:
 	@rm -r $(VENV)
 	@rm $(SYSTEM_STAMP)
+
