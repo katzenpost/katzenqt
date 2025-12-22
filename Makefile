@@ -225,6 +225,11 @@ katzenpost-update: $(KATZENPOST_DIR)
 kpclientd: $(KATZENPOST_DIR)
 	@cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1
 
+kpclientd-podman:
+	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=debian \
+        voting_mixnet/kpclientd.debian && \
+        mv voting_mixnet/kpclientd.debian ../cmd/kpclientd/
+
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
