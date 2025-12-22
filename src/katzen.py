@@ -802,10 +802,13 @@ class MainWindow(QMainWindow):
 
         The BACAP stuff we will get from the thin client.
         """
-        print("invite contact pressed TODO")
 
         # Retrieve our read cap for selected convo:
-        convo = self.convo_state()
+        try:
+          convo = self.convo_state()
+        except Exception:
+            dlg = QMessageBox.critical(self, f"ERROR: {APP_NAME}", "Can't invite when no conversation is selected. Click 'Create conversation' to create a conversation.")
+            return
         import sqlalchemy as sa
         async with persistent.asession() as sess:
             # TODO this can definitely be rewritten as a more graceful JOIN:
@@ -837,6 +840,7 @@ class MainWindow(QMainWindow):
         # We still don't have theirs.
         print()
         print(intro.to_human_readable())
+        dlg = QMessageBox.critical(self, f"Invite code: {APP_NAME}", f"Here is your invitation. Pass it to your new contact:\n{intro.to_human_readable()}")
         print()
         # TODO instead of print, we want a GUI element diplaying this, with a button to copy to
         # clipboard
