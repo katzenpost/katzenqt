@@ -130,10 +130,9 @@ $(STAMP_UV): system-setup $(PYPROJECT) $(UV_LOCK)
 		printf '%s\n' "error: .venv is pip-managed; run 'make clean-venv' first"; \
 		exit 1; \
 	fi
-	@mkdir -p $(VENV)
 	@command -v "$(UV)" >/dev/null 2>&1 || { printf '%s\n' "error: uv not found (set UV=/path/to/uv)"; exit 1; }
 	@if [[ ! -f "$(VENV)/pyvenv.cfg" ]]; then \
-		$(UV) venv >/dev/null 2>&1; \
+		$(UV) venv "$(VENV)"; \
 	fi
 	@$(UV) pip install . >/dev/null 2>&1
 	@$(UV) pip install -U pytest >/dev/null 2>&1
