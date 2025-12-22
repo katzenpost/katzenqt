@@ -1,0 +1,31 @@
+name: pytest (uv)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest (uv)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: |
+          make deps
+          uv sync --all-extras --dev
+
+      - name: Run tests
+        run: |
+          uv run pytest

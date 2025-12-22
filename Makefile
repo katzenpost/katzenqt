@@ -5,6 +5,12 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 MAKEFLAGS += --no-print-directory
 
+export PATH:=$(PATH):~/.local/bin/
+export UV_VENV_CLEAR:=1
+# override uv with:
+#   make setup-uv UV=$$HOME/.local/bin/uv
+UV ?= uv
+
 VENV := .venv
 BACKEND_UV := $(VENV)/.backend-uv
 BACKEND_PIP := $(VENV)/.backend-pip
@@ -23,17 +29,35 @@ GEN_UI_FONT := src/katzenqt/ui_font_settings.py
 PYPROJECT := pyproject.toml
 UV_LOCK := $(wildcard uv.lock)
 
-.PHONY: help \
+# make alembic-revision-uv ALEMBIC_MSG='some changeset details'
+ALEMBIC_MSG ?=
+ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
+
+.PHONY: default default_uv_setup default_pip_setup help \
 	system-setup install-debian-packages install-uv clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
 	run test status code-generator regen-code \
 	run-uv run-pip test-uv test-pip \
+	alembic-check-uv alembic-check-pip \
+	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd install-kpclient kpclientd.service \
-	clean clean-venv
+	clean clean-venv deps
+
+deps: default_uv_setup
+
+default: default_uv_setup
+
+default_uv_setup: system-setup setup-uv setup test kpclientd install-kpclient \
+		kpclientd.service status
+default_pip_setup: system-setup setup-pip setup test kpclientd install-kpclient \
+		kpclientd.service status
 
 help:
 	@printf '%s\n' \
+		'If in doubt, run `make deps` and `source ~/.profile` and `make run`' \
+		'' \
 		'Usage:' \
+		'  make deps                  Install system packages and venv' \
 		'  make system-setup          Install system packages (Debian/Ubuntu) and uv (via pipx)' \
 		'  make setup-uv              Create or update .venv using uv' \
 		'  make setup-pip             Create or update .venv using pip/venv' \
@@ -47,6 +71,10 @@ help:
 		'Code generation:' \
 		'  make code-generator        Generate Qt code only if needed (missing or inputs changed)' \
 		'  make regen-code            Force regenerate Qt code' \
+		'  make alembic-check-uv      Alembic check using uv'\
+		'  make alembic-check-pip     Alembic check using pip'\
+		'  make alembic-revision-uv   Alembic revision using uv (requires ALEMBIC_MSG="msg")'\
+		'  make alembic-revision-pip  Alembic revision using pip (requires ALEMBIC_MSG="msg")'\
 		'' \
 		'Katzenpost / kpclientd:' \
 		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
@@ -70,9 +98,9 @@ clean-system-stamp:
 
 install-debian-packages:
 	@sudo apt install -y \
-		libxcb-cursor0 \
+		libxcb-cursor0 libegl1 libpulse0 \
 		build-essential pkg-config \
-		golang-go git \
+		golang-go git podman \
 		pipx python3 python3-venv >/dev/null
 
 install-uv:
@@ -102,12 +130,12 @@ $(STAMP_UV): system-setup $(PYPROJECT) $(UV_LOCK)
 		printf '%s\n' "error: .venv is pip-managed; run 'make clean-venv' first"; \
 		exit 1; \
 	fi
-	@mkdir -p $(VENV)
+	@command -v "$(UV)" >/dev/null 2>&1 || { printf '%s\n' "error: uv not found (set UV=/path/to/uv)"; exit 1; }
 	@if [[ ! -f "$(VENV)/pyvenv.cfg" ]]; then \
-		uv venv >/dev/null 2>&1; \
+		$(UV) venv "$(VENV)"; \
 	fi
-	@uv pip install . >/dev/null 2>&1
-	@uv pip install -U pytest >/dev/null 2>&1
+	@$(UV) pip install . >/dev/null 2>&1
+	@$(UV) pip install -U pytest >/dev/null 2>&1
 	@touch $(BACKEND_UV)
 	@touch $(STAMP_UV)
 
@@ -167,7 +195,7 @@ run: setup code-generator
 	fi
 
 run-uv: $(STAMP_UV) code-generator
-	@uv run katzenqt
+	@$(UV) run katzenqt
 
 run-pip: $(STAMP_PIP) code-generator
 	@$(VENV)/bin/katzenqt
@@ -183,7 +211,7 @@ test: setup
 	fi
 
 test-uv: $(STAMP_UV)
-	@uv run pytest
+	@$(UV) run pytest
 
 test-pip: $(STAMP_PIP)
 	@$(VENV)/bin/pytest
@@ -199,6 +227,9 @@ kpclientd: $(KATZENPOST_DIR)
 
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
+	@install -d -m 0700 ~/.local/katzenpost/
+	@install -m 0666 config/client2.toml ~/.local/katzenpost/client2.toml
+	@install -m 0666 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
@@ -207,9 +238,30 @@ kpclientd.service: install-kpclient
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now kpclientd >/dev/null 2>&1
 
+alembic-check-uv:
+	@$(UV) run alembic -c config/alembic.ini check
+
+alembic-check-pip:
+	@$(VENV)/bin/alembic -c config/alembic.ini check
+
+alembic-revision-uv:
+	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
+		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
+		exit 2; \
+	fi
+	@$(UV) run alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+
+alembic-revision-pip:
+	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
+		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
+		exit 2; \
+	fi
+	@$(VENV)/bin/alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+
 clean-venv:
-	@rm -rf $(VENV)
+	@rm -r $(VENV)
 
 clean:
-	@rm -rf $(VENV)
+	@rm -r $(VENV)
 	@rm $(SYSTEM_STAMP)
+

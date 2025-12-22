@@ -154,7 +154,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 elif role == 0:
                     if cl.payload.startswith(b'F'):                        
                         try:
-                            from models import GroupChatMessage
+                            from .models import GroupChatMessage
                             cm = GroupChatMessage.from_cbor(cl.payload[1:])
                             return cm.text
                         except Exception as e:

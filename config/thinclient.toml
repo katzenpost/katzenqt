@@ -1,7 +1,7 @@
 #Network = "tcp"
-#Address = "localhost:64331"
 Network = "unix"
 Address = "@katzenpost"
+#Address = "localhost:64331"
 
 [SphinxGeometry]
   PacketLength = 3082
