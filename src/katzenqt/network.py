@@ -672,7 +672,7 @@ async def on_message_sent(reply):
 # from katzenpost_thinclient import ThinClient, Config
 async def reconnect() -> ThinClient:
     cfg = ThinClientConfig(
-        "config/thinclient.toml",
+        "thinclient.toml",
         on_message_reply=on_message_reply,
         on_message_sent=on_message_sent,
         on_connection_status=on_connection_status,
