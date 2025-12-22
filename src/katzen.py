@@ -863,6 +863,12 @@ class MainWindow(QMainWindow):
           make the inviter give us a BACAP write cap for a temp stream we could write our invitation
           to instead? (And then they should start checking that).
         """
+
+        try:
+          convo = self.convo_state()
+        except Exception:
+          dlg = QMessageBox.critical(self, f"ERROR", f"You must first 'create new conversation' before you can 'Accept' an invitation")
+
         invite_string , ok = QInputDialog.getText(
             self,
             "Accept invitation",
@@ -883,7 +889,6 @@ class MainWindow(QMainWindow):
         #   and confirm with the user that they like the display name
         dlg = QMessageBox.critical(self, f"TODO ask", f"Is this name OK? {please_add.display_name}")
 
-        convo = self.convo_state()
         from sqlmodel import select
         async with persistent.asession() as sess:
             # insert into readcapwal
