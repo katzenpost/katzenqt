@@ -6,7 +6,7 @@ SHELL := /bin/bash
 MAKEFLAGS += --no-print-directory
 
 export PATH:=$(PATH):~/.local/bin/
-export UV_VENV_CLEAR:=1          
+export UV_VENV_CLEAR:=1
 # override uv with:
 #   make setup-uv UV=$$HOME/.local/bin/uv
 UV ?= uv
@@ -100,7 +100,7 @@ install-debian-packages:
 	@sudo apt install -y \
 		libxcb-cursor0 libegl1 libpulse0 \
 		build-essential pkg-config \
-		golang-go git \
+		golang-go git podman \
 		pipx python3 python3-venv >/dev/null
 
 install-uv:
