@@ -13,21 +13,6 @@ First, git clone the `katzenqt` repo and `cd` into `katzenqt`:
   cd ~/katzenqt/
 ```
 
-Second, you will need configuration files for a real mixnet or you will need to
-install configuration files for the local docker mixnet development
-environment.
-
-For example, if you want to use `namenlos` then you'll need to install the
-`namelos` configuration files. For example if you have checked out the `namenlos`
-repo into `~/namenlos` then you would do the following to create and then put
-the configuration files into `~/.local/katzenpost/`:
-```
-  mkdir -p ~/.local/katzenpost/
-  cp ~/namenlos/configs/client2.toml ~/.local/katzenpost/client2.toml
-  cp ~/namenlos/configs/thinclient.toml ~/.local/katzenpost/thinclient.toml
-  cp ~/namenlos/configs/thinclient.toml ~/katzenqt/configs/thinclient.toml
-```
-
 At this point your system should have all of the required tools to proceed.
 Your user account should have `~/.local/katzenpost/client2.toml` and
 `~/.local/katzenpost/thinclient.toml` ready for software that expects to find
