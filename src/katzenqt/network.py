@@ -13,9 +13,9 @@ import logging
 import asyncio
 import traceback
 from asyncio import ensure_future
-from .katzen_util import create_task
+from katzen_util import create_task
 from pydantic.dataclasses import dataclass
-from . import persistent
+import persistent
 
 logger = logging.getLogger("katzen.network")
 

@@ -15,7 +15,7 @@ count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
 import struct
 from typing import TYPE_CHECKING
-from .katzen_util import create_task
+from katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
     import sqlmodel
@@ -24,7 +24,7 @@ import os
 
 
 
-_alembic_cfg = alembic.config.Config(Path(__file__).parent.parent.parent / "config" / "alembic.ini")
+_alembic_cfg = alembic.config.Config(Path(__file__).parent.parent / "config" / "alembic.ini")
 
 xdg_data_home = (Path().home()/".local"/"share")
 xdg_data_home.mkdir(parents=True,exist_ok=True)

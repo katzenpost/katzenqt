@@ -9,4 +9,3 @@ build/
 *.log
 .python-version
 .venv
-katzenpost/

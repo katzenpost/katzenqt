@@ -1,55 +1,47 @@
 APP_ORGANIZATION = "Mixnetwork"
 APP_NAME = "KatzenQt"
 
-import argparse
-import asyncio
-import fcntl
 import logging
-import math
-import os
-import sys
+import argparse
 import threading
-import time
-import uuid
-from asyncio import ensure_future
-from pathlib import Path
-from typing import TYPE_CHECKING
-
 import PySide6.QtAsyncio as QtAsyncio
-#from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
-from PySide6 import QtCore, QtNetwork
-from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
-                            QSettings, QSize, QThread, QUrl, Signal)
-from PySide6.QtGui import (QAction, QIcon, QKeySequence, QPixmap, QShortcut,
-                           QStandardItem, QStandardItemModel)
-from PySide6.QtMultimedia import (QAudioBufferInput, QAudioBufferOutput,
-                                  QAudioFormat, QAudioInput,
-                                  QMediaCaptureSession, QMediaRecorder)
-from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
-from PySide6.QtTest import QAbstractItemModelTester
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
-                               QFileDialog, QFontDialog, QInputDialog, QLabel,
-                               QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QStyle, QSystemTrayIcon,
-                               QTextBrowser, QToolButton, QTreeView,
-                               QTreeWidgetItem)
-from sqlalchemy import func
-from sqlmodel import select
-
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
-from . import network  # this is network.py
-from . import persistent
-from .katzen_util import create_task
-from .models import (ConversationUIState, GroupChatFileUpload,
-                     GroupChatMessage, GroupChatPleaseAdd, SendOperation)
-#from ui_mixchat_chatview import Ui_ChatForm
-from .qt_models import *  # qt_models.py
-from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
-from .ui_mixchat import Ui_MainWindow  # ui_mixchat.py
+import persistent
+import sys
+import fcntl
+from pathlib import Path
+import uuid
+import math
+from asyncio import ensure_future
+from PySide6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QStyle, QTreeWidgetItem, QMenu, QDialog, QDialogButtonBox, QInputDialog, QLabel, QTreeView, QFileDialog, QListWidgetItem, QMessageBox, QFontDialog, QTextBrowser, QToolButton
+from PySide6.QtGui import QIcon, QPixmap, QStandardItemModel, QStandardItem, QAction, QKeySequence, QShortcut
+from PySide6.QtCore import QFile, QSize, QModelIndex, QUrl, QCoreApplication, QEvent, QSettings, Signal, QThread
+from PySide6.QtMultimedia import QMediaCaptureSession, QAudioBufferInput, QAudioBufferOutput, QMediaRecorder, QAudioFormat, QAudioInput
+from PySide6.QtQml import QQmlPropertyMap
+from PySide6 import QtCore
+from models import ConversationUIState, SendOperation, GroupChatMessage, GroupChatFileUpload, GroupChatPleaseAdd
+from sqlalchemy import func
+import asyncio
+from PySide6.QtTest import QAbstractItemModelTester
+#from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
+from PySide6 import QtNetwork
+import os
+import network  # this is network.py
+import time
 
+#from ui_mixchat_chatview import Ui_ChatForm
+from qt_models import *  # qt_models.py
+from ui_mixchat import Ui_MainWindow  # ui_mixchat.py
+from ui_font_settings import Ui_FontSettingsDialog # ui_font_settings.py
+from sqlmodel import select
+from PySide6.QtQml import QQmlNetworkAccessManagerFactory
+
+from katzen_util import create_task
+
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    import typing
     from typing import Dict, List
+    import typing
 
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
@@ -1181,7 +1173,7 @@ def add_log_args(parser: argparse.ArgumentParser):
         action="append",
     )
 
-def cli():
+if __name__ == "__main__":
     app = QApplication(sys.argv)
     parser = argparse.ArgumentParser()
     add_log_args(parser)
@@ -1219,4 +1211,4 @@ def cli():
     window = MainWindow(app)
     window.iothread = iothread
 
-    return QtAsyncio.run(main(window), handle_sigint=True)
+    QtAsyncio.run(main(window), handle_sigint=True)

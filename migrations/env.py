@@ -16,7 +16,7 @@ from alembic import context
 config = context.config
 
 # TODO here we need to import the SQLModel models
-from katzenqt.persistent import ConversationPeerLink, ConversationPeer, Conversation, metadata, _sql_url
+from persistent import ConversationPeerLink, ConversationPeer, Conversation, metadata, _sql_url
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

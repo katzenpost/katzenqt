@@ -4,7 +4,7 @@ from PySide6.QtCore import QFile, QSize, QModelIndex, QPersistentModelIndex, QMo
 from PySide6.QtGui import QPainter, QImage
 from PySide6.QtQuick import QQuickImageProvider
 
-from . import persistent
+import persistent
 
 import functools
 from functools import lru_cache

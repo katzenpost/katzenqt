@@ -1,7 +1,7 @@
 import annotated_types
 from typing_extensions import Annotated
 from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict
-from .qt_models import *
+from qt_models import *
 from PySide6.QtQml import QQmlPropertyMap
 from PySide6.QtGui import QStandardItem
 import cbor2
@@ -9,7 +9,7 @@ from enum import Enum
 import uuid
 import secrets
 import io
-from . import persistent
+import persistent
 import hashlib
 from base64 import b64encode, b64decode
 from typing import List
