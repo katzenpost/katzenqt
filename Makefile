@@ -96,7 +96,7 @@ clean-system-stamp:
 
 install-debian-packages:
 	@sudo apt install -y \
-		libxcb-cursor0 \
+		libxcb-cursor0 libegl1 \
 		build-essential pkg-config \
 		golang-go git \
 		pipx python3 python3-venv >/dev/null
