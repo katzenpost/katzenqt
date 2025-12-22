@@ -56,7 +56,7 @@ exclude = [".gitignore"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-katzen=['configs/*']
+katzen=["configs/*", "resources/*"]
 
 [tool.alembic]
 script_location = "%(here)s/migrations"
