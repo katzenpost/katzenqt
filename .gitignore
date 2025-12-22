@@ -11,3 +11,4 @@ src/ui_font_settings.py
 *.log
 .python-version
 .venv
+katzenpost/
