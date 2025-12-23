@@ -892,7 +892,16 @@ class MainWindow(QMainWindow):
 
         # Now we need to parse it, validate the cap,
         #   and confirm with the user that they like the display name
-        dlg = QMessageBox.critical(self, f"TODO ask", f"Is this name OK? {please_add.display_name}")
+        if QMessageBox.question(
+            self,
+            'Confirmation',
+            f"Add contact {please_add.display_name!r}?",
+            QMessageBox.StandardButton.Yes |
+            QMessageBox.StandardButton.No,
+            defaultButton = QMessageBox.StandardButton.Yes
+        ) != QMessageBox.StandardButton.Yes:
+            logging.warning('Canceled adding contact')
+            return
 
         from sqlmodel import select
         async with persistent.asession() as sess:
