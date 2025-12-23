@@ -46,7 +46,7 @@ katzenqt = "katzenqt:cli"
 #files = ["mixchat.ui"]
 
 [tool.alembic]
-script_location = "%(here)s/migrations"
+script_location = "katzenqt:migrations"
 prepend_sys_path = ["."]
 
 [project.urls]
