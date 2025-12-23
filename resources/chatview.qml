@@ -13,6 +13,13 @@ TreeView {
      id: chatTreeView
      objectName: "chatTreeView"
 
+     // Dark background for chat area
+     Rectangle {
+         anchors.fill: parent
+         color: "#2d2d2d"
+         z: -1
+     }
+
      //required property QtObject change_convo
 
      // we should track if messages have been "read" for some definition of "read"
@@ -180,7 +187,7 @@ TreeView {
 			    )) // tallest element
 
           background: Rectangle {
-//            color: "gray";
+            color: "transparent"
           }
 
           contentItem: Row {  /// contentItem is the thing that gets displayed
@@ -193,7 +200,7 @@ TreeView {
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
 	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)
-	    color: (model.network_status > 0 ? "red" : "black")
+	    color: (model.network_status > 0 ? "red" : "#e0e0e0")
           }
 
 	  RowLayout {
@@ -229,10 +236,6 @@ TreeView {
             text: model.display
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
 	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
-	    color: "black"
-	    background: Rectangle {
-	      color: hovered ? "#eeeeff" : "white"
-	    }
           } // Text
 } // contentItem: Row
         } // delegate: TreeViewDelegate
