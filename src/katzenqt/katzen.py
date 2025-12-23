@@ -65,20 +65,17 @@ class AsyncioThread(threading.Thread):
         self.loop.set_exception_handler(report_exception3)
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
-        self.loop.run_forever()
 
     async def run_in_io(self, fn):
         """Run (fn) in the io loop, to work around QtAsyncio not providing sock_connect etc.
 
         Would be nice to have a "with" context handler I guess.
 
-        TODO: figure out how to get exceptions there
         """
         ffff = asyncio.run_coroutine_threadsafe(fn, self.loop)
         res = await asyncio.wrap_future(ffff)
         assert ffff.exception() is None
         assert ffff.result() == res
-        #print("RUN_IN_IO COMPLETE", res)
         return res
 
     async def async_main(self):
@@ -937,6 +934,8 @@ class MainWindow(QMainWindow):
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):
             logger.critical("QUITTING")
+            network.shutdown()
+            self.systray = False
             self.app.quit()
     def closeEvent(self, event, **kwargs):
         if getattr(self, "systray", False):

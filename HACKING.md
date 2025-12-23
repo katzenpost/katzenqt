@@ -1,5 +1,7 @@
 ## Installation dependencies
 
+### Manual installation
+
 ```
 git clone https://github.com/katzenpost/katzenqt
 cd katzenqt
@@ -10,9 +12,18 @@ pip install 'git+https://github.com/katzenpost/thin_client@487d2b8e46440abba5bb4
 pip install -e .
 ```
 
-Most debian systems will already have this package, but it is required:
+### Developing with the `make deps run` / `uv pip` install method:
+
+```shell
+uv run -v --with-editable ~/thin_client katzenqt
+```
+
+### System deps
+
+Most debian systems will already have these packages, but they are required:
 ```shell
 apt install libxcb-cursor0 # version (0.1.4-1)
+apt install libegl1
 ```
 
 At the moment, this program only works with the `tb/debug2025-09-21` branch of https://github.com/katzenpost/katzenpost .

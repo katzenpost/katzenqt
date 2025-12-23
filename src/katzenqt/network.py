@@ -50,18 +50,18 @@ async def start_background_threads(connection: ThinClient):
     It runs forever.
     """
     # Loop over our write caps and retrive read caps for them:
-    f1 = ensure_future(provision_read_caps(connection))
+    f1 = ensure_future(asyncio.gather(provision_read_caps(connection)))
 
     await __mixnet_connected.wait()
 
     # Loop over outgoing queue and start transmitting them to the network. Runs forever.
-    f3 = ensure_future(drain_mixwal(connection))
+    f3 = ensure_future(asyncio.gather(drain_mixwal(connection)))
 
     # Loop over PlaintextWAL messages, encrypt them, and put them in MixWAL. Runs forever.
-    f4 = ensure_future(send_resendable_plaintexts(connection))
+    f4 = ensure_future(asyncio.gather(send_resendable_plaintexts(connection)))
 
     # Loop over things we can read and start reading them:
-    f5 = create_task(readables_to_mixwal(connection))
+    f5 = asyncio.gather(create_task(readables_to_mixwal(connection)))
     async def do_shutdown():
         """TODO this needs some work"""
         await __should_quit.wait()
@@ -73,7 +73,10 @@ async def start_background_threads(connection: ThinClient):
     shutdown_task = create_task(do_shutdown())
     try:
         for task in asyncio.as_completed([f1, f3, f4, f5, shutdown_task]):
-            await task
+            try:
+              await asyncio.gather(task)
+            except asyncio.exceptions.CancelledError:
+              logger.info(f"cancelled: {task}")
             print("start_background_threads completed: ",task)
     except Exception as xx:
         print("f1-f4-f5 exception",xx)
@@ -273,7 +276,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # A tricky situation arises if we receive both an ACK and a message payload.
     if reply_task in done:
         reply = reply_task.result()
-        logger.critical("got message reply!", reply)
+        logger.critical(f"got message reply! {reply}")
         if reply is None:
             import pdb;pdb.set_trace()
         # look up rcw
@@ -334,7 +337,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         create_task(conversation_update_queue.put((c_id,False)))
         done = []  # disregard the ack_task
     else:
-        logger.critical("NO MESSAGE REPLY, making new envelope"*100)
+        logger.critical("NO MESSAGE REPLY, making new envelope")
         async with persistent.asession() as sess:
             await sess.delete(mw)
             await sess.commit()
@@ -383,8 +386,10 @@ async def drain_mixwal2(connection: ThinClient):
             done_with_this = await tx_single(sess, mw)
         # __resend_queue.remove(mw.bacap_stream)
     await __resend_queue_populated.wait()
-    while True:
+    while not __should_quit.is_set():
         _, _ = await asyncio.wait((create_task(__mixwal_updated.wait()),), timeout=15)
+        if __should_quit.is_set():
+          continue
         __mixwal_updated.clear()
         print(f"DRAIN_MIXWAL draining_right_now:{draining_right_now} __resend_queue:{__resend_queue}")
         # TODO drain new from mixwal, this should NOT be a long-running session like it currently is
@@ -417,7 +422,7 @@ async def provision_read_caps(connection: ThinClient):
     #print("provision read caps"*100)
     import sqlalchemy as sa
     wait = 0
-    while True:
+    while not __should_quit.is_set():
         await asyncio.sleep(wait)  # could make this smoother with an asyncio.Event(), but 5s is fine for now.
         wait = 5
         async with persistent.asession() as sess:
@@ -464,8 +469,8 @@ async def readables_to_mixwal(connection):
             rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
             print(f"cpeer got read_channel reply")
         except Exception as e:
-            print("readables-to-mixwal", e)
-            import pdb;pdb.set_trace()
+            logger.critical(f"readables-to-mixwal exception (did kpclientd die?) {e}")
+            raise
         print("process_box got this from read_channel:", rcreply)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
@@ -503,7 +508,12 @@ async def readables_to_mixwal(connection):
             print("readable_peers", len(readable_peers))
             for (cpeer, rcw) in readable_peers:
                 print("going to process_box", cpeer.name, rcw.next_index[:8].hex())
-                sess.add(await process_box(cpeer, rcw)) ## HERE?
+                try:
+                  mw = await process_box(cpeer, rcw)
+                except Exception as e:
+                  logger.critical(f"process_box failed: {e}")
+                  continue
+                sess.add(mw)
                 print("finished one peer", cpeer.name)
             print("committing")
             await sess.commit()
@@ -761,7 +771,7 @@ def courier_destination_exists(connection, destination) -> bool:
     TODO: when ensuring courier exists we usually also want to make sure there are (some) replicas present.
     """
     pki = connection.pki_document()
-    for sn in pki['ServiceNodes']:
+    for sn in (pki or {}).get('ServiceNodes', []):
         snd = cbor2.loads(sn)
         if 'courier' not in snd['Kaetzchen']:
             continue
