@@ -16,6 +16,7 @@ from asyncio import ensure_future
 from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
 from . import persistent
+from sqlmodel import select
 
 logger = logging.getLogger("katzen.network")
 
@@ -126,7 +127,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
                 dest_queue=b'courier',
                 message_id=message_id,
             )
-        except ThinClientOfflineError:
+        except (ThinClientOfflineError, BrokenPipeError):
             logger.warning("thin client is offline, can't drain mixwal.")
             del connection.ack_queues[message_id]
             await asyncio.sleep(5)
@@ -318,7 +319,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 __mixwal_updated.set()
                 return
 
-            from sqlmodel import select
             cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
             # Here we should write to the ReceivedPiece table:
             #
@@ -386,8 +386,12 @@ async def drain_mixwal2(connection: ThinClient):
             done_with_this = await tx_single(sess, mw)
         # __resend_queue.remove(mw.bacap_stream)
     await __resend_queue_populated.wait()
+    shutdown = create_task(__should_quit.wait())
     while not __should_quit.is_set():
-        _, _ = await asyncio.wait((create_task(__mixwal_updated.wait()),), timeout=15)
+        _, _ = await asyncio.wait((
+                 create_task(__mixwal_updated.wait()),
+                 shutdown,
+        ), timeout=15)
         if __should_quit.is_set():
           continue
         __mixwal_updated.clear()
@@ -458,7 +462,6 @@ async def readables_to_mixwal(connection):
     """
     await __mixnet_connected.wait()
     print("READABLES READING")
-    from sqlmodel import select  # TODO move to persistent
     global __resend_queue
     await __resend_queue_populated.wait()
     async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
