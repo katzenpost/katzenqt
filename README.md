@@ -1,6 +1,10 @@
 So you want to try the `katzenqt` program? These instructions should help
 developers to start to run the software.
 
+WARNING: DO NOT USE THIS SOFTWARE UNLESS YOU ARE DEVELOPING IT AND AWARE OF THE
+TECHNICAL RISKS. DO NOT RELY ON THIS SOFTWARE FOR ANONYMITY, SECURITY, PRIVACY,
+RELIABILITY, RESILENCY, CREDIBILITY, FRIENDSHIP, FUN, OR ANY SERIOUS BUSINESS.
+
 To use the new `Makefile` targets please ensure that you have `git` and `make`
 installed before proceeding:
 ```
