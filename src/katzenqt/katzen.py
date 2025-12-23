@@ -19,7 +19,7 @@ import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
-                            QSettings, QSize, QThread, QUrl, Signal)
+                            QSettings, QSize, QThread, QUrl, Signal, QTimer)
 from PySide6.QtGui import (QAction, QIcon, QKeySequence, QPixmap, QShortcut,
                            QStandardItem, QStandardItemModel)
 from PySide6.QtMultimedia import (QAudioBufferInput, QAudioBufferOutput,
@@ -845,8 +845,8 @@ class MainWindow(QMainWindow):
         # We still don't have theirs.
         print()
         print(intro.to_human_readable())
-        dlg = QMessageBox.information(self, f"Invite code: {APP_NAME}", f"Here is your invitation. Pass it to your new contact:\n{intro.to_human_readable()}")
         print()
+        QTimer.singleShot(0, lambda: QMessageBox.information(self, f"Invite code: {APP_NAME}", f"Here is your invitation, {display_name}.\nPass it to your new contact:\n{intro.to_human_readable()}"))
         # TODO instead of print, we want a GUI element diplaying this, with a button to copy to
         # clipboard
 
@@ -872,7 +872,8 @@ class MainWindow(QMainWindow):
         try:
           convo = self.convo_state()
         except Exception:
-          dlg = QMessageBox.critical(self, f"ERROR", f"You must first 'create new conversation' before you can 'Accept' an invitation")
+          QTimer.singleShot(0, lambda: QMessageBox.critical(self, f"ERROR", f"You must first 'create new conversation' before you can 'Accept' an invitation"))
+          return
 
         invite_string , ok = QInputDialog.getText(
             self,
@@ -885,7 +886,7 @@ class MainWindow(QMainWindow):
         try:
             please_add = GroupChatPleaseAdd.from_human_readable(invite_string)
         except:
-            print("Invalid PleaseAdd")
+            QTimer.singleShot(0, lambda: QMessageBox.critical(self, f"ERROR", f"Invalid invitation code."))
             return
 
         # TODO need to validate these a bit more, like ensure we are not adding ourselves to our own convo, and so on.
@@ -1091,6 +1092,7 @@ async def main(window: MainWindow):
     def report_exception2(*args):
         for m in args:
             print("report_exception2", m)
+            QTimer.singleShot(0, lambda: QMessageBox.critical(window, f"Exception", f"{m}"))
     asyncio.get_running_loop().set_exception_handler(report_exception2)
 
     rebuild_pydantic_models()
