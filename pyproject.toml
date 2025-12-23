@@ -85,6 +85,7 @@ testpaths = [
 markers = [
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
 ]
+norecursedirs = ["src/katzenqt/migrations"]
 
 [tool.ruff]
 line-length = 78
