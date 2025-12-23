@@ -82,6 +82,7 @@ testpaths = [
     "src",
     "tests",
 ]
+norecursedirs = ["src/katzenqt/migrations"]
 
 [tool.ruff]
 line-length = 78
