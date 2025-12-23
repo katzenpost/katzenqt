@@ -229,6 +229,7 @@ TreeView {
             text: model.display
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
 	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
+	    color: "black"
 	    background: Rectangle {
 	      color: hovered ? "#eeeeff" : "white"
 	    }
