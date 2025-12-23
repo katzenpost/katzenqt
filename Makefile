@@ -78,7 +78,7 @@ help:
 		'' \
 		'Katzenpost / kpclientd:' \
 		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
-		'  make kpclientd             Build kpclientd (golang native build; falls back to podman' \
+		'  make kpclientd             Build kpclientd (golang native build; falls back to podman)' \
 		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
 		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
