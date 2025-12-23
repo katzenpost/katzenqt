@@ -225,7 +225,7 @@ katzenpost-update: $(KATZENPOST_DIR)
 
 kpclientd: $(KATZENPOST_DIR)
 	@set +e; \
-	cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1; \
+	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1 ) ; \
 	rc=$$?; \
 	set -e; \
 	if [[ $$rc -ne 0 ]]; then \
