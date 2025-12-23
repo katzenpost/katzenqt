@@ -236,7 +236,7 @@ kpclientd: $(KATZENPOST_DIR)
 kpclientd-podman:
 	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=debian \
         voting_mixnet/kpclientd.debian && \
-        mv voting_mixnet/kpclientd.debian ../cmd/kpclientd/
+        mv voting_mixnet/kpclientd.debian ../cmd/kpclientd/kpclientd
 
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
