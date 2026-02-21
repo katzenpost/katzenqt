@@ -1,0 +1,62 @@
+name: Integration Tests (Docker Mixnet)
+
+# Integration tests require a running docker mixnet, so they are run manually
+on:
+  workflow_dispatch:
+    inputs:
+      mixnet_branch:
+        description: 'Katzenpost branch to use for docker mixnet'
+        required: false
+        default: 'new_pigeonhole_thinclient2'
+
+jobs:
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencies
+        run: |
+          make deps
+          uv sync --all-extras --dev
+
+      - name: Clone katzenpost
+        run: |
+          git clone -b ${{ github.event.inputs.mixnet_branch }} https://github.com/katzenpost/katzenpost.git
+
+      - name: Start Docker Mixnet
+        working-directory: katzenpost/docker
+        run: |
+          make start
+          # Wait for mixnet to be ready
+          sleep 60
+
+      - name: Run integration tests
+        run: |
+          uv run pytest -m integration -v --timeout=300
+        env:
+          KATZENPOST_CONFIG: katzenpost/docker/voting_mixnet/client2/thinclient.toml
+
+      - name: Stop Docker Mixnet
+        if: always()
+        working-directory: katzenpost/docker
+        run: |
+          make stop || true
+
