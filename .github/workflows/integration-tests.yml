@@ -1,11 +1,12 @@
 name: Integration Tests (Docker Mixnet)
 
-# Integration tests require a running docker mixnet, so they are run manually
 on:
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
-      mixnet_branch:
-        description: 'Katzenpost branch to use for docker mixnet'
+      mixnet_ref:
+        description: 'Katzenpost ref (branch/tag/commit) for docker mixnet'
         required: false
         default: 'new_pigeonhole_thinclient2'
 
@@ -19,6 +20,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout katzenpost repository
+        uses: actions/checkout@v4
+        with:
+          repository: katzenpost/katzenpost
+          ref: ${{ github.event.inputs.mixnet_ref || 'new_pigeonhole_thinclient2' }}
+          path: katzenpost
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Configure podman socket
+        run: |
+          systemctl --user start podman.socket
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -27,36 +50,33 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
       - name: Install dependencies
         run: |
-          make deps
-          uv sync --all-extras --dev
+          uv pip install -e "." --group dev
 
-      - name: Clone katzenpost
+      - name: Build and start the mixnet
         run: |
-          git clone -b ${{ github.event.inputs.mixnet_branch }} https://github.com/katzenpost/katzenpost.git
+          cd katzenpost/docker && make start wait
 
-      - name: Start Docker Mixnet
-        working-directory: katzenpost/docker
-        run: |
-          make start
-          # Wait for mixnet to be ready
-          sleep 60
+      - name: Brief pause to ensure mixnet is fully ready
+        run: sleep 30
 
       - name: Run integration tests
+        timeout-minutes: 20
         run: |
-          uv run pytest -m integration -v --timeout=300
+          uv run pytest -m integration -vvv -s --tb=short --timeout=1200
         env:
           KATZENPOST_CONFIG: katzenpost/docker/voting_mixnet/client2/thinclient.toml
 
       - name: Stop Docker Mixnet
         if: always()
-        working-directory: katzenpost/docker
         run: |
-          make stop || true
+          cd katzenpost/docker && make stop || true
 
+      - name: Upload testnet logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mixnet-${{ github.run_id }}-${{ github.job }}
+          path: |
+            katzenpost/docker/voting_mixnet/*/*.log

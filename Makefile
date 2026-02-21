@@ -136,8 +136,7 @@ $(STAMP_UV): system-setup $(PYPROJECT) $(UV_LOCK)
 	@if [[ ! -f "$(VENV)/pyvenv.cfg" ]]; then \
 		$(UV) venv "$(VENV)"; \
 	fi
-	@$(UV) pip install . >/dev/null 2>&1
-	@$(UV) pip install -U pytest >/dev/null 2>&1
+	@$(UV) pip install -e "." --group dev >/dev/null 2>&1
 	@touch $(BACKEND_UV)
 	@touch $(STAMP_UV)
 
@@ -151,8 +150,8 @@ $(STAMP_PIP): system-setup $(PYPROJECT)
 		python3 -m venv $(VENV); \
 	fi
 	@$(VENV)/bin/pip install -U pip >/dev/null 2>&1
-	@$(VENV)/bin/pip install . >/dev/null 2>&1
-	@$(VENV)/bin/pip install -U pytest >/dev/null 2>&1
+	@$(VENV)/bin/pip install -e "." >/dev/null 2>&1
+	@$(VENV)/bin/pip install pytest hypothesis pytest-cov pytest-xdist pytest-asyncio >/dev/null 2>&1
 	@touch $(BACKEND_PIP)
 	@touch $(STAMP_PIP)
 

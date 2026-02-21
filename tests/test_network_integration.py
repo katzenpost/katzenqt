@@ -60,6 +60,7 @@ async def setup_thin_client():
     return client
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_new_pigeonhole_api_roundtrip():
     """
@@ -162,6 +163,7 @@ async def test_new_pigeonhole_api_roundtrip():
         client.stop()
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_multiple_messages_same_channel():
     """
@@ -236,6 +238,7 @@ async def test_multiple_messages_same_channel():
         client.stop()
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_cancel_during_resend():
     """

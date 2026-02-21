@@ -30,6 +30,7 @@ dev = [
     "pytest>=9.0.1",
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
+    "pytest-asyncio>=0.23.0",
     "ruff>=0.14.6",
 ]
 release = [
@@ -77,10 +78,12 @@ strict = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=src/katzenqt --cov-report=term-missing --doctest-modules -vv"
+addopts = "--cov=src/katzenqt --cov-report=term-missing -vv -m 'not integration'"
 testpaths = [
-    "src",
     "tests",
+]
+markers = [
+    "integration: marks tests as integration tests requiring a running docker mixnet (deselect with '-m \"not integration\"')",
 ]
 
 [tool.ruff]

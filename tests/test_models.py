@@ -5,7 +5,8 @@ import hypothesis.strategies as st
 import pydantic
 from hypothesis import example, given
 
-from katzenqt import models, persistent
+import katzenqt.models as models
+import katzenqt.persistent as persistent
 
 test_please_add_deserialize = given(st.text(), st.binary())
 @test_please_add_deserialize
