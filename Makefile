@@ -21,6 +21,7 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
+KATZENPOST_BRANCH := new_pigeonhole_thinclient2
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
@@ -218,10 +219,10 @@ test-pip: $(STAMP_PIP)
 	@$(VENV)/bin/pytest
 
 $(KATZENPOST_DIR):
-	@git clone $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
+	@git clone -b $(KATZENPOST_BRANCH) $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
 
 katzenpost-update: $(KATZENPOST_DIR)
-	@cd $(KATZENPOST_DIR) && git pull --ff-only >/dev/null 2>&1
+	@cd $(KATZENPOST_DIR) && git checkout $(KATZENPOST_BRANCH) >/dev/null 2>&1 && git pull --ff-only >/dev/null 2>&1
 
 kpclientd: $(KATZENPOST_DIR)
 	@set +e; \
