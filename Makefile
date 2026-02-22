@@ -37,7 +37,7 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 .PHONY: default default_uv_setup default_pip_setup help \
 	system-setup install-debian-packages install-uv clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
-	run test status code-generator regen-code \
+	run run-local test status code-generator regen-code \
 	run-uv run-pip test-uv test-pip \
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
@@ -65,7 +65,8 @@ help:
 		'' \
 		'Backend auto selection:' \
 		'  make setup                 Ensure setup is complete for the chosen backend and print status' \
-		'  make run                   Run katzenqt using the chosen backend' \
+		'  make run                   Run katzenqt using the chosen backend (starts kpclientd)' \
+		'  make run-local             Run katzenqt against docker mixnet (kpclientd already running)' \
 		'  make test                  Run pytest using the chosen backend' \
 		'  make status                Show backend, venv, and kpclientd status' \
 		'' \
@@ -200,6 +201,17 @@ run-uv: $(STAMP_UV) code-generator
 
 run-pip: $(STAMP_PIP) code-generator
 	@$(VENV)/bin/katzenqt
+
+# Run katzenqt against docker mixnet (assumes kpclientd is already running via docker)
+run-local: setup code-generator
+	@if [[ -e "$(BACKEND_UV)" ]]; then \
+		$(UV) run katzenqt; \
+	elif [[ -e "$(BACKEND_PIP)" ]]; then \
+		$(VENV)/bin/katzenqt; \
+	else \
+		printf '%s\n' "error: no backend selected. run: make setup-uv OR make setup-pip"; \
+		exit 1; \
+	fi
 
 test: setup
 	@if [[ -e "$(BACKEND_UV)" ]]; then \
