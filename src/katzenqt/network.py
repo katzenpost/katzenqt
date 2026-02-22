@@ -290,8 +290,8 @@ async def drain_mixwal2(connection: ThinClient):
                 else:
                     new_write_mws.append(mw)
         for mw in new_write_mws:
-            # With new API, destination is None and daemon picks courier
-            if mw.destination is not None and not courier_destination_exists(connection, mw.destination):
+            # Check if the courier we picked when creating MixWAL still exists in PKI
+            if not courier_destination_exists(connection, mw.destination):
                 logger.warning("mw courier is currently not in PKI")
                 continue
             logger.debug(f"drain_mixwal: NEW (write) MIXWAL: idx={struct.unpack('<1Q', mw.current_message_index[:8])} stream={mw.bacap_stream}")
@@ -358,7 +358,7 @@ async def readables_to_mixwal(connection):
             bacap_stream=rcw.id,
             plaintextwal=None,
             envelope_hash=envelope_hash,
-            destination=None,  # Not needed for new API - daemon picks courier
+            destination=pick_random_courier_destination(connection),
             encrypted_payload=message_ciphertext,
             envelope_descriptor=envelope_descriptor,
             next_message_index=next_message_index,
@@ -475,7 +475,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
         bacap_stream=pwal.bacap_stream,
         plaintextwal=pwal.id,
         envelope_hash=envelope_hash,
-        destination=None,  # Not needed for new API - daemon picks courier
+        destination=pick_random_courier_destination(connection),
         encrypted_payload=message_ciphertext,
         envelope_descriptor=envelope_descriptor,
         current_message_index=wc.next_index,
@@ -637,6 +637,11 @@ def courier_destination_exists(connection, destination) -> bool:
         if snd_dest == destination:
             return True
     return False
+
+def pick_random_courier_destination(connection) -> bytes:
+    """Pick a random courier from the PKI and return its destination hash."""
+    courier = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document()))
+    return courier.to_destination()[0]
 
 async def test_keypair(connection, write_cap, read_cap):
     """Test that create_new_keypair() results in usable+matching write/read caps."""
