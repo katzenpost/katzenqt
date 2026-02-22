@@ -346,7 +346,9 @@ async def readables_to_mixwal(connection):
         logger.debug(f"process_box cpeer={cpeer.name} idx={struct.unpack('<Q', rcw.next_index[:8])}")
         try:
             # Use the new encrypt_read API
-            message_ciphertext, next_message_index, envelope_descriptor, envelope_hash = await connection.encrypt_read(
+            # Note: encrypt_read returns the index needed for decryption (which is the CURRENT index),
+            # so we need to call next_message_box_index to get the actual next index for bookkeeping.
+            message_ciphertext, decrypt_index, envelope_descriptor, envelope_hash = await connection.encrypt_read(
                 read_cap=rcw.read_cap,
                 message_box_index=rcw.next_index
             )
@@ -354,6 +356,8 @@ async def readables_to_mixwal(connection):
             logger.critical(f"readables-to-mixwal exception (did kpclientd die?) {e}")
             raise
         logger.debug(f"process_box got encrypt_read reply")
+        # Compute the actual next index (decrypt_index is the same as current, used for decryption)
+        next_message_index = await connection.next_message_box_index(rcw.next_index)
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
             plaintextwal=None,
