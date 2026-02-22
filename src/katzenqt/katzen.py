@@ -808,6 +808,16 @@ class MainWindow(QMainWindow):
         The BACAP stuff we will get from the thin client.
         """
 
+        # Get display name FIRST (before any async operations) to avoid Qt asyncio conflicts
+        # with blocking dialogs
+        display_name, ok = QInputDialog.getText(
+            self,
+            "Invite contact",
+            "Choose (your) name displayed to the other user:",
+        )
+        if not ok:
+            return
+
         # Retrieve our read cap for selected convo:
         try:
           convo = self.convo_state()
@@ -824,14 +834,6 @@ class MainWindow(QMainWindow):
             pass
         if rcw.read_cap is None:
             dlg = QMessageBox.critical(self, f"ERROR: {APP_NAME}", "Can't invite when not connected to clientd")
-            return
-
-        display_name , ok = QInputDialog.getText(
-            self,
-            "Invite contact",
-            "Choose (your) name displayed to the other user:",
-        )
-        if not ok:
             return
 
         # serialize:
