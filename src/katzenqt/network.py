@@ -459,11 +459,10 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                 print("Got a PWAL entry that requires an indirection", pwal.indirection)
                 if not pwal.bacap_payload:
                     # TODO this ought to be a SQL UPDATE plaintextwal USING readcapwal, but for now we do it by hand.
-                    rcw = sess.get(persistent.ReadCapWAL, pwal.indirection)
+                    rcw = await sess.get(persistent.ReadCapWAL, pwal.indirection)
                     pwal.bacap_payload = b'I' + rcw.write_cap
-                    await sess.update(pwal)
-                    await sess.refresh(pwal)
-            await sess.commit()
+                    sess.add(pwal)
+                    await sess.commit()
         for pwal in sendable:
             if pwal.bacap_stream not in __resend_queue:
                 __resend_queue.add(pwal.bacap_stream)
