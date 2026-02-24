@@ -871,6 +871,8 @@ class MainWindow(QMainWindow):
           to instead? (And then they should start checking that).
         """
 
+        # Get all user input FIRST (before any async operations) to avoid Qt asyncio conflicts
+        # with blocking dialogs
         try:
           convo = self.convo_state()
         except Exception:
@@ -906,6 +908,7 @@ class MainWindow(QMainWindow):
             logging.warning('Canceled adding contact')
             return
 
+        # All blocking dialogs done - now safe to do async operations
         from sqlmodel import select
         async with persistent.asession() as sess:
             # insert into readcapwal

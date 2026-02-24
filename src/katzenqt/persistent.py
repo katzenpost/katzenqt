@@ -167,7 +167,6 @@ class SentLog(SQLModel, table=True):
                     print(f"in mark_sent, but db next {real_next} >= {our_next} we already advanced from idx", mw.current_message_index[:8].hex())
                     resend_queue.discard(mw.bacap_stream)  # TODO not sure if we still use this?
                     return
-                import pdb; pdb.set_trace()
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
             wcw = sess.get(WriteCapWAL, mw.bacap_stream)
             print("updating wcw: ", struct.unpack('<2Q', wcw.next_index[:8] + mw.next_message_index[:8]))

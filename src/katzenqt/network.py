@@ -146,7 +146,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         return await connection.start_resending_encrypted_message(
             read_cap=rcw_read_cap,
             write_cap=None,
-            next_message_index=mw.next_message_index,
+            # Use current_message_index (the index we're decrypting), not next_message_index
+            next_message_index=mw.current_message_index,
             reply_index=reply_index,
             envelope_descriptor=mw.envelope_descriptor,
             message_ciphertext=mw.encrypted_payload,
@@ -157,14 +158,31 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     task0 = create_task(try_reply_index(0))
     task1 = create_task(try_reply_index(1))
 
+    # Timeout after 60 seconds - if the box is empty, the ARQ will wait forever.
+    # We need to timeout and retry later to allow polling other peers.
+    READ_TIMEOUT_SECONDS = 60
+
     done, pending = await asyncio.wait(
         [task0, task1],
+        timeout=READ_TIMEOUT_SECONDS,
         return_when=asyncio.FIRST_COMPLETED
     )
 
-    # Cancel the other task
+    # Cancel any pending tasks (either the other reply_index or both if timeout)
+    # Also cancel the ARQ in the daemon so it stops retrying
+    if pending:
+        try:
+            await connection.cancel_resending_encrypted_message(mw.envelope_hash)
+        except Exception as e:
+            logger.debug(f"cancel_resending_encrypted_message: {e}")
     for task in pending:
         task.cancel()
+        try:
+            await task  # Wait for cancellation to complete
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
     # Get the result from the completed task
     plaintext = None
@@ -177,8 +195,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             continue
 
     if plaintext is None:
-        # Both failed - delete MixWAL so a new envelope can be made
-        logger.critical("NO MESSAGE REPLY, making new envelope")
+        # Either both tasks failed OR we timed out (empty box).
+        # Delete MixWAL so the peer can be polled again later.
+        logger.warning("NO MESSAGE REPLY (timeout or error), will retry later")
         async with persistent.asession() as sess:
             await sess.delete(mw)
             await sess.commit()
