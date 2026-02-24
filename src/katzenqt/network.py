@@ -17,6 +17,7 @@ from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
 from . import persistent
 from sqlmodel import select
+from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger("katzen.network")
 
@@ -234,7 +235,11 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             logger.debug(f"received C message")
         else:
             logger.warning("received message with invalid prefix, stopping reading this peer")
-            cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
+            cp = (await sess.exec(
+                select(persistent.ConversationPeer)
+                .options(selectinload(persistent.ConversationPeer.conversation))
+                .where(persistent.ConversationPeer.read_cap_id == rcw.id)
+            )).one()
             cp.active = False
             sess.add(cp)
             await sess.delete(mw)
@@ -242,7 +247,11 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             __mixwal_updated.set()
             return
 
-        cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
+        cp = (await sess.exec(
+                select(persistent.ConversationPeer)
+                .options(selectinload(persistent.ConversationPeer.conversation))
+                .where(persistent.ConversationPeer.read_cap_id == rcw.id)
+        )).one()
         sess.add(persistent.ReceivedPiece(
             read_cap=mw.bacap_stream,
             bacap_index=mw.current_message_index[:8],

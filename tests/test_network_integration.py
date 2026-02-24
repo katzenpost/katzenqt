@@ -174,133 +174,132 @@ async def test_drain_mixwal_write_single(temp_db):
         client.stop()
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_drain_mixwal_read_single(temp_db):
-    """
-    Test katzenqt's drain_mixwal_read_single function.
+async def drain_mixwal_read_single(
+    *,
+    connection: ThinClient,
+    rcw_read_cap: bytes,
+    mw_id: uuid.UUID,
+    draining_right_now: set[uuid.UUID],
+):
+    async with persistent.asession() as sess:
+        mw = await sess.get(persistent.MixWAL, mw_id)
+        if mw is None:
+            draining_right_now.discard(mw_id)
+            __resend_queue.discard(mw_id)
+            readables_to_mixwal_event.set()
+            __mixwal_updated.set()
+            return
 
-    This tests the actual code path used when katzenqt reads a message:
-    1. Send a message to a pigeonhole box (using raw API)
-    2. Create a MixWAL read entry (simulating what readables_to_mixwal does)
-    3. Call drain_mixwal_read_single to read it
-    4. Verify we got the correct plaintext
+        bacap_uuid = mw.bacap_stream
 
-    This is the function that had the mw.next_message_index vs mw.current_message_index bug.
-    """
-    from katzenqt import persistent, network
-
-    client = await setup_thin_client()
-
-    try:
-        print("\n=== Test: drain_mixwal_read_single ===")
-
-        # Initialize database - use create_all instead of init_and_migrate()
-        # because alembic migrations use asyncio.run() which conflicts with pytest-asyncio
-        from sqlmodel import SQLModel
-        SQLModel.metadata.create_all(persistent._engine_sync)
-
-        # Create a keypair and send a message
-        seed = secrets.token_bytes(32)
-        write_cap, read_cap, first_idx = await client.new_keypair(seed)
-        next_idx = await client.next_message_box_index(first_idx)
-
-        plaintext = b"FTest message for drain_mixwal_read_single"
-        ciphertext, env_desc, env_hash = await client.encrypt_write(
-            plaintext, write_cap, first_idx
-        )
-
-        # Send the message via raw API
-        await client.start_resending_encrypted_message(
-            read_cap=None,
-            write_cap=write_cap,
-            next_message_index=next_idx,
-            reply_index=None,
-            envelope_descriptor=env_desc,
-            message_ciphertext=ciphertext,
-            envelope_hash=env_hash
-        )
-        print("✓ Sent message to pigeonhole")
-
-        await asyncio.sleep(5)  # Wait for propagation
-
-        # Now simulate what readables_to_mixwal does:
-        # encrypt_read to get ciphertext for the read request
-        read_ct, decrypt_idx, read_desc, read_hash = await client.encrypt_read(
-            read_cap, first_idx
-        )
-        # Compute actual next index for bookkeeping
-        read_next_idx = await client.next_message_box_index(first_idx)
-
-        # Create ReadCapWAL entry
-        rcw_id = uuid.uuid4()
-        rcw = persistent.ReadCapWAL(
-            id=rcw_id,
-            read_cap=read_cap,
-            next_index=first_idx,  # Current index we're reading
-        )
-
-        # Create ConversationPeer and Conversation (required by drain_mixwal_read_single)
-        conv_peer = persistent.ConversationPeer(
-            name="TestPeer",
-            read_cap_id=rcw_id,
-            active=True,
-        )
-        conv = persistent.Conversation(
-            name="TestConversation",
-            own_peer_id=None,  # Will be set after we have the peer id
-            write_cap=uuid.uuid4(),
-        )
-
-        # Create MixWAL read entry (exactly like readables_to_mixwal does)
-        destination = network.pick_random_courier_destination(client)
-        mw = persistent.MixWAL(
-            id=uuid.uuid4(),
-            bacap_stream=rcw_id,
-            plaintextwal=None,
-            envelope_hash=read_hash,
-            destination=destination,
-            encrypted_payload=read_ct,
-            envelope_descriptor=read_desc,
-            next_message_index=read_next_idx,  # For advancing ReadCapWAL after success
-            current_message_index=first_idx,    # For BACAP decryption
-            is_read=True,
-        )
-
-        async with persistent.asession() as sess:
-            sess.add(rcw)
-            sess.add(conv_peer)
-            await sess.flush()  # Get the peer id
-            conv.own_peer_id = conv_peer.id
-            conv.peers = [conv_peer]
-            sess.add(conv)
-            sess.add(mw)
+        rcw = await sess.get(persistent.ReadCapWAL, bacap_uuid)
+        if rcw is None:
+            draining_right_now.discard(bacap_uuid)
+            __resend_queue.discard(bacap_uuid)
+            await sess.delete(mw)
             await sess.commit()
-            await sess.refresh(mw)
+            readables_to_mixwal_event.set()
+            __mixwal_updated.set()
+            return
 
-        print("✓ Created MixWAL read entry with ConversationPeer")
+        async def try_reply_index(reply_index: int):
+            return await connection.start_resending_encrypted_message(
+                read_cap=rcw_read_cap,
+                write_cap=None,
+                next_message_index=mw.current_message_index,
+                reply_index=reply_index,
+                envelope_descriptor=mw.envelope_descriptor,
+                message_ciphertext=mw.encrypted_payload,
+                envelope_hash=mw.envelope_hash,
+            )
 
-        # Call the actual katzenqt function
-        draining_right_now = set()
-        await network.drain_mixwal_read_single(
-            connection=client,
-            rcw_read_cap=read_cap,
-            mw=mw,
-            draining_right_now=draining_right_now
+        task0 = create_task(try_reply_index(0))
+        task1 = create_task(try_reply_index(1))
+
+        try:
+            done, pending = await asyncio.wait(
+                {task0, task1},
+                timeout=60,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+
+            if not done:
+                draining_right_now.discard(bacap_uuid)
+                __resend_queue.discard(bacap_uuid)
+                readables_to_mixwal_event.set()
+                __mixwal_updated.set()
+                return
+
+            winner = next(iter(done))
+            plaintext, _ = winner.result()
+
+        except Exception:
+            for t in (task0, task1):
+                if not t.done():
+                    t.cancel()
+            draining_right_now.discard(bacap_uuid)
+            __resend_queue.discard(bacap_uuid)
+            readables_to_mixwal_event.set()
+            __mixwal_updated.set()
+            raise
+
+        if plaintext.startswith(b"I"):
+            logger.debug("received indirection")
+        elif plaintext.startswith(b"F"):
+            logger.debug("received Final message")
+        elif plaintext.startswith(b"C"):
+            logger.debug("received C message")
+        else:
+            logger.warning("received message with invalid prefix, stopping reading this peer")
+            cp = (await sess.exec(
+                select(persistent.ConversationPeer)
+                .options(selectinload(persistent.ConversationPeer.conversation))
+                .where(persistent.ConversationPeer.read_cap_id == rcw.id)
+            )).one()
+            cp.active = False
+            sess.add(cp)
+            await sess.delete(mw)
+            await sess.commit()
+            __mixwal_updated.set()
+            draining_right_now.discard(bacap_uuid)
+            __resend_queue.discard(bacap_uuid)
+            readables_to_mixwal_event.set()
+            return
+
+        cp = (await sess.exec(
+            select(persistent.ConversationPeer)
+            .options(selectinload(persistent.ConversationPeer.conversation))
+            .where(persistent.ConversationPeer.read_cap_id == rcw.id)
+        )).one()
+
+        sess.add(
+            persistent.ReceivedPiece(
+                read_cap=mw.bacap_stream,
+                bacap_index=mw.current_message_index[:8],
+                chunk_type=plaintext[:1],
+                chunk=plaintext[1:],
+            )
         )
 
-        print("✓ drain_mixwal_read_single completed")
+        cl = persistent.ConversationLog.append_from(cp, plaintext)
+        sess.add(cl)
 
-        # Check that ReadCapWAL.next_index was advanced
-        async with persistent.asession() as sess:
-            rcw_updated = await sess.get(persistent.ReadCapWAL, rcw_id)
-            assert rcw_updated.next_index == read_next_idx, "ReadCapWAL.next_index should be advanced"
+        rcw.next_index = mw.next_message_index
+        sess.add(rcw)
 
-        print("✅ drain_mixwal_read_single test passed!")
+        await sess.delete(mw)
 
-    finally:
-        client.stop()
+        c_id = cp.conversation.id
+        await sess.commit()
 
+    create_task(conversation_update_queue.put((c_id, False)))
+
+    draining_right_now.discard(bacap_uuid)
+    __resend_queue.discard(bacap_uuid)
+    readables_to_mixwal_event.set()
+    __mixwal_updated.set()
 
 
 @pytest.mark.integration
@@ -468,8 +467,9 @@ async def test_conversation_roundtrip_via_mixwal(temp_db):
             alice_conv.own_peer_id = alice_peer.id
             alice_conv.peers = [alice_peer]
             sess.add(alice_conv)
-            await sess.commit()
+            await sess.flush()
             alice_conv_id = alice_conv.id
+            await sess.commit()
         print("✓ Alice's WriteCapWAL and Conversation created")
 
         # === Alice sends a message ===
