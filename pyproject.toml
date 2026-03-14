@@ -18,7 +18,7 @@ dependencies = [
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
 "cbor2~=5.6.5",
-"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@remove_bullshit_code"
+"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@update_python_pigeonhole"
 ]
 
 [dependency-groups]
@@ -33,7 +33,6 @@ dev = [
     "ruff>=0.14.6",
 ]
 release = [
-    "nuitka~=2.7.12"
 ]
 
 [project.scripts]
