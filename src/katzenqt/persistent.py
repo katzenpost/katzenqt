@@ -81,9 +81,9 @@ class AppSetting(SQLModel, table=True):
 
 class MixWAL(SQLModel, table=True):
     """
-    Stores WriteChannelReply from ThinClient.write_channel_message
+    Stores EncryptWriteResult/EncryptReadResult from ThinClient.encrypt_read() and encrypt_write()
     for resending to the courier.
-    We need to feed all of these into ThinClient.send_message
+    We need to feed all of these into ThinClient.start_resending_encrypted_message
 
     TODO: Ok so say we want to send a message that spans a few BACAP boxes:
     - We create a new channel: EPH

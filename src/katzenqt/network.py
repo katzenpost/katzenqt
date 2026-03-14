@@ -66,7 +66,7 @@ async def start_background_threads(connection: ThinClient):
     async def do_shutdown():
         """TODO this needs some work"""
         await __should_quit.wait()
-        print("shutting down")
+        logger.info("shutting down")
         f1.cancel()
         f3.cancel()
         f4.cancel()
@@ -78,16 +78,16 @@ async def start_background_threads(connection: ThinClient):
               await asyncio.gather(task)
             except asyncio.exceptions.CancelledError:
               logger.info(f"cancelled: {task}")
-            print("start_background_threads completed: ",task)
+            logger.debug("start_background_threads completed: ",task)
     except Exception as xx:
-        print("f1-f4-f5 exception",xx)
+        logger.critical("f1-f4-f5 exception",xx)
         raise
 
 async def drain_mixwal(connection: ThinClient):
     try:
         await drain_mixwal2(connection) # todo why the fuck does this not catch ?
     except Exception as e:
-        print("drain_mixwal: exception", e)
+        logger.critical("drain_mixwal: exception", e)
         import traceback
         traceback.print_exc()
 
@@ -149,15 +149,21 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       logger.error("outbound read mw for courier that no longer exists")
       return
 
-  resp = await connection.start_resending_encrypted_message(
-      read_cap=rcw_read_cap,
-      write_cap=None,
-      next_message_index=mw.current_message_index,
-      reply_index=None,
-      envelope_descriptor=mw.envelope_descriptor,
-      envelope_hash=mw.envelope_hash,
-      message_ciphertext=mw.encrypted_payload,
-  )
+  while True: # there is a bug here where it will raise/return early when BoxIDNotFound
+    try:
+      resp = await connection.start_resending_encrypted_message(
+        read_cap=rcw_read_cap,
+        write_cap=None,
+        next_message_index=mw.current_message_index,
+        reply_index=None,
+        envelope_descriptor=mw.envelope_descriptor,
+        envelope_hash=mw.envelope_hash,
+        message_ciphertext=mw.encrypted_payload,
+        no_retry_on_box_id_not_found=False,
+      )
+      break
+    except katzenpost_thinclient.core.BoxIDNotFoundError:
+      continue
 
   logger.critical(f"got reply for outbound read mw {resp}")
   async with persistent.asession() as sess:
@@ -176,20 +182,19 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = mw.next_message_index
     sess.add(rcw)
-
-    if reply['payload'].startswith(b"I"):
-      logger.debug(f"received indirection {reply}")
+    if resp.startswith(b"I"):
+      logger.debug(f"received indirection {resp}")
       import pdb;pdb.set_trace()
       pass
-    elif reply['payload'].startswith(b"F"):
+    elif resp.startswith(b"F"):
       # it's a discrete message
-      logger.debug(f"received Final message {reply}")
+      logger.debug(f"received Final message {resp}")
       pass
-    elif reply["payload"].startswith(b"C"):
-      logger.debug(f"received C message {reply}")
+    elif resp.startswith(b"C"):
+      logger.debug(f"received C message {resp}")
       pass
     else:
-      logger.critical(f"received message with invalid prefix, going to stop reading this peer {reply}")
+      logger.critical(f"received message with invalid prefix, going to stop reading this peer {resp}")
       cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
       cp.active = False
       sess.add(cp)
@@ -204,10 +209,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     sess.add(persistent.ReceivedPiece(
                 read_cap=mw.bacap_stream,
                 bacap_index=mw.current_message_index[:8],
-                chunk_type=reply['payload'][:1],
-                chunk=reply['payload'][1:]
+                chunk_type=resp[:1],
+                chunk=resp[1:]
             ))
-    cl = persistent.ConversationLog.append_from(cp, reply["payload"])
+    cl = persistent.ConversationLog.append_from(cp, resp)
     sess.add(cl)
     await sess.delete(mw)
     c_id = cp.conversation.id
@@ -293,8 +298,7 @@ async def provision_read_caps(connection: ThinClient):
                     try:
                         keypair_res = await connection.new_keypair(seed=secrets.token_bytes(32))
                     except Exception as e:
-                        print("create_write_channel DID NOT WORK"*100)
-                        print(e)
+                        logger.warn(f"new_keypair DID NOT WORK: {e}")
                         continue
                     wcw.write_cap = keypair_res.write_cap
                     wcw.next_index = keypair_res.first_message_index
@@ -321,38 +325,31 @@ async def readables_to_mixwal(connection):
     global __resend_queue
     await __resend_queue_populated.wait()
     async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
-        print("process box cpeer-rcw:", cpeer, struct.unpack('<Q', rcw.next_index[:8]))
-        try:
-            chan_id = await connection.resume_read_channel(read_cap=rcw.read_cap,next_message_index=rcw.next_index)
-            print(f"cpeer got chan_id:{chan_id}, waiting for read_channel")
-            rcreply : "katzenpost_thinclient.ReadChannelReply" = await connection.read_channel(chan_id, message_box_index=rcw.next_index)
-            print(f"cpeer got read_channel reply")
-        except Exception as e:
-            logger.critical(f"readables-to-mixwal exception (did kpclientd die?) {e}")
-            raise
-        print("process_box got this from read_channel:", rcreply)
+        logger.debug("process box cpeer-rcw:", cpeer, struct.unpack('<Q', rcw.next_index[:8]))
+        rcreply: "EncryptReadResult" = await connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
+        print("process_box got this from encrypt_read:", rcreply)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
             plaintextwal=None,
             envelope_hash=rcreply.envelope_hash,
             destination=courier,
-            encrypted_payload=rcreply.send_message_payload,
+            encrypted_payload=rcreply.message_ciphertext,
             envelope_descriptor=rcreply.envelope_descriptor,
-            next_message_index=rcreply.next_message_index,
-            current_message_index=rcreply.current_message_index,
+            next_message_index=await connection.next_message_box_index(rcreply.next_message_index),
+            current_message_index=rcw.next_index,
             # rcreply.reply_index
             is_read=True,
         )
         return mw
     while True:
-        print("SLEEPING FOR READABLES_TO_MIXWAL"*2)
+        logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
         a, b = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=60)
         if not len(a):
             print('readables_to_mixwal_event.wait() timed out, nothing new to read?')
             continue
         readables_to_mixwal_event.clear()
-        print("IN READABLES_TO_MIXWAL_LOOP")
+        logger.debug("IN READABLES_TO_MIXWAL_LOOP")
         async with persistent.asession() as sess:
             # TODO are these guaranteed to be distinct?
             readable_peers = (await sess.exec(select(
@@ -366,7 +363,7 @@ async def readables_to_mixwal(connection):
             ).all()
             print("readable_peers", len(readable_peers))
             for (cpeer, rcw) in readable_peers:
-                print("going to process_box", cpeer.name, rcw.next_index[:8].hex())
+                logger.debug("going to process_box", cpeer.name, rcw.next_index[:8].hex())
                 try:
                   mw = await process_box(cpeer, rcw)
                 except Exception as e:
@@ -559,43 +556,6 @@ async def reconnect() -> ThinClient:
 # events: we should keep track of ConnectionStatusEvent.IsConnected so we can tell the user whether the mixnet client is working
 
 # ThinClient.send_message(surb_id, payload, dest_node, dest_queue)
-
-
-@dataclass
-class EncryptMessageReply:
-    encrypted: bytes
-    next_write_index: bytes
-
-async def encrypt_message(msg: str, bacap_write_cap:bytes, bacap_write_index:int, connection:ThinClient|None=None) -> EncryptMessageReply:
-    """cbor encode a chat message and encrypt it using write_cap
-
-    ThinClient.WriteChannelMessage() -> should give us a payload that we can put in ThinClient.SendMessage
-    """
-    payload = cbor2.dumps({
-        'version': 0,
-        'text': msg
-    })
-    print("ENCRYPT_MESSAGE DOES NOT WORK")
-    return
-    if connection:
-        # TODO try:
-        print("WTF7"*100, len(bacap_write_cap), len(read_cap))
-        channel_id, read_cap, write_cap = await connection.create_write_channel(
-            write_cap=bacap_write_cap,
-            message_box_index=bacap_write_index,
-        )
-        print("WTF6"*100, len(write_cap), len(read_cap))
-        encrypted, next_message_index = await connection.write_channel(
-            channel_id=channel_id,
-            payload=payload
-        )
-        await connection.close_channel(channel_id)
-        return EncryptMessageReply(encrypted=encrypted, next_write_index=next_message_index)
-    print("encrypt_message:", msg, bacap_write_cap, bacap_write_index)
-    return EncryptMessageReply(
-        encrypted=b"encrypted:{payload}:{bacap_write_cap}:{bacap_write_index}",
-        next_write_index=b"1234"
-    )
 
 def create_new_keypair(seed: bytes):
     """Makes a new WriteCap/ReadCap pair from a 32byte seed, using blake2b as KDF"""
