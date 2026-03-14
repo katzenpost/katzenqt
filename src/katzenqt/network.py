@@ -484,7 +484,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
         await sess.commit()
     # Now we have persisted our intention to resend.
     # Next up is something needs to actually resend, reading from MixWAL
-    # and issuing ThinClient.send_channel_query
+    # and issuing ThinClient.start_resending_encrypted_message
     __mixwal_updated.set()
 
 async def on_connection_status(status:"Dict[str,Any]"):
