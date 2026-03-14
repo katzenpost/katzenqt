@@ -1,7 +1,9 @@
-#Network = "tcp"
-Network = "unix"
-Address = "@katzenpost"
-#Address = "localhost:64331"
+# For prod namenlos:
+#Network = "unix"
+#Address = "@katzenpost"  # for prod
+# For testing with remote kpclientd:
+Network = "tcp"
+Address = "127.0.0.1:64331"
 
 [SphinxGeometry]
   PacketLength = 3082
