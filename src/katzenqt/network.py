@@ -144,12 +144,23 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   assert len(rcw_read_cap) == 136
   bacap_uuid = mw.bacap_stream
 
+  def give_up() -> None:
+    """Unblocks the mw so it can be scheduled again."""
+    draining_right_now.discard(bacap_uuid)
+    # we don't clear it from __resend_queue because we don't want to skip
+    # ahead in the stream.
+    readables_to_mixwal_event.set()
+    return
+
   # we should check that mw.destination exists:
   if not courier_destination_exists(connection, mw.destination):
       logger.error("outbound read mw for courier that no longer exists")
+      await asyncio.sleep(500)  # we want to wait until next PKI doc
+      give_up()
       return
 
-  resp = await connection.start_resending_encrypted_message(
+  try:
+    resp = await connection.start_resending_encrypted_message(
         read_cap=rcw_read_cap,
         write_cap=None,
         next_message_index=mw.current_message_index,
@@ -158,9 +169,15 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         envelope_hash=mw.envelope_hash,
         message_ciphertext=mw.encrypted_payload,
         no_retry_on_box_id_not_found=False,
-  )
+   )
+  except katzenpost_thinclient.core.MKEMDecryptionFailedError as e:
+    logger.critical(f"{e}: ")
+    await asyncio.sleep(5)
+    give_up()
+    return
 
   logger.critical(f"got reply for outbound read mw {resp}")
+  assert resp is not None, "outbound read reply is None, but ought to be retrying"
   async with persistent.asession() as sess:
     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
     idx_old, idx_new = struct.unpack("<2Q", rcw.next_index[:8] + mw.next_message_index[:8])
