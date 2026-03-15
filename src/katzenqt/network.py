@@ -149,9 +149,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       logger.error("outbound read mw for courier that no longer exists")
       return
 
-  while True: # there is a bug here where it will raise/return early when BoxIDNotFound
-    try:
-      resp = await connection.start_resending_encrypted_message(
+  resp = await connection.start_resending_encrypted_message(
         read_cap=rcw_read_cap,
         write_cap=None,
         next_message_index=mw.current_message_index,
@@ -160,10 +158,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         envelope_hash=mw.envelope_hash,
         message_ciphertext=mw.encrypted_payload,
         no_retry_on_box_id_not_found=False,
-      )
-      break
-    except katzenpost_thinclient.core.BoxIDNotFoundError:
-      continue
+  )
 
   logger.critical(f"got reply for outbound read mw {resp}")
   async with persistent.asession() as sess:
