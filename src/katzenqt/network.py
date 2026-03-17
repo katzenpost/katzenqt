@@ -348,7 +348,7 @@ async def readables_to_mixwal(connection):
             destination=courier,
             encrypted_payload=rcreply.message_ciphertext,
             envelope_descriptor=rcreply.envelope_descriptor,
-            next_message_index=await connection.next_message_box_index(rcreply.next_message_index),
+            next_message_index=await connection.next_message_box_index(rcw.next_index),
             current_message_index=rcw.next_index,
             # rcreply.reply_index
             is_read=True,
