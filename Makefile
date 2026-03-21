@@ -218,7 +218,7 @@ test-pip: $(STAMP_PIP)
 	@$(VENV)/bin/pytest
 
 $(KATZENPOST_DIR):
-	@git clone --branch new_pigeonhole_thinclient2_api_updates1 --depth 1 $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
+	@git clone $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
 
 katzenpost-update: $(KATZENPOST_DIR)
 	@cd $(KATZENPOST_DIR) && git pull --ff-only >/dev/null 2>&1
