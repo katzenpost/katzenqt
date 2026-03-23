@@ -101,7 +101,7 @@ install-debian-packages:
 	@sudo apt install -y \
 		libxcb-cursor0 libegl1 libpulse0 \
 		build-essential pkg-config \
-		golang-go git podman \
+		git podman \
 		pipx python3 python3-venv >/dev/null
 
 install-uv:
@@ -234,9 +234,9 @@ kpclientd: $(KATZENPOST_DIR)
 	fi
 
 kpclientd-podman:
-	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=debian \
-        voting_mixnet/kpclientd.debian && \
-        mv voting_mixnet/kpclientd.debian ../cmd/kpclientd/kpclientd
+	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=bookworm \
+        voting_mixnet/kpclientd.bookworm && \
+        mv voting_mixnet/kpclientd.bookworm ../cmd/kpclientd/kpclientd
 
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
