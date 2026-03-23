@@ -194,15 +194,15 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = mw.next_message_index
     sess.add(rcw)
-    if resp.startswith(b"I"):
+    if resp.plaintext.startswith(b"I"):
       logger.debug(f"received indirection {resp}")
       import pdb;pdb.set_trace()
       pass
-    elif resp.startswith(b"F"):
+    elif resp.plaintext.startswith(b"F"):
       # it's a discrete message
       logger.debug(f"received Final message {resp}")
       pass
-    elif resp.startswith(b"C"):
+    elif resp.plaintext.startswith(b"C"):
       logger.debug(f"received C message {resp}")
       pass
     else:
@@ -221,10 +221,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     sess.add(persistent.ReceivedPiece(
                 read_cap=mw.bacap_stream,
                 bacap_index=mw.current_message_index[:8],
-                chunk_type=resp[:1],
-                chunk=resp[1:]
+                chunk_type=resp.plaintext[:1],
+                chunk=resp.plaintext[1:]
             ))
-    cl = persistent.ConversationLog.append_from(cp, resp)
+    cl = persistent.ConversationLog.append_from(cp, resp.plaintext)
     sess.add(cl)
     await sess.delete(mw)
     c_id = cp.conversation.id
