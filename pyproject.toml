@@ -28,6 +28,7 @@ dev = [
     "hypothesis>=6.135.17",
     "mypy>=1.18.2",
     "pytest>=9.0.1",
+    "pytest-asyncio>=1.0.0",
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
