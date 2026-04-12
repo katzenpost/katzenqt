@@ -1,9 +1,10 @@
 import secrets
 import katzenpost_thinclient
-from katzenpost_thinclient import ThinClient, ThinClientOfflineError
+from katzenpost_thinclient import (
+    ThinClient, ThinClientOfflineError,
+    BACAPDecryptionFailedError, StartResendingCancelledError,
+)
 from katzenpost_thinclient import Config as ThinClientConfig
-import hashlib
-import cbor2
 import struct
 import nacl.public
 import secrets
@@ -105,14 +106,13 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     try:
       resp = await connection.start_resending_encrypted_message(
       write_cap=wcw.write_cap,
-      # next_message_index=mw.current_message_index,
       envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
       message_ciphertext=mw.encrypted_payload,
-      read_cap=None, next_message_index=None, reply_index=None
+      read_cap=None, message_box_index=None, reply_index=None
 
       )
-    except (ThinClientOfflineError, BrokenPipeError):
-      logger.warning("thin client is offline, can't drain mixwal.")
+    except (ThinClientOfflineError, BrokenPipeError, StartResendingCancelledError):
+      logger.warning("thin client is offline or resend cancelled, can't drain mixwal.")
       return
 
     logger.info(f"drain_mixwal_write_single got resp: {resp}")
@@ -163,14 +163,15 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     resp = await connection.start_resending_encrypted_message(
         read_cap=rcw_read_cap,
         write_cap=None,
-        next_message_index=mw.current_message_index,
+        message_box_index=mw.current_message_index,
         reply_index=None,
         envelope_descriptor=mw.envelope_descriptor,
         envelope_hash=mw.envelope_hash,
         message_ciphertext=mw.encrypted_payload,
         no_retry_on_box_id_not_found=False,
    )
-  except katzenpost_thinclient.core.MKEMDecryptionFailedError as e:
+  except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
+          BACAPDecryptionFailedError, StartResendingCancelledError) as e:
     logger.critical(f"{e}: ")
     await asyncio.sleep(5)
     give_up()
@@ -348,7 +349,7 @@ async def readables_to_mixwal(connection):
             destination=courier,
             encrypted_payload=rcreply.message_ciphertext,
             envelope_descriptor=rcreply.envelope_descriptor,
-            next_message_index=await connection.next_message_box_index(rcw.next_index),
+            next_message_index=rcreply.next_message_box_index,
             current_message_index=rcw.next_index,
             # rcreply.reply_index
             is_read=True,
@@ -475,7 +476,7 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
           message_box_index=wc.next_index,
           plaintext=pwal.bacap_payload)
 
-    next_message_index = await connection.next_message_box_index(wc.next_index)
+    next_message_index = wcr.next_message_box_index
 
     courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     mw = persistent.MixWAL(
@@ -602,29 +603,37 @@ def courier_destination_exists(connection, destination) -> bool:
 
     TODO: when ensuring courier exists we usually also want to make sure there are (some) replicas present.
     """
-    pki = connection.pki_document()
-    for sn in (pki or {}).get('ServiceNodes', []):
-        snd = cbor2.loads(sn)
-        if 'courier' not in snd['Kaetzchen']:
-            continue
-        snd_dest = hashlib.blake2b(snd['IdentityKey'], digest_size=32).digest()
-        if snd_dest == destination:
-            return True
-    return False
+    try:
+        couriers = connection.get_all_couriers()
+    except Exception:
+        return False
+    return any(identity_hash == destination for identity_hash, _queue_id in couriers)
 
 async def test_keypair(connection, write_cap, read_cap):
     """Test that create_new_keypair() results in usable+matching write/read caps."""
-    write_msg_id = secrets.token_bytes(16)
-    read_msg_id = secrets.token_bytes(16)
     courier = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     logger.debug("courier exists? %s %s", courier, courier_destination_exists(connection, courier))
-    write_chan = await connection.resume_write_channel(write_cap=write_cap, message_box_index=write_cap[-104:])
-    wcr : WriteChannelReply = await connection.write_channel(write_chan, payload=b'hello')
-    await connection.send_channel_query(channel_id=write_chan, payload=wcr.send_message_payload, dest_node=courier, dest_queue=b'courier',message_id=write_msg_id)
-    create_task(connection.close_channel(write_chan))
+
+    wcr = await connection.encrypt_write(
+        plaintext=b'hello',
+        write_cap=write_cap,
+        message_box_index=write_cap[-104:])
+    await connection.start_resending_encrypted_message(
+        read_cap=None, write_cap=write_cap, message_box_index=None,
+        reply_index=None,
+        envelope_descriptor=wcr.envelope_descriptor,
+        message_ciphertext=wcr.message_ciphertext,
+        envelope_hash=wcr.envelope_hash)
+
     await asyncio.sleep(20)
-    read_chan = await connection.resume_read_channel(read_cap=read_cap, next_message_index=read_cap[-104:])
-    rcr : ReadChannelReply = await connection.read_channel(read_chan, message_box_index=read_cap[-104:])
-    for i in range(3):
-        await connection.send_channel_query(channel_id=read_chan, payload=rcr.send_message_payload, dest_node=courier, dest_queue=b'courier',message_id=read_msg_id)
-        await asyncio.sleep(5)
+
+    rcr = await connection.encrypt_read(
+        read_cap=read_cap,
+        message_box_index=read_cap[-104:])
+    await connection.start_resending_encrypted_message(
+        read_cap=read_cap, write_cap=None,
+        message_box_index=read_cap[-104:],
+        reply_index=None,
+        envelope_descriptor=rcr.envelope_descriptor,
+        message_ciphertext=rcr.message_ciphertext,
+        envelope_hash=rcr.envelope_hash)
