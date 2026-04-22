@@ -20,7 +20,10 @@ if TYPE_CHECKING:
     from typing import AsyncContextManager
     import sqlmodel
 from alembic import context
+import logging
 import os
+
+logger = logging.getLogger("katzen.persistent")
 
 
 
@@ -155,19 +158,44 @@ class SentLog(SQLModel, table=True):
         """
         conversation_id = None
         with Session(_engine_sync) as sess:
+            # Unconditional regression guard: another drain may have already
+            # advanced wcw.next_index past our mw.next_message_index (e.g.,
+            # a retransmission's ACK arriving after a later message's ACK).
+            # Clobbering it back would let the writer re-encrypt at an index
+            # that was already written, and BACAP derives a unique key per
+            # index — the mismatch surfaces as an MKEM/BACAP decrypt failure
+            # at the reader.
+            wcw_precheck = sess.get(WriteCapWAL, mw.bacap_stream)
+            if wcw_precheck is not None:
+                real_next, our_next = struct.unpack(
+                    '<2Q',
+                    wcw_precheck.next_index[:8] + mw.next_message_index[:8],
+                )
+                if real_next >= our_next:
+                    logger.warning(
+                        "mark_sent: skipping stale ACK for bacap_stream=%s "
+                        "(db next=%d >= our next=%d); not regressing index",
+                        mw.bacap_stream, real_next, our_next,
+                    )
+                    # Clean up the stray MW so we don't re-drain it; leave
+                    # the PWAL alone if it still exists — a later MW with a
+                    # fresh next_message_index will mark it sent.
+                    stale_mw = sess.get(MixWAL, mw.id)
+                    if stale_mw is not None:
+                        sess.delete(stale_mw)
+                        sess.commit()
+                    resend_queue.discard(mw.bacap_stream)
+                    return
             pwal = sess.get(PlaintextWAL, mw.plaintextwal)
             if not pwal:
-                print("pwal lookup failed for mw.plaintextwal", mw.is_read, mw)
-                # this is not great; if mw.is_read==False then we really ought to have a corresponding plaintextwal.
-                # either we put the wrong id here; or something went wrong making the entry; or we have already mark_sent something
-                # for this plaintextwal entry. It seems most likely that we would end up here if we have resent the write
-                # and only later gotten the ACK.
-                real_next, our_next = struct.unpack('<2Q', sess.get(WriteCapWAL, mw.bacap_stream).next_index[:8] + mw.next_message_index[:8])
-                if real_next >= our_next:
-                    print(f"in mark_sent, but db next {real_next} >= {our_next} we already advanced from idx", mw.current_message_index[:8].hex())
-                    resend_queue.discard(mw.bacap_stream)  # TODO not sure if we still use this?
-                    return
-                import pdb; pdb.set_trace()
+                logger.warning(
+                    "mark_sent: pwal lookup failed for mw.plaintextwal=%s "
+                    "(is_read=%s); most likely a duplicate ACK for an MW "
+                    "whose PWAL was already reaped",
+                    mw.plaintextwal, mw.is_read,
+                )
+                resend_queue.discard(mw.bacap_stream)
+                return
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
             wcw = sess.get(WriteCapWAL, mw.bacap_stream)
             print("updating wcw: ", struct.unpack('<2Q', wcw.next_index[:8] + mw.next_message_index[:8]))
@@ -245,7 +273,11 @@ class PlaintextWAL(SQLModel, table=True):
             )
             .where(
                 sa.and_(
-                    PlaintextWAL.id.not_in(resend_queue),
+                    # __resend_queue holds bacap_stream UUIDs (not PWAL ids),
+                    # so the filter column has to match. The prior
+                    # PlaintextWAL.id.not_in(resend_queue) was a silent no-op
+                    # because the two UUID spaces essentially never overlap.
+                    PlaintextWAL.bacap_stream.not_in(resend_queue),
                     sa.or_(PlaintextWAL.after_id.is_(None),
                         PlaintextWAL.after_id.in_(sent_cte)
                         ),
