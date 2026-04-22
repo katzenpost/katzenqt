@@ -439,7 +439,12 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
             if pwal.bacap_stream not in __resend_queue:
                 __resend_queue.add(pwal.bacap_stream)
                 t = create_task(start_resending(connection, pwal))
-                on_error(t, lambda: __resend_queue.discard(pwal.bacap_stream))  # when cancelled/exception
+                # Default-arg capture pins pwal.bacap_stream at lambda
+                # creation time. The prior `lambda: ... pwal.bacap_stream`
+                # closed over the loop variable and, on an inner iteration's
+                # failure, discarded the LAST iteration's bacap_stream —
+                # stranding the actual failer in __resend_queue forever.
+                on_error(t, lambda s=pwal.bacap_stream: __resend_queue.discard(s))  # when cancelled/exception
 
 async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     """
