@@ -82,6 +82,9 @@ testpaths = [
     "src",
     "tests",
 ]
+markers = [
+    "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
+]
 
 [tool.ruff]
 line-length = 78

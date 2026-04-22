@@ -1,9 +1,13 @@
-# For prod namenlos:
-#Network = "unix"
-#Address = "@katzenpost"  # for prod
-# For testing with remote kpclientd:
-Network = "tcp"
-Address = "127.0.0.1:64331"
+# Dial transport: pick one subtable. The docker mixnet's kpclientd listens
+# on TCP 127.0.0.1:64331; prod katzenpost typically uses an abstract unix
+# socket. Exactly one of [Dial.Tcp] / [Dial.Unix] must be set.
+[Dial]
+  [Dial.Tcp]
+    Network = "tcp"
+    Address = "127.0.0.1:64331"
+  # [Dial.Unix]
+  #   Network = "unix"
+  #   Address = "@katzenpost"
 
 [SphinxGeometry]
   PacketLength = 3082
