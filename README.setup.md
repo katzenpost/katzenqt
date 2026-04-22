@@ -23,7 +23,7 @@ repo into `~/namenlos` then you would do the following to create and then put
 the configuration files into `~/.local/katzenpost/`:
 ```
   mkdir -p ~/.local/katzenpost/
-  cp ~/namenlos/configs/client2.toml ~/.local/katzenpost/client2.toml
+  cp ~/namenlos/configs/client.toml ~/.local/katzenpost/client.toml
   cp ~/namenlos/configs/thinclient.toml ~/.local/katzenpost/thinclient.toml
   cp ~/namenlos/configs/thinclient.toml ~/katzenqt/configs/thinclient.toml
 ```

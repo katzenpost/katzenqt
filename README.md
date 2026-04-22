@@ -18,7 +18,7 @@ First, git clone the `katzenqt` repo and `cd` into `katzenqt`:
 ```
 
 At this point your system should have all of the required tools to proceed.
-Your user account should have `~/.local/katzenpost/client2.toml` and
+Your user account should have `~/.local/katzenpost/client.toml` and
 `~/.local/katzenpost/thinclient.toml` ready for software that expects to find
 the configuration files in those locations.
 
