@@ -1,9 +1,6 @@
 import annotated_types
 from typing_extensions import Annotated
 from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict
-from .qt_models import *
-from PySide6.QtQml import QQmlPropertyMap
-from PySide6.QtGui import QStandardItem
 import cbor2
 from enum import Enum
 import uuid
@@ -13,6 +10,13 @@ from . import persistent
 import hashlib
 from base64 import b64encode, b64decode
 from typing import List
+
+# Note: ``ConversationUIState`` used to live here but its Qt-typed fields
+# (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
+# importer of this module — including the headless integration runner
+# and pytest collection — to load PySide6 and the Qt runtime libraries.
+# It now lives in ``katzenqt.qt_models``; import it from there if you
+# need it.
 
 class GroupChatTEXT(BaseModel):
     model_config = {
@@ -200,49 +204,5 @@ class GroupChatMessage(BaseModel):
         gcm = cls(**dic)
         return gcm, d.fp.tell()
 
-class ConversationUIState(BaseModel):
-    """Per-conversation runtime state used by the Qt UI."""
-    model_config = {
-        'validate_assignment': True,
-        'arbitrary_types_allowed': True
-    }
-    conversation_id : int
-    own_peer_id : int = Field(description="ConversationPeer.id for self")
-    own_peer_name : str = Field(description="ConversationPeer.name for self")
-    own_peer_bacap_uuid: uuid.UUID
-    chat_lineEdit_buffer : str
-    conversation_log_model: ConversationLogModel
-    contacts_standard_item : QStandardItem = Field(description="the entry in the Contacts pane for the conversation")
-    chat_lines_scroll_idx : float = 0.0
-    # TODO: should store scroll state of self.ui.ChatLines
-    # ie self.ui.ChatLines.scrollToBottom() for default new ones
-    last_push_to_talk_ns : int = 0
-    attached_files : set[str] = Field(default_factory=set)
-
-    first_unread : int = 0
-    # (projected) ConversationLog.conversation_order of first message the user
-    # hasn't "read" yet - it doesn't have to exist in ConversationLog yet.
-
-    def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
-        props = QQmlPropertyMap(rootObject)
-        props.insert({
-            **settings,
-            "chatTreeViewModel": self.conversation_log_model,
-            "conversation_scroll": self.chat_lines_scroll_idx,
-            "first_unread": self.first_unread,
-            "chat_text_size": 11, # governs text size of chat messages
-            "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
-        })
-        return props
-
-    async def update_first_unread(self, new_first_unread:int) -> None:
-        """Update first_unread in the persistent database:"""
-        if new_first_unread == self.first_unread:
-            return
-        print("UPDATED FIRST_UNREAD", self.first_unread, new_first_unread)
-        self.first_unread = new_first_unread
-        async with persistent.asession() as sess:
-            co = await sess.get(persistent.Conversation, self.conversation_id)
-            co.first_unread = self.first_unread
-            sess.add(co)
-            await sess.commit()
+# ConversationUIState moved to katzenqt.qt_models — see banner near the
+# top of this file for rationale.
