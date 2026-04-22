@@ -47,12 +47,22 @@ def test_import_katzenqt_network_does_not_load_pyside6():
 
 
 def test_import_katzenqt_models_does_not_load_pyside6():
-    # models has Qt deps via .qt_models; we don't claim it stays
-    # PySide6-free. This asserts the OPPOSITE — if someone manages to
-    # decouple it later, flip the assertion. For now it's a known cost.
-    assert _imports_pyside6("import katzenqt.models"), (
-        "katzenqt.models was expected to pull PySide6 (via .qt_models); "
-        "if it no longer does, flip this assertion."
+    # ConversationUIState used to live here and dragged in Qt via its
+    # ConversationLogModel/QStandardItem/QQmlPropertyMap fields. It now
+    # lives in katzenqt.qt_models so this module can stay headless.
+    assert not _imports_pyside6("import katzenqt.models")
+
+
+def test_integration_runner_imports_do_not_load_pyside6():
+    # Regression guard for the precise import set the docker-integration
+    # subprocess pulls in. If a future contributor adds a top-level
+    # PySide6-touching import to integration_runner (or to one of its
+    # transitive deps) the docker-integration CI will break with
+    # `ImportError: libEGL.so.1` and this test will catch it locally
+    # first.
+    assert not _imports_pyside6(
+        "from katzenqt import models, network, persistent\n"
+        "from katzenqt import integration_runner\n"
     )
 
 
