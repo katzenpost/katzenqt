@@ -46,18 +46,6 @@ jobs:
           ref: 66891b7e4067d3088fbb8e43d2f5aa4f59c6e2d3
           path: katzenqt/katzenpost
 
-      # katzenqt's top-level __init__.py imports katzen.cli which imports
-      # PySide6. Even the integration test's conftest triggers that chain
-      # via `from katzenqt import persistent`, so the runner needs the Qt
-      # runtime libs present or pytest fails at collection with
-      # `ImportError: libEGL.so.1`. Matches the subset of
-      # install-debian-packages in katzenqt's Makefile.
-      - name: Install Qt runtime libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libxcb-cursor0 libegl1 libpulse0 libfontconfig1 libxkbcommon0
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
