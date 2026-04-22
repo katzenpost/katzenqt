@@ -13,9 +13,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-import struct
 from typing import TYPE_CHECKING
-from .katzen_util import create_task
+from .katzen_util import bacap_idx64, create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
     import sqlmodel
@@ -167,12 +166,8 @@ class SentLog(SQLModel, table=True):
             # at the reader.
             wcw_precheck = sess.get(WriteCapWAL, mw.bacap_stream)
             if wcw_precheck is not None:
-                # First 8 bytes of a MessageBoxIndex blob are Idx64 as a
-                # little-endian uint64 (see hpqc/bacap/bacap.go
-                # MessageBoxIndex.MarshalBinary). Byte comparison would
-                # reverse the ordering on LE; take the integer view.
-                real_next = int.from_bytes(wcw_precheck.next_index[:8], 'little')
-                our_next = int.from_bytes(mw.next_message_index[:8], 'little')
+                real_next = bacap_idx64(wcw_precheck.next_index)
+                our_next = bacap_idx64(mw.next_message_index)
                 if real_next >= our_next:
                     logger.warning(
                         "mark_sent: skipping stale ACK for bacap_stream=%s "
@@ -200,7 +195,8 @@ class SentLog(SQLModel, table=True):
                 return
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
             wcw = sess.get(WriteCapWAL, mw.bacap_stream)
-            print("updating wcw: ", struct.unpack('<2Q', wcw.next_index[:8] + mw.next_message_index[:8]))
+            print("updating wcw: ",
+                  (bacap_idx64(wcw.next_index), bacap_idx64(mw.next_message_index)))
             wcw.next_index = mw.next_message_index
             if pwal.bacap_payload[:1] in (b'F',b'I'):
                 # This is either:
