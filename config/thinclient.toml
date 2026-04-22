@@ -1,3 +1,15 @@
+
+# Dial transport: pick one subtable. The docker mixnet's kpclientd listens
+# on TCP 127.0.0.1:64331; prod katzenpost typically uses an abstract unix
+# socket. Exactly one of [Dial.Tcp] / [Dial.Unix] must be set.
+[Dial]
+  [Dial.Tcp]
+    Network = "tcp"
+    Address = "127.0.0.1:64331"
+  # [Dial.Unix]
+  #   Network = "unix"
+  #   Address = "@katzenpost"
+
 [SphinxGeometry]
   PacketLength = 3082
   NrHops = 5
@@ -22,8 +34,3 @@
   CourierQueryReplyWriteLength = 50
   NIKEName = "CTIDH1024-X25519"
   SignatureSchemeName = "Ed25519"
-
-[Dial]
-  [Dial.Tcp]
-    Address = "localhost:64331"
-    Network = "tcp"
