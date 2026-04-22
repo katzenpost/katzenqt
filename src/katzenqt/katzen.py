@@ -40,10 +40,12 @@ from sqlmodel import select
 from . import network  # this is network.py
 from . import persistent
 from .katzen_util import create_task
-from .models import (ConversationUIState, GroupChatFileUpload,
+from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
-from .qt_models import *  # qt_models.py
+# qt_models.py — also re-exports ConversationUIState (moved here so the
+# headless `models` module can stay PySide6-free).
+from .qt_models import *
 from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
 from .ui_mixchat import Ui_MainWindow  # ui_mixchat.py
 
