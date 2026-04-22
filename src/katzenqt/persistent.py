@@ -167,10 +167,12 @@ class SentLog(SQLModel, table=True):
             # at the reader.
             wcw_precheck = sess.get(WriteCapWAL, mw.bacap_stream)
             if wcw_precheck is not None:
-                real_next, our_next = struct.unpack(
-                    '<2Q',
-                    wcw_precheck.next_index[:8] + mw.next_message_index[:8],
-                )
+                # First 8 bytes of a MessageBoxIndex blob are Idx64 as a
+                # little-endian uint64 (see hpqc/bacap/bacap.go
+                # MessageBoxIndex.MarshalBinary). Byte comparison would
+                # reverse the ordering on LE; take the integer view.
+                real_next = int.from_bytes(wcw_precheck.next_index[:8], 'little')
+                our_next = int.from_bytes(mw.next_message_index[:8], 'little')
                 if real_next >= our_next:
                     logger.warning(
                         "mark_sent: skipping stale ACK for bacap_stream=%s "
