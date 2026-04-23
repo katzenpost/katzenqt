@@ -5,11 +5,10 @@ name: Docker Mixnet Integration Tests
 # structure of thin_client's test-integration-docker.yml workflow.
 #
 # The `ref:` on the katzenpost checkout below is the single pin that
-# controls which kpclientd version is built. The current pin
-# (66891b7e4067d3088fbb8e43d2f5aa4f59c6e2d3, tip of branch
-# new_pigeonhole_thinclient2) is the first sha that serves the
-# GetMessageBoxIndexCounter API katzenqt's integration test requires —
-# do NOT replace it with `main` until that sha is merged there.
+# controls which kpclientd version is built. Keep it aligned with the
+# pin in thin_client's own test-integration-docker.yml workflow so all
+# three repos (katzenpost, thin_client, katzenqt) exercise the same
+# daemon on every CI run.
 
 on:
   pull_request:
@@ -39,11 +38,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: katzenpost/katzenpost
-          # Tip of branch new_pigeonhole_thinclient2 — the first commit that
-          # serves GetMessageBoxIndexCounter, which katzenqt's integration
-          # test requires at every write-ACK. Do NOT bump to `main` until
-          # this sha is merged there.
-          ref: 66891b7e4067d3088fbb8e43d2f5aa4f59c6e2d3
+          # Keep in lockstep with
+          # thin_client/.github/workflows/test-integration-docker.yml —
+          # both katzenqt and thin_client must exercise the same
+          # kpclientd sha or protocol drift will hit one workflow
+          # before the other.
+          ref: f6056a1d9961a5398f6543cd4dca1389e157f4fc
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
