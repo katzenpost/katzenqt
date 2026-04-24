@@ -34,6 +34,7 @@ import asyncio
 import os
 import signal
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -379,7 +380,7 @@ async def _action_chat_session(args):
                 if not ok:
                     print(f"STEP_FAIL:{step_idx}:send-timeout:{payload}", flush=True)
                     return 3
-                print(f"STEP_OK:{step_idx}:SEND:{payload}", flush=True)
+                print(f"STEP_OK:{step_idx}:SEND:{payload}:ts={time.time():.3f}", flush=True)
 
             elif kind == "READ":
                 # Nudge the read loop in case no event is outstanding.
@@ -421,7 +422,7 @@ async def _action_chat_session(args):
                 if not ok:
                     print(f"STEP_FAIL:{step_idx}:read-timeout:{payload}", flush=True)
                     return 4
-                print(f"STEP_OK:{step_idx}:READ:{payload}", flush=True)
+                print(f"STEP_OK:{step_idx}:READ:{payload}:ts={time.time():.3f}", flush=True)
 
             elif kind == "SLEEP":
                 await asyncio.sleep(float(payload))
