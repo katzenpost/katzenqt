@@ -131,7 +131,39 @@ async def _action_create_conv(args):
 async def _action_accept_invite(args):
     please_add = models.GroupChatPleaseAdd.from_human_readable(args.invite_b64)
 
-    # Build own conversation + own_peer skeleton.
+    # If a conversation with this name already exists, add the peer to it
+    # rather than creating a new conversation (matches the Qt app's
+    # accept_invitation flow, which always adds to the selected conv).
+    async with persistent.asession() as sess:
+        existing = (await sess.exec(
+            select(persistent.Conversation).where(
+                persistent.Conversation.name == args.conv_name
+            )
+        )).first()
+
+    if existing is not None:
+        peer_rcwal = persistent.ReadCapWAL(
+            id=uuid.uuid4(),
+            read_cap=please_add.read_cap,
+            next_index=please_add.read_cap[-104:],
+        )
+        async with persistent.asession() as sess:
+            conv_obj = (await sess.exec(
+                select(persistent.Conversation).where(
+                    persistent.Conversation.id == existing.id
+                )
+            )).one()
+            peer = persistent.ConversationPeer(
+                name=args.peer_name, read_cap_id=peer_rcwal.id, active=True,
+                conversation=conv_obj,
+            )
+            sess.add(peer_rcwal)
+            sess.add(peer)
+            await sess.commit()
+        print("ACCEPTED", flush=True)
+        return 0
+
+    # Otherwise, build own conversation + own_peer skeleton.
     wcapwal = persistent.WriteCapWAL(id=uuid.uuid4())
     own_rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
     convo = persistent.Conversation(name=args.conv_name, write_cap=wcapwal.id, first_unread=0)
@@ -220,6 +252,191 @@ async def _action_send(args):
         await _shutdown(bg)
 
 
+async def _action_multi_send(args):
+    """Queue N messages on the PWAL all at once, then wait for the LAST of
+    them to land in SentLog. Approximates a user that typed and pressed
+    Enter several times in quick succession before quitting.
+    """
+    async with persistent.asession() as sess:
+        convo = (await sess.exec(
+            select(persistent.Conversation).where(
+                persistent.Conversation.name == args.conv_name
+            )
+        )).first()
+        if convo is None:
+            print(f"ERROR=conversation {args.conv_name!r} not found", flush=True)
+            return 2
+        conversation_id = convo.id
+        own_bacap_stream = convo.write_cap
+
+    texts = args.texts.split("|")
+    final_pwal_ids: list = []
+    for text in texts:
+        gcm = models.GroupChatMessage(
+            version=0, membership_hash=b"TODO" * 8, text=text,
+        )
+        send_op = models.SendOperation(
+            bacap_stream=own_bacap_stream, messages=[gcm],
+        )
+        _, db_entries = send_op.serialize(
+            chunk_size=1530, conversation_id=conversation_id,
+        )
+        final_pwal_ids.append(db_entries[-1].id)
+        async with persistent.asession() as sess:
+            for obj in db_entries:
+                sess.add(obj)
+            await sess.commit()
+
+    connection, bg = await _connect_and_start()
+    try:
+        await network.check_for_new()
+        # Wait for the LAST queued PWAL to clear.
+        target = final_pwal_ids[-1]
+        for _ in range(2400):  # 600s @ 250ms
+            async with persistent.asession() as sess:
+                hit = (await sess.exec(
+                    select(persistent.SentLog).where(persistent.SentLog.id == target)
+                )).first()
+                if hit is not None:
+                    print("SENT", flush=True)
+                    return 0
+            await asyncio.sleep(0.25)
+        print("ERROR=multi-send timed out", flush=True)
+        return 3
+    finally:
+        await _shutdown(bg)
+
+
+async def _action_chat_session(args):
+    """Long-lived session that runs multiple SEND / READ / SLEEP steps in
+    ONE subprocess against a shared background-thread ThinClient, then
+    cleanly shuts down. The whole point is to exercise multiple in-process
+    state transitions before the subprocess exits, so that on the *next*
+    subprocess we know the last committed state on disk is the one that
+    matters.
+
+    Steps are taken from positional args, each of the forms:
+        SEND:<text>           — queue one PWAL, wait for SentLog.
+        READ:<expected_text>  — poll ConvLog for the expected peer text.
+        SLEEP:<seconds>       — sleep (helps when we need a background
+                                 read loop to drain without us signalling).
+
+    Emits one line per step to stdout: `STEP_OK:<n>` or `STEP_FAIL:<n>:<reason>`,
+    then `SESSION_DONE` on clean exit.
+
+    Timeouts (send=300s, read=180s) are shared across steps.
+    """
+    async with persistent.asession() as sess:
+        convo = (await sess.exec(
+            select(persistent.Conversation).where(
+                persistent.Conversation.name == args.conv_name
+            )
+        )).first()
+        if convo is None:
+            print(f"ERROR=conversation {args.conv_name!r} not found", flush=True)
+            return 2
+        own_peer_id = convo.own_peer_id
+        conversation_id = convo.id
+        own_bacap_stream = convo.write_cap
+
+    connection, bg = await _connect_and_start()
+    try:
+        # Kick the read loop once so the session starts polling any peer
+        # streams that have advanced since our last incarnation.
+        await network.signal_readables_to_mixwal()
+
+        for step_idx, raw in enumerate(args.steps):
+            kind, _, payload = raw.partition(":")
+            if kind == "SEND":
+                gcm = models.GroupChatMessage(
+                    version=0, membership_hash=b"TODO" * 8, text=payload,
+                )
+                send_op = models.SendOperation(
+                    bacap_stream=own_bacap_stream, messages=[gcm],
+                )
+                _, db_entries = send_op.serialize(
+                    chunk_size=1530, conversation_id=conversation_id,
+                )
+                final_pwal_id = db_entries[-1].id
+                async with persistent.asession() as sess:
+                    for obj in db_entries:
+                        sess.add(obj)
+                    await sess.commit()
+                await network.check_for_new()
+                deadline = asyncio.get_event_loop().time() + 300.0
+                ok = False
+                while asyncio.get_event_loop().time() < deadline:
+                    async with persistent.asession() as sess:
+                        hit = (await sess.exec(
+                            select(persistent.SentLog).where(
+                                persistent.SentLog.id == final_pwal_id
+                            )
+                        )).first()
+                        if hit is not None:
+                            ok = True
+                            break
+                    await asyncio.sleep(0.25)
+                if not ok:
+                    print(f"STEP_FAIL:{step_idx}:send-timeout:{payload}", flush=True)
+                    return 3
+                print(f"STEP_OK:{step_idx}:SEND:{payload}", flush=True)
+
+            elif kind == "READ":
+                # Nudge the read loop in case no event is outstanding.
+                await network.signal_readables_to_mixwal()
+                deadline = asyncio.get_event_loop().time() + 180.0
+                ok = False
+                poll_n = 0
+                last_count = -1
+                while asyncio.get_event_loop().time() < deadline:
+                    poll_n += 1
+                    async with persistent.asession() as sess:
+                        rows = (await sess.exec(
+                            select(persistent.ConversationLog).where(
+                                persistent.ConversationLog.conversation_id == conversation_id
+                            ).where(
+                                persistent.ConversationLog.conversation_peer_id != own_peer_id
+                            )
+                        )).all()
+                    if len(rows) != last_count:
+                        last_count = len(rows)
+                        print(
+                            f"STEP_POLL:{step_idx}:poll={poll_n}:row_count={last_count}:"
+                            f"conv_id={conversation_id}:own_peer_id={own_peer_id}:looking_for={payload!r}",
+                            flush=True,
+                        )
+                    for cl in rows:
+                        if cl.payload[:1] != b"F":
+                            continue
+                        try:
+                            gcm = models.GroupChatMessage.from_cbor(cl.payload[1:])
+                        except Exception:
+                            continue
+                        if gcm.text == payload:
+                            ok = True
+                            break
+                    if ok:
+                        break
+                    await asyncio.sleep(0.5)
+                if not ok:
+                    print(f"STEP_FAIL:{step_idx}:read-timeout:{payload}", flush=True)
+                    return 4
+                print(f"STEP_OK:{step_idx}:READ:{payload}", flush=True)
+
+            elif kind == "SLEEP":
+                await asyncio.sleep(float(payload))
+                print(f"STEP_OK:{step_idx}:SLEEP:{payload}", flush=True)
+
+            else:
+                print(f"STEP_FAIL:{step_idx}:unknown-step:{raw}", flush=True)
+                return 5
+
+        print("SESSION_DONE", flush=True)
+        return 0
+    finally:
+        await _shutdown(bg)
+
+
 async def _action_read(args):
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -233,6 +450,7 @@ async def _action_read(args):
         own_peer_id = convo.own_peer_id
         conversation_id = convo.id
 
+    expected = getattr(args, "expected_text", None)
     connection, bg = await _connect_and_start()
     try:
         await network.signal_readables_to_mixwal()
@@ -256,9 +474,12 @@ async def _action_read(args):
                         gcm = models.GroupChatMessage.from_cbor(cl.payload[1:])
                     except Exception:
                         continue
-                    if gcm.text:
-                        print("RECV=" + gcm.text, flush=True)
-                        return 0
+                    if not gcm.text:
+                        continue
+                    if expected is not None and gcm.text != expected:
+                        continue
+                    print("RECV=" + gcm.text, flush=True)
+                    return 0
             await asyncio.sleep(0.5)
         print("TIMEOUT", flush=True)
         return 1
@@ -294,10 +515,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("text")
     p_send.set_defaults(func=_action_send)
 
+    p_multi = sub.add_parser("multi-send")
+    p_multi.add_argument("conv_name")
+    p_multi.add_argument("texts", help="pipe-separated list of texts to queue")
+    p_multi.set_defaults(func=_action_multi_send)
+
     p_read = sub.add_parser("read")
     p_read.add_argument("conv_name")
     p_read.add_argument("timeout_s", type=float)
+    p_read.add_argument("expected_text", nargs="?", default=None)
     p_read.set_defaults(func=_action_read)
+
+    p_sess = sub.add_parser("chat-session")
+    p_sess.add_argument("conv_name")
+    p_sess.add_argument(
+        "steps", nargs="+",
+        help="steps like SEND:text, READ:text, SLEEP:seconds",
+    )
+    p_sess.set_defaults(func=_action_chat_session)
 
     return parser
 
