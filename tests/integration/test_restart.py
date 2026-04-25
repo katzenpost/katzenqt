@@ -279,6 +279,93 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
 
 
 @pytest.mark.integration
+def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_factory):
+    """Measure end-to-end latency from Bob's send completion to Alice's
+    ConvLog commit, over several back-to-back messages.
+
+    Bob sends 5 messages in a single long-lived session. Alice runs her
+    own long-lived session that simply READs each of them in turn and
+    timestamps the observation. Since both STEP_OK lines carry ts=,
+    we can compute per-message gap "bob SENT ts" - "alice RECV ts".
+
+    No assertion is made about the absolute latency — docker mixnet
+    defaults are slow on purpose — but the timings land in the pytest
+    log so the user can see them.
+    """
+    alice_state = tmp_path_factory.mktemp("alice") / "state"
+    bob_state = tmp_path_factory.mktemp("bob") / "state"
+    log_dir = tmp_path_factory.mktemp("latency_logs")
+
+    create_a = _run_role(alice_state, "create-conv", "demo", "alice", timeout=180.0)
+    assert create_a.returncode == 0, create_a.stdout + create_a.stderr
+    invite_a = _expect_prefix(create_a.stdout, "INVITE=")
+
+    create_b = _run_role(bob_state, "create-conv", "demo", "bob", timeout=180.0)
+    assert create_b.returncode == 0
+    invite_b = _expect_prefix(create_b.stdout, "INVITE=")
+
+    # Both sides accept each other's invite so each has an active peer
+    # reading the other's stream.
+    accept_b = _run_role(bob_state, "accept-invite", "demo", "bob", "alice", invite_a, timeout=30.0)
+    assert accept_b.returncode == 0
+    accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
+    assert accept_a.returncode == 0
+
+    n = 5
+    bob_steps = []
+    alice_steps = []
+    for i in range(n):
+        bob_steps.append(f"SEND:m{i}")
+        alice_steps.append(f"READ:m{i}")
+    bob_proc = _spawn_role(
+        bob_state, "chat-session", "demo", *bob_steps,
+        stdout_path=log_dir / "bob.out", stderr_path=log_dir / "bob.err",
+    )
+    alice_proc = _spawn_role(
+        alice_state, "chat-session", "demo", *alice_steps,
+        stdout_path=log_dir / "alice.out", stderr_path=log_dir / "alice.err",
+    )
+    try:
+        bob_proc.wait(timeout=1200.0)
+        alice_proc.wait(timeout=1200.0)
+    except subprocess.TimeoutExpired:
+        bob_proc.kill()
+        alice_proc.kill()
+        raise
+
+    bob_out = (log_dir / "bob.out").read_text()
+    alice_out = (log_dir / "alice.out").read_text()
+
+    import re
+    send_ts = {}  # text -> ts
+    for line in bob_out.splitlines():
+        m = re.match(r"^STEP_OK:\d+:SEND:(m\d+):ts=(\d+\.\d+)$", line)
+        if m:
+            send_ts[m.group(1)] = float(m.group(2))
+    recv_ts = {}
+    for line in alice_out.splitlines():
+        m = re.match(r"^STEP_OK:\d+:READ:(m\d+):ts=(\d+\.\d+)$", line)
+        if m:
+            recv_ts[m.group(1)] = float(m.group(2))
+
+    print(f"[latency] bob sent {len(send_ts)} messages, alice received {len(recv_ts)}")
+    assert len(send_ts) == n, f"bob didn't complete all sends: {send_ts}\n---\n{bob_out[-2000:]}"
+    assert len(recv_ts) == n, f"alice didn't receive all messages: {recv_ts}\n---\n{alice_out[-2000:]}"
+
+    gaps = []
+    for i in range(n):
+        key = f"m{i}"
+        gap = recv_ts[key] - send_ts[key]
+        gaps.append(gap)
+        print(f"[latency] {key}: bob SEND_ACK={send_ts[key]:.3f} alice OBSERVED={recv_ts[key]:.3f} gap={gap:+.2f}s")
+
+    print(f"[latency] gap stats: min={min(gaps):.2f}s max={max(gaps):.2f}s "
+          f"mean={sum(gaps)/len(gaps):.2f}s")
+    assert bob_proc.returncode == 0
+    assert alice_proc.returncode == 0
+
+
+@pytest.mark.integration
 def test_bidirectional_multi_round(kpclientd_endpoint, tmp_path_factory):
     """Bidirectional setup, then 3 rounds of alice→bob, bob→alice exchanges
     each in fresh subprocesses (so each send/read is a restart).
