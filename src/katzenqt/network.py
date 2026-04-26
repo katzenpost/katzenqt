@@ -271,7 +271,7 @@ async def drain_mixwal2(connection: ThinClient):
         if __should_quit.is_set():
           continue
         __mixwal_updated.clear()
-        print(f"DRAIN_MIXWAL draining_right_now:{draining_right_now} __resend_queue:{__resend_queue}")
+        logger.debug("DRAIN_MIXWAL draining_right_now:%s __resend_queue:%s", draining_right_now, __resend_queue)
         # TODO drain new from mixwal, this should NOT be a long-running session like it currently is
         new_write_mws = []
         async with persistent.asession() as sess:
@@ -291,7 +291,9 @@ async def drain_mixwal2(connection: ThinClient):
             if not courier_destination_exists(connection, mw.destination):
                 logger.warning("mw courier is currently not in PKI")
                 continue
-            print("drain_mixwal: NEW (write) MIXWAL:", await connection.get_message_box_index_counter(mw.current_message_index), mw.is_read, mw.bacap_stream)
+            logger.debug("drain_mixwal: NEW (write) MIXWAL idx=%s is_read=%s bacap_stream=%s",
+                         await connection.get_message_box_index_counter(mw.current_message_index),
+                         mw.is_read, mw.bacap_stream)
             draining_right_now.add(mw.bacap_stream) # this is the uuid PK
             __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
             write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
@@ -307,7 +309,8 @@ async def provision_read_caps(connection: ThinClient):
         wait = 5
         async with persistent.asession() as sess:
             for (rcw, wcw) in await sess.exec(sa.select(persistent.ReadCapWAL,persistent.WriteCapWAL).where(persistent.ReadCapWAL.read_cap == None).where(persistent.ReadCapWAL.write_cap_id==persistent.WriteCapWAL.id)): #  &
-                print("UPDATING:"*100, rcw,wcw, wcw.write_cap, wcw.next_index)
+                logger.debug("provision_read_caps UPDATING rcw=%s wcw=%s write_cap=%s next_index=%s",
+                             rcw, wcw, wcw.write_cap, wcw.next_index)
                 if wcw.write_cap is None:
                     try:
                         keypair_res = await connection.new_keypair(seed=secrets.token_bytes(32))
@@ -325,7 +328,7 @@ async def provision_read_caps(connection: ThinClient):
                     readables_to_mixwal_event.set() # start reading the ReadCap if it's active
                     continue
                 else:
-                    print("DB was created with old API, new API does not support converting write cap to read cap")
+                    logger.warning("DB was created with old API; new API does not support converting write cap to read cap")
                     continue
             await sess.commit()
 
@@ -335,13 +338,13 @@ async def readables_to_mixwal(connection):
     aren't currently trying to read.
     """
     await __mixnet_connected.wait()
-    print("READABLES READING")
+    logger.debug("readables_to_mixwal: starting")
     global __resend_queue
     await __resend_queue_populated.wait()
     async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
         logger.debug("process box cpeer-rcw:", cpeer, await connection.get_message_box_index_counter(rcw.next_index))
         rcreply: "EncryptReadResult" = await connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
-        print("process_box got this from encrypt_read:", rcreply)
+        logger.debug("process_box got this from encrypt_read: %s", rcreply)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
@@ -360,7 +363,7 @@ async def readables_to_mixwal(connection):
         logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
         a, b = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=60)
         if not len(a):
-            print('readables_to_mixwal_event.wait() timed out, nothing new to read?')
+            logger.debug("readables_to_mixwal_event.wait() timed out, nothing new to read")
             continue
         readables_to_mixwal_event.clear()
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
@@ -375,7 +378,7 @@ async def readables_to_mixwal(connection):
                             )
                 )
             ).all()
-            print("readable_peers", len(readable_peers))
+            logger.debug("readable_peers: %d", len(readable_peers))
             for (cpeer, rcw) in readable_peers:
                 logger.debug("going to process_box", cpeer.name, rcw.next_index[:8].hex())
                 try:
@@ -384,13 +387,13 @@ async def readables_to_mixwal(connection):
                   logger.critical(f"process_box failed: {e}")
                   continue
                 sess.add(mw)
-                print("finished one peer", cpeer.name)
-            print("committing")
+                logger.debug("finished one peer: %s", cpeer.name)
+            logger.debug("readables_to_mixwal: committing")
             await sess.commit()
-        print("done readables_to_mixwal", len(readable_peers))
+        logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))
         if len(readable_peers):
             __mixwal_updated.set()
-            print("__mixwal_updated.set() from readables_to_mixwal")
+            logger.debug("__mixwal_updated.set() from readables_to_mixwal")
 
 def on_error(task, func, *args, **kwargs):
     """calls func(*args,**kwargs) if task has an exception.
@@ -417,7 +420,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     while True:
         _, _ = await asyncio.wait((create_task(resendable_event.wait()),), timeout=60)
         resendable_event.clear()
-        print("SEND_RESENDABLE RUNNING")
+        logger.debug("send_resendable_plaintexts: running")
         pwals_to_send = set()
         async with persistent.asession() as sess:
             query = persistent.PlaintextWAL.find_resendable(__resend_queue)
@@ -428,7 +431,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                     continue
                 # This is an indirection message, we need to fill the read cap.
                 # find_resendable should only give us these entries if the needed read cap has been provisioned.
-                print("Got a PWAL entry that requires an indirection", pwal.indirection)
+                logger.debug("got a PWAL entry that requires an indirection: %s", pwal.indirection)
                 if not pwal.bacap_payload:
                     # TODO this ought to be a SQL UPDATE plaintextwal USING readcapwal, but for now we do it by hand.
                     rcw = sess.get(persistent.ReadCapWAL, pwal.indirection)
@@ -512,7 +515,7 @@ async def on_connection_status(status:"Dict[str,Any]"):
     else:
       __mixnet_connected.clear()
     if status["err"] or status.get("Err", None):
-        print("ON_CONNECTION_STATUS err:", status)
+        logger.error("ON_CONNECTION_STATUS err: %s", status)
         #ON_CONNECTION_STATUS err: {'is_connected': False, 'err': {'Op': 'read', 'Net': 'tcp', 'Source': {'IP': b'\x7f\x00\x00\x01', 'Port': 51718, 'Zone': ''}, 'Addr': {'IP': b'\x7f\x00\x00\x01', 'Port': 30004, 'Zone': ''}, 'Err': {}}}
         # why is clientd telling us about the IP addresses its trying to connect to?
         # and why does it have both status['err'] and status['Err']?
@@ -527,11 +530,12 @@ async def on_message_reply(reply):
     # Receives something like:
     # {'message_id': b'\n\x90\xc2\x0cr\xa8\xa2+\x17Y\xcb\x837\xcc\x0f\x9b', 'surbid': None, 'payload': None}
     if async_queue := __on_message_queues.get(reply['message_id'], None):
-        print("got reply for something we have a queue for", reply['message_id'].hex(), reply['payload'])
+        logger.debug("on_message_reply: matched queue for message_id=%s payload=%s",
+                     reply['message_id'].hex(), reply['payload'])
         create_task(async_queue.put(reply))
-        print("its now on queue", reply['message_id'].hex())
+        logger.debug("on_message_reply: enqueued message_id=%s", reply['message_id'].hex())
     else:
-        print("on_message_reply"*100, reply)
+        logger.debug("on_message_reply: no queue match, reply=%s", reply)
     return
     # TODO wait for ACK, then:
     # once reply comes in:
@@ -555,9 +559,9 @@ async def on_message_sent(reply):
     'err': 'client/conn: PKI error: client2: failed to find destination service node: pki: service not found'}
     """
     if err := reply.get('err', None):
-        print("ERR for outgoing message_id:", reply['message_id'].hex())
+        logger.error("ERR for outgoing message_id=%s: %s", reply['message_id'].hex(), err)
     else:
-        print("MESSAGE SENT OK:", reply['message_id'].hex(), reply)
+        logger.debug("MESSAGE SENT OK: message_id=%s reply=%s", reply['message_id'].hex(), reply)
 
 # from katzenpost_thinclient import ThinClient, Config
 async def reconnect() -> ThinClient:
