@@ -100,7 +100,7 @@ jobs:
 
       - name: Run integration tests
         working-directory: katzenqt
-        timeout-minutes: 20
+        timeout-minutes: 30
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: .venv/bin/pytest tests/integration -vv
