@@ -1,8 +1,12 @@
 from PySide6 import QtCore
 from PySide6.QtWidgets import QStyledItemDelegate, QLabel, QStyleOptionViewItem, QMainWindow
 from PySide6.QtCore import QFile, QSize, QModelIndex, QPersistentModelIndex, QModelRoleDataSpan, QModelRoleData, Slot, QObject, QByteArray
-from PySide6.QtGui import QPainter, QImage
+from PySide6.QtGui import QPainter, QImage, QStandardItem
+from PySide6.QtQml import QQmlPropertyMap
 from PySide6.QtQuick import QQuickImageProvider
+
+from pydantic import BaseModel, Field
+import uuid
 
 from . import persistent
 
@@ -186,3 +190,58 @@ class ChatImageProvider(QQuickImageProvider):
         img = QImage(123,400, QImage.Format_RGBA8888)
         img.fill(QtCore.Qt.red)
         return img
+
+
+class ConversationUIState(BaseModel):
+    """Per-conversation runtime state used by the Qt UI.
+
+    Lives in qt_models.py rather than models.py because its fields
+    (ConversationLogModel, QStandardItem, QQmlPropertyMap) are Qt types
+    and forcing every importer of `models` to load PySide6 broke
+    headless consumers (the integration runner, pytest collection
+    against a runner without libEGL).
+    """
+    model_config = {
+        'validate_assignment': True,
+        'arbitrary_types_allowed': True
+    }
+    conversation_id : int
+    own_peer_id : int = Field(description="ConversationPeer.id for self")
+    own_peer_name : str = Field(description="ConversationPeer.name for self")
+    own_peer_bacap_uuid: uuid.UUID
+    chat_lineEdit_buffer : str
+    conversation_log_model: ConversationLogModel
+    contacts_standard_item : QStandardItem = Field(description="the entry in the Contacts pane for the conversation")
+    chat_lines_scroll_idx : float = 0.0
+    # TODO: should store scroll state of self.ui.ChatLines
+    # ie self.ui.ChatLines.scrollToBottom() for default new ones
+    last_push_to_talk_ns : int = 0
+    attached_files : set[str] = Field(default_factory=set)
+
+    first_unread : int = 0
+    # (projected) ConversationLog.conversation_order of first message the user
+    # hasn't "read" yet - it doesn't have to exist in ConversationLog yet.
+
+    def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
+        props = QQmlPropertyMap(rootObject)
+        props.insert({
+            **settings,
+            "chatTreeViewModel": self.conversation_log_model,
+            "conversation_scroll": self.chat_lines_scroll_idx,
+            "first_unread": self.first_unread,
+            "chat_text_size": 11, # governs text size of chat messages
+            "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
+        })
+        return props
+
+    async def update_first_unread(self, new_first_unread:int) -> None:
+        """Update first_unread in the persistent database:"""
+        if new_first_unread == self.first_unread:
+            return
+        print("UPDATED FIRST_UNREAD", self.first_unread, new_first_unread)
+        self.first_unread = new_first_unread
+        async with persistent.asession() as sess:
+            co = await sess.get(persistent.Conversation, self.conversation_id)
+            co.first_unread = self.first_unread
+            sess.add(co)
+            await sess.commit()

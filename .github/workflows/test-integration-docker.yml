@@ -1,0 +1,120 @@
+name: Docker Mixnet Integration Tests
+
+# End-to-end test that stands up a Katzenpost docker mixnet and runs the
+# opt-in Alice + Bob integration test in tests/integration/. Mirrors the
+# structure of thin_client's test-integration-docker.yml workflow.
+#
+# The `ref:` on the katzenpost checkout below is the single pin that
+# controls which kpclientd version is built. Keep it aligned with the
+# pin in thin_client's own test-integration-docker.yml workflow so all
+# three repos (katzenpost, thin_client, katzenqt) exercise the same
+# daemon on every CI run.
+
+on:
+  pull_request:
+    branches: [main, master, resending_api2026_fix_decryption_bugs]
+  push:
+    branches: [main, master, resending_api2026_fix_decryption_bugs]
+
+jobs:
+  docker-integration:
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout katzenqt
+        uses: actions/checkout@v4
+        with:
+          path: katzenqt
+
+      # Checked out under katzenqt/ so katzenqt's Makefile default
+      # KATZENPOST_DIR (="katzenpost", relative to the Makefile) resolves
+      # without modification. Pin to a sha that has every daemon API the
+      # integration test exercises — see top-of-file note.
+      - name: Checkout katzenpost
+        uses: actions/checkout@v4
+        with:
+          repository: katzenpost/katzenpost
+          # Keep in lockstep with
+          # thin_client/.github/workflows/test-integration-docker.yml —
+          # both katzenqt and thin_client must exercise the same
+          # kpclientd sha or protocol drift will hit one workflow
+          # before the other.
+          ref: f6056a1d9961a5398f6543cd4dca1389e157f4fc
+          path: katzenqt/katzenpost
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Configure podman socket
+        run: systemctl --user start podman.socket || true
+
+      - name: Set up Go (for kpclientd build)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '>=1.26'
+          cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin || true
+
+      # Build kpclientd + start the mixnet via katzenpost's own docker
+      # Makefile. `make wait` blocks until the dirauths reach consensus.
+      - name: Build and start the docker mixnet
+        working-directory: katzenqt/katzenpost/docker
+        run: make start wait
+
+      - name: Brief pause so the mixnet is fully ready
+        run: sleep 30
+
+      # Create the venv and install katzenqt in editable mode — matches
+      # what `make docker-integration` does locally, minus the Makefile's
+      # apt/pipx bootstrap which the GitHub runner doesn't need.
+      - name: Install katzenqt + dev deps
+        working-directory: katzenqt
+        run: |
+          uv venv .venv
+          uv pip install -e '.[dev]' || uv pip install -e .
+          uv pip install pytest pytest-asyncio pytest-cov hypothesis
+
+      - name: Run integration tests
+        working-directory: katzenqt
+        timeout-minutes: 30
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+        run: .venv/bin/pytest tests/integration -vv
+
+      - name: Stop the mixnet
+        if: always()
+        working-directory: katzenqt/katzenpost/docker
+        run: make stop
+
+      - name: Upload mixnet logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mixnet-${{ github.run_id }}-${{ github.job }}
+          path: |
+            katzenqt/katzenpost/docker/voting_mixnet/*/*.log
+            katzenqt/katzenpost/docker/voting_mixnet/*/*/*.log

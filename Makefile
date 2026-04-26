@@ -217,6 +217,39 @@ test-uv: $(STAMP_UV)
 test-pip: $(STAMP_PIP)
 	@$(VENV)/bin/pytest
 
+# Run the docker-integration tests. Requires a Katzenpost docker mixnet
+# already running (see katzenpost-update + $(KATZENPOST_DIR)/docker: make
+# start wait). Will auto-skip if kpclientd isn't reachable at
+# 127.0.0.1:64331.
+#
+# THIN_CLIENT_DIR: optional local checkout of https://github.com/katzenpost/thin_client
+# installed in editable mode so the integration tests see protocol changes
+# before they are released. Set to empty to use the version pinned in
+# pyproject.toml.
+THIN_CLIENT_DIR ?= $(HOME)/thin_client
+docker-integration: setup
+	@# Install katzenqt editable so source edits land without a full
+	@# `make setup` cycle. `make setup` itself copy-installs (no -e),
+	@# which defeats iterating on src/katzenqt during test authoring.
+	@if [[ -e "$(BACKEND_UV)" ]]; then \
+		$(UV) pip install -e . >/dev/null; \
+	elif [[ -e "$(BACKEND_PIP)" ]]; then \
+		$(VENV)/bin/pip install -e . >/dev/null; \
+	fi
+	@# Install the local thin_client checkout in editable mode so the
+	@# integration tests exercise protocol changes not yet released.
+	@if [[ -n "$(THIN_CLIENT_DIR)" ]] && [[ -d "$(THIN_CLIENT_DIR)" ]]; then \
+		if [[ -e "$(BACKEND_UV)" ]]; then \
+			$(UV) pip install -e "$(THIN_CLIENT_DIR)" >/dev/null; \
+		elif [[ -e "$(BACKEND_PIP)" ]]; then \
+			$(VENV)/bin/pip install -e "$(THIN_CLIENT_DIR)" >/dev/null; \
+		fi; \
+	fi
+	@# Bypass `uv run`'s lock-resync — it would re-resolve the git-pinned
+	@# thinclient and silently overwrite our editable install.
+	@KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv
+.PHONY: docker-integration
+
 $(KATZENPOST_DIR):
 	@git clone $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
 
@@ -241,7 +274,7 @@ kpclientd-podman:
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
-	@install -m 0666 config/client2.toml ~/.local/katzenpost/client2.toml
+	@install -m 0666 config/client.toml ~/.local/katzenpost/client.toml
 	@install -m 0666 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
 

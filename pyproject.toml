@@ -18,7 +18,7 @@ dependencies = [
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
 "cbor2~=5.6.5",
-"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@update_python_pigeonhole"
+"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@a4609a6511d2393fce9ea8fac1742d0998b6da63"
 ]
 
 [dependency-groups]
@@ -81,6 +81,9 @@ addopts = "--cov=src/katzenqt --cov-report=term-missing --doctest-modules -vv"
 testpaths = [
     "src",
     "tests",
+]
+markers = [
+    "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
 ]
 
 [tool.ruff]
