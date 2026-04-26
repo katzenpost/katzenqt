@@ -98,7 +98,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
 
     TODO: we do not handle losing the connection to the thin client very gracefully at all here.
     """
-    mw_current_idx = struct.unpack('<Q', mw.current_message_index[:8])[0]
+    mw_current_idx = await connection.get_message_box_index_counter(mw.current_message_index)
     logger.info(f"TX_SINGLE idx:{mw_current_idx} ")
     from sqlmodel import select
     async with persistent.asession() as sess:
@@ -124,7 +124,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     - bump send_resendable,
     - bump drain_mixwal
     """
-    conv_id = await asyncio.shield(persistent.SentLog.mark_sent(mw, __resend_queue))
+    conv_id = await asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue))
     draining_right_now.discard(mw.bacap_stream)  # ready to send
     resendable_event.set()  # signal send_resendable_plaintexts
     __mixwal_updated.set()  # ought to be set
@@ -181,7 +181,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   assert resp is not None, "outbound read reply is None, but ought to be retrying"
   async with persistent.asession() as sess:
     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-    idx_old, idx_new = struct.unpack("<2Q", rcw.next_index[:8] + mw.next_message_index[:8])
+    idx_old = await connection.get_message_box_index_counter(rcw.next_index)
+    idx_new = await connection.get_message_box_index_counter(mw.next_message_index)
     if idx_old >= idx_new:
       logger.warning(f"not advancing idx to {idx_new} from old {idx_old}, we probably already handled this? ought to not be possible.")
       try:
@@ -290,7 +291,7 @@ async def drain_mixwal2(connection: ThinClient):
             if not courier_destination_exists(connection, mw.destination):
                 logger.warning("mw courier is currently not in PKI")
                 continue
-            print("drain_mixwal: NEW (write) MIXWAL:", struct.unpack("<1Q", mw.current_message_index[:8]), mw.is_read, mw.bacap_stream)
+            print("drain_mixwal: NEW (write) MIXWAL:", await connection.get_message_box_index_counter(mw.current_message_index), mw.is_read, mw.bacap_stream)
             draining_right_now.add(mw.bacap_stream) # this is the uuid PK
             __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
             write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
@@ -338,7 +339,7 @@ async def readables_to_mixwal(connection):
     global __resend_queue
     await __resend_queue_populated.wait()
     async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
-        logger.debug("process box cpeer-rcw:", cpeer, struct.unpack('<Q', rcw.next_index[:8]))
+        logger.debug("process box cpeer-rcw:", cpeer, await connection.get_message_box_index_counter(rcw.next_index))
         rcreply: "EncryptReadResult" = await connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
         print("process_box got this from encrypt_read:", rcreply)
         courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]

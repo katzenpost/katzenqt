@@ -22,6 +22,23 @@ from katzenqt import network, persistent
 
 
 # ---------------------------------------------------------------------------
+# Stub for the ThinClient's get_message_box_index_counter dependency.
+# ---------------------------------------------------------------------------
+
+class _FakeConnection:
+    """Minimal stand-in for ThinClient in mark_sent tests.
+
+    mark_sent only needs `get_message_box_index_counter(blob) -> int`. We
+    compute it locally in the test using the same layout the daemon does
+    (first 8 bytes little-endian uint64) so the tests don't depend on a
+    running kpclientd. The layout knowledge is confined to this stub.
+    """
+
+    async def get_message_box_index_counter(self, message_box_index: bytes) -> int:
+        return int.from_bytes(message_box_index[:8], "little")
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -108,7 +125,7 @@ def test_mark_sent_advances_by_exactly_one():
     resend_queue: set = {bacap_stream}
 
     async def _do():
-        await persistent.SentLog.mark_sent(mw, resend_queue)
+        await persistent.SentLog.mark_sent(_FakeConnection(), mw, resend_queue)
 
     asyncio.run(_do())
 
@@ -153,7 +170,7 @@ def test_mark_sent_refuses_regression_on_pwal_present_path():
     resend_queue: set = {bacap_stream}
 
     async def _do():
-        await persistent.SentLog.mark_sent(mw, resend_queue)
+        await persistent.SentLog.mark_sent(_FakeConnection(), mw, resend_queue)
 
     asyncio.run(_do())
 

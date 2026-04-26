@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-import struct
 from typing import TYPE_CHECKING
 from .katzen_util import create_task
 if TYPE_CHECKING:
@@ -149,43 +148,54 @@ class WriteCapWAL(SQLModel, table=True):
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
-    async def mark_sent(cls, mw:MixWAL, resend_queue) -> int:
+    async def mark_sent(cls, connection, mw:MixWAL, resend_queue) -> int:
         """Add SentLog entry, delete corresponding MixWAL and PlaintextWAL entries.
         Also bump index so we don't just keep writing to the same index??
+
+        `connection` is a ThinClient used to resolve BACAP Idx64 counters out
+        of opaque MessageBoxIndex blobs via get_message_box_index_counter.
         TODO: cleanup WriteCapWAL/ReadCapWAL entries when we are done with them (not urgent, but eventually)
 
         Returns the Conversation.id for the MixWAL entry so UI can be updated.
         """
         conversation_id = None
+        # Unconditional regression guard: another drain may have already
+        # advanced wcw.next_index past our mw.next_message_index (e.g., a
+        # retransmission's ACK arriving after a later message's ACK).
+        # Clobbering it back would let the writer re-encrypt at an index that
+        # was already written, and BACAP derives a unique key per index — the
+        # mismatch surfaces as an MKEM/BACAP decrypt failure at the reader.
+        # Read the wcw blob first in a small sync transaction, then resolve
+        # the counters via the thinclient OUTSIDE the session so we don't
+        # hold a DB transaction across an await.
         with Session(_engine_sync) as sess:
-            # Unconditional regression guard: another drain may have already
-            # advanced wcw.next_index past our mw.next_message_index (e.g.,
-            # a retransmission's ACK arriving after a later message's ACK).
-            # Clobbering it back would let the writer re-encrypt at an index
-            # that was already written, and BACAP derives a unique key per
-            # index — the mismatch surfaces as an MKEM/BACAP decrypt failure
-            # at the reader.
             wcw_precheck = sess.get(WriteCapWAL, mw.bacap_stream)
-            if wcw_precheck is not None:
-                real_next, our_next = struct.unpack(
-                    '<2Q',
-                    wcw_precheck.next_index[:8] + mw.next_message_index[:8],
+            precheck_next_blob = wcw_precheck.next_index if wcw_precheck else None
+        if precheck_next_blob is not None:
+            real_next = await connection.get_message_box_index_counter(precheck_next_blob)
+            our_next = await connection.get_message_box_index_counter(mw.next_message_index)
+            if real_next >= our_next:
+                logger.warning(
+                    "mark_sent: skipping stale ACK for bacap_stream=%s "
+                    "(db next=%d >= our next=%d); not regressing index",
+                    mw.bacap_stream, real_next, our_next,
                 )
-                if real_next >= our_next:
-                    logger.warning(
-                        "mark_sent: skipping stale ACK for bacap_stream=%s "
-                        "(db next=%d >= our next=%d); not regressing index",
-                        mw.bacap_stream, real_next, our_next,
-                    )
-                    # Clean up the stray MW so we don't re-drain it; leave
-                    # the PWAL alone if it still exists — a later MW with a
-                    # fresh next_message_index will mark it sent.
+                # Clean up the stray MW so we don't re-drain it; leave the
+                # PWAL alone if it still exists — a later MW with a fresh
+                # next_message_index will mark it sent.
+                with Session(_engine_sync) as sess:
                     stale_mw = sess.get(MixWAL, mw.id)
                     if stale_mw is not None:
                         sess.delete(stale_mw)
                         sess.commit()
-                    resend_queue.discard(mw.bacap_stream)
-                    return
+                resend_queue.discard(mw.bacap_stream)
+                return
+        # Resolve the diagnostic counters once so the commit-time print is
+        # as cheap as a tuple format rather than two more thinclient calls.
+        new_idx = our_next if precheck_next_blob is not None else (
+            await connection.get_message_box_index_counter(mw.next_message_index)
+        )
+        with Session(_engine_sync) as sess:
             pwal = sess.get(PlaintextWAL, mw.plaintextwal)
             if not pwal:
                 logger.warning(
@@ -198,7 +208,8 @@ class SentLog(SQLModel, table=True):
                 return
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
             wcw = sess.get(WriteCapWAL, mw.bacap_stream)
-            print("updating wcw: ", struct.unpack('<2Q', wcw.next_index[:8] + mw.next_message_index[:8]))
+            old_idx = real_next if precheck_next_blob is not None else None
+            logger.debug("updating wcw: old=%s new=%s", old_idx, new_idx)
             wcw.next_index = mw.next_message_index
             if pwal.bacap_payload[:1] in (b'F',b'I'):
                 # This is either:
