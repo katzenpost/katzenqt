@@ -38,7 +38,7 @@ if not (state_file := os.getenv("KQT_STATE", "")):
 state_file += ".sqlite3"
 state_file = app_data / state_file
 _sql_url = f"sqlite+aiosqlite:///{ state_file }"
-print(_sql_url)
+logger.info("sql url: %s", _sql_url)
 _engine = create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)
 _engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True, pool_size=1000)
 
