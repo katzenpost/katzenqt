@@ -43,7 +43,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: f6056a1d9961a5398f6543cd4dca1389e157f4fc
+          ref: v0.0.73
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
