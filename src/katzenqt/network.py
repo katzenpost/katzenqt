@@ -81,15 +81,15 @@ async def start_background_threads(connection: ThinClient):
             except asyncio.exceptions.CancelledError:
               logger.info(f"cancelled: {task}")
             logger.debug("start_background_threads completed: %s", task)
-    except Exception as xx:
+    except Exception as xx:  # pragma: no cover - defensive: gathered tasks catch their own
         logger.critical("f1-f4-f5 exception: %s", xx)
         raise
 
 async def drain_mixwal(connection: ThinClient):
     try:
         await drain_mixwal2(connection) # todo why the fuck does this not catch ?
-    except Exception as e:
-        logger.critical("drain_mixwal: exception", e)
+    except Exception as e:  # pragma: no cover - defensive: drain_mixwal2 handles its own errors
+        logger.critical("drain_mixwal: exception: %s", e)
         import traceback
         traceback.print_exc()
 
@@ -189,8 +189,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       try:
         await sess.delete(mw)
         await sess.commit()
-      except Exception as e:
-        logger.critical(f"error committing deletion of stray MW")
+      except Exception as e:  # pragma: no cover - defensive: commit-of-delete should never fail
+        logger.critical("error committing deletion of stray MW: %s", e)
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
     logger.info(f"advancing read to idx {idx_new}")
