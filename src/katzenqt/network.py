@@ -198,7 +198,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     sess.add(rcw)
     if resp.plaintext.startswith(b"I"):
       logger.debug(f"received indirection {resp}")
-      import pdb;pdb.set_trace()
       pass
     elif resp.plaintext.startswith(b"F"):
       # it's a discrete message
