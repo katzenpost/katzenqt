@@ -6,6 +6,7 @@ from katzenpost_thinclient import (
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import struct
+import types
 import nacl.public
 import secrets
 import random
@@ -424,29 +425,46 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
         pwals_to_send = set()
         async with persistent.asession() as sess:
             query = persistent.PlaintextWAL.find_resendable(__resend_queue)
-            #print("send_resendable QUERY:", query, __resend_queue)
-            sendable = (await sess.exec(query)).all()
-            for pwal in sendable:
-                if pwal.indirection is None:
-                    continue
-                # This is an indirection message, we need to fill the read cap.
-                # find_resendable should only give us these entries if the needed read cap has been provisioned.
-                logger.debug("got a PWAL entry that requires an indirection: %s", pwal.indirection)
-                if not pwal.bacap_payload:
-                    # TODO this ought to be a SQL UPDATE plaintextwal USING readcapwal, but for now we do it by hand.
-                    rcw = sess.get(persistent.ReadCapWAL, pwal.indirection)
-                    pwal.bacap_payload = b'I' + rcw.write_cap
-                    await sess.update(pwal)
-                    await sess.refresh(pwal)
+            sendable_rows = (await sess.exec(query)).all()
+            # find_resendable wraps PlaintextWAL inside a row_number()
+            # subquery and returns plain Row tuples that are not
+            # ORM-tracked. For an indirection PWAL we re-fetch the
+            # tracked instance to fill in its bacap_payload, then
+            # snapshot the (id, bacap_stream, payload) we need for
+            # dispatch into a detachable container so start_resending
+            # never touches a session-bound attribute.
+            dispatch: "list[types.SimpleNamespace]" = []
+            for row in sendable_rows:
+                payload = row.bacap_payload
+                if row.indirection is not None and not payload:
+                    # find_resendable only surfaces indirection PWALs
+                    # whose target ReadCapWAL has been provisioned
+                    # (read_cap IS NOT NULL), so the get is guaranteed
+                    # to find a populated read_cap here.
+                    logger.debug(
+                        "filling indirection PWAL %s from rcw %s",
+                        row.id, row.indirection,
+                    )
+                    rcw = await sess.get(persistent.ReadCapWAL, row.indirection)
+                    payload = b'I' + rcw.read_cap
+                    pwal_orm = await sess.get(persistent.PlaintextWAL, row.id)
+                    if pwal_orm is not None:
+                        pwal_orm.bacap_payload = payload
+                        sess.add(pwal_orm)
+                dispatch.append(types.SimpleNamespace(
+                    id=row.id,
+                    bacap_stream=row.bacap_stream,
+                    bacap_payload=payload,
+                ))
             await sess.commit()
-        for pwal in sendable:
+        for pwal in dispatch:
             if pwal.bacap_stream not in __resend_queue:
                 __resend_queue.add(pwal.bacap_stream)
                 t = create_task(start_resending(connection, pwal))
                 # Default-arg capture pins pwal.bacap_stream at lambda
                 # creation time. The prior `lambda: ... pwal.bacap_stream`
                 # closed over the loop variable and, on an inner iteration's
-                # failure, discarded the LAST iteration's bacap_stream —
+                # failure, discarded the LAST iteration's bacap_stream,
                 # stranding the actual failer in __resend_queue forever.
                 on_error(t, lambda s=pwal.bacap_stream: __resend_queue.discard(s))  # when cancelled/exception
 

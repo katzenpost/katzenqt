@@ -936,6 +936,63 @@ class TestSendResendablePlaintexts:
         # so encrypt_write must not have been called for the dup.
         assert fake_thinclient.call_count("encrypt_write") == 0
 
+    @pytest.mark.asyncio
+    async def test_indirection_pwal_fills_read_cap_before_dispatch(
+        self, fake_thinclient,
+    ):
+        """An indirection PWAL has an empty bacap_payload and points at
+        a ReadCapWAL via its `indirection` column. Once that
+        ReadCapWAL's read_cap has been provisioned, the loop should
+        fill the PWAL's bacap_payload with b'I' + read_cap and
+        dispatch it. Pins both the persisted payload and the wire
+        shape of the resulting encrypt_write call."""
+        # The target stream the indirection points at.
+        target = await _insert_write_setup(
+            fake_thinclient, conv_name="target", peer_name="target_self",
+            seed=b"\xab" * 32,
+        )
+        # The PWAL that should be filled in lives on a *different*
+        # stream and references the target stream's ReadCapWAL via
+        # `indirection`. Set up that second stream too so the dispatch
+        # has a populated WriteCapWAL to encrypt against.
+        host = await _insert_write_setup(
+            fake_thinclient, conv_name="host", peer_name="host_self",
+            seed=b"\xcd" * 32,
+        )
+        async with persistent.asession() as sess:
+            release = persistent.PlaintextWAL(
+                bacap_stream=host["bacap_stream"],
+                conversation_id=host["conversation_id"],
+                bacap_payload=b"",
+                indirection=target["bacap_stream"],
+            )
+            sess.add(release)
+            await sess.commit()
+            await sess.refresh(release)
+            release_id = release.id
+        getattr(network, "resendable_event").set()
+
+        def encrypt_write_seen():
+            return fake_thinclient.call_count("encrypt_write") >= 1
+
+        await _run_loop_until(
+            network.send_resendable_plaintexts(fake_thinclient),
+            encrypt_write_seen,
+            timeout=5.0,
+        )
+        assert encrypt_write_seen()
+        last = fake_thinclient.last_call("encrypt_write")
+        # The plaintext sent must be exactly b'I' followed by the
+        # target stream's read_cap.
+        expected = b"I" + target["read_cap"]
+        assert last["plaintext"] == expected
+        # The PWAL row itself was persisted with the filled payload,
+        # so a restart-from-disk would resume in the same state.
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.PlaintextWAL, release_id)
+            assert row is not None
+            assert row.bacap_payload == expected
+
 
 # ---------------------------------------------------------------------------
 # reconnect
