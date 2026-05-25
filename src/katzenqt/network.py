@@ -617,35 +617,6 @@ async def on_message_sent(reply):
     else:
         logger.debug("MESSAGE SENT OK: message_id=%s reply=%s", reply['message_id'].hex(), reply)
 
-def reset_for_reconnect() -> None:
-    """Reset all module-level state so a subsequent `reconnect()` +
-    `start_background_threads()` can begin from the same initial state
-    a freshly-imported module would. Callers MUST have already awaited
-    the previous `start_background_threads()` task to completion (after
-    `shutdown()`) and called `old_client.stop()` on the previous
-    ThinClient before invoking this, or background loops bound to the
-    old events will linger.
-
-    Re-creates each asyncio.Event rather than just clearing it, because
-    Events bind to the event loop on first `.wait()` and re-using an
-    Event from a different past loop is forbidden in asyncio.
-    """
-    global __mixwal_updated, readables_to_mixwal_event, resendable_event
-    global __mixnet_connected, __resend_queue_populated, __should_quit
-
-    __mixwal_updated = asyncio.Event()
-    __mixwal_updated.set()
-    readables_to_mixwal_event = asyncio.Event()
-    readables_to_mixwal_event.set()
-    resendable_event = asyncio.Event()
-    resendable_event.set()
-    __mixnet_connected = asyncio.Event()
-    __resend_queue_populated = asyncio.Event()
-    __should_quit = asyncio.Event()
-    __resend_queue.clear()
-    __on_message_queues.clear()
-
-
 # from katzenpost_thinclient import ThinClient, Config
 async def reconnect() -> ThinClient:
     cfg = ThinClientConfig(
