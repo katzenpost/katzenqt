@@ -79,9 +79,9 @@ async def start_background_threads(connection: ThinClient):
               await asyncio.gather(task)
             except asyncio.exceptions.CancelledError:
               logger.info(f"cancelled: {task}")
-            logger.debug("start_background_threads completed: ",task)
+            logger.debug("start_background_threads completed: %s", task)
     except Exception as xx:
-        logger.critical("f1-f4-f5 exception",xx)
+        logger.critical("f1-f4-f5 exception: %s", xx)
         raise
 
 async def drain_mixwal(connection: ThinClient):
