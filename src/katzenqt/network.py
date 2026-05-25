@@ -263,10 +263,15 @@ async def drain_mixwal2(connection: ThinClient):
     await __resend_queue_populated.wait()
     shutdown = create_task(__should_quit.wait())
     while not __should_quit.is_set():
+        # asyncio.wait defaults to ALL_COMPLETED, which would force this
+        # loop to wait the full timeout (or for shutdown) regardless of
+        # __mixwal_updated being set, effectively turning it into a
+        # 15-second poller. FIRST_COMPLETED restores the event-driven
+        # behaviour the caller of __mixwal_updated.set() expects.
         _, _ = await asyncio.wait((
                  create_task(__mixwal_updated.wait()),
                  shutdown,
-        ), timeout=15)
+        ), timeout=15, return_when=asyncio.FIRST_COMPLETED)
         if __should_quit.is_set():
           continue
         __mixwal_updated.clear()
