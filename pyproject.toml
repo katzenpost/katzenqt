@@ -84,6 +84,7 @@ testpaths = [
 ]
 markers = [
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
+    "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
 ]
 norecursedirs = ["src/katzenqt/migrations"]
 
