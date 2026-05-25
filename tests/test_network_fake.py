@@ -690,28 +690,33 @@ class TestProvisionReadCaps:
 
 async def _run_loop_until(loop_coro, condition_callable, *, timeout: float = 5.0):
     """Run a long-running coroutine and shut it down once
-    `condition_callable()` returns truthy.
+    `condition_callable()` returns truthy or the wall-clock deadline
+    elapses.
 
-    `loop_coro` must be the unstarted coroutine itself (not a task), so
-    we await it directly rather than via create_task; that is the only
-    way coverage's tracer stays inside the loop body in our version of
-    the toolchain. `condition_callable` may be sync or async.
+    The wait is bounded by `asyncio.get_event_loop().time()` so the
+    autouse fast_asyncio_sleep monkeypatch can't accidentally race the
+    loop body. condition_callable may be sync or async.
     """
     is_async = asyncio.iscoroutinefunction(condition_callable)
-
-    async def quitter():
-        for _ in range(int(timeout * 100)):
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    loop_task = asyncio.create_task(loop_coro)
+    try:
+        while True:
             await asyncio.sleep(0)
             result = await condition_callable() if is_async else condition_callable()
             if result:
                 break
+            if loop.time() >= deadline:
+                break
+            if loop_task.done():
+                break
+    finally:
         network.shutdown()
-
-    asyncio.create_task(quitter())
-    try:
-        await asyncio.wait_for(loop_coro, timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
+        try:
+            await asyncio.wait_for(loop_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            loop_task.cancel()
 
 
 class TestDrainMixwal2:
@@ -725,6 +730,7 @@ class TestDrainMixwal2:
         setup = await _set_up_write_flow(fake_thinclient)
         getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
+        getattr(network, "__mixnet_connected").set()
 
         def dispatch_happened():
             return fake_thinclient.call_count(
@@ -752,6 +758,7 @@ class TestDrainMixwal2:
         setup = await _set_up_read_flow(fake_thinclient, plaintext=b"Fhi")
         getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
+        getattr(network, "__mixnet_connected").set()
 
         async def mw_drained():
             async with persistent.asession() as sess:
@@ -777,6 +784,7 @@ class TestDrainMixwal2:
             await sess.commit()
         getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
+        getattr(network, "__mixnet_connected").set()
 
         async def loop_idle():
             # Give the loop a chance to process and skip.
@@ -881,6 +889,7 @@ class TestSendResendablePlaintexts:
             )
             sess.add(pwal)
             await sess.commit()
+        getattr(network, "__mixnet_connected").set()
         getattr(network, "resendable_event").set()
 
         async def mixwal_present():
@@ -918,6 +927,7 @@ class TestSendResendablePlaintexts:
         # Add the stream to the resend queue directly; the loop should skip it.
         getattr(network, "__resend_queue").add(setup["bacap_stream"])
         getattr(network, "resendable_event").set()
+        getattr(network, "__mixnet_connected").set()
 
         async def quitter():
             for _ in range(40):
@@ -970,6 +980,7 @@ class TestSendResendablePlaintexts:
             await sess.commit()
             await sess.refresh(release)
             release_id = release.id
+        getattr(network, "__mixnet_connected").set()
         getattr(network, "resendable_event").set()
 
         def encrypt_write_seen():
@@ -992,6 +1003,166 @@ class TestSendResendablePlaintexts:
             row = await sess.get(persistent.PlaintextWAL, release_id)
             assert row is not None
             assert row.bacap_payload == expected
+
+
+# ---------------------------------------------------------------------------
+# disconnect / reconnect ride-through
+# ---------------------------------------------------------------------------
+
+
+class TestDisconnectPauseAndResume:
+    """The drain loops gate every iteration on __mixnet_connected so a
+    kpclientd reconnect or a transient mixnet outage cleanly pauses
+    and resumes them. These tests flip the connection status mid-flight
+    and assert that the loops respect the gate."""
+
+    @pytest.mark.asyncio
+    async def test_send_resendable_does_not_dispatch_while_disconnected(
+        self, fake_thinclient,
+    ):
+        setup = await _insert_write_setup(fake_thinclient)
+        async with persistent.asession() as sess:
+            pwal = persistent.PlaintextWAL(
+                bacap_stream=setup["bacap_stream"],
+                conversation_id=setup["conversation_id"],
+                bacap_payload=b"Fpause",
+            )
+            sess.add(pwal)
+            await sess.commit()
+        # Begin disconnected. resendable_event is set but the loop
+        # should still wait at the connection gate.
+        await network.on_connection_status({"is_connected": False, "err": None})
+        getattr(network, "resendable_event").set()
+
+        loop_task = asyncio.create_task(
+            network.send_resendable_plaintexts(fake_thinclient),
+        )
+        try:
+            # Give the loop a moment; gate should block.
+            for _ in range(50):
+                await asyncio.sleep(0)
+            assert fake_thinclient.call_count("encrypt_write") == 0
+            # Reconnect: the loop should now wake and dispatch.
+            await network.on_connection_status({"is_connected": True, "err": None})
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_write") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_write") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_drain_mixwal2_does_not_dispatch_while_disconnected(
+        self, fake_thinclient,
+    ):
+        setup = await _set_up_write_flow(fake_thinclient)
+        await network.on_connection_status({"is_connected": False, "err": None})
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "__mixwal_updated").set()
+
+        loop_task = asyncio.create_task(network.drain_mixwal2(fake_thinclient))
+        try:
+            for _ in range(50):
+                await asyncio.sleep(0)
+            assert fake_thinclient.call_count("start_resending_encrypted_message") == 0
+            await network.on_connection_status({"is_connected": True, "err": None})
+            # Re-trigger the mixwal-updated event so the loop's second
+            # wait fires straight away rather than spinning on its
+            # 15-second timeout.
+            getattr(network, "__mixwal_updated").set()
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("start_resending_encrypted_message") >= 1:
+                    break
+            assert fake_thinclient.call_count("start_resending_encrypted_message") >= 1
+            last = fake_thinclient.last_call("start_resending_encrypted_message")
+            assert last["envelope_hash"] == setup["wcr"].envelope_hash
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_readables_to_mixwal_does_not_poll_while_disconnected(
+        self, fake_thinclient,
+    ):
+        await _insert_write_setup(fake_thinclient)
+        await network.on_connection_status({"is_connected": False, "err": None})
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "readables_to_mixwal_event").set()
+
+        loop_task = asyncio.create_task(
+            network.readables_to_mixwal(fake_thinclient),
+        )
+        try:
+            for _ in range(50):
+                await asyncio.sleep(0)
+            assert fake_thinclient.call_count("encrypt_read") == 0
+            await network.on_connection_status({"is_connected": True, "err": None})
+            getattr(network, "readables_to_mixwal_event").set()
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_read") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_read") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_drain_mixwal_write_single_swallows_offline_mid_call(
+        self, fake_thinclient,
+    ):
+        """A daemon-side socket drop mid-call surfaces as
+        ThinClientOfflineError on a single drain attempt. The retry
+        path (the surrounding drain loop) handles re-trying once the
+        connection comes back; the per-call helper just needs to swallow
+        cleanly and leave the MixWAL row in place for the next pass."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", ThinClientOfflineError(),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["bacap_stream"]},
+        )
+        # MW preserved; the next loop iteration after reconnect will
+        # have another go.
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+
+    @pytest.mark.asyncio
+    async def test_drain_mixwal_read_single_swallows_offline_mid_call(
+        self, fake_thinclient,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", ThinClientOfflineError(),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
 
 
 # ---------------------------------------------------------------------------

@@ -172,8 +172,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         no_retry_on_box_id_not_found=False,
    )
   except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
-          BACAPDecryptionFailedError, StartResendingCancelledError) as e:
-    logger.critical(f"{e}: ")
+          BACAPDecryptionFailedError, StartResendingCancelledError,
+          ThinClientOfflineError, BrokenPipeError) as e:
+    logger.warning("drain_mixwal_read_single giving up: %s", e)
     await asyncio.sleep(5)
     give_up()
     return
@@ -241,6 +242,25 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   __mixwal_updated.set()
 
 
+async def _wait_for_connection_or_shutdown() -> bool:
+    """Block until either __mixnet_connected is set or __should_quit fires.
+
+    Returns True if the mixnet is reportedly connected, False if shutdown
+    happened first. Drain loops use this at the top of each iteration so
+    they pause cleanly during outages instead of burning cycles against
+    a daemon that will only raise ThinClientOfflineError back at them.
+    """
+    if __should_quit.is_set():
+        return False
+    if __mixnet_connected.is_set():
+        return True
+    await asyncio.wait((
+        create_task(__mixnet_connected.wait()),
+        create_task(__should_quit.wait()),
+    ), return_when=asyncio.FIRST_COMPLETED)
+    return __mixnet_connected.is_set() and not __should_quit.is_set()
+
+
 async def drain_mixwal2(connection: ThinClient):
     """Read from MixWAL and put the messages on the network."""
     """"Send messages to mixnet from MixWAL.
@@ -260,6 +280,11 @@ async def drain_mixwal2(connection: ThinClient):
     await __resend_queue_populated.wait()
     shutdown = create_task(__should_quit.wait())
     while not __should_quit.is_set():
+        # Pause while the mixnet is unreachable. on_connection_status
+        # toggles __mixnet_connected so a kpclientd reconnect (or an
+        # outage and recovery on the wire) resumes us cleanly.
+        if not await _wait_for_connection_or_shutdown():
+            continue
         # asyncio.wait defaults to ALL_COMPLETED, which would force this
         # loop to wait the full timeout (or for shutdown) regardless of
         # __mixwal_updated being set, effectively turning it into a
@@ -338,7 +363,6 @@ async def readables_to_mixwal(connection):
     Look up all of our read caps, start sending reads for all the "active" ones that we
     aren't currently trying to read.
     """
-    await __mixnet_connected.wait()
     logger.debug("readables_to_mixwal: starting")
     global __resend_queue
     await __resend_queue_populated.wait()
@@ -360,9 +384,15 @@ async def readables_to_mixwal(connection):
             is_read=True,
         )
         return mw
-    while True:
+    while not __should_quit.is_set():
+        # Pause while the mixnet is unreachable so the loop does not
+        # try to encrypt_read against a daemon that cannot route.
+        if not await _wait_for_connection_or_shutdown():
+            continue
         logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
         a, b = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=60)
+        if __should_quit.is_set():
+            continue
         if not len(a):
             logger.debug("readables_to_mixwal_event.wait() timed out, nothing new to read")
             continue
@@ -418,8 +448,14 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     global __resend_queue
     __resend_queue |= await persistent.MixWAL.resend_queue_from_disk()
     __resend_queue_populated.set()
-    while True:
+    while not __should_quit.is_set():
+        # Pause while the mixnet is unreachable; encrypt_write/
+        # start_resending need a live route through kpclientd.
+        if not await _wait_for_connection_or_shutdown():
+            continue
         _, _ = await asyncio.wait((create_task(resendable_event.wait()),), timeout=60)
+        if __should_quit.is_set():
+            continue
         resendable_event.clear()
         logger.debug("send_resendable_plaintexts: running")
         pwals_to_send = set()
