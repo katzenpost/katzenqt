@@ -341,7 +341,7 @@ async def provision_read_caps(connection: ThinClient):
                     try:
                         keypair_res = await connection.new_keypair(seed=secrets.token_bytes(32))
                     except Exception as e:
-                        logger.warn(f"new_keypair DID NOT WORK: {e}")
+                        logger.warning("new_keypair did not work: %s", e)
                         continue
                     wcw.write_cap = keypair_res.write_cap
                     wcw.next_index = keypair_res.first_message_index

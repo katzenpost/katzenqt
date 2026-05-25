@@ -77,7 +77,7 @@ strict = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=src/katzenqt --cov-report=term-missing --doctest-modules -vv"
+addopts = "--cov=katzenqt --cov-report=term-missing --doctest-modules -vv"
 testpaths = [
     "src",
     "tests",
@@ -86,7 +86,10 @@ markers = [
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
 ]
-norecursedirs = ["src/katzenqt/migrations"]
+# We have to re-state the .hypothesis ignore that pytest defaults to,
+# because setting norecursedirs at all replaces the built-in list
+# wholesale rather than extending it.
+norecursedirs = ["src/katzenqt/migrations", ".hypothesis"]
 
 [tool.ruff]
 line-length = 78
