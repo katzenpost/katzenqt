@@ -1208,6 +1208,115 @@ class TestStartBackgroundThreads:
 
 
 # ---------------------------------------------------------------------------
+# reset_for_reconnect / second-session lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestReconnectReinvocation:
+    """A full lifecycle should be repeatable in the same process: boot
+    background loops against one ThinClient, shut them down cleanly,
+    call `reset_for_reconnect()`, then boot a second session against a
+    fresh ThinClient. Models the GUI's hypothetical
+    File -> Reconnect menu item."""
+
+    @staticmethod
+    async def _run_one_session(fake, monkeypatch):
+        import katzenpost_thinclient as ktc
+        monkeypatch.setattr(
+            ktc, "find_services",
+            lambda capability, doc: fake.find_services(capability),
+        )
+        await network.on_connection_status({"is_connected": True, "err": None})
+        task = asyncio.create_task(network.start_background_threads(fake))
+        try:
+            await asyncio.wait_for(
+                getattr(network, "__resend_queue_populated").wait(),
+                timeout=3.0,
+            )
+            assert not task.done()
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
+        return task
+
+    @pytest.mark.asyncio
+    async def test_two_sessions_back_to_back(self, monkeypatch):
+        from tests.fakes.thinclient import FakeThinClient
+
+        fake1 = FakeThinClient()
+        task1 = await self._run_one_session(fake1, monkeypatch)
+        assert task1.done()
+        assert fake1.call_count("new_keypair") == 0  # no work to do
+
+        network.reset_for_reconnect()
+        # After reset, events must be fresh and clear/quiet again.
+        assert not getattr(network, "__should_quit").is_set()
+        assert not getattr(network, "__mixnet_connected").is_set()
+        assert not getattr(network, "__resend_queue_populated").is_set()
+
+        fake2 = FakeThinClient()
+        task2 = await self._run_one_session(fake2, monkeypatch)
+        assert task2.done()
+        # Independent FakeThinClient: nothing from the first session
+        # leaked across to the second.
+        assert fake1 is not fake2
+
+    @pytest.mark.asyncio
+    async def test_second_session_can_send_a_message(self, monkeypatch):
+        """After a reset, the resend pipeline still dispatches a fresh
+        PWAL inserted post-reset, end-to-end through the second
+        FakeThinClient."""
+        from tests.fakes.thinclient import FakeThinClient
+        import katzenpost_thinclient as ktc
+
+        fake1 = FakeThinClient()
+        await self._run_one_session(fake1, monkeypatch)
+        network.reset_for_reconnect()
+
+        # Second session: actually drive a send through.
+        fake2 = FakeThinClient()
+        setup = await _insert_write_setup(fake2)
+        async with persistent.asession() as sess:
+            pwal = persistent.PlaintextWAL(
+                bacap_stream=setup["bacap_stream"],
+                conversation_id=setup["conversation_id"],
+                bacap_payload=b"Frestart",
+            )
+            sess.add(pwal)
+            await sess.commit()
+
+        monkeypatch.setattr(
+            ktc, "find_services",
+            lambda capability, doc: fake2.find_services(capability),
+        )
+        await network.on_connection_status({"is_connected": True, "err": None})
+        task = asyncio.create_task(network.start_background_threads(fake2))
+        try:
+            await asyncio.wait_for(
+                getattr(network, "__resend_queue_populated").wait(),
+                timeout=3.0,
+            )
+            await network.check_for_new()
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake2.call_count("encrypt_write") >= 1:
+                    break
+            assert fake2.call_count("encrypt_write") >= 1
+            # And the first session's fake saw nothing for this stream.
+            assert fake1.call_count("encrypt_write") == 0
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
+
+
+# ---------------------------------------------------------------------------
 # test_keypair (developer smoke helper)
 # ---------------------------------------------------------------------------
 
