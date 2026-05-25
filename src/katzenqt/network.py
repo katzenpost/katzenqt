@@ -256,10 +256,6 @@ async def drain_mixwal2(connection: ThinClient):
     """
 
     draining_right_now : "Set[uuid.UUID]" = set()
-    async def with_own_sess(mw):
-        async with persistent.asession() as sess:
-            done_with_this = await tx_single(sess, mw)
-        # __resend_queue.remove(mw.bacap_stream)
     await __resend_queue_populated.wait()
     shutdown = create_task(__should_quit.wait())
     while not __should_quit.is_set():
