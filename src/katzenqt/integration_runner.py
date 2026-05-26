@@ -37,7 +37,7 @@ import time
 import uuid
 
 import sqlalchemy as sa
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from . import headless, models, network, persistent
 
@@ -524,14 +524,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: "list[str] | None" = None) -> int:
     args = _build_parser().parse_args(argv)
-    # Create schema directly via SQLModel.metadata rather than
-    # alembic.command.upgrade(). The integration tests run against a
-    # disposable KQT_STATE tmpdir, so migration history is irrelevant,
-    # and alembic would otherwise: (1) need its script_location config
-    # file to be reachable from the installed katzenqt (which is copy-
-    # installed into site-packages by `make setup-uv`, not editable),
-    # and (2) call asyncio.run internally, which can't nest.
-    SQLModel.metadata.create_all(persistent._engine_sync)
+    # Bring the schema to head before any action runs. init_and_migrate
+    # invokes alembic.command.upgrade which internally calls asyncio.run,
+    # so it must execute before we instantiate our own event loop below.
+    persistent.init_and_migrate()
     # Give a clean exit on SIGTERM so subprocesses can be killed by the
     # harness if a test's wait loop overruns.
     loop = asyncio.new_event_loop()
