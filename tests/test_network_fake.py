@@ -30,7 +30,17 @@ from katzenpost_thinclient import (
 )
 from katzenpost_thinclient.core import MKEMDecryptionFailedError
 
-from katzenqt import network, persistent
+from katzenqt import models, network, persistent
+
+
+def _make_F_payload(text: str = "hello") -> bytes:
+    """Return a ``b'F'``-framed CBOR-encoded GroupChatMessage. The new
+    receive-side coalescer parses the CBOR; tests that simulate a
+    final-message arrival must produce something decodable."""
+    gcm = models.GroupChatMessage(
+        version=0, membership_hash=b"X" * 32, text=text,
+    )
+    return b"F" + gcm.to_cbor()
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +246,9 @@ async def _set_up_write_flow(
     return setup
 
 
-async def _set_up_read_flow(fake, *, plaintext: bytes = b"Fhello"):
+async def _set_up_read_flow(fake, *, plaintext: "bytes | None" = None):
+    if plaintext is None:
+        plaintext = _make_F_payload("hello")
     """Like _set_up_write_flow but also pre-stores the box and builds a
     read-MixWAL row so drain_mixwal_read_single can be tested.
     """
@@ -388,7 +400,8 @@ class TestDrainMixwalWriteSingle:
 class TestDrainMixwalReadSingle:
     @pytest.mark.asyncio
     async def test_success_with_final_prefix(self, fake_thinclient):
-        setup = await _set_up_read_flow(fake_thinclient, plaintext=b"Fpayload")
+        payload = _make_F_payload("payload")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         draining: set = {setup["bacap_stream"]}
@@ -398,14 +411,15 @@ class TestDrainMixwalReadSingle:
             mw=mw,
             draining_right_now=draining,
         )
-        # MW deleted, ConversationLog appended, ReceivedPiece written,
-        # RCW.next_index advanced.
+        # MW deleted, the coalescer turned the single 'F' piece into one
+        # ConversationLog row and pruned the piece, RCW.next_index
+        # advanced.
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
             log = (await sess.exec(select(persistent.ConversationLog))).all()
-            assert len(log) == 1 and log[0].payload == b"Fpayload"
+            assert len(log) == 1 and log[0].payload == payload
             pieces = (await sess.exec(select(persistent.ReceivedPiece))).all()
-            assert len(pieces) == 1 and pieces[0].chunk_type == b"F"
+            assert pieces == []
             rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
             assert rcw.next_index == setup["rcr"].next_message_box_index
         assert setup["bacap_stream"] not in draining
@@ -762,7 +776,9 @@ class TestDrainMixwal2:
 
     @pytest.mark.asyncio
     async def test_dispatches_read_mixwal(self, fake_thinclient):
-        setup = await _set_up_read_flow(fake_thinclient, plaintext=b"Fhi")
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("hi"),
+        )
         getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
         getattr(network, "__mixnet_connected").set()

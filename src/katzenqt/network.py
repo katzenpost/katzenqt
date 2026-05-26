@@ -16,11 +16,12 @@ import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
 import asyncio
 import traceback
+import uuid
 from asyncio import ensure_future
 from pathlib import Path
 from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
-from . import persistent
+from . import models, persistent
 from sqlmodel import select
 
 logger = logging.getLogger("katzen.network")
@@ -136,6 +137,78 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         # update the UX:
         create_task(conversation_update_queue.put((conv_id, True)))
 
+_SUBSTREAM_NAME_PREFIX = ":substream:"
+
+
+async def _get_received_piece(sess, rcw_id: "uuid.UUID", idx_8b: bytes):
+    """Lookup helper for the (read_cap, bacap_index) composite primary
+    key. Returns ``None`` when no row matches."""
+    return (await sess.exec(
+        select(persistent.ReceivedPiece).where(
+            persistent.ReceivedPiece.read_cap == rcw_id,
+            persistent.ReceivedPiece.bacap_index == idx_8b,
+        )
+    )).first()
+
+
+async def _try_assemble(sess, rcw_id: "uuid.UUID", terminal_idx_8b: bytes):
+    """Walk back from a freshly-inserted ``ReceivedPiece`` and try to
+    coalesce a chain.
+
+    Returns:
+
+    * ``("F", chunks, chain, gcm)`` when ``terminal_idx_8b`` resolves
+      to a ``b'F'`` chunk and every predecessor down to the substream's
+      start (or the previous ``b'F'``/``b'I'`` boundary) is present
+      and the concatenated CBOR decodes to a :class:`GroupChatMessage`.
+      ``chunks`` is the ordered ``(type, body)`` list passed to
+      :func:`models.unserialize`; ``chain`` is the ordered list of
+      ``ReceivedPiece`` rows the caller may delete on commit.
+    * ``("I", read_cap_bytes, [piece])`` when ``terminal_idx_8b``
+      resolves to a ``b'I'`` chunk, whose body is the substream's
+      read cap.
+    * ``None`` when the chain is still open (no terminator) or has
+      gaps that prevent a clean decode.
+
+    BACAP indices are 64-bit little-endian counters stored in the
+    first eight bytes of ``MessageBoxIndex`` blobs; predecessors
+    are at ``counter - 1``.
+    """
+    cur = await _get_received_piece(sess, rcw_id, terminal_idx_8b)
+    if cur is None:
+        return None
+    if cur.chunk_type == b"I":
+        return ("I", cur.chunk, [cur])
+    if cur.chunk_type != b"F":
+        return None  # a lone 'C', chain not yet terminated
+
+    chain = [cur]
+    counter = int.from_bytes(terminal_idx_8b, "little")
+    while counter > 0:
+        counter -= 1
+        prev = await _get_received_piece(
+            sess, rcw_id, counter.to_bytes(8, "little"),
+        )
+        if prev is None:
+            break  # either gap or substream start; let CBOR decode decide
+        if prev.chunk_type in (b"F", b"I"):
+            break  # boundary with a prior assembled message
+        chain.insert(0, prev)
+
+    chunks = [(rp.chunk_type, rp.chunk) for rp in chain]
+    try:
+        gcm = models.unserialize(chunks)
+    except Exception as exc:  # malformed CBOR or framing: leave RPs for retry
+        logger.warning(
+            "could not assemble chain at rcw=%s terminal=%s: %s",
+            rcw_id, terminal_idx_8b.hex(), exc,
+        )
+        return None
+    if gcm is None:
+        return None
+    return ("F", chunks, chain, gcm)
+
+
 async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]"):
   """Given a single persisten.MixWAL with is_read==True:
     - Send it to the network.
@@ -201,17 +274,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = mw.next_message_index
     sess.add(rcw)
-    if resp.plaintext.startswith(b"I"):
-      logger.debug(f"received indirection {resp}")
-      pass
-    elif resp.plaintext.startswith(b"F"):
-      # it's a discrete message
-      logger.debug(f"received Final message {resp}")
-      pass
-    elif resp.plaintext.startswith(b"C"):
-      logger.debug(f"received C message {resp}")
-      pass
-    else:
+    chunk_type = resp.plaintext[:1]
+    chunk_body = resp.plaintext[1:]
+    if chunk_type not in (b"F", b"C", b"I"):
       logger.critical(f"received message with invalid prefix, going to stop reading this peer {resp}")
       cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
       cp.active = False
@@ -222,22 +287,80 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       return
 
     cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
-    # Here we should write to the ReceivedPiece table:
-    #
     sess.add(persistent.ReceivedPiece(
                 read_cap=mw.bacap_stream,
                 bacap_index=mw.current_message_index[:8],
-                chunk_type=resp.plaintext[:1],
-                chunk=resp.plaintext[1:]
+                chunk_type=chunk_type,
+                chunk=chunk_body,
             ))
-    cl = persistent.ConversationLog.append_from(cp, resp.plaintext)
-    sess.add(cl)
+
+    assembled = await _try_assemble(
+        sess, mw.bacap_stream, mw.current_message_index[:8],
+    )
+    convlog_added = False
+    notify_conv_id = cp.conversation.id
+
+    if assembled is not None and assembled[0] == "F":
+      _, chunks, chain, _gcm = assembled
+      full_payload = b"F" + b"".join(body for _kind, body in chunks)
+      if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+        # Substream's terminal F: commit the assembled message into the
+        # parent peer's ConversationLog, prune the parent's indirection
+        # piece, and retire this synthetic peer.
+        parent_id = int(cp.name.split(":")[2])
+        parent_peer = await sess.get(persistent.ConversationPeer, parent_id)
+        cl = persistent.ConversationLog.append_from(parent_peer, full_payload)
+        sess.add(cl)
+        parent_i = (await sess.exec(
+            select(persistent.ReceivedPiece).where(
+                persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
+                persistent.ReceivedPiece.chunk_type == b"I",
+                persistent.ReceivedPiece.chunk == rcw.read_cap,
+            )
+        )).first()
+        if parent_i is not None:
+          await sess.delete(parent_i)
+        cp.active = False
+        sess.add(cp)
+        notify_conv_id = parent_peer.conversation.id
+        convlog_added = True
+      else:
+        # Top-level F (single-box or contiguous on the parent stream):
+        # commit directly into this peer's log.
+        cl = persistent.ConversationLog.append_from(cp, full_payload)
+        sess.add(cl)
+        convlog_added = True
+      for rp in chain:
+        await sess.delete(rp)
+
+    elif assembled is not None and assembled[0] == "I":
+      _, substream_read_cap, _ = assembled
+      if len(substream_read_cap) == 136:
+        new_rcw = persistent.ReadCapWAL(
+            id=uuid.uuid4(),
+            read_cap=substream_read_cap,
+            next_index=substream_read_cap[-104:],
+        )
+        sess.add(new_rcw)
+        substream_peer = persistent.ConversationPeer(
+            name=f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:{secrets.token_hex(2)}",
+            read_cap_id=new_rcw.id,
+            active=True,
+            conversation=cp.conversation,
+        )
+        sess.add(substream_peer)
+      else:
+        logger.warning(
+            "ignoring indirection with malformed read cap length %d",
+            len(substream_read_cap),
+        )
+
     await sess.delete(mw)
-    c_id = cp.conversation.id
     bacap_uuid = mw.bacap_stream
     await sess.commit()
 
-  create_task(conversation_update_queue.put((c_id,False)))
+  if convlog_added:
+    create_task(conversation_update_queue.put((notify_conv_id, False)))
 
   draining_right_now.discard(bacap_uuid)
   __resend_queue.discard(bacap_uuid)  # this should be .remove(), but why is it empty?
