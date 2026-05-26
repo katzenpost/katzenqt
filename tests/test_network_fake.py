@@ -187,14 +187,21 @@ class TestCourierDestinationExistsFakeBacked:
 # ---------------------------------------------------------------------------
 
 
-async def _set_up_write_flow(fake, *, plaintext: bytes = b"Fhello"):
+async def _set_up_write_flow(
+    fake, *, plaintext: bytes = b"Fhello",
+    seed: bytes = b"\x33" * 32,
+    conv_name: str = "demo",
+    peer_name: str = "self",
+):
     """Build the DB rows + fake envelope state representing 'we have just
     encrypted a write and persisted it to MixWAL; ready to drain'.
 
     Returns dict with keys: bacap_stream, write_cap, read_cap,
     first_message_index, conversation_id, peer_id, mw_id, pwal_id.
     """
-    setup = await _insert_write_setup(fake)
+    setup = await _insert_write_setup(
+        fake, seed=seed, conv_name=conv_name, peer_name=peer_name,
+    )
     # Encrypt write through the fake so the envelope_hash is recognised.
     wcr = await fake.encrypt_write(
         plaintext=plaintext,
@@ -1204,6 +1211,81 @@ class TestStartBackgroundThreads:
         assert getattr(network, "__resend_queue_populated").is_set()
         # The loops are running; teardown of the fixture will call
         # network.shutdown() and wait for the orchestrator to exit.
+        assert not live_network.task.done()
+
+
+# ---------------------------------------------------------------------------
+# Send-loop resilience: a stuck dispatched send must not wedge the
+# orchestrator or the other streams. Regression guard against the
+# historical "the whole send loop wedges" symptom, the most likely
+# culprit for which was the indirection bug repaired in 9606e5f.
+# ---------------------------------------------------------------------------
+
+
+class TestSendLoopResilience:
+    @pytest.mark.real_sleeps
+    @pytest.mark.asyncio
+    async def test_one_stuck_send_does_not_wedge_orchestrator(
+        self, live_network, fake_thinclient,
+    ):
+        """A single drain_mixwal_write_single hanging forever on an
+        un-ACK'd envelope must not stop drain_mixwal2 from continuing
+        to dispatch other streams, and must not propagate as an
+        exception into start_background_threads.
+
+        Uses real sleeps so SentLog.mark_sent's mixed sync/async
+        session work for stream B settles without racing the test's
+        polling under coverage instrumentation.
+        """
+        # Stream A: pre-stage a MW whose courier ACK we will withhold.
+        setup_a = await _set_up_write_flow(
+            fake_thinclient,
+            plaintext=b"Fstuck",
+            seed=b"\xaa" * 32,
+            conv_name="A",
+            peer_name="a-self",
+        )
+        fake_thinclient.hold_ack(setup_a["wcr"].envelope_hash)
+
+        # Stream B: a separate stream whose dispatch should proceed
+        # normally while A is wedged.
+        setup_b = await _set_up_write_flow(
+            fake_thinclient,
+            plaintext=b"Fprogresses",
+            seed=b"\xbb" * 32,
+            conv_name="B",
+            peer_name="b-self",
+        )
+
+        # Wake drain_mixwal2 to pick up both rows.
+        getattr(network, "__mixwal_updated").set()
+
+        async def b_drained() -> bool:
+            async with persistent.asession() as sess:
+                return await sess.get(persistent.MixWAL, setup_b["mw_id"]) is None
+
+        # Wait for B to settle. Real sleeps so SentLog.mark_sent's
+        # async/sync session interplay has wall-clock time to commit.
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            if await b_drained():
+                break
+
+        assert await b_drained(), (
+            "stream B's MixWAL should have drained while A was stuck"
+        )
+
+        # A is still in flight: its MW remains, its envelope was issued
+        # to the daemon (call_log records it), but no ACK has come back.
+        async with persistent.asession() as sess:
+            mw_a = await sess.get(persistent.MixWAL, setup_a["mw_id"])
+            assert mw_a is not None
+        assert fake_thinclient.call_count("start_resending_encrypted_message") >= 2
+
+        # And the orchestrator is alive, which is the load-bearing
+        # claim of this whole test: a stuck dispatched task must NOT
+        # kill start_background_threads. The fixture teardown will
+        # call network.shutdown() and confirm it exits cleanly.
         assert not live_network.task.done()
 
 
