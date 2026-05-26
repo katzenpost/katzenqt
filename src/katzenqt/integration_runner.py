@@ -31,49 +31,33 @@ it.
 """
 import argparse
 import asyncio
-import os
 import signal
 import sys
 import time
 import uuid
-from pathlib import Path
 
 import sqlalchemy as sa
 from sqlmodel import SQLModel, select
 
-from . import models, network, persistent
-
-
-_DEFAULT_THINCLIENT_CONFIG = str(
-    Path(__file__).resolve().parent.parent.parent / "config" / "thinclient.toml"
-)
-
-
-def _cfg_path() -> str:
-    return os.environ.get("KATZENQT_THINCLIENT_CONFIG", _DEFAULT_THINCLIENT_CONFIG)
+from . import headless, models, network, persistent
 
 
 async def _connect_and_start():
     """Connect to kpclientd and kick the background threads running.
 
     Returns a tuple of (connection, background_task). The caller is
-    responsible for cancelling the background task on exit.
+    responsible for cancelling the background task on exit. The
+    thinclient config path is resolved by
+    :func:`katzenqt.network.resolve_thinclient_config`, which honours
+    ``$KATZENQT_THINCLIENT_CONFIG``.
     """
-    # network.reconnect() reads the config path from the hardcoded
-    # "config/thinclient.toml". Temporarily chdir so its relative lookup
-    # resolves to the config we want.
-    os.chdir(str(Path(_cfg_path()).resolve().parent.parent))
-    connection = await network.reconnect()
-    bg = asyncio.create_task(network.start_background_threads(connection))
+    connection = await headless.connect()
+    bg = await headless.start(connection)
     return connection, bg
 
 
 async def _shutdown(bg):
-    network.shutdown()
-    try:
-        await asyncio.wait_for(bg, timeout=5)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        bg.cancel()
+    await headless.stop(bg)
 
 
 # ---------------------------------------------------------------------------
