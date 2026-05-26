@@ -6,7 +6,14 @@ file. It is deliberately free of any ``PySide6`` import so headless
 consumers, including pytest collection and the integration runner,
 pay no Qt cost.
 
-Typical usage::
+Two surfaces are exposed:
+
+* a small async Python API (``connect``, ``start``, ``stop``,
+  ``session``) for in-process callers,
+* a line-oriented CLI driven by :func:`cli`, also installed as the
+  ``katzenqt-headless`` console script.
+
+Typical Python usage::
 
     import asyncio
     from katzenqt import headless
@@ -17,21 +24,23 @@ Typical usage::
 
     asyncio.run(main())
 
-The lower-level helpers ``connect``, ``start``, and ``stop`` are
-exposed for callers that need finer control over the life cycle of
-the background task.
+For the CLI surface, run ``katzenqt-headless --help`` or
+``python -m katzenqt.headless --help``.
 """
 from __future__ import annotations
 
 import asyncio
+import signal
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
 from katzenpost_thinclient import ThinClient
 
-from . import network
-from .network import resolve_thinclient_config
+from . import _actions
+from .. import network, persistent
+from ..network import resolve_thinclient_config
 
 
 async def connect(config_path: "str | Path | None" = None) -> ThinClient:
@@ -87,10 +96,37 @@ async def session(
         await stop(bg)
 
 
+def cli(argv: "list[str] | None" = None) -> int:
+    """Console-script entry point for the headless CLI.
+
+    Brings the schema to head via :func:`persistent.init_and_migrate`
+    (which itself calls ``asyncio.run`` and therefore must execute
+    before we instantiate our own event loop), then dispatches the
+    chosen action.
+    """
+    args = _actions._build_parser().parse_args(argv)
+    persistent.init_and_migrate()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, loop.stop)
+    except NotImplementedError:
+        pass  # Windows or sandboxed envs
+    try:
+        return loop.run_until_complete(args.func(args))
+    finally:
+        loop.close()
+
+
 __all__ = [
+    "cli",
     "connect",
     "resolve_thinclient_config",
     "session",
     "start",
     "stop",
 ]
+
+
+if __name__ == "__main__":
+    sys.exit(cli())
