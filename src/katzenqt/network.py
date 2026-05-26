@@ -5,6 +5,8 @@ from katzenpost_thinclient import (
     BACAPDecryptionFailedError, StartResendingCancelledError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
+import importlib.resources
+import os
 import struct
 import types
 import nacl.public
@@ -15,6 +17,7 @@ import logging
 import asyncio
 import traceback
 from asyncio import ensure_future
+from pathlib import Path
 from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
 from . import persistent
@@ -617,10 +620,59 @@ async def on_message_sent(reply):
     else:
         logger.debug("MESSAGE SENT OK: message_id=%s reply=%s", reply['message_id'].hex(), reply)
 
+def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
+    """Locate ``thinclient.toml`` using a precedence chain.
+
+    The chain is consulted in order, returning the first path that
+    exists on disk:
+
+      1. ``explicit`` argument (raises ``FileNotFoundError`` if given
+         and missing; the caller asked for this file specifically),
+      2. ``$KATZENQT_THINCLIENT_CONFIG``,
+      3. ``$XDG_CONFIG_HOME/katzenqt/thinclient.toml`` (default
+         ``~/.config/katzenqt/thinclient.toml``),
+      4. the bundled copy shipped under ``katzenqt/data/thinclient.toml``
+         (resolved via ``importlib.resources``),
+      5. the development-tree fallback at
+         ``<repo>/config/thinclient.toml``.
+    """
+    if explicit is not None:
+        explicit_path = Path(explicit)
+        if not explicit_path.is_file():
+            raise FileNotFoundError(
+                f"thinclient config not found at explicit path: {explicit_path}"
+            )
+        return explicit_path
+
+    candidates: "list[Path]" = []
+    env = os.environ.get("KATZENQT_THINCLIENT_CONFIG")
+    if env:
+        candidates.append(Path(env))
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    candidates.append(Path(xdg) / "katzenqt" / "thinclient.toml")
+    try:
+        bundled = importlib.resources.files("katzenqt") / "data" / "thinclient.toml"
+        candidates.append(Path(str(bundled)))
+    except (ModuleNotFoundError, FileNotFoundError):
+        pass
+    candidates.append(
+        Path(__file__).resolve().parent.parent.parent / "config" / "thinclient.toml"
+    )
+
+    for c in candidates:
+        if c.is_file():
+            return c
+    raise FileNotFoundError(
+        "Could not locate thinclient.toml in: "
+        + ", ".join(str(c) for c in candidates)
+    )
+
+
 # from katzenpost_thinclient import ThinClient, Config
-async def reconnect() -> ThinClient:
+async def reconnect(config_path: "str | Path | None" = None) -> ThinClient:
+    resolved = resolve_thinclient_config(config_path)
     cfg = ThinClientConfig(
-        "config/thinclient.toml",
+        str(resolved),
         on_message_reply=on_message_reply,
         on_message_sent=on_message_sent,
         on_connection_status=on_connection_status,
