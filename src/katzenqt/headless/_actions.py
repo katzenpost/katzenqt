@@ -51,18 +51,27 @@ can parse the result without ceremony:
         (optionally filtered by basename), copy the on-disk file
         into DIR, verify SHA-256, and print
         ``RECV_FILE=<absolute path>`` or ``TIMEOUT``.
+
+    info
+        Emit one line of JSON describing the state file's current
+        alembic revision, the state path, the list of (non-substream)
+        conversations and their peer/message counts, and the open WAL
+        row counts. Does not contact kpclientd.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import hashlib
+import json
 import shutil
 import time
 import uuid
 from pathlib import Path
 
 import cbor2
+import sqlalchemy as sa
+from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
 from .. import models, network, persistent
@@ -601,6 +610,64 @@ async def _action_read(args):
         await _shutdown(bg)
 
 
+async def _action_info(args) -> int:
+    """Print one line of JSON describing this state file's schema,
+    conversations, and outstanding WAL counts.
+
+    Synthetic substream peers (whose names begin with the
+    ``:substream:`` marker) are excluded from per-conversation peer
+    counts so the output reflects only user-facing peers.
+    """
+    with persistent._engine_sync.connect() as conn:
+        ctx = MigrationContext.configure(conn)
+        revision = ctx.get_current_revision()
+
+    async with persistent.asession() as sess:
+        conversations = (await sess.exec(
+            select(persistent.Conversation)
+        )).all()
+        conv_summaries = []
+        for c in conversations:
+            real_peers = [
+                p for p in c.peers
+                if not p.name.startswith(network._SUBSTREAM_NAME_PREFIX)
+            ]
+            msg_count = (await sess.exec(
+                select(sa.func.count()).select_from(persistent.ConversationLog).where(
+                    persistent.ConversationLog.conversation_id == c.id
+                )
+            )).one()
+            conv_summaries.append({
+                "id": c.id,
+                "name": c.name,
+                "peer_count": len(real_peers),
+                "messages": int(msg_count),
+            })
+
+        pwal_count = (await sess.exec(
+            select(sa.func.count()).select_from(persistent.PlaintextWAL)
+        )).one()
+        mw_count = (await sess.exec(
+            select(sa.func.count()).select_from(persistent.MixWAL)
+        )).one()
+        rp_count = (await sess.exec(
+            select(sa.func.count()).select_from(persistent.ReceivedPiece)
+        )).one()
+
+    payload = {
+        "alembic_revision": revision,
+        "state_file": str(persistent.state_file),
+        "conversations": conv_summaries,
+        "wal": {
+            "plaintext": int(pwal_count),
+            "mix": int(mw_count),
+            "received_piece": int(rp_count),
+        },
+    }
+    print(json.dumps(payload), flush=True)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="katzenqt-headless",
@@ -666,5 +733,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="restrict to attachments whose basename matches",
     )
     p_read_file.set_defaults(func=_action_read_file)
+
+    p_info = sub.add_parser(
+        "info",
+        help="emit one line of JSON describing the state file's "
+             "schema, conversations, and outstanding WAL counts",
+    )
+    p_info.set_defaults(func=_action_info)
 
     return parser
