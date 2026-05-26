@@ -146,23 +146,6 @@ class SendOperation(BaseModel):
         )
         return [agg_bacap_stream], agg
 
-    def unserialize(self):
-        # take a typing.IO param
-        # first thing we see is either a b'I' or b'F'
-        # while b'I' or b'C':
-        #   yield things to read
-        #   those things should get read and put in our box cache
-        #   once read, continue the unserialize operation
-        # return once we see a F
-        # when we see a I we can start a new nested unserialize operation
-        # that proceeds from the next message
-        # data = io.BytesIO(b"123")
-        # dec = cbor2.CBORDecoder(fp=data)
-        # dec.decode()
-        # dec.fp.tell() # pos
-        # dec.fp.read() # remaining
-        pass
-
 class GroupChatFileUpload(BaseModel):
     model_config = {'validate_assignment': True}
     payload : bytes
@@ -203,6 +186,59 @@ class GroupChatMessage(BaseModel):
         assert 3 != len(list(dic.keys()))
         gcm = cls(**dic)
         return gcm, d.fp.tell()
+
+def unserialize(chunks) -> "GroupChatMessage | None":
+    """Reassemble a serialised ``SendOperation`` chain into a
+    :class:`GroupChatMessage`.
+
+    ``chunks`` is an iterable of ``(chunk_type, chunk_bytes)`` tuples
+    ordered by BACAP index. ``chunk_type`` is the single-byte framing
+    marker emitted by :meth:`SendOperation.serialize`:
+
+    * ``b'C'`` — continuation; carries an interior slice of the
+      CBOR-encoded message,
+    * ``b'F'`` — final; carries the last slice, terminating the chain,
+    * ``b'I'`` — indirection; reserved for the network-layer coalescer
+      which follows the embedded read cap and feeds the substream's
+      chunks back in. The data layer refuses to treat it as payload.
+
+    Returns the decoded :class:`GroupChatMessage` if the chain is
+    contiguous and ends in ``b'F'``. Returns ``None`` when the chain
+    does not yet end in ``b'F'`` (more chunks still expected, or an
+    empty chain). Raises :class:`ValueError` on framing violations:
+    unknown chunk types, ``b'I'`` chunks, or a ``b'F'`` chunk that is
+    not the last in the sequence.
+
+    No assumption is made about whether the chunks originated from the
+    original ``bacap_stream`` or from an indirection substream; the
+    caller has already classified them by the time they reach here.
+    """
+    parts = []
+    chunk_list = list(chunks)
+    if not chunk_list:
+        return None
+    for i, (kind, data) in enumerate(chunk_list):
+        if kind == b"C":
+            if i == len(chunk_list) - 1:
+                return None  # chain still open, no terminating 'F'
+            parts.append(data)
+        elif kind == b"F":
+            if i != len(chunk_list) - 1:
+                raise ValueError(
+                    f"'F' chunk at index {i} but {len(chunk_list) - 1 - i} "
+                    "chunk(s) follow"
+                )
+            parts.append(data)
+            return GroupChatMessage.from_cbor(b"".join(parts))
+        elif kind == b"I":
+            raise ValueError(
+                "indirection ('I') framing must be resolved by the network "
+                "coalescer before reaching models.unserialize"
+            )
+        else:
+            raise ValueError(f"unknown chunk type: {kind!r}")
+    return None
+
 
 # ConversationUIState moved to katzenqt.qt_models — see banner near the
 # top of this file for rationale.
