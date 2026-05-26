@@ -5,6 +5,7 @@ from katzenpost_thinclient import (
     BACAPDecryptionFailedError, StartResendingCancelledError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
+import hashlib
 import importlib.resources
 import os
 import struct
@@ -19,6 +20,9 @@ import traceback
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
+
+import cbor2
+
 from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
 from . import models, persistent
@@ -138,6 +142,87 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         create_task(conversation_update_queue.put((conv_id, True)))
 
 _SUBSTREAM_NAME_PREFIX = ":substream:"
+
+# Cap on attachment size after reassembly. Anything larger is
+# logged at WARNING, the bytes are discarded, and a
+# ``file_oversized`` marker is committed in place of a real
+# ``file_marker``. The cap was set in consultation with the
+# operator; it is generous enough for photos, audio clips, and
+# short documents.
+_ATTACHMENT_HARD_CAP = 200 * 1024 * 1024
+
+
+def _attachments_root() -> Path:
+    """Directory under the state file's parent where assembled
+    attachments are spilled."""
+    return persistent.state_file.parent / "attachments"
+
+
+def _safe_basename(name: str) -> str:
+    """Strip path separators and leading dots, clamp to 200 chars."""
+    cleaned = (name or "").replace("/", "_").replace("\\", "_")
+    cleaned = cleaned.lstrip(".")
+    return cleaned[:200] or "unnamed"
+
+
+def _spill_attachment(
+    file_upload: "models.GroupChatFileUpload",
+    membership_hash: bytes,
+    conversation_id: int,
+) -> bytes:
+    """Write the attachment bytes to disk and return the CBOR marker
+    that goes into ``ConversationLog.payload``.
+
+    Files larger than :data:`_ATTACHMENT_HARD_CAP` are dropped and a
+    ``file_oversized`` marker is returned instead, so the
+    conversation log still records that something arrived without
+    consuming the disk.
+    """
+    safe = _safe_basename(file_upload.basename)
+    blob = file_upload.payload
+    if len(blob) > _ATTACHMENT_HARD_CAP:
+        logger.warning(
+            "attachment of %d bytes exceeds cap %d; dropping body",
+            len(blob), _ATTACHMENT_HARD_CAP,
+        )
+        return b"F" + cbor2.dumps({
+            "v": 0,
+            "kind": "file_oversized",
+            "size": len(blob),
+            "basename": safe,
+            "filetype": file_upload.filetype,
+            "membership_hash": membership_hash,
+        })
+
+    conv_dir = _attachments_root() / str(conversation_id)
+    conv_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    msg_uuid = uuid.uuid4()
+    filename = f"{msg_uuid}-{safe}"
+    rel_path = f"attachments/{conversation_id}/{filename}"
+    abs_path = persistent.state_file.parent / rel_path
+
+    fd = os.open(
+        str(abs_path),
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        0o600,
+    )
+    try:
+        os.write(fd, blob)
+    finally:
+        os.close(fd)
+
+    sha = hashlib.sha256(blob).digest()
+    marker = cbor2.dumps({
+        "v": 0,
+        "kind": "file_marker",
+        "basename": safe,
+        "filetype": file_upload.filetype,
+        "size": len(blob),
+        "rel_path": rel_path,
+        "sha256": sha,
+        "membership_hash": membership_hash,
+    })
+    return b"F" + marker
 
 
 async def _get_received_piece(sess, rcw_id: "uuid.UUID", idx_8b: bytes):
@@ -301,8 +386,18 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     notify_conv_id = cp.conversation.id
 
     if assembled is not None and assembled[0] == "F":
-      _, chunks, chain, _gcm = assembled
-      full_payload = b"F" + b"".join(body for _kind, body in chunks)
+      _, chunks, chain, gcm = assembled
+      if gcm.file_upload is not None:
+        target_conv_id = (
+            (await sess.get(persistent.ConversationPeer, int(cp.name.split(":")[2]))).conversation.id
+            if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+            else cp.conversation.id
+        )
+        full_payload = _spill_attachment(
+            gcm.file_upload, gcm.membership_hash, target_conv_id,
+        )
+      else:
+        full_payload = b"F" + b"".join(body for _kind, body in chunks)
       if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
         # Substream's terminal F: commit the assembled message into the
         # parent peer's ConversationLog, prune the parent's indirection

@@ -40,14 +40,29 @@ can parse the result without ceremony:
         SLEEP:<seconds> steps against a single connection. Prints
         ``STEP_OK:<n>:...``/``STEP_FAIL:<n>:reason`` per step and
         ``SESSION_DONE`` on clean exit.
+
+    send-file CONV_NAME PATH [--basename X] [--filetype Y]
+        Read PATH from disk, wrap it in a GroupChatFileUpload, and
+        send. ``--basename`` overrides the on-wire filename;
+        ``--filetype`` overrides the MIME-ish tag. Prints ``SENT``.
+
+    read-file CONV_NAME --to-dir DIR [--timeout SEC] [--basename X]
+        Poll the ConversationLog for a ``file_marker`` from a peer
+        (optionally filtered by basename), copy the on-disk file
+        into DIR, verify SHA-256, and print
+        ``RECV_FILE=<absolute path>`` or ``TIMEOUT``.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import shutil
 import time
 import uuid
+from pathlib import Path
 
+import cbor2
 from sqlmodel import select
 
 from .. import models, network, persistent
@@ -193,8 +208,104 @@ async def _action_accept_invite(args):
     return 0
 
 
+async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
+    """Common send path for ``_action_send`` and ``_action_send_file``.
+
+    Serialises ``gcm`` into the conversation's outgoing BACAP stream,
+    spawns the headless background loops, and waits for the final
+    PlaintextWAL to land in SentLog. The budget scales with the
+    number of chunks so a multi-box attachment is given enough time
+    to clear (sixty seconds per chunk on the local docker mixnet,
+    one-hundred-twenty seconds minimum).
+    """
+    async with persistent.asession() as sess:
+        convo = (await sess.exec(
+            select(persistent.Conversation).where(
+                persistent.Conversation.name == conv_name
+            )
+        )).first()
+        if convo is None:
+            print(f"ERROR=conversation {conv_name!r} not found", flush=True)
+            return 2
+        conversation_id = convo.id
+        # Outgoing writes for this conversation go on the write-cap's
+        # bacap_stream (i.e., the WriteCapWAL primary key). find_resendable
+        # requires the PWAL's bacap_stream to match a fully-provisioned
+        # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
+        own_bacap_stream = convo.write_cap
+
+    send_op = models.SendOperation(
+        bacap_stream=own_bacap_stream, messages=[gcm],
+    )
+    new_write_caps, db_entries = send_op.serialize(
+        chunk_size=1530, conversation_id=conversation_id,
+    )
+    final_pwal_id = db_entries[-1].id
+    num_pwals = sum(
+        1 for e in db_entries if isinstance(e, persistent.PlaintextWAL)
+    )
+
+    async with persistent.asession() as sess:
+        for cap_uuid in new_write_caps:
+            sess.add(persistent.WriteCapWAL(id=cap_uuid))
+        for obj in db_entries:
+            sess.add(obj)
+        await sess.commit()
+
+    budget_s = max(120.0, num_pwals * 60.0)
+    connection, bg = await _connect_and_start()
+    try:
+        await network.check_for_new()
+        deadline = asyncio.get_event_loop().time() + budget_s
+        while asyncio.get_event_loop().time() < deadline:
+            async with persistent.asession() as sess:
+                hit = (await sess.exec(
+                    select(persistent.SentLog).where(
+                        persistent.SentLog.id == final_pwal_id
+                    )
+                )).first()
+                if hit is not None:
+                    print("SENT", flush=True)
+                    return 0
+            await asyncio.sleep(0.25)
+        print("ERROR=send timed out waiting for SentLog", flush=True)
+        return 3
+    finally:
+        await _shutdown(bg)
+
+
 async def _action_send(args):
-    # Locate our Conversation by name.
+    gcm = models.GroupChatMessage(
+        version=0, membership_hash=b"TODO" * 8, text=args.text,
+    )
+    return await _send_one_gcm(args.conv_name, gcm)
+
+
+async def _action_send_file(args):
+    path = Path(args.path)
+    if not path.is_file():
+        print(f"ERROR=file not found: {path}", flush=True)
+        return 2
+    data = path.read_bytes()
+    if len(data) > network._ATTACHMENT_HARD_CAP:
+        print(
+            f"ERROR=file exceeds {network._ATTACHMENT_HARD_CAP}-byte cap: "
+            f"{len(data)} bytes",
+            flush=True,
+        )
+        return 2
+    file_upload = models.GroupChatFileUpload(
+        payload=data,
+        filetype=args.filetype or "application/octet-stream",
+        basename=args.basename or path.name,
+    )
+    gcm = models.GroupChatMessage(
+        version=0, membership_hash=b"TODO" * 8, file_upload=file_upload,
+    )
+    return await _send_one_gcm(args.conv_name, gcm)
+
+
+async def _action_read_file(args):
     async with persistent.asession() as sess:
         convo = (await sess.exec(
             select(persistent.Conversation).where(
@@ -204,46 +315,62 @@ async def _action_send(args):
         if convo is None:
             print(f"ERROR=conversation {args.conv_name!r} not found", flush=True)
             return 2
+        own_peer_id = convo.own_peer_id
         conversation_id = convo.id
-        # Outgoing writes for this conversation go on the write-cap's
-        # bacap_stream (i.e., the WriteCapWAL primary key). find_resendable
-        # requires the PWAL's bacap_stream to match a fully-provisioned
-        # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
-        own_bacap_stream = convo.write_cap
 
-    gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8, text=args.text,
-    )
-    send_op = models.SendOperation(
-        bacap_stream=own_bacap_stream, messages=[gcm],
-    )
-    new_write_caps, db_entries = send_op.serialize(
-        chunk_size=1530, conversation_id=conversation_id,
-    )
-    final_pwal_id = db_entries[-1].id
-
-    async with persistent.asession() as sess:
-        for cap_uuid in new_write_caps:
-            sess.add(persistent.WriteCapWAL(id=cap_uuid))
-        for obj in db_entries:
-            sess.add(obj)
-        await sess.commit()
+    to_dir = Path(args.to_dir)
+    to_dir.mkdir(parents=True, exist_ok=True)
+    basename_filter = args.basename
 
     connection, bg = await _connect_and_start()
     try:
-        await network.check_for_new()
-        # Wait until SentLog contains the final pwal id, meaning mark_sent ran.
-        for _ in range(480):  # 120s @ 250ms
+        await network.signal_readables_to_mixwal()
+        deadline = asyncio.get_event_loop().time() + args.timeout
+        while asyncio.get_event_loop().time() < deadline:
             async with persistent.asession() as sess:
-                hit = (await sess.exec(
-                    select(persistent.SentLog).where(persistent.SentLog.id == final_pwal_id)
-                )).first()
-                if hit is not None:
-                    print("SENT", flush=True)
-                    return 0
-            await asyncio.sleep(0.25)
-        print("ERROR=send timed out waiting for SentLog", flush=True)
-        return 3
+                rows = (await sess.exec(
+                    select(persistent.ConversationLog).where(
+                        persistent.ConversationLog.conversation_id == conversation_id
+                    ).where(
+                        persistent.ConversationLog.conversation_peer_id != own_peer_id
+                    )
+                )).all()
+            for cl in rows:
+                if cl.payload[:1] != b"F":
+                    continue
+                try:
+                    decoded = cbor2.loads(cl.payload[1:])
+                except Exception:
+                    continue
+                if not isinstance(decoded, dict):
+                    continue
+                if decoded.get("kind") != "file_marker":
+                    continue
+                if basename_filter is not None and decoded.get("basename") != basename_filter:
+                    continue
+                rel_path = decoded.get("rel_path")
+                marker_sha = decoded.get("sha256")
+                basename = decoded.get("basename") or "unnamed"
+                if not rel_path or not marker_sha:
+                    continue
+                src_abs = persistent.state_file.parent / rel_path
+                if not src_abs.is_file():
+                    continue
+                file_bytes = src_abs.read_bytes()
+                actual_sha = hashlib.sha256(file_bytes).digest()
+                if actual_sha != marker_sha:
+                    print(
+                        f"WARN=sha256 mismatch for {basename}: "
+                        f"marker={marker_sha.hex()} actual={actual_sha.hex()}",
+                        flush=True,
+                    )
+                dst_abs = to_dir / basename
+                shutil.copyfile(src_abs, dst_abs)
+                print(f"RECV_FILE={dst_abs.resolve()}", flush=True)
+                return 0
+            await asyncio.sleep(0.5)
+        print("TIMEOUT", flush=True)
+        return 1
     finally:
         await _shutdown(bg)
 
@@ -516,5 +643,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="steps like SEND:text, READ:text, SLEEP:seconds",
     )
     p_sess.set_defaults(func=_action_chat_session)
+
+    p_send_file = sub.add_parser("send-file")
+    p_send_file.add_argument("conv_name")
+    p_send_file.add_argument("path", help="path to the file to send")
+    p_send_file.add_argument("--basename", default=None)
+    p_send_file.add_argument("--filetype", default=None)
+    p_send_file.set_defaults(func=_action_send_file)
+
+    p_read_file = sub.add_parser("read-file")
+    p_read_file.add_argument("conv_name")
+    p_read_file.add_argument(
+        "--to-dir", dest="to_dir", required=True,
+        help="directory where the received attachment is written",
+    )
+    p_read_file.add_argument(
+        "--timeout", type=float, default=600.0,
+        help="seconds to wait for a file_marker to arrive",
+    )
+    p_read_file.add_argument(
+        "--basename", default=None,
+        help="restrict to attachments whose basename matches",
+    )
+    p_read_file.set_defaults(func=_action_read_file)
 
     return parser

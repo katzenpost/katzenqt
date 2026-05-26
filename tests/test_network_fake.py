@@ -397,6 +397,19 @@ class TestDrainMixwalWriteSingle:
 # ---------------------------------------------------------------------------
 
 
+def _make_F_file_payload(blob: bytes, basename: str = "blob.bin",
+                          filetype: str = "application/octet-stream") -> bytes:
+    """``b'F'``-framed GroupChatMessage carrying a small file_upload that
+    fits in a single BACAP box."""
+    gcm = models.GroupChatMessage(
+        version=0, membership_hash=b"Y" * 32,
+        file_upload=models.GroupChatFileUpload(
+            payload=blob, filetype=filetype, basename=basename,
+        ),
+    )
+    return b"F" + gcm.to_cbor()
+
+
 class TestDrainMixwalReadSingle:
     @pytest.mark.asyncio
     async def test_success_with_final_prefix(self, fake_thinclient):
@@ -423,6 +436,63 @@ class TestDrainMixwalReadSingle:
             rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
             assert rcw.next_index == setup["rcr"].next_message_box_index
         assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_single_box_file_upload_spills_to_disk(self, fake_thinclient):
+        """A single-box GroupChatMessage carrying a file_upload must
+        result in (a) the bytes written under the attachments dir,
+        (b) the ConversationLog payload becoming a ``file_marker``
+        rather than the raw CBOR, and (c) the SHA-256 in the marker
+        matching the file on disk."""
+        import cbor2
+        import hashlib
+
+        blob = b"sample bytes 0123456789" * 5
+        plaintext = _make_F_file_payload(blob, basename="hello.bin")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=plaintext)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert len(log) == 1
+        payload = log[0].payload
+        assert payload[:1] == b"F"
+        marker = cbor2.loads(payload[1:])
+        assert marker["kind"] == "file_marker"
+        assert marker["basename"] == "hello.bin"
+        assert marker["size"] == len(blob)
+        assert marker["sha256"] == hashlib.sha256(blob).digest()
+        from pathlib import Path
+        spilled = persistent.state_file.parent / marker["rel_path"]
+        assert spilled.is_file()
+        assert spilled.read_bytes() == blob
+
+    @pytest.mark.asyncio
+    async def test_oversized_file_yields_oversized_marker(self, fake_thinclient, monkeypatch):
+        """An assembled attachment larger than the hard cap must be
+        replaced with a ``file_oversized`` marker and not touch disk."""
+        import cbor2
+        # Lower the cap so we don't actually have to allocate 200 MiB.
+        monkeypatch.setattr(network, "_ATTACHMENT_HARD_CAP", 100)
+        blob = b"X" * 4096  # > cap
+        plaintext = _make_F_file_payload(blob, basename="big.bin")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=plaintext)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+        assert len(log) == 1
+        marker = cbor2.loads(log[0].payload[1:])
+        assert marker["kind"] == "file_oversized"
+        assert marker["size"] == len(blob)
 
     @pytest.mark.asyncio
     async def test_continuation_prefix(self, fake_thinclient):
