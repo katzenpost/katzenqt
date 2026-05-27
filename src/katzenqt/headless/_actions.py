@@ -91,12 +91,21 @@ async def _connect_and_start():
     return connection, bg
 
 
-async def _shutdown(bg):
+async def _shutdown(bg, connection):
+    """Tear down a session opened by :func:`_connect_and_start`.
+
+    Sets the network's shutdown event, waits for the background task
+    to drain, and then closes the ThinClient so kpclientd receives
+    its ``thin_close`` and frees this connection's ARQ state. The
+    close is mandatory; see the docstring on
+    :func:`katzenqt.headless.stop` for why.
+    """
     network.shutdown()
     try:
         await asyncio.wait_for(bg, timeout=5)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         bg.cancel()
+    connection.stop()
 
 
 async def _action_create_conv(args):
@@ -145,7 +154,7 @@ async def _action_create_conv(args):
         print("INVITE=" + invite.to_human_readable(), flush=True)
         return 0
     finally:
-        await _shutdown(bg)
+        await _shutdown(bg, connection)
 
 
 async def _action_accept_invite(args):
@@ -280,7 +289,7 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
         print("ERROR=send timed out waiting for SentLog", flush=True)
         return 3
     finally:
-        await _shutdown(bg)
+        await _shutdown(bg, connection)
 
 
 async def _action_send(args):
@@ -381,7 +390,7 @@ async def _action_read_file(args):
         print("TIMEOUT", flush=True)
         return 1
     finally:
-        await _shutdown(bg)
+        await _shutdown(bg, connection)
 
 
 async def _action_multi_send(args):
@@ -436,7 +445,7 @@ async def _action_multi_send(args):
         print("ERROR=multi-send timed out", flush=True)
         return 3
     finally:
-        await _shutdown(bg)
+        await _shutdown(bg, connection)
 
 
 async def _action_chat_session(args):
@@ -557,7 +566,7 @@ async def _action_chat_session(args):
         print("SESSION_DONE", flush=True)
         return 0
     finally:
-        await _shutdown(bg)
+        await _shutdown(bg, connection)
 
 
 async def _action_read(args):
@@ -607,7 +616,7 @@ async def _action_read(args):
         print("TIMEOUT", flush=True)
         return 1
     finally:
-        await _shutdown(bg)
+        await _shutdown(bg, connection)
 
 
 async def _action_info(args) -> int:
