@@ -131,11 +131,15 @@ class SendOperation(BaseModel):
         # 1. We need a ReadCapWal that points to the `agg_bacap_stream`:
         rcw = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=agg_bacap_stream, active=False)
         agg.append(rcw)
-        # 2. the b'I'ndirection entry needs to point to rcw.id, so the read cap can be filled once we have
-        #    received it from clientd, and only then can this operation be churned out as a WriteCap:
+        # 2. the b'I'ndirection entry needs to point to rcw.id, so the read
+        #    cap can be filled once we have received it from clientd, and
+        #    only then can this operation be churned out as a WriteCap. The
+        #    primary key is assigned up front so callers (notably the
+        #    headless runner) can capture it before the session commit and
+        #    later watch SentLog for it.
         agg.append(
             persistent.PlaintextWAL(
-                id=None,
+                id=uuid.uuid4(),
                 after_id=None,
                 after_stream=agg_bacap_stream,
                 bacap_stream=self.bacap_stream,
