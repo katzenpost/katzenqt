@@ -271,6 +271,95 @@ def test_send_resendable_plaintexts_has_no_late_bound_lambda():
     )
 
 
+# ---------------------------------------------------------------------------
+# Invariant 8: after_stream gate releases only when no PWAL remains on the
+# referenced bacap_stream. The previous SQL compared ``after_stream`` (a
+# bacap_stream UUID) against ``sent_cte`` (a set of PWAL IDs), two
+# disjoint identifier spaces, so the indirection PWAL of any multi-box
+# send was permanently un-resendable and the send timed out.
+# ---------------------------------------------------------------------------
+
+
+def test_find_resendable_after_stream_gate_releases_when_substream_drained():
+    """Stage a multi-box send fixture: three substream chunks and one
+    indirection PWAL on the parent stream with after_stream=substream_uuid.
+    While any substream chunk remains in plaintextwal the indirection
+    must NOT be resendable. Once they are all mark_sent (deleted from
+    plaintextwal and present in sentlog) the indirection MUST appear
+    in find_resendable's result set."""
+    substream_uuid = uuid.uuid4()
+    parent_stream_uuid = uuid.uuid4()
+    substream_rcw_id = uuid.uuid4()
+
+    pwal_c1_id = uuid.uuid4()
+    pwal_c2_id = uuid.uuid4()
+    pwal_f_id = uuid.uuid4()
+    pwal_indirection_id = uuid.uuid4()
+
+    with Session(persistent._engine_sync) as sess:
+        # Substream WCW+RCW, both populated so the cap CTEs admit the rows.
+        sess.add(persistent.WriteCapWAL(
+            id=substream_uuid, write_cap=b"W" * 168, next_index=mbi(1),
+        ))
+        sess.add(persistent.ReadCapWAL(
+            id=substream_rcw_id, write_cap_id=substream_uuid,
+            read_cap=b"R" * 136, next_index=mbi(1),
+        ))
+        # Parent stream's WCW+RCW (the conv's own caps).
+        sess.add(persistent.WriteCapWAL(
+            id=parent_stream_uuid, write_cap=b"W" * 168, next_index=mbi(1),
+        ))
+        sess.add(persistent.ReadCapWAL(
+            id=uuid.uuid4(), write_cap_id=parent_stream_uuid,
+            read_cap=b"R" * 136, next_index=mbi(1),
+        ))
+        # Substream chunks linked C -> C -> F via after_id.
+        sess.add(persistent.PlaintextWAL(
+            id=pwal_c1_id, after_id=None, after_stream=None,
+            bacap_stream=substream_uuid, conversation_id=1,
+            bacap_payload=b"C" + b"a" * 32,
+        ))
+        sess.add(persistent.PlaintextWAL(
+            id=pwal_c2_id, after_id=pwal_c1_id, after_stream=None,
+            bacap_stream=substream_uuid, conversation_id=1,
+            bacap_payload=b"C" + b"b" * 32,
+        ))
+        sess.add(persistent.PlaintextWAL(
+            id=pwal_f_id, after_id=pwal_c2_id, after_stream=None,
+            bacap_stream=substream_uuid, conversation_id=1,
+            bacap_payload=b"F" + b"c" * 32,
+        ))
+        # Indirection PWAL on the parent stream: waits for substream drain.
+        sess.add(persistent.PlaintextWAL(
+            id=pwal_indirection_id, after_id=None,
+            after_stream=substream_uuid,
+            bacap_stream=parent_stream_uuid, conversation_id=1,
+            bacap_payload=b"", indirection=substream_rcw_id,
+        ))
+        sess.commit()
+
+        # While substream chunks remain, the indirection is gated out.
+        rows = list(sess.exec(persistent.PlaintextWAL.find_resendable(set())))
+        returned = {row.id for row in rows}
+        assert pwal_indirection_id not in returned, (
+            f"indirection PWAL must NOT be resendable while substream chunks "
+            f"remain in plaintextwal; got rows={returned}"
+        )
+
+        # Drain the substream: mark all chunks sent and delete them.
+        for pid in (pwal_c1_id, pwal_c2_id, pwal_f_id):
+            sess.add(persistent.SentLog(id=pid))
+            sess.delete(sess.get(persistent.PlaintextWAL, pid))
+        sess.commit()
+
+        rows = list(sess.exec(persistent.PlaintextWAL.find_resendable(set())))
+        returned = {row.id for row in rows}
+        assert pwal_indirection_id in returned, (
+            f"indirection PWAL must be resendable once its after_stream "
+            f"({substream_uuid}) has no remaining PWALs; got rows={returned}"
+        )
+
+
 def test_late_binding_pattern_is_really_a_python_hazard():
     """Demonstrate the late-binding semantics so the test above is
     calibrated. If this ever fails, Python's loop-variable binding rules

@@ -294,6 +294,19 @@ class PlaintextWAL(SQLModel, table=True):
         mixwal_bacap_cte = sa.select(sa.select(MixWAL.bacap_stream).cte('mixwal_bacap_cte'))
         populated_read_cap_cte = sa.select(sa.select(ReadCapWAL.id).where(ReadCapWAL.read_cap != None).cte("populated_read_cap_cte"))
         populated_write_cap_cte = sa.select(sa.select(WriteCapWAL.id).where(WriteCapWAL.write_cap != None).cte("populated_write_cap_cte"))
+        # Aliased copy of the table for the after_stream gate's correlated
+        # NOT EXISTS subquery. The gate fires when the referenced
+        # bacap_stream has no remaining PWALs, which (since mark_sent
+        # deletes the PWAL row in the same transaction it writes SentLog)
+        # is the correct end-of-stream condition. The previous attempt
+        # compared after_stream (a bacap_stream UUID) against SentLog.id
+        # (a PWAL UUID), two disjoint identifier spaces, so the gate was
+        # permanently closed for every indirection PWAL of every multi-box
+        # send. The release also implicitly handles the "all PWALs for
+        # this stream are still pending" case because some chunk's
+        # bacap_stream IS the target after_stream.
+        from sqlalchemy.orm import aliased as _aliased
+        _other_pwal = _aliased(PlaintextWAL)
         # instead of a cte that selects it all we may want to us after_id/after_stream directly
         row = sa.func.row_number().over(partition_by=PlaintextWAL.bacap_stream).label("rownum")
         all_elig= (
@@ -311,8 +324,13 @@ class PlaintextWAL(SQLModel, table=True):
                     sa.or_(PlaintextWAL.after_id.is_(None),
                         PlaintextWAL.after_id.in_(sent_cte)
                         ),
-                    sa.or_(PlaintextWAL.after_stream.is_(None),
-                        PlaintextWAL.after_stream.in_(sent_cte)),
+                    sa.or_(
+                        PlaintextWAL.after_stream.is_(None),
+                        # No PWAL remains on the referenced bacap_stream.
+                        sa.not_(sa.exists().where(
+                            _other_pwal.bacap_stream == PlaintextWAL.after_stream
+                        )),
+                    ),
                 )
             )
             .where(
