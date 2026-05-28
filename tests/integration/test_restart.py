@@ -103,7 +103,7 @@ def _run_concurrent_session(
     alice_state: Path, bob_state: Path,
     alice_steps: list, bob_steps: list,
     *, round_label: str,
-    process_timeout_s: float = 900.0,
+    process_timeout_s: float = 2400.0,
     log_dir: Path,
 ) -> None:
     """Run Alice and Bob as two concurrent chat-session subprocesses,

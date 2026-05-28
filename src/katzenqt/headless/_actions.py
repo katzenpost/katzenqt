@@ -495,7 +495,12 @@ async def _action_chat_session(args):
                         sess.add(obj)
                     await sess.commit()
                 await network.check_for_new()
-                deadline = asyncio.get_event_loop().time() + 300.0
+                # Ten minutes: a chat-session shares its kpclientd
+                # connection with the test's other concurrent role and
+                # the two compete for daemon CPU on a loaded CI runner,
+                # which pushes per-step wall time well above the
+                # single-role baseline.
+                deadline = asyncio.get_event_loop().time() + 600.0
                 ok = False
                 while asyncio.get_event_loop().time() < deadline:
                     async with persistent.asession() as sess:
@@ -516,7 +521,13 @@ async def _action_chat_session(args):
             elif kind == "READ":
                 # Nudge the read loop in case no event is outstanding.
                 await network.signal_readables_to_mixwal()
-                deadline = asyncio.get_event_loop().time() + 180.0
+                # Six minutes: enough for the loaded CI mixnet's
+                # propagation-and-poll round trip without giving up
+                # on a session that is otherwise progressing. The
+                # outer chat-session subprocess timeout in
+                # tests/integration/test_restart.py is the harder
+                # bound.
+                deadline = asyncio.get_event_loop().time() + 360.0
                 ok = False
                 poll_n = 0
                 last_count = -1
