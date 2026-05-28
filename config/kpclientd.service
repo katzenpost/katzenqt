@@ -4,7 +4,7 @@
 #
 # Requirements:
 #   - kpclientd installed at: %h/.local/bin/kpclientd
-#   - config at:              %h/.local/katzenpost/client2.toml
+#   - config at:              %h/.local/katzenpost/client.toml
 #
 # Install like so:
 #
@@ -36,7 +36,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 
-ExecStart=%h/.local/bin/kpclientd -c %h/.local/katzenpost/client2.toml
+ExecStart=%h/.local/bin/kpclientd -c %h/.local/katzenpost/client.toml
 
 Restart=on-failure
 RestartSec=5s

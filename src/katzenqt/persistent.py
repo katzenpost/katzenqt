@@ -1,6 +1,7 @@
 import sqlalchemy as sa
 from sqlalchemy.orm import declarative_base
 #from pydantic import BaseModel, ConfigDict, Field
+import importlib.resources
 from pathlib import Path
 import alembic.config
 import alembic.command
@@ -13,18 +14,38 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-import struct
 from typing import TYPE_CHECKING
 from .katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
     import sqlmodel
 from alembic import context
+import logging
 import os
 
+logger = logging.getLogger("katzen.persistent")
 
 
-_alembic_cfg = alembic.config.Config(Path(__file__).parent.parent.parent / "config" / "alembic.ini")
+def _resolve_alembic_ini() -> Path:
+    """Locate the ``alembic.ini`` shipped with the package.
+
+    Tries the package-data copy first (works for both editable and
+    copy installs), then falls back to the development-tree
+    ``<repo>/config/alembic.ini`` (so ``uv run alembic -c
+    config/alembic.ini ...`` from the source tree keeps working
+    without touching the package data file).
+    """
+    try:
+        bundled = importlib.resources.files("katzenqt") / "data" / "alembic.ini"
+        p = Path(str(bundled))
+        if p.is_file():
+            return p
+    except (ModuleNotFoundError, FileNotFoundError):
+        pass
+    return Path(__file__).parent.parent.parent / "config" / "alembic.ini"
+
+
+_alembic_cfg = alembic.config.Config(_resolve_alembic_ini())
 
 xdg_data_home = (Path().home()/".local"/"share")
 xdg_data_home.mkdir(parents=True,exist_ok=True)
@@ -36,7 +57,7 @@ if not (state_file := os.getenv("KQT_STATE", "")):
 state_file += ".sqlite3"
 state_file = app_data / state_file
 _sql_url = f"sqlite+aiosqlite:///{ state_file }"
-print(_sql_url)
+logger.info("sql url: %s", _sql_url)
 _engine = create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)
 _engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True, pool_size=1000)
 
@@ -81,9 +102,9 @@ class AppSetting(SQLModel, table=True):
 
 class MixWAL(SQLModel, table=True):
     """
-    Stores WriteChannelReply from ThinClient.write_channel_message
+    Stores EncryptWriteResult/EncryptReadResult from ThinClient.encrypt_read() and encrypt_write()
     for resending to the courier.
-    We need to feed all of these into ThinClient.send_message
+    We need to feed all of these into ThinClient.start_resending_encrypted_message
 
     TODO: Ok so say we want to send a message that spans a few BACAP boxes:
     - We create a new channel: EPH
@@ -146,31 +167,68 @@ class WriteCapWAL(SQLModel, table=True):
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
-    async def mark_sent(cls, mw:MixWAL, resend_queue) -> int:
+    async def mark_sent(cls, connection, mw:MixWAL, resend_queue) -> int:
         """Add SentLog entry, delete corresponding MixWAL and PlaintextWAL entries.
         Also bump index so we don't just keep writing to the same index??
+
+        `connection` is a ThinClient used to resolve BACAP Idx64 counters out
+        of opaque MessageBoxIndex blobs via get_message_box_index_counter.
         TODO: cleanup WriteCapWAL/ReadCapWAL entries when we are done with them (not urgent, but eventually)
 
         Returns the Conversation.id for the MixWAL entry so UI can be updated.
         """
         conversation_id = None
+        # Unconditional regression guard: another drain may have already
+        # advanced wcw.next_index past our mw.next_message_index (e.g., a
+        # retransmission's ACK arriving after a later message's ACK).
+        # Clobbering it back would let the writer re-encrypt at an index that
+        # was already written, and BACAP derives a unique key per index — the
+        # mismatch surfaces as an MKEM/BACAP decrypt failure at the reader.
+        # Read the wcw blob first in a small sync transaction, then resolve
+        # the counters via the thinclient OUTSIDE the session so we don't
+        # hold a DB transaction across an await.
+        with Session(_engine_sync) as sess:
+            wcw_precheck = sess.get(WriteCapWAL, mw.bacap_stream)
+            precheck_next_blob = wcw_precheck.next_index if wcw_precheck else None
+        if precheck_next_blob is not None:
+            real_next = await connection.get_message_box_index_counter(precheck_next_blob)
+            our_next = await connection.get_message_box_index_counter(mw.next_message_index)
+            if real_next >= our_next:
+                logger.warning(
+                    "mark_sent: skipping stale ACK for bacap_stream=%s "
+                    "(db next=%d >= our next=%d); not regressing index",
+                    mw.bacap_stream, real_next, our_next,
+                )
+                # Clean up the stray MW so we don't re-drain it; leave the
+                # PWAL alone if it still exists — a later MW with a fresh
+                # next_message_index will mark it sent.
+                with Session(_engine_sync) as sess:
+                    stale_mw = sess.get(MixWAL, mw.id)
+                    if stale_mw is not None:
+                        sess.delete(stale_mw)
+                        sess.commit()
+                resend_queue.discard(mw.bacap_stream)
+                return
+        # Resolve the diagnostic counters once so the commit-time print is
+        # as cheap as a tuple format rather than two more thinclient calls.
+        new_idx = our_next if precheck_next_blob is not None else (
+            await connection.get_message_box_index_counter(mw.next_message_index)
+        )
         with Session(_engine_sync) as sess:
             pwal = sess.get(PlaintextWAL, mw.plaintextwal)
             if not pwal:
-                print("pwal lookup failed for mw.plaintextwal", mw.is_read, mw)
-                # this is not great; if mw.is_read==False then we really ought to have a corresponding plaintextwal.
-                # either we put the wrong id here; or something went wrong making the entry; or we have already mark_sent something
-                # for this plaintextwal entry. It seems most likely that we would end up here if we have resent the write
-                # and only later gotten the ACK.
-                real_next, our_next = struct.unpack('<2Q', sess.get(WriteCapWAL, mw.bacap_stream).next_index[:8] + mw.next_message_index[:8])
-                if real_next >= our_next:
-                    print(f"in mark_sent, but db next {real_next} >= {our_next} we already advanced from idx", mw.current_message_index[:8].hex())
-                    resend_queue.discard(mw.bacap_stream)  # TODO not sure if we still use this?
-                    return
-                import pdb; pdb.set_trace()
+                logger.warning(
+                    "mark_sent: pwal lookup failed for mw.plaintextwal=%s "
+                    "(is_read=%s); most likely a duplicate ACK for an MW "
+                    "whose PWAL was already reaped",
+                    mw.plaintextwal, mw.is_read,
+                )
+                resend_queue.discard(mw.bacap_stream)
+                return
             sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
             wcw = sess.get(WriteCapWAL, mw.bacap_stream)
-            print("updating wcw: ", struct.unpack('<2Q', wcw.next_index[:8] + mw.next_message_index[:8]))
+            old_idx = real_next if precheck_next_blob is not None else None
+            logger.debug("updating wcw: old=%s new=%s", old_idx, new_idx)
             wcw.next_index = mw.next_message_index
             if pwal.bacap_payload[:1] in (b'F',b'I'):
                 # This is either:
@@ -236,6 +294,19 @@ class PlaintextWAL(SQLModel, table=True):
         mixwal_bacap_cte = sa.select(sa.select(MixWAL.bacap_stream).cte('mixwal_bacap_cte'))
         populated_read_cap_cte = sa.select(sa.select(ReadCapWAL.id).where(ReadCapWAL.read_cap != None).cte("populated_read_cap_cte"))
         populated_write_cap_cte = sa.select(sa.select(WriteCapWAL.id).where(WriteCapWAL.write_cap != None).cte("populated_write_cap_cte"))
+        # Aliased copy of the table for the after_stream gate's correlated
+        # NOT EXISTS subquery. The gate fires when the referenced
+        # bacap_stream has no remaining PWALs, which (since mark_sent
+        # deletes the PWAL row in the same transaction it writes SentLog)
+        # is the correct end-of-stream condition. The previous attempt
+        # compared after_stream (a bacap_stream UUID) against SentLog.id
+        # (a PWAL UUID), two disjoint identifier spaces, so the gate was
+        # permanently closed for every indirection PWAL of every multi-box
+        # send. The release also implicitly handles the "all PWALs for
+        # this stream are still pending" case because some chunk's
+        # bacap_stream IS the target after_stream.
+        from sqlalchemy.orm import aliased as _aliased
+        _other_pwal = _aliased(PlaintextWAL)
         # instead of a cte that selects it all we may want to us after_id/after_stream directly
         row = sa.func.row_number().over(partition_by=PlaintextWAL.bacap_stream).label("rownum")
         all_elig= (
@@ -245,12 +316,21 @@ class PlaintextWAL(SQLModel, table=True):
             )
             .where(
                 sa.and_(
-                    PlaintextWAL.id.not_in(resend_queue),
+                    # __resend_queue holds bacap_stream UUIDs (not PWAL ids),
+                    # so the filter column has to match. The prior
+                    # PlaintextWAL.id.not_in(resend_queue) was a silent no-op
+                    # because the two UUID spaces essentially never overlap.
+                    PlaintextWAL.bacap_stream.not_in(resend_queue),
                     sa.or_(PlaintextWAL.after_id.is_(None),
                         PlaintextWAL.after_id.in_(sent_cte)
                         ),
-                    sa.or_(PlaintextWAL.after_stream.is_(None),
-                        PlaintextWAL.after_stream.in_(sent_cte)),
+                    sa.or_(
+                        PlaintextWAL.after_stream.is_(None),
+                        # No PWAL remains on the referenced bacap_stream.
+                        sa.not_(sa.exists().where(
+                            _other_pwal.bacap_stream == PlaintextWAL.after_stream
+                        )),
+                    ),
                 )
             )
             .where(

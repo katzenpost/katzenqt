@@ -1,9 +1,6 @@
 import annotated_types
 from typing_extensions import Annotated
 from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict
-from .qt_models import *
-from PySide6.QtQml import QQmlPropertyMap
-from PySide6.QtGui import QStandardItem
 import cbor2
 from enum import Enum
 import uuid
@@ -13,6 +10,13 @@ from . import persistent
 import hashlib
 from base64 import b64encode, b64decode
 from typing import List
+
+# Note: ``ConversationUIState`` used to live here but its Qt-typed fields
+# (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
+# importer of this module — including the headless integration runner
+# and pytest collection — to load PySide6 and the Qt runtime libraries.
+# It now lives in ``katzenqt.qt_models``; import it from there if you
+# need it.
 
 class GroupChatTEXT(BaseModel):
     model_config = {
@@ -127,11 +131,15 @@ class SendOperation(BaseModel):
         # 1. We need a ReadCapWal that points to the `agg_bacap_stream`:
         rcw = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=agg_bacap_stream, active=False)
         agg.append(rcw)
-        # 2. the b'I'ndirection entry needs to point to rcw.id, so the read cap can be filled once we have
-        #    received it from clientd, and only then can this operation be churned out as a WriteCap:
+        # 2. the b'I'ndirection entry needs to point to rcw.id, so the read
+        #    cap can be filled once we have received it from clientd, and
+        #    only then can this operation be churned out as a WriteCap. The
+        #    primary key is assigned up front so callers (notably the
+        #    headless runner) can capture it before the session commit and
+        #    later watch SentLog for it.
         agg.append(
             persistent.PlaintextWAL(
-                id=None,
+                id=uuid.uuid4(),
                 after_id=None,
                 after_stream=agg_bacap_stream,
                 bacap_stream=self.bacap_stream,
@@ -141,23 +149,6 @@ class SendOperation(BaseModel):
             )
         )
         return [agg_bacap_stream], agg
-
-    def unserialize(self):
-        # take a typing.IO param
-        # first thing we see is either a b'I' or b'F'
-        # while b'I' or b'C':
-        #   yield things to read
-        #   those things should get read and put in our box cache
-        #   once read, continue the unserialize operation
-        # return once we see a F
-        # when we see a I we can start a new nested unserialize operation
-        # that proceeds from the next message
-        # data = io.BytesIO(b"123")
-        # dec = cbor2.CBORDecoder(fp=data)
-        # dec.decode()
-        # dec.fp.tell() # pos
-        # dec.fp.read() # remaining
-        pass
 
 class GroupChatFileUpload(BaseModel):
     model_config = {'validate_assignment': True}
@@ -200,49 +191,58 @@ class GroupChatMessage(BaseModel):
         gcm = cls(**dic)
         return gcm, d.fp.tell()
 
-class ConversationUIState(BaseModel):
-    """Per-conversation runtime state used by the Qt UI."""
-    model_config = {
-        'validate_assignment': True,
-        'arbitrary_types_allowed': True
-    }
-    conversation_id : int
-    own_peer_id : int = Field(description="ConversationPeer.id for self")
-    own_peer_name : str = Field(description="ConversationPeer.name for self")
-    own_peer_bacap_uuid: uuid.UUID
-    chat_lineEdit_buffer : str
-    conversation_log_model: ConversationLogModel
-    contacts_standard_item : QStandardItem = Field(description="the entry in the Contacts pane for the conversation")
-    chat_lines_scroll_idx : float = 0.0
-    # TODO: should store scroll state of self.ui.ChatLines
-    # ie self.ui.ChatLines.scrollToBottom() for default new ones
-    last_push_to_talk_ns : int = 0
-    attached_files : set[str] = Field(default_factory=set)
+def unserialize(chunks) -> "GroupChatMessage | None":
+    """Reassemble a serialised ``SendOperation`` chain into a
+    :class:`GroupChatMessage`.
 
-    first_unread : int = 0
-    # (projected) ConversationLog.conversation_order of first message the user
-    # hasn't "read" yet - it doesn't have to exist in ConversationLog yet.
+    ``chunks`` is an iterable of ``(chunk_type, chunk_bytes)`` tuples
+    ordered by BACAP index. ``chunk_type`` is the single-byte framing
+    marker emitted by :meth:`SendOperation.serialize`:
 
-    def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
-        props = QQmlPropertyMap(rootObject)
-        props.insert({
-            **settings,
-            "chatTreeViewModel": self.conversation_log_model,
-            "conversation_scroll": self.chat_lines_scroll_idx,
-            "first_unread": self.first_unread,
-            "chat_text_size": 11, # governs text size of chat messages
-            "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
-        })
-        return props
+    * ``b'C'`` — continuation; carries an interior slice of the
+      CBOR-encoded message,
+    * ``b'F'`` — final; carries the last slice, terminating the chain,
+    * ``b'I'`` — indirection; reserved for the network-layer coalescer
+      which follows the embedded read cap and feeds the substream's
+      chunks back in. The data layer refuses to treat it as payload.
 
-    async def update_first_unread(self, new_first_unread:int) -> None:
-        """Update first_unread in the persistent database:"""
-        if new_first_unread == self.first_unread:
-            return
-        print("UPDATED FIRST_UNREAD", self.first_unread, new_first_unread)
-        self.first_unread = new_first_unread
-        async with persistent.asession() as sess:
-            co = await sess.get(persistent.Conversation, self.conversation_id)
-            co.first_unread = self.first_unread
-            sess.add(co)
-            await sess.commit()
+    Returns the decoded :class:`GroupChatMessage` if the chain is
+    contiguous and ends in ``b'F'``. Returns ``None`` when the chain
+    does not yet end in ``b'F'`` (more chunks still expected, or an
+    empty chain). Raises :class:`ValueError` on framing violations:
+    unknown chunk types, ``b'I'`` chunks, or a ``b'F'`` chunk that is
+    not the last in the sequence.
+
+    No assumption is made about whether the chunks originated from the
+    original ``bacap_stream`` or from an indirection substream; the
+    caller has already classified them by the time they reach here.
+    """
+    parts = []
+    chunk_list = list(chunks)
+    if not chunk_list:
+        return None
+    for i, (kind, data) in enumerate(chunk_list):
+        if kind == b"C":
+            if i == len(chunk_list) - 1:
+                return None  # chain still open, no terminating 'F'
+            parts.append(data)
+        elif kind == b"F":
+            if i != len(chunk_list) - 1:
+                raise ValueError(
+                    f"'F' chunk at index {i} but {len(chunk_list) - 1 - i} "
+                    "chunk(s) follow"
+                )
+            parts.append(data)
+            return GroupChatMessage.from_cbor(b"".join(parts))
+        elif kind == b"I":
+            raise ValueError(
+                "indirection ('I') framing must be resolved by the network "
+                "coalescer before reaching models.unserialize"
+            )
+        else:
+            raise ValueError(f"unknown chunk type: {kind!r}")
+    return None
+
+
+# ConversationUIState moved to katzenqt.qt_models — see banner near the
+# top of this file for rationale.

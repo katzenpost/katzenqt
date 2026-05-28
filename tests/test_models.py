@@ -89,3 +89,31 @@ def test_send_operation_preserves_1(chunk_size, text):
         recon += ser[0].bacap_payload[1:]
         assert ser[-1].bacap_stream == bacap_stream
     assert recon == m.to_cbor()
+
+
+def test_serialize_assigns_non_null_id_to_every_pwal():
+    """Every PlaintextWAL emitted by serialize, including the indirection
+    release on a multi-box send, must carry a fresh primary-key UUID
+    before commit. The runner captures ``db_entries[-1].id`` to know
+    which row to wait for in SentLog; if any id is None at that moment
+    the wait can never terminate."""
+    text = "X" * 4000  # forces multi-box split
+    m = models.GroupChatMessage(
+        version=0, membership_hash=b"a" * 32, text=text,
+    )
+    bacap_stream = uuid.uuid4()
+    s = models.SendOperation(messages=[m], bacap_stream=bacap_stream)
+    _, ser = s.serialize(chunk_size=1530, conversation_id=123)
+
+    pwals = [e for e in ser if isinstance(e, persistent.PlaintextWAL)]
+    assert len(pwals) >= 3, "expected substream chunks plus release"
+    for p in pwals:
+        assert p.id is not None, (
+            f"PlaintextWAL with bacap_payload prefix "
+            f"{p.bacap_payload[:1]!r} has id=None; the runner's "
+            "SentLog wait would never match"
+        )
+    # The ids must also be distinct, otherwise we'd be polling for an
+    # ambiguous row.
+    ids = [p.id for p in pwals]
+    assert len(set(ids)) == len(ids), f"duplicate PWAL ids: {ids}"

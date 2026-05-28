@@ -18,7 +18,7 @@ dependencies = [
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
 "cbor2~=5.6.5",
-"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@remove_bullshit_code"
+"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@0.0.14"
 ]
 
 [dependency-groups]
@@ -28,16 +28,17 @@ dev = [
     "hypothesis>=6.135.17",
     "mypy>=1.18.2",
     "pytest>=9.0.1",
+    "pytest-asyncio>=1.0.0",
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
 ]
 release = [
-    "nuitka~=2.7.12"
 ]
 
 [project.scripts]
 katzenqt = "katzenqt:cli"
+katzenqt-headless = "katzenqt.headless:cli"
 
 #[tool.pyside6-project]
 #files = ["main.py", "main_window.py"]
@@ -46,7 +47,7 @@ katzenqt = "katzenqt:cli"
 #files = ["mixchat.ui"]
 
 [tool.alembic]
-script_location = "%(here)s/migrations"
+script_location = "katzenqt:migrations"
 prepend_sys_path = ["."]
 
 [project.urls]
@@ -77,11 +78,19 @@ strict = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=src/katzenqt --cov-report=term-missing --doctest-modules -vv"
+addopts = "--cov=katzenqt --cov-report=term-missing --doctest-modules -vv"
 testpaths = [
     "src",
     "tests",
 ]
+markers = [
+    "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
+    "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
+]
+# We have to re-state the .hypothesis ignore that pytest defaults to,
+# because setting norecursedirs at all replaces the built-in list
+# wholesale rather than extending it.
+norecursedirs = ["src/katzenqt/migrations", ".hypothesis"]
 
 [tool.ruff]
 line-length = 78

@@ -108,11 +108,11 @@ The procedure is:
    - No further action required if it says:
      > No new upgrade operations detected.
 2. Otherwise you'll need: `alembic revision --autogenerate -m 'Added a new field to Foo'`
-   This will create a file in `migrations/versions`.
+   This will create a file in `src/katzenqt/migrations/versions`.
    They frequently need manual editing because we're using sqlite3 which isn't good at ALTER'ing constraints.
 3. `persistent.py:init_and_migrate()` any outstanding the migrations to an existing database file. This function gets called by `demo.py` on startup.
   - This can also be done by hand: `alembic upgrade head`
-4. If everything works, you need to `git add` the file in  `migrations/versions/1234_added_a_....py` to ensure everybody else gets it.
+4. If everything works, you need to `git add` the file in  `src/katzenqt/migrations/versions/1234_added_a_....py` to ensure everybody else gets it.
 
 ### UI editing
 - Our UI is *mainly* defined in `mixchat.ui`, which can be edited with `pyside6-designer` (a WYSIWYG program for Qt).
