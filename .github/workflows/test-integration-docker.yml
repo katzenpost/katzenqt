@@ -100,7 +100,14 @@ jobs:
 
       - name: Run integration tests
         working-directory: katzenqt
-        timeout-minutes: 30
+        # CI runs roughly 2.5-3x slower than a local docker mixnet, and
+        # the multi-box reassembly tests are the slowest, dominating the
+        # wall clock at around eight minutes apiece. With ten integration
+        # tests in the suite the previous thirty-minute ceiling is not
+        # enough; sixty minutes leaves comfortable headroom for the
+        # whole sequence without inviting per-test timeouts to mask
+        # protocol-level regressions.
+        timeout-minutes: 60
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: .venv/bin/pytest tests/integration -vv

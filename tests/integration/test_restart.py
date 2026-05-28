@@ -77,7 +77,7 @@ def test_restart_second_exchange(kpclientd_endpoint, tmp_path_factory):
     print(f"[r1] alice send1 ACKed in {time.monotonic()-t0:.1f}s")
 
     t0 = time.monotonic()
-    read = _run_role(bob_state, "read", "demo", "180", "msg1", timeout=210.0)
+    read = _run_role(bob_state, "read", "demo", "360", "msg1", timeout=400.0)
     assert read.returncode == 0, f"bob read1 failed:\n{read.stdout}\n{read.stderr}"
     recv = _expect_prefix(read.stdout, "RECV=")
     assert recv == "msg1"
@@ -91,7 +91,7 @@ def test_restart_second_exchange(kpclientd_endpoint, tmp_path_factory):
     print(f"[r2] alice send2 ACKed in {time.monotonic()-t0:.1f}s")
 
     t0 = time.monotonic()
-    read = _run_role(bob_state, "read", "demo", "180", "msg2", timeout=210.0)
+    read = _run_role(bob_state, "read", "demo", "360", "msg2", timeout=400.0)
     print(f"[r2] bob read2 stdout:\n{read.stdout[-2000:]}\nstderr tail:\n{read.stderr[-3000:]}")
     assert read.returncode == 0, f"bob read2 did not find msg2"
     recv = _expect_prefix(read.stdout, "RECV=")
@@ -270,7 +270,7 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
 
     # Bob restarts fresh and must receive all three in order.
     for expected in ("m1", "m2", "m3"):
-        r = _run_role(bob_state, "read", "demo", "180", expected, timeout=210.0)
+        r = _run_role(bob_state, "read", "demo", "360", expected, timeout=400.0)
         assert r.returncode == 0, (
             f"bob failed to read {expected!r}:\n"
             f"stdout tail:\n{r.stdout[-3000:]}\nstderr tail:\n{r.stderr[-3000:]}"
@@ -411,12 +411,12 @@ def test_bidirectional_multi_round(kpclientd_endpoint, tmp_path_factory):
             f"[r{round_idx}] bob send failed:\n{s_b.stdout[-3000:]}\n"
             f"{s_b.stderr[-3000:]}"
         )
-        r_b = _run_role(bob_state, "read", "demo", "180", msg_a, timeout=210.0)
+        r_b = _run_role(bob_state, "read", "demo", "360", msg_a, timeout=400.0)
         assert r_b.returncode == 0, (
             f"[r{round_idx}] bob read {msg_a!r} failed:\n"
             f"stdout tail:\n{r_b.stdout[-3000:]}\nstderr tail:\n{r_b.stderr[-3000:]}"
         )
-        r_a = _run_role(alice_state, "read", "demo", "180", msg_b, timeout=210.0)
+        r_a = _run_role(alice_state, "read", "demo", "360", msg_b, timeout=400.0)
         assert r_a.returncode == 0, (
             f"[r{round_idx}] alice read {msg_b!r} failed:\n"
             f"stdout tail:\n{r_a.stdout[-3000:]}\nstderr tail:\n{r_a.stderr[-3000:]}"
@@ -463,10 +463,10 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", timeout=300.0)
     assert s1b.returncode == 0 and "SENT" in s1b.stdout, s1b.stdout + s1b.stderr
 
-    r1b = _run_role(bob_state, "read", "demo", "180", "hello-from-alice", timeout=210.0)
+    r1b = _run_role(bob_state, "read", "demo", "360", "hello-from-alice", timeout=400.0)
     assert r1b.returncode == 0, f"bob read1 failed:\n{r1b.stdout}\n{r1b.stderr}"
 
-    r1a = _run_role(alice_state, "read", "demo", "180", "hello-from-bob", timeout=210.0)
+    r1a = _run_role(alice_state, "read", "demo", "360", "hello-from-bob", timeout=400.0)
     assert r1a.returncode == 0, f"alice read1 failed:\n{r1a.stdout}\n{r1a.stderr}"
     print("[r1] bidirectional exchange complete")
 
@@ -477,10 +477,10 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", timeout=300.0)
     assert s2b.returncode == 0 and "SENT" in s2b.stdout, s2b.stdout + s2b.stderr
 
-    r2b = _run_role(bob_state, "read", "demo", "180", "round2-from-alice", timeout=210.0)
+    r2b = _run_role(bob_state, "read", "demo", "360", "round2-from-alice", timeout=400.0)
     print(f"[r2] bob read2 stdout tail:\n{r2b.stdout[-2000:]}\nstderr tail:\n{r2b.stderr[-3000:]}")
     assert r2b.returncode == 0, "bob read2 did not find round2-from-alice"
 
-    r2a = _run_role(alice_state, "read", "demo", "180", "round2-from-bob", timeout=210.0)
+    r2a = _run_role(alice_state, "read", "demo", "360", "round2-from-bob", timeout=400.0)
     print(f"[r2] alice read2 stdout tail:\n{r2a.stdout[-2000:]}\nstderr tail:\n{r2a.stderr[-3000:]}")
     assert r2a.returncode == 0, "alice read2 did not find round2-from-bob"
