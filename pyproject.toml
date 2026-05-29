@@ -59,16 +59,6 @@ Issues = "https://github.com/katzenpost/katzenqt/issues"
 requires = ["flit_core>=3.9"]
 build-backend = "flit_core.buildapi"
 
-[tool.setuptools.packages.find]
-where = ["src/katzenqt/"]
-exclude = [".gitignore"]
-
-[tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.package-data]
-katzen=["configs/*", "resources/*"]
-
 [tool.flit.module]
 name = "katzenqt"
 
