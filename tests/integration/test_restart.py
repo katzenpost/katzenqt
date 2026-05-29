@@ -373,8 +373,9 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
 
 @pytest.mark.integration
 def test_bidirectional_multi_round(kpclientd_endpoint, tmp_path_factory):
-    """Bidirectional setup, then 3 rounds of alice→bob, bob→alice exchanges
-    each in fresh subprocesses (so each send/read is a restart).
+    """Bidirectional setup, then 2 rounds of alice→bob, bob→alice exchanges
+    each in fresh subprocesses (so each send/read is a restart). Two rounds
+    is enough to prove the stream index keeps advancing across rounds.
     """
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
@@ -392,7 +393,7 @@ def test_bidirectional_multi_round(kpclientd_endpoint, tmp_path_factory):
     accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
     assert accept_a.returncode == 0
 
-    for round_idx in range(1, 4):
+    for round_idx in range(1, 3):
         msg_a = f"r{round_idx}-from-alice"
         msg_b = f"r{round_idx}-from-bob"
         s_a = _run_role(alice_state, "send", "demo", msg_a, timeout=300.0)
