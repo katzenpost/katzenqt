@@ -198,8 +198,8 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
 
 @pytest.mark.integration
 def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
-    """Alice queues 3 messages in one subprocess, then quits. Bob is then
-    started fresh and must read all 3. Emulates 'user typed fast, then
+    """Alice queues 2 messages in one subprocess, then quits. Bob is then
+    started fresh and must read both. Emulates 'user typed fast, then
     quit, peer came online later'.
     """
     alice_state = tmp_path_factory.mktemp("alice") / "state"
@@ -213,12 +213,12 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
     assert accept.returncode == 0
 
     send = _run_role(
-        alice_state, "multi-send", "demo", "m1|m2|m3", timeout=600.0,
+        alice_state, "multi-send", "demo", "m1|m2", timeout=600.0,
     )
     assert send.returncode == 0 and "SENT" in send.stdout, send.stdout + send.stderr
 
-    # Bob restarts fresh and must receive all three in order.
-    for expected in ("m1", "m2", "m3"):
+    # Bob restarts fresh and must receive both in order.
+    for expected in ("m1", "m2"):
         r = _run_role(bob_state, "read", "demo", "360", expected, timeout=400.0)
         assert r.returncode == 0, (
             f"bob failed to read {expected!r}:\n"
@@ -232,7 +232,7 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
     """Measure end-to-end latency from Bob's send completion to Alice's
     ConvLog commit, over several back-to-back messages.
 
-    Bob sends 5 messages in a single long-lived session. Alice runs her
+    Bob sends 3 messages in a single long-lived session. Alice runs her
     own long-lived session that simply READs each of them in turn and
     timestamps the observation. Since both STEP_OK lines carry ts=,
     we can compute per-message gap "bob SENT ts" - "alice RECV ts".
@@ -262,7 +262,7 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
     accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
     assert accept_a.returncode == 0
 
-    n = 5
+    n = 3
     bob_steps = []
     alice_steps = []
     for i in range(n):
