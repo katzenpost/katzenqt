@@ -199,23 +199,21 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
     accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
     assert accept_a.returncode == 0
 
-    # --- Round 1: concurrent session. Alice sends two, reads two. Bob
-    # sends two, reads two. The SLEEP at the end gives the background
-    # read loop a beat to drain the last message before we shut down
-    # (so no PWAL/MixWAL is mid-flight at quit time; reloading stale
+    # --- Round 1: concurrent session. Each side sends one and reads one;
+    # a single bidirectional exchange is enough to prove the round works,
+    # and multi-message-per-session is covered by
+    # test_multi_send_then_restart_read. The SLEEP at the end gives the
+    # background read loop a beat to drain the last message before we shut
+    # down (so no PWAL/MixWAL is mid-flight at quit time; reloading stale
     # in-flight entries is a separate concern).
     alice_steps_r1 = [
         "SEND:a-r1-msg1",
         "READ:b-r1-msg1",
-        "SEND:a-r1-msg2",
-        "READ:b-r1-msg2",
         "SLEEP:2",
     ]
     bob_steps_r1 = [
         "SEND:b-r1-msg1",
         "READ:a-r1-msg1",
-        "SEND:b-r1-msg2",
-        "READ:a-r1-msg2",
         "SLEEP:2",
     ]
     log_dir = tmp_path_factory.mktemp("concurrent_logs")
@@ -232,14 +230,10 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
     alice_steps_r2 = [
         "SEND:a-r2-msg1",
         "READ:b-r2-msg1",
-        "SEND:a-r2-msg2",
-        "READ:b-r2-msg2",
     ]
     bob_steps_r2 = [
         "SEND:b-r2-msg1",
         "READ:a-r2-msg1",
-        "SEND:b-r2-msg2",
-        "READ:a-r2-msg2",
     ]
     _run_concurrent_session(
         alice_state, bob_state, alice_steps_r2, bob_steps_r2,
