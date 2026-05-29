@@ -18,7 +18,7 @@ dependencies = [
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
 "cbor2~=5.6.5",
-"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@d06c23e97f2ada3b9ac816c400c5bc36a605a2f0"
+"katzenpost_thinclient==0.0.16"
 ]
 
 [dependency-groups]
