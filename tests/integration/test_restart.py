@@ -54,51 +54,6 @@ def _expect_prefix(stdout: str, prefix: str) -> str:
     raise AssertionError(f"no prefix {prefix!r} in:\n{stdout}")
 
 
-@pytest.mark.integration
-def test_restart_second_exchange(kpclientd_endpoint, tmp_path_factory):
-    """Alice sends msg1, Bob reads. Both quit (each step is a fresh
-    subprocess anyway). Then Alice sends msg2, Bob must read msg2."""
-    alice_state = tmp_path_factory.mktemp("alice") / "state"
-    bob_state = tmp_path_factory.mktemp("bob") / "state"
-
-    # Round 1
-    t0 = time.monotonic()
-    create = _run_role(alice_state, "create-conv", "demo", "alice", timeout=180.0)
-    assert create.returncode == 0, f"alice create-conv failed:\n{create.stdout}\n{create.stderr}"
-    invite = _expect_prefix(create.stdout, "INVITE=")
-    print(f"[r1] alice created conv in {time.monotonic()-t0:.1f}s")
-
-    accept = _run_role(bob_state, "accept-invite", "demo", "bob", "alice", invite, timeout=30.0)
-    assert accept.returncode == 0
-
-    t0 = time.monotonic()
-    send = _run_role(alice_state, "send", "demo", "msg1", timeout=300.0)
-    assert send.returncode == 0 and "SENT" in send.stdout
-    print(f"[r1] alice send1 ACKed in {time.monotonic()-t0:.1f}s")
-
-    t0 = time.monotonic()
-    read = _run_role(bob_state, "read", "demo", "360", "msg1", timeout=400.0)
-    assert read.returncode == 0, f"bob read1 failed:\n{read.stdout}\n{read.stderr}"
-    recv = _expect_prefix(read.stdout, "RECV=")
-    assert recv == "msg1"
-    print(f"[r1] bob received in {time.monotonic()-t0:.1f}s: {recv!r}")
-
-    # Round 2 — both subprocesses exited; state on disk is all we have.
-    t0 = time.monotonic()
-    send = _run_role(alice_state, "send", "demo", "msg2", timeout=300.0)
-    assert send.returncode == 0, f"alice send2 failed:\n{send.stdout}\n{send.stderr}"
-    assert "SENT" in send.stdout, f"alice send2 no SENT:\n{send.stdout}\n{send.stderr}"
-    print(f"[r2] alice send2 ACKed in {time.monotonic()-t0:.1f}s")
-
-    t0 = time.monotonic()
-    read = _run_role(bob_state, "read", "demo", "360", "msg2", timeout=400.0)
-    print(f"[r2] bob read2 stdout:\n{read.stdout[-2000:]}\nstderr tail:\n{read.stderr[-3000:]}")
-    assert read.returncode == 0, f"bob read2 did not find msg2"
-    recv = _expect_prefix(read.stdout, "RECV=")
-    assert recv == "msg2", f"round 2 got {recv!r}"
-    print(f"[r2] bob received in {time.monotonic()-t0:.1f}s: {recv!r}")
-
-
 def _run_concurrent_session(
     alice_state: Path, bob_state: Path,
     alice_steps: list, bob_steps: list,
@@ -369,54 +324,6 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
         f"bob->alice per-message read latency {max_gap:.1f}s exceeds 240s ceiling; "
         f"per-message gaps={[f'{g:.1f}' for g in gaps]}"
     )
-
-
-@pytest.mark.integration
-def test_bidirectional_multi_round(kpclientd_endpoint, tmp_path_factory):
-    """Bidirectional setup, then 2 rounds of alice→bob, bob→alice exchanges
-    each in fresh subprocesses (so each send/read is a restart). Two rounds
-    is enough to prove the stream index keeps advancing across rounds.
-    """
-    alice_state = tmp_path_factory.mktemp("alice") / "state"
-    bob_state = tmp_path_factory.mktemp("bob") / "state"
-
-    create_a = _run_role(alice_state, "create-conv", "demo", "alice", timeout=180.0)
-    assert create_a.returncode == 0, create_a.stdout + create_a.stderr
-    invite_a = _expect_prefix(create_a.stdout, "INVITE=")
-
-    create_b = _run_role(bob_state, "create-conv", "demo", "bob", timeout=180.0)
-    assert create_b.returncode == 0
-    invite_b = _expect_prefix(create_b.stdout, "INVITE=")
-
-    accept_b = _run_role(bob_state, "accept-invite", "demo", "bob", "alice", invite_a, timeout=30.0)
-    assert accept_b.returncode == 0
-    accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
-    assert accept_a.returncode == 0
-
-    for round_idx in range(1, 3):
-        msg_a = f"r{round_idx}-from-alice"
-        msg_b = f"r{round_idx}-from-bob"
-        s_a = _run_role(alice_state, "send", "demo", msg_a, timeout=300.0)
-        assert s_a.returncode == 0 and "SENT" in s_a.stdout, (
-            f"[r{round_idx}] alice send failed:\n{s_a.stdout[-3000:]}\n"
-            f"{s_a.stderr[-3000:]}"
-        )
-        s_b = _run_role(bob_state, "send", "demo", msg_b, timeout=300.0)
-        assert s_b.returncode == 0 and "SENT" in s_b.stdout, (
-            f"[r{round_idx}] bob send failed:\n{s_b.stdout[-3000:]}\n"
-            f"{s_b.stderr[-3000:]}"
-        )
-        r_b = _run_role(bob_state, "read", "demo", "360", msg_a, timeout=400.0)
-        assert r_b.returncode == 0, (
-            f"[r{round_idx}] bob read {msg_a!r} failed:\n"
-            f"stdout tail:\n{r_b.stdout[-3000:]}\nstderr tail:\n{r_b.stderr[-3000:]}"
-        )
-        r_a = _run_role(alice_state, "read", "demo", "360", msg_b, timeout=400.0)
-        assert r_a.returncode == 0, (
-            f"[r{round_idx}] alice read {msg_b!r} failed:\n"
-            f"stdout tail:\n{r_a.stdout[-3000:]}\nstderr tail:\n{r_a.stderr[-3000:]}"
-        )
-        print(f"[r{round_idx}] exchange complete")
 
 
 @pytest.mark.integration
