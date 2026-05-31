@@ -171,6 +171,16 @@ class ThemeManager(QObject):
             qml.setClearColor(themed.base().color())
             qml.update()
         self._sync_themed_stylesheets(ui, themed)
+        # Toolbar buttons (QToolButtons the QToolBar builds from QActions) do
+        # not re-resolve their palette on a live switch, so they keep the
+        # previous scheme's text colour (white text on a light toolbar after
+        # dark->light). Set the palette on each explicitly.
+        toolbar = getattr(ui, "toolBar", None)
+        if toolbar is not None:
+            for action in toolbar.actions():
+                button = toolbar.widgetForAction(action)
+                if button is not None:
+                    button.setPalette(themed)
 
     def _sync_themed_stylesheets(self, ui, pal):
         """Re-style the generated widgets that pin light colours in their
