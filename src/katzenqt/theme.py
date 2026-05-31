@@ -107,6 +107,40 @@ class ThemeManager(QObject):
         if qml is not None and hasattr(qml, "setClearColor"):
             qml.setClearColor(themed.base().color())
             qml.update()
+        self._sync_themed_stylesheets(ui, themed)
+
+    def _sync_themed_stylesheets(self, ui, pal):
+        """Re-style the generated widgets that pin light colours in their
+        stylesheets (which override the palette) so they stay legible in
+        dark mode. Colours are re-derived from ``pal`` on every theme change.
+        """
+        # The invite-contact button hardcoded a light-blue background; clear
+        # it so the button renders with the themed (Fusion) look instead.
+        invite = getattr(ui, "invite_contact_toolButton", None)
+        if invite is not None:
+            invite.setStyleSheet("")
+        # The contacts list pinned a light gradient behind every item, so the
+        # themed (light) text was unreadable. Keep its layout rules but drive
+        # the colours from the current palette.
+        contacts = getattr(ui, "contacts_treeWidget", None)
+        if contacts is not None:
+            base = pal.base().color().name()
+            highlight = pal.highlight().color().name()
+            highlighted_text = pal.highlightedText().color().name()
+            contacts.setStyleSheet(
+                "QTreeView::item:selected {\n"
+                f"    background-color: {highlight};\n"
+                f"    color: {highlighted_text};\n"
+                "}\n"
+                "QTreeView::item {\n"
+                "    height: 1.6em;\n"
+                "    margin-top: 0.2em;\n"
+                "    margin-bottom: 0.2em;\n"
+                "    padding-left: 1em; padding-right: 1em;\n"
+                f"    background-color: {base};\n"
+                "    qproperty-alignment: AlignCenter;\n"
+                "}"
+            )
 
     def _load_mode(self):
         try:
