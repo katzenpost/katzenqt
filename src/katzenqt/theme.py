@@ -100,6 +100,13 @@ class ThemeManager(QObject):
             widget = getattr(ui, name, None)
             if widget is not None:
                 widget.setPalette(themed)
+        # The QML chat host (a QQuickWidget) clears to white by default and
+        # its rows are transparent over it, so in dark mode the themed light
+        # text would land on white. Drive its clear colour from the theme.
+        qml = getattr(ui, "qml_ChatLines", None)
+        if qml is not None and hasattr(qml, "setClearColor"):
+            qml.setClearColor(themed.base().color())
+            qml.update()
 
     def _load_mode(self):
         try:

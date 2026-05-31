@@ -187,7 +187,9 @@ TreeView {
 			    )) // tallest element
 
           background: Rectangle {
-//            color: "gray";
+            // Themed row background so contact names (sysPalette.text) are
+            // legible in dark mode rather than light-on-white.
+            color: sysPalette.base
           }
 
           contentItem: Row {  /// contentItem is the thing that gets displayed
