@@ -171,16 +171,16 @@ class ThemeManager(QObject):
             qml.setClearColor(themed.base().color())
             qml.update()
         self._sync_themed_stylesheets(ui, themed)
-        # Toolbar buttons (QToolButtons the QToolBar builds from QActions) do
-        # not re-resolve their palette on a live switch, so they keep the
-        # previous scheme's text colour (white text on a light toolbar after
-        # dark->light). Set the palette on each explicitly.
-        toolbar = getattr(ui, "toolBar", None)
-        if toolbar is not None:
-            for action in toolbar.actions():
-                button = toolbar.widgetForAction(action)
-                if button is not None:
-                    button.setPalette(themed)
+        # A live palette change does not fully re-propagate to every widget:
+        # toolbar buttons and group-box titles keep the previous scheme's text
+        # colour (e.g. white "Conversations and contacts" on a light panel
+        # after dark->light), so a switch in the dialog must match a fresh
+        # start. Set the palette on every widget explicitly so they all
+        # re-resolve. The contacts list is styled above so it stays themed
+        # despite the explicit palette. Theme switches are rare; the cost of
+        # the sweep is irrelevant.
+        for widget in self._app.allWidgets():
+            widget.setPalette(themed)
 
     def _sync_themed_stylesheets(self, ui, pal):
         """Re-style the generated widgets that pin light colours in their
@@ -201,6 +201,9 @@ class ThemeManager(QObject):
             highlight = pal.highlight().color().name()
             highlighted_text = pal.highlightedText().color().name()
             contacts.setStyleSheet(
+                # The empty area below the rows: style it explicitly, or a
+                # styled QTreeView paints it white regardless of palette.
+                f"QTreeView {{ background-color: {base}; }}\n"
                 "QTreeView::item:selected {\n"
                 f"    background-color: {highlight};\n"
                 f"    color: {highlighted_text};\n"
