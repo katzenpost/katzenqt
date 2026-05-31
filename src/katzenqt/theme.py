@@ -20,7 +20,7 @@ The chosen mode persists in the ``AppSetting`` table under
 
 import logging
 
-from PySide6.QtCore import Qt, QObject
+from PySide6.QtCore import Qt, QObject, QTimer
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QRadioButton, QVBoxLayout,
@@ -81,25 +81,33 @@ class ThemeManager(QObject):
         mode = normalize_mode(mode)
         self._mode = mode
         self._app.styleHints().setColorScheme(_SCHEME[mode])
-        self._sync_pinned_palettes()
+        # The style updates the application palette in response, but not
+        # synchronously: reading it on the next line would return the
+        # outgoing scheme's palette. Defer the hand-set colours to the next
+        # event-loop tick so they read the new palette, not the old one.
+        QTimer.singleShot(0, self._sync_theme)
         if persist:
             self._save_mode(mode)
         logger.info("theme mode applied: %s", mode)
 
     def _on_scheme_changed(self, _scheme):
-        # The palette has just changed under us; bring the pinned widgets
-        # into line with the new one rather than leaving them stale.
-        self._sync_pinned_palettes()
+        # Fires after the palette has settled (e.g. a live window-manager
+        # change in system mode); the palette read here is already current.
+        self._sync_theme()
 
-    def _sync_pinned_palettes(self):
+    def _sync_theme(self):
         ui = getattr(self._window, "ui", None)
         if ui is None:
             return
-        themed = self._app.palette()
+        # Clear the designer-pinned palettes so these widgets inherit the
+        # application palette and follow the scheme on their own, with no
+        # dependence on when we happen to read it.
+        inherit = QPalette()
         for name in _PINNED_PALETTE_WIDGETS:
             widget = getattr(ui, name, None)
             if widget is not None:
-                widget.setPalette(themed)
+                widget.setPalette(inherit)
+        themed = self._app.palette()
         # The QML chat host (a QQuickWidget) clears to white by default and
         # its rows are transparent over it, so in dark mode the themed light
         # text would land on white. Drive its clear colour from the theme.
