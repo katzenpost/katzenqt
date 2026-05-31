@@ -153,16 +153,6 @@ class ThemeManager(QObject):
         ui = getattr(self._window, "ui", None)
         if ui is None:
             return
-        # A stylesheet on an ancestor of a QQuickWidget makes that widget
-        # paint solid black instead of compositing its QML texture (a known
-        # Qt fault), which is what blackened the chat view when the message
-        # box was focused. The generated UI sets just such a stylesheet on
-        # the main window (a focus highlight and a toolbar-hover accent, both
-        # hardcoded light-mode colours anyway); clearing it removes the
-        # conflict. Per-widget themed stylesheets (set below) are unaffected,
-        # as they are not ancestors of the chat view.
-        if hasattr(self._window, "setStyleSheet"):
-            self._window.setStyleSheet("")
         # This runs deferred / on colorSchemeChanged, so the scheme has
         # settled and the palette read here is current. Apply it explicitly
         # to the designer-pinned widgets: an empty QPalette() does not
