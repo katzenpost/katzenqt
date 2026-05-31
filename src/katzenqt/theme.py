@@ -21,7 +21,7 @@ The chosen mode persists in the ``AppSetting`` table under
 import logging
 
 from PySide6.QtCore import Qt, QObject, QTimer
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QRadioButton, QVBoxLayout,
 )
@@ -56,6 +56,39 @@ def normalize_mode(mode):
     return mode if mode in _SCHEME else DEFAULT_MODE
 
 
+def _build_dark_palette():
+    """A consistent dark palette for the Fusion style. The light palette is
+    taken from the style's own standard palette; only dark needs building,
+    since most desktops' default Qt palette is light."""
+    p = QPalette()
+    window = QColor(0x35, 0x35, 0x35)
+    base = QColor(0x23, 0x23, 0x23)
+    text = QColor(0xff, 0xff, 0xff)
+    disabled = QColor(0x7f, 0x7f, 0x7f)
+    highlight = QColor(0x2a, 0x82, 0xda)
+    p.setColor(QPalette.ColorRole.Window, window)
+    p.setColor(QPalette.ColorRole.WindowText, text)
+    p.setColor(QPalette.ColorRole.Base, base)
+    p.setColor(QPalette.ColorRole.AlternateBase, window)
+    p.setColor(QPalette.ColorRole.ToolTipBase, window)
+    p.setColor(QPalette.ColorRole.ToolTipText, text)
+    p.setColor(QPalette.ColorRole.Text, text)
+    p.setColor(QPalette.ColorRole.Button, window)
+    p.setColor(QPalette.ColorRole.ButtonText, text)
+    p.setColor(QPalette.ColorRole.BrightText, QColor(0xff, 0x55, 0x55))
+    p.setColor(QPalette.ColorRole.Link, highlight)
+    p.setColor(QPalette.ColorRole.Highlight, highlight)
+    p.setColor(QPalette.ColorRole.HighlightedText, base)
+    p.setColor(QPalette.ColorRole.PlaceholderText, disabled)
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+    ):
+        p.setColor(QPalette.ColorGroup.Disabled, role, disabled)
+    return p
+
+
 class ThemeManager(QObject):
     """Applies, persists, and restores the display mode for the GUI."""
 
@@ -80,20 +113,41 @@ class ThemeManager(QObject):
         """Switch to ``mode`` ("system", "light", or "dark")."""
         mode = normalize_mode(mode)
         self._mode = mode
+        # Requesting a scheme alone is unreliable (some platforms, and the
+        # offscreen plugin, ignore it; forcing Light over a dark desktop can
+        # leave an inconsistent palette). So we also install an explicit
+        # palette below, which is authoritative everywhere. The scheme is
+        # still set so native bits and QML SystemPalette agree.
         self._app.styleHints().setColorScheme(_SCHEME[mode])
-        # The style updates the application palette in response, but not
-        # synchronously: reading it on the next line would return the
-        # outgoing scheme's palette. Defer the hand-set colours to the next
-        # event-loop tick so they read the new palette, not the old one.
-        QTimer.singleShot(0, self._sync_theme)
+        self._apply_palette()
         if persist:
             self._save_mode(mode)
         logger.info("theme mode applied: %s", mode)
 
+    def _resolve_scheme(self):
+        """Return "dark" or "light" for the current mode; system follows
+        the desktop's reported scheme."""
+        if self._mode == "dark":
+            return "dark"
+        if self._mode == "light":
+            return "light"
+        desktop = self._app.styleHints().colorScheme()
+        return "dark" if desktop == Qt.ColorScheme.Dark else "light"
+
+    def _apply_palette(self):
+        scheme = self._resolve_scheme()
+        if scheme == "dark":
+            palette = _build_dark_palette()
+        else:
+            palette = self._app.style().standardPalette()
+        self._app.setPalette(palette)
+        # Defer the widget-level sync so it reads the palette we just set.
+        QTimer.singleShot(0, self._sync_theme)
+
     def _on_scheme_changed(self, _scheme):
-        # Fires after the palette has settled (e.g. a live window-manager
-        # change in system mode); the palette read here is already current.
-        self._sync_theme()
+        # The desktop scheme changed under us (system mode): re-resolve and
+        # re-apply the matching explicit palette.
+        self._apply_palette()
 
     def _sync_theme(self):
         ui = getattr(self._window, "ui", None)
