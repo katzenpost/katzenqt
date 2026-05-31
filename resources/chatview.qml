@@ -23,6 +23,13 @@ TreeView {
      property var unread_map: ({})
      required property var ctx
 
+     // Tracks the application palette so the chat view follows the
+     // light/dark/system theme (see theme.py). Updates live on change.
+     SystemPalette {
+       id: sysPalette
+       colorGroup: SystemPalette.Active
+     }
+
      Timer {
        id: msgReadTimer
        interval: 1500
@@ -193,7 +200,7 @@ TreeView {
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
 	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)
-	    color: (model.network_status > 0 ? "red" : "black")
+	    color: (model.network_status > 0 ? "red" : sysPalette.text)
           }
 
 	  RowLayout {
@@ -230,7 +237,7 @@ TreeView {
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
 	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
 	    background: Rectangle {
-	      color: hovered ? "#eeeeff" : "white"
+	      color: hovered ? sysPalette.alternateBase : sysPalette.base
 	    }
           } // Text
 } // contentItem: Row

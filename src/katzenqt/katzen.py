@@ -39,6 +39,7 @@ from sqlmodel import select
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
 from . import network  # this is network.py
 from . import persistent
+from . import theme  # theme.py: light/dark/system theming
 from .katzen_util import create_task
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
@@ -293,6 +294,10 @@ class MainWindow(QMainWindow):
                     el.setText(old_text)
         self.font_settings_qdialog.show()
 
+    def theme_settings_dialog(self):
+        # Modal chooser; applies and persists on accept (see theme.py).
+        theme.ThemeDialog(self.theme, self).exec()
+
     @async_cb
     async def testme(self):
         logger.info("testing")
@@ -381,6 +386,12 @@ class MainWindow(QMainWindow):
 
         # item delegates define custom looks for view items
         self.ui.action_display_font.triggered.connect(self.font_settings_dialog)
+        # Theme: enable the (otherwise disabled) menu action, wire its dialog,
+        # then restore the persisted light/dark/system choice.
+        self.ui.action_theme.setEnabled(True)
+        self.ui.action_theme.triggered.connect(self.theme_settings_dialog)
+        self.theme = theme.ThemeManager(self.app, self)
+        self.theme.restore()
         self.ui.action_testme.triggered.connect(self.testme)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
