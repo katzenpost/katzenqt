@@ -1214,6 +1214,13 @@ def add_log_args(parser: argparse.ArgumentParser):
     )
 
 def cli():
+    # The chat view is a QQuickWidget. Qt Quick's default GL/RHI backend
+    # renders it solid black on displays without working hardware GL (SSH
+    # X-forwarding, VNC, headless or software-GL remotes), which is how this
+    # client is often run. Default to the software renderer, which composites
+    # reliably everywhere; set QT_QUICK_BACKEND yourself to override. Must be
+    # set before the QApplication is constructed.
+    os.environ.setdefault("QT_QUICK_BACKEND", "software")
     app = QApplication(sys.argv)
     parser = argparse.ArgumentParser()
     add_log_args(parser)
