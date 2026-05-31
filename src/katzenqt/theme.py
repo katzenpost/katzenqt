@@ -99,15 +99,16 @@ class ThemeManager(QObject):
         ui = getattr(self._window, "ui", None)
         if ui is None:
             return
-        # Clear the designer-pinned palettes so these widgets inherit the
-        # application palette and follow the scheme on their own, with no
-        # dependence on when we happen to read it.
-        inherit = QPalette()
+        # This runs deferred / on colorSchemeChanged, so the scheme has
+        # settled and the palette read here is current. Apply it explicitly
+        # to the designer-pinned widgets: an empty QPalette() does not
+        # guarantee contrast, whereas the live scheme palette does, in both
+        # light and dark.
+        themed = self._app.palette()
         for name in _PINNED_PALETTE_WIDGETS:
             widget = getattr(ui, name, None)
             if widget is not None:
-                widget.setPalette(inherit)
-        themed = self._app.palette()
+                widget.setPalette(themed)
         # The QML chat host (a QQuickWidget) clears to white by default and
         # its rows are transparent over it, so in dark mode the themed light
         # text would land on white. Drive its clear colour from the theme.
