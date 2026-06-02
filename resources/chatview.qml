@@ -9,9 +9,30 @@ import QtQuick.Controls
 // it would also be nice if pgup/pgdown worked when the treeview isn't
 // the input focus
 
+// Root wrapper. The chat view must paint its own opaque themed background:
+// the QQuickWidget clear colour does not repaint on a live theme switch,
+// whereas a Rectangle bound to SystemPalette.base redraws when the
+// application palette changes (see theme.py).
+Item {
+   id: chatRoot
+   objectName: "chatRoot"
+   required property var ctx
+
+   SystemPalette {
+     id: sysPalette
+     colorGroup: SystemPalette.Active
+   }
+
+   Rectangle {
+     anchors.fill: parent
+     color: sysPalette.base
+   }
+
 TreeView {
      id: chatTreeView
      objectName: "chatTreeView"
+     anchors.fill: parent
+     property var ctx: chatRoot.ctx
 
      //required property QtObject change_convo
 
@@ -21,7 +42,6 @@ TreeView {
      property var msgReadTimer_generation: 0
      property var read_map: ({})
      property var unread_map: ({})
-     required property var ctx
 
      Timer {
        id: msgReadTimer
@@ -122,7 +142,7 @@ TreeView {
     //onCurrentIndexChanged: savedIndex = currentIndex //eventually check against != 0 first
 
 
-    anchors.centerIn: parent
+    // anchors.fill is set above; the view fills the themed root.
         //Layout.fillWidth: true
 
         flickDeceleration: 0.1
@@ -180,7 +200,9 @@ TreeView {
 			    )) // tallest element
 
           background: Rectangle {
-//            color: "gray";
+            // Themed row background so contact names (sysPalette.text) are
+            // legible in dark mode rather than light-on-white.
+            color: sysPalette.base
           }
 
           contentItem: Row {  /// contentItem is the thing that gets displayed
@@ -193,7 +215,7 @@ TreeView {
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
 	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)
-	    color: (model.network_status > 0 ? "red" : "black")
+	    color: (model.network_status > 0 ? "red" : sysPalette.text)
           }
 
 	  RowLayout {
@@ -230,10 +252,11 @@ TreeView {
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
 	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
 	    background: Rectangle {
-	      color: hovered ? "#eeeeff" : "white"
+	      color: hovered ? sysPalette.alternateBase : sysPalette.base
 	    }
           } // Text
 } // contentItem: Row
         } // delegate: TreeViewDelegate
 
 } // TreeView
+} // Item chatRoot
