@@ -40,6 +40,9 @@
 QToolBar :hover {
    /* active item in the toolbar */
    background-color: #8effc3 !important;
+   /* that highlight is a fixed light green, so force dark text or the themed
+      (white, in dark mode) text is unreadable on it */
+   color: rgb(0, 0, 0);
 }
 
 QTreeView {
