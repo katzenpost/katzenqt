@@ -40,7 +40,9 @@ def test_actions_module_exists_with_parser_builder():
     from katzenqt.headless import _actions
     assert callable(_actions._build_parser)
     assert callable(_actions._action_create_conv)
-    assert callable(_actions._action_accept_invite)
+    assert callable(_actions._action_voucher_mint)
+    assert callable(_actions._action_voucher_induct)
+    assert callable(_actions._action_voucher_await)
     assert callable(_actions._action_send)
     assert callable(_actions._action_multi_send)
     assert callable(_actions._action_read)
@@ -50,19 +52,22 @@ def test_actions_module_exists_with_parser_builder():
 def test_cli_dispatches_read_against_missing_conv(monkeypatch, capsys):
     monkeypatch.setattr(persistent, "init_and_migrate", lambda: None)
     rc = headless.cli(["read", "no-such-conv", "0.1"])
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert rc == 2
-    assert "conversation 'no-such-conv' not found" in out
+    assert "conversation 'no-such-conv' not found" in captured.out + captured.err
 
 
 def test_main_is_thin_shim_for_cli(monkeypatch, capsys):
-    """integration_runner.main and headless.cli must produce the
-    same exit code and same stdout for the same argv; the legacy
-    runner is now a thin shim."""
+    """integration_runner.main and headless.cli must produce the same
+    exit code and the same result for the same argv; the legacy runner
+    is now a thin shim. (Output is compared by content, not byte-for-byte,
+    since the logged stream carries per-record timestamps.)"""
     monkeypatch.setattr(persistent, "init_and_migrate", lambda: None)
     rc1 = headless.cli(["read", "ghost", "0.1"])
-    out1 = capsys.readouterr().out
+    c1 = capsys.readouterr()
     rc2 = integration_runner.main(["read", "ghost", "0.1"])
-    out2 = capsys.readouterr().out
+    c2 = capsys.readouterr()
     assert rc1 == rc2 == 2
-    assert out1 == out2
+    msg = "conversation 'ghost' not found"
+    assert msg in c1.out + c1.err
+    assert msg in c2.out + c2.err

@@ -5,51 +5,64 @@ action function via ``set_defaults(func=...)``. The unified
 :func:`katzenqt.headless.cli` entry point looks the action up and
 runs it inside its own event loop after ``persistent.init_and_migrate``.
 
-Actions speak a tiny line-oriented protocol so subprocess harnesses
-can parse the result without ceremony:
+Actions emit their results and diagnostics through the logging
+framework; the headless CLI routes logs to stderr, and subprocess
+harnesses capture that stream and look for result tokens such as
+``VOUCHER=`` or ``SENT``. Contact is established with the Contact
+Voucher protocol, see
+https://katzenpost.network/docs/specs/contact_voucher/ .
 
     create-conv CONV_NAME OWN_DISPLAY_NAME
-        Create a new Conversation + own ConversationPeer, wait for
+        Create a new Conversation + own ConversationPeer and wait for
         the background provision_read_caps loop to fill in the
-        WriteCap/ReadCap via ``ThinClient.new_keypair``, then print
-        ``INVITE=<base64>``.
+        WriteCap/ReadCap via ``ThinClient.new_keypair``. Logs
+        ``CREATED``.
 
-    accept-invite CONV_NAME OWN_DISPLAY_NAME PEER_NAME INVITE_B64
-        Create a Conversation + own ConversationPeer, then insert a
-        ReadCapWAL from the invite and a ConversationPeer marked
-        ``active=True`` so the read loop picks it up. Prints
-        ``ACCEPTED``.
+    voucher-mint CONV_NAME DISPLAY_NAME
+        Joiner side: mint a Voucher over the conversation's MessageStream
+        and publish the payload to VoucherStream box 0. Logs
+        ``VOUCHER=<base64>`` to hand to an existing member out of band.
+
+    voucher-induct CONV_NAME PEER_NAME VOUCHER_B64
+        Inductor side: read the joiner's payload, seal a reply carrying
+        the group's read caps, write it back, and add the joiner as an
+        active peer. Logs ``INDUCTED=<joiner display name>``.
+
+    voucher-await CONV_NAME
+        Joiner side: poll for the inductor's reply, open it, move this
+        conversation's write cap onto the salt-mutated sequence, and add
+        the members named in the reply as peers. Logs ``JOINED``.
 
     send CONV_NAME TEXT
         Insert a PlaintextWAL via SendOperation; wait until the
         network reports the MixWAL drained (SentLog entry appears).
-        Prints ``SENT``.
+        Logs ``SENT``.
 
     multi-send CONV_NAME TEXTS
         ``TEXTS`` is a pipe-separated list. Queue all messages on
         the PWAL up front, then wait for the LAST to land in
-        SentLog. Prints ``SENT``.
+        SentLog. Logs ``SENT``.
 
     read CONV_NAME TIMEOUT_S [EXPECTED_TEXT]
         Poll the ConversationLog until a peer message arrives (any
         whose ConversationPeer is not the own_peer) or the timeout
-        fires. Prints ``RECV=<text>`` or ``TIMEOUT``.
+        fires. Logs ``RECV=<text>`` or ``TIMEOUT``.
 
     chat-session CONV_NAME STEPS...
         Long-lived session running SEND:<text>, READ:<text>, or
-        SLEEP:<seconds> steps against a single connection. Prints
+        SLEEP:<seconds> steps against a single connection. Logs
         ``STEP_OK:<n>:...``/``STEP_FAIL:<n>:reason`` per step and
         ``SESSION_DONE`` on clean exit.
 
     send-file CONV_NAME PATH [--basename X] [--filetype Y]
         Read PATH from disk, wrap it in a GroupChatFileUpload, and
         send. ``--basename`` overrides the on-wire filename;
-        ``--filetype`` overrides the MIME-ish tag. Prints ``SENT``.
+        ``--filetype`` overrides the MIME-ish tag. Logs ``SENT``.
 
     read-file CONV_NAME --to-dir DIR [--timeout SEC] [--basename X]
         Poll the ConversationLog for a ``file_marker`` from a peer
         (optionally filtered by basename), copy the on-disk file
-        into DIR, verify SHA-256, and print
+        into DIR, verify SHA-256, and log
         ``RECV_FILE=<absolute path>`` or ``TIMEOUT``.
 
     info
@@ -64,9 +77,11 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import shutil
 import time
 import uuid
+from base64 import b64decode, b64encode
 from pathlib import Path
 
 import cbor2
@@ -75,6 +90,9 @@ from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
 from .. import models, network, persistent
+from ..voucher import await_and_open, derive_read_and_induct, mint_and_publish
+
+logger = logging.getLogger("katzen.headless")
 
 
 async def _connect_and_start():
@@ -145,85 +163,87 @@ async def _action_create_conv(args):
                     break
             await asyncio.sleep(0.5)
         else:
-            print("ERROR=no read_cap provisioned after timeout", flush=True)
+            logger.error("no read_cap provisioned after timeout")
             return 2
 
-        invite = models.GroupChatPleaseAdd(
-            display_name=args.own_display, read_cap=rc_bytes,
-        )
-        print("INVITE=" + invite.to_human_readable(), flush=True)
+        logger.info("CREATED")
         return 0
     finally:
         await _shutdown(bg, connection)
 
 
-async def _action_accept_invite(args):
-    please_add = models.GroupChatPleaseAdd.from_human_readable(args.invite_b64)
-
-    # If a conversation with this name already exists, add the peer to it
-    # rather than creating a new conversation (matches the Qt app's
-    # accept_invitation flow, which always adds to the selected conv).
+async def _conv_id_by_name(conv_name: str) -> "int | None":
     async with persistent.asession() as sess:
-        existing = (await sess.exec(
+        conv = (await sess.exec(
             select(persistent.Conversation).where(
-                persistent.Conversation.name == args.conv_name
+                persistent.Conversation.name == conv_name
             )
         )).first()
+        return conv.id if conv is not None else None
 
-    if existing is not None:
-        peer_rcwal = persistent.ReadCapWAL(
-            id=uuid.uuid4(),
-            read_cap=please_add.read_cap,
-            next_index=please_add.read_cap[-104:],
-        )
+
+async def _wait_for_conv_write_cap(conversation_id: int, attempts: int = 120, delay: float = 0.5) -> bool:
+    """Block until provision_read_caps has filled in the conversation's write cap."""
+    for _ in range(attempts):
         async with persistent.asession() as sess:
-            conv_obj = (await sess.exec(
-                select(persistent.Conversation).where(
-                    persistent.Conversation.id == existing.id
-                )
-            )).one()
-            peer = persistent.ConversationPeer(
-                name=args.peer_name, read_cap_id=peer_rcwal.id, active=True,
-                conversation=conv_obj,
-            )
-            sess.add(peer_rcwal)
-            sess.add(peer)
-            await sess.commit()
-        print("ACCEPTED", flush=True)
+            conv = await sess.get(persistent.Conversation, conversation_id)
+            wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
+            if wcw is not None and wcw.write_cap is not None:
+                return True
+        await asyncio.sleep(delay)
+    return False
+
+
+async def _action_voucher_mint(args):
+    conv_id = await _conv_id_by_name(args.conv_name)
+    if conv_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    connection, bg = await _connect_and_start()
+    try:
+        if not await _wait_for_conv_write_cap(conv_id):
+            logger.error("write cap not provisioned after timeout")
+            return 2
+        voucher = await mint_and_publish(connection, conv_id, args.display_name)
+        logger.info("VOUCHER=%s", b64encode(voucher).decode())
         return 0
+    finally:
+        await _shutdown(bg, connection)
 
-    # Otherwise, build own conversation + own_peer skeleton.
-    wcapwal = persistent.WriteCapWAL(id=uuid.uuid4())
-    own_rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
-    convo = persistent.Conversation(name=args.conv_name, write_cap=wcapwal.id, first_unread=0)
-    own_peer = persistent.ConversationPeer(
-        name=args.own_display, read_cap_id=own_rcapwal.id,
-        active=False, conversation=convo,
-    )
-    convo.own_peer = own_peer
 
-    # ReadCapWAL + ConversationPeer for the inviter.
-    peer_rcwal = persistent.ReadCapWAL(
-        id=uuid.uuid4(),
-        read_cap=please_add.read_cap,
-        next_index=please_add.read_cap[-104:],
-    )
-    peer = persistent.ConversationPeer(
-        name=args.peer_name, read_cap_id=peer_rcwal.id, active=True,
-        conversation=convo,
-    )
+async def _action_voucher_induct(args):
+    conv_id = await _conv_id_by_name(args.conv_name)
+    if conv_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    try:
+        voucher = b64decode(args.voucher_b64.strip().encode())
+    except Exception:
+        logger.error("invalid voucher encoding")
+        return 2
+    connection, bg = await _connect_and_start()
+    try:
+        joiner_name = await derive_read_and_induct(
+            connection, conv_id, args.peer_name, voucher,
+        )
+        logger.info("INDUCTED=%s", joiner_name)
+        return 0
+    finally:
+        await _shutdown(bg, connection)
 
-    async with persistent.asession() as sess:
-        sess.add(wcapwal)
-        sess.add(own_rcapwal)
-        sess.add(convo)
-        sess.add(own_peer)
-        sess.add(peer_rcwal)
-        sess.add(peer)
-        await sess.commit()
 
-    print("ACCEPTED", flush=True)
-    return 0
+async def _action_voucher_await(args):
+    conv_id = await _conv_id_by_name(args.conv_name)
+    if conv_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    connection, bg = await _connect_and_start()
+    try:
+        await await_and_open(connection, conv_id)
+        logger.info("JOINED")
+        return 0
+    finally:
+        await _shutdown(bg, connection)
 
 
 async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
@@ -243,7 +263,7 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
             )
         )).first()
         if convo is None:
-            print(f"ERROR=conversation {conv_name!r} not found", flush=True)
+            logger.error("conversation %r not found", conv_name)
             return 2
         conversation_id = convo.id
         # Outgoing writes for this conversation go on the write-cap's
@@ -283,10 +303,10 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
                     )
                 )).first()
                 if hit is not None:
-                    print("SENT", flush=True)
+                    logger.info("SENT")
                     return 0
             await asyncio.sleep(0.25)
-        print("ERROR=send timed out waiting for SentLog", flush=True)
+        logger.error("send timed out waiting for SentLog")
         return 3
     finally:
         await _shutdown(bg, connection)
@@ -302,14 +322,13 @@ async def _action_send(args):
 async def _action_send_file(args):
     path = Path(args.path)
     if not path.is_file():
-        print(f"ERROR=file not found: {path}", flush=True)
+        logger.error("file not found: %s", path)
         return 2
     data = path.read_bytes()
     if len(data) > network._ATTACHMENT_HARD_CAP:
-        print(
-            f"ERROR=file exceeds {network._ATTACHMENT_HARD_CAP}-byte cap: "
-            f"{len(data)} bytes",
-            flush=True,
+        logger.error(
+            "file exceeds %d-byte cap: %d bytes",
+            network._ATTACHMENT_HARD_CAP, len(data),
         )
         return 2
     file_upload = models.GroupChatFileUpload(
@@ -331,7 +350,7 @@ async def _action_read_file(args):
             )
         )).first()
         if convo is None:
-            print(f"ERROR=conversation {args.conv_name!r} not found", flush=True)
+            logger.error("conversation %r not found", args.conv_name)
             return 2
         own_peer_id = convo.own_peer_id
         conversation_id = convo.id
@@ -377,17 +396,16 @@ async def _action_read_file(args):
                 file_bytes = src_abs.read_bytes()
                 actual_sha = hashlib.sha256(file_bytes).digest()
                 if actual_sha != marker_sha:
-                    print(
-                        f"WARN=sha256 mismatch for {basename}: "
-                        f"marker={marker_sha.hex()} actual={actual_sha.hex()}",
-                        flush=True,
+                    logger.warning(
+                        "sha256 mismatch for %s: marker=%s actual=%s",
+                        basename, marker_sha.hex(), actual_sha.hex(),
                     )
                 dst_abs = to_dir / basename
                 shutil.copyfile(src_abs, dst_abs)
-                print(f"RECV_FILE={dst_abs.resolve()}", flush=True)
+                logger.info("RECV_FILE=%s", dst_abs.resolve())
                 return 0
             await asyncio.sleep(0.5)
-        print("TIMEOUT", flush=True)
+        logger.info("TIMEOUT")
         return 1
     finally:
         await _shutdown(bg, connection)
@@ -405,7 +423,7 @@ async def _action_multi_send(args):
             )
         )).first()
         if convo is None:
-            print(f"ERROR=conversation {args.conv_name!r} not found", flush=True)
+            logger.error("conversation %r not found", args.conv_name)
             return 2
         conversation_id = convo.id
         own_bacap_stream = convo.write_cap
@@ -439,10 +457,10 @@ async def _action_multi_send(args):
                     select(persistent.SentLog).where(persistent.SentLog.id == target)
                 )).first()
                 if hit is not None:
-                    print("SENT", flush=True)
+                    logger.info("SENT")
                     return 0
             await asyncio.sleep(0.25)
-        print("ERROR=multi-send timed out", flush=True)
+        logger.error("multi-send timed out")
         return 3
     finally:
         await _shutdown(bg, connection)
@@ -465,7 +483,7 @@ async def _action_chat_session(args):
             )
         )).first()
         if convo is None:
-            print(f"ERROR=conversation {args.conv_name!r} not found", flush=True)
+            logger.error("conversation %r not found", args.conv_name)
             return 2
         own_peer_id = convo.own_peer_id
         conversation_id = convo.id
@@ -514,9 +532,9 @@ async def _action_chat_session(args):
                             break
                     await asyncio.sleep(0.25)
                 if not ok:
-                    print(f"STEP_FAIL:{step_idx}:send-timeout:{payload}", flush=True)
+                    logger.error(f"STEP_FAIL:{step_idx}:send-timeout:{payload}")
                     return 3
-                print(f"STEP_OK:{step_idx}:SEND:{payload}:ts={time.time():.3f}", flush=True)
+                logger.info(f"STEP_OK:{step_idx}:SEND:{payload}:ts={time.time():.3f}")
 
             elif kind == "READ":
                 # Nudge the read loop in case no event is outstanding.
@@ -543,10 +561,9 @@ async def _action_chat_session(args):
                         )).all()
                     if len(rows) != last_count:
                         last_count = len(rows)
-                        print(
+                        logger.info(
                             f"STEP_POLL:{step_idx}:poll={poll_n}:row_count={last_count}:"
-                            f"conv_id={conversation_id}:own_peer_id={own_peer_id}:looking_for={payload!r}",
-                            flush=True,
+                            f"conv_id={conversation_id}:own_peer_id={own_peer_id}:looking_for={payload!r}"
                         )
                     for cl in rows:
                         if cl.payload[:1] != b"F":
@@ -562,19 +579,19 @@ async def _action_chat_session(args):
                         break
                     await asyncio.sleep(0.5)
                 if not ok:
-                    print(f"STEP_FAIL:{step_idx}:read-timeout:{payload}", flush=True)
+                    logger.error(f"STEP_FAIL:{step_idx}:read-timeout:{payload}")
                     return 4
-                print(f"STEP_OK:{step_idx}:READ:{payload}:ts={time.time():.3f}", flush=True)
+                logger.info(f"STEP_OK:{step_idx}:READ:{payload}:ts={time.time():.3f}")
 
             elif kind == "SLEEP":
                 await asyncio.sleep(float(payload))
-                print(f"STEP_OK:{step_idx}:SLEEP:{payload}", flush=True)
+                logger.info(f"STEP_OK:{step_idx}:SLEEP:{payload}")
 
             else:
-                print(f"STEP_FAIL:{step_idx}:unknown-step:{raw}", flush=True)
+                logger.error(f"STEP_FAIL:{step_idx}:unknown-step:{raw}")
                 return 5
 
-        print("SESSION_DONE", flush=True)
+        logger.info("SESSION_DONE")
         return 0
     finally:
         await _shutdown(bg, connection)
@@ -588,7 +605,7 @@ async def _action_read(args):
             )
         )).first()
         if convo is None:
-            print(f"ERROR=conversation {args.conv_name!r} not found", flush=True)
+            logger.error("conversation %r not found", args.conv_name)
             return 2
         own_peer_id = convo.own_peer_id
         conversation_id = convo.id
@@ -621,10 +638,10 @@ async def _action_read(args):
                         continue
                     if expected is not None and gcm.text != expected:
                         continue
-                    print("RECV=" + gcm.text, flush=True)
+                    logger.info("RECV=%s", gcm.text)
                     return 0
             await asyncio.sleep(0.5)
-        print("TIMEOUT", flush=True)
+        logger.info("TIMEOUT")
         return 1
     finally:
         await _shutdown(bg, connection)
@@ -684,7 +701,7 @@ async def _action_info(args) -> int:
             "received_piece": int(rp_count),
         },
     }
-    print(json.dumps(payload), flush=True)
+    logger.info(json.dumps(payload))
     return 0
 
 
@@ -700,12 +717,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_create.add_argument("own_display")
     p_create.set_defaults(func=_action_create_conv)
 
-    p_accept = sub.add_parser("accept-invite")
-    p_accept.add_argument("conv_name")
-    p_accept.add_argument("own_display")
-    p_accept.add_argument("peer_name")
-    p_accept.add_argument("invite_b64")
-    p_accept.set_defaults(func=_action_accept_invite)
+    p_mint = sub.add_parser("voucher-mint")
+    p_mint.add_argument("conv_name")
+    p_mint.add_argument("display_name")
+    p_mint.set_defaults(func=_action_voucher_mint)
+
+    p_induct = sub.add_parser("voucher-induct")
+    p_induct.add_argument("conv_name")
+    p_induct.add_argument("peer_name")
+    p_induct.add_argument("voucher_b64")
+    p_induct.set_defaults(func=_action_voucher_induct)
+
+    p_await = sub.add_parser("voucher-await")
+    p_await.add_argument("conv_name")
+    p_await.set_defaults(func=_action_voucher_await)
 
     p_send = sub.add_parser("send")
     p_send.add_argument("conv_name")

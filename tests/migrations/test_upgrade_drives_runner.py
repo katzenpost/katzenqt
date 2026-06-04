@@ -49,17 +49,20 @@ def test_info_then_read_against_upgraded_state(tmp_path):
     )
     assert info.returncode == 0, info.stdout + info.stderr
 
-    # The last JSON line on stdout is the info payload.
+    # The info payload is emitted as a JSON line through the logging
+    # framework (stderr, prefixed with the log level and logger name),
+    # so strip any prefix up to the opening brace before parsing.
     json_line = None
-    for line in info.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("{") and line.endswith("}"):
-            try:
-                json_line = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    for line in (info.stdout + "\n" + info.stderr).splitlines():
+        brace = line.find("{")
+        if brace == -1 or not line.rstrip().endswith("}"):
+            continue
+        try:
+            json_line = json.loads(line[brace:])
+        except json.JSONDecodeError:
+            continue
     assert json_line is not None, (
-        f"no JSON output found in info stdout:\n{info.stdout}"
+        f"no JSON output found:\nstdout:\n{info.stdout}\nstderr:\n{info.stderr}"
     )
     assert json_line.get("alembic_revision")
     assert json_line.get("conversations") == []
@@ -77,7 +80,7 @@ def test_info_then_read_against_upgraded_state(tmp_path):
         env=env, cwd=str(_REPO_ROOT),
         capture_output=True, text=True, timeout=60,
     )
-    # An empty conversations list means the action prints ERROR= and
+    # An empty conversations list means the action logs the error and
     # returns 2 (the runner's existing semantics).
     assert read.returncode == 2
-    assert "conversation 'no-such-conv' not found" in read.stdout
+    assert "conversation 'no-such-conv' not found" in (read.stdout + read.stderr)

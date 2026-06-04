@@ -30,6 +30,8 @@ For the CLI surface, run ``katzenqt-headless --help`` or
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import signal
 import sys
 from contextlib import asynccontextmanager
@@ -108,6 +110,26 @@ async def session(
         await stop(bg, connection)
 
 
+def _configure_logging() -> None:
+    """Send katzenqt's logs to stderr for headless runs.
+
+    The headless CLI has no GUI to surface status, so diagnostics and
+    results go through the logging framework. KQT_LOG_LEVEL overrides the
+    default INFO level.
+    """
+    level = os.environ.get("KQT_LOG_LEVEL", "INFO").upper()
+    # force=True so we own the root handler and level even though importing
+    # persistent.py (engines created with echo=True) has already touched the
+    # logging machinery; without it basicConfig would no-op and our INFO
+    # records would be filtered by the default WARNING root level.
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=getattr(logging, level, logging.INFO),
+        format="%(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+
+
 def cli(argv: "list[str] | None" = None) -> int:
     """Console-script entry point for the headless CLI.
 
@@ -117,7 +139,11 @@ def cli(argv: "list[str] | None" = None) -> int:
     chosen action.
     """
     args = _actions._build_parser().parse_args(argv)
+    # After init_and_migrate: Alembic's env.py runs fileConfig() from
+    # alembic.ini, which resets the root logger to WARNING. Configuring
+    # afterwards lets our level stand.
     persistent.init_and_migrate()
+    _configure_logging()
 
     loop = asyncio.new_event_loop()
     try:
