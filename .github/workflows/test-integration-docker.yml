@@ -97,11 +97,6 @@ jobs:
           uv venv .venv
           uv pip install -e '.[dev]' || uv pip install -e .
           uv pip install pytest pytest-asyncio pytest-cov hypothesis
-          # The voucher API is not yet on PyPI, so override the pinned
-          # katzenpost_thinclient with the voucher-capable build. Keep this
-          # commit in lockstep with the katzenpost daemon ref above; drop it
-          # once a release carrying the voucher API is published.
-          uv pip install "katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@55946e588903d777288aa462973fdb7222cf2286"
 
       - name: Run integration tests
         working-directory: katzenqt

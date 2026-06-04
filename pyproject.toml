@@ -18,7 +18,11 @@ dependencies = [
 "aiosqlite~=0.21.0",
 "pydantic~=2.11.7",
 "cbor2~=5.6.5",
-"katzenpost_thinclient==0.0.16"
+# Contact Voucher API: pinned to the thinclient-voucher-api branch commit until
+# a release carrying it lands on PyPI, when this reverts to a version pin. Keep
+# in lockstep with the katzenpost daemon ref in
+# .github/workflows/test-integration-docker.yml.
+"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@55946e588903d777288aa462973fdb7222cf2286"
 ]
 
 [dependency-groups]
