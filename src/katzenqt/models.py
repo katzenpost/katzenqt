@@ -44,8 +44,10 @@ class GroupChatReplyWho(BaseModel):
     }
     please_adds : list[GroupChatPleaseAdd] = Field()
     def to_cbor(self) -> bytes:
-        # TODO 
         return cbor2.dumps(self.model_dump(exclude_none=True))
+    @classmethod
+    def from_cbor(cls, data: bytes) -> "GroupChatReplyWho":
+        return cls(**cbor2.loads(data))
     def membership_hash(self) -> bytes:
         return hashlib.blake2b(self.to_cbor(), digest_size=32).digest()
     # the conversation hash should be available
