@@ -124,10 +124,11 @@ async def mint_and_publish(connection, conversation_id: int, display_name: str) 
     return mint.voucher
 
 
-async def await_and_open(connection, conversation_id: int) -> None:
+async def await_and_open(connection, conversation_id: int) -> "list[str]":
     """Joiner: poll VoucherStream box 1 for the inductor's reply, open it, move
     this conversation's write cap onto the salt-mutated sequence, and add the
-    members named in the reply as peers."""
+    members named in the reply as peers. Returns the display names added, so a
+    caller (the GUI) can reflect them without re-querying."""
     async with persistent.asession() as sess:
         pv = (await sess.exec(
             select(persistent.PendingVoucher).where(
@@ -159,11 +160,14 @@ async def await_and_open(connection, conversation_id: int) -> None:
         wcw.write_cap = opened.mutated_message_write_cap
         wcw.next_index = opened.mutated_message_write_cap[-_INDEX_LEN:]
         sess.add(wcw)
+        added = []
         for please_add in reply_who.please_adds:
             _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
+            added.append(please_add.display_name)
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
+    return added
 
 
 async def derive_read_and_induct(connection, conversation_id: int, peer_name: str, voucher: bytes) -> str:

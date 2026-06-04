@@ -868,7 +868,7 @@ QToolButton {
 }</string>
                    </property>
                    <property name="text">
-                    <string>  Invite a contact</string>
+                    <string>  Generate voucher</string>
                    </property>
                    <property name="icon">
                     <iconset>
@@ -2853,16 +2853,16 @@ QToolButton {
      <normaloff>resources/accept.png</normaloff>resources/accept.png</iconset>
    </property>
    <property name="text">
-    <string>Accept invitation</string>
+    <string>Induct via voucher</string>
    </property>
    <property name="iconText">
-    <string> Accept invitation   </string>
+    <string> Induct via voucher   </string>
    </property>
    <property name="toolTip">
-    <string>Accept invitation received from contact</string>
+    <string>Induct a new contact using the voucher they handed you</string>
    </property>
    <property name="statusTip">
-    <string>Accept invitation received from contact</string>
+    <string>Induct a new contact using the voucher they handed you</string>
    </property>
    <property name="whatsThis">
     <string>TODO-acceptinvitation</string>
@@ -2883,16 +2883,16 @@ QToolButton {
      <normaloff>resources/invite.png</normaloff>resources/invite.png</iconset>
    </property>
    <property name="text">
-    <string>Invite contact</string>
+    <string>Generate voucher</string>
    </property>
    <property name="iconText">
-    <string> Invite contact   </string>
+    <string> Generate voucher   </string>
    </property>
    <property name="toolTip">
-    <string>Generate a new invitation that can be passed on to a contact</string>
+    <string>Generate a voucher to hand to a member who will induct you</string>
    </property>
    <property name="statusTip">
-    <string>Generate a new invitation that can be passed on to a contact</string>
+    <string>Generate a voucher to hand to a member who will induct you</string>
    </property>
    <property name="font">
     <font>
