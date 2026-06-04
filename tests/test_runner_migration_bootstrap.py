@@ -30,8 +30,8 @@ def test_main_calls_init_and_migrate(monkeypatch, capsys):
 
     assert calls == ["init_and_migrate"]
     assert rc == 2
-    out = capsys.readouterr().out
-    assert "conversation 'no-such-conv' not found" in out
+    captured = capsys.readouterr()
+    assert "conversation 'no-such-conv' not found" in captured.out + captured.err
 
 
 def test_alembic_cfg_resolves_to_an_existing_ini():

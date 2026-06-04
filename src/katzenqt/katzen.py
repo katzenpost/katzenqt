@@ -29,10 +29,10 @@ from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
-                               QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QStyle, QSystemTrayIcon,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QToolButton, QTreeView,
-                               QTreeWidgetItem)
+                               QTreeWidgetItem, QVBoxLayout)
 from sqlalchemy import func
 from sqlmodel import select
 
@@ -40,6 +40,11 @@ from sqlmodel import select
 from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
+from base64 import b64decode, b64encode
+from .voucher import (await_and_open, cancel_pending_voucher,
+                     conversation_is_joined, derive_read_and_induct,
+                     list_pending_vouchers, mint_and_publish,
+                     pending_voucher_for)
 from .katzen_util import create_task
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
@@ -171,6 +176,40 @@ def duration_time_ns():
     except AttributeError:
         # BSDs use SI seconds by default:
         return time.monotonic_ns()
+
+class PendingVouchersDialog(QDialog):
+    """Lists in-flight vouchers and lets the user abandon stale ones, e.g. a
+    voucher whose code was lost and whose join never completed."""
+    def __init__(self, parent, rows, on_cancel):
+        super().__init__(parent)
+        self.setWindowTitle("Pending vouchers")
+        self._on_cancel = on_cancel
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Vouchers that have not finished joining. Cancel one to abandon it; "
+            "you may then generate a fresh voucher for that conversation."
+        ))
+        self.list_widget = QListWidget()
+        for pv_id, conv_name, role, step in rows:
+            item = QListWidgetItem(f"{conv_name}   [{role}, {step}]")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, pv_id)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+        cancel_btn = QPushButton("Cancel selected voucher")
+        cancel_btn.clicked.connect(self._cancel_selected)
+        layout.addWidget(cancel_btn)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+    def _cancel_selected(self):
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+        self._on_cancel(item.data(QtCore.Qt.ItemDataRole.UserRole))
+        self.list_widget.takeItem(self.list_widget.row(item))
+
 
 class MainWindow(QMainWindow):
     def X_keyPressEvent(self, ev: "QEvent") -> None:
@@ -395,8 +434,9 @@ class MainWindow(QMainWindow):
         self.ui.action_testme.triggered.connect(self.testme)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
-        self.ui.action_accept_invitation.triggered.connect(self.accept_invitation)
-        self.ui.action_invite_contact.triggered.connect(self.invite_contact)
+        self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
+        self.ui.action_invite_contact.triggered.connect(self.generate_voucher)
+        self.ui.action_pending_vouchers.triggered.connect(self.show_pending_vouchers)
         # Make the [Quit] toolbar actually quit:
         self.ui.action_quit.triggered.connect(lambda ev: self.close(ev,really_quit=True))
 
@@ -807,152 +847,153 @@ class MainWindow(QMainWindow):
         await add_conversation(self, convo)
 
     @async_cb
-    async def invite_contact(self):
-        """User wants to generate an invitation to give to a friend.
-
-        We need to ask the user what name they want, and make them a BACAP write cap.
-        Then we need to find the corresponding read cap, and show that.
-
-        Persistence-wise, we need to store:
-        - Our display name
-        - BACAP write cap
-        - BACAP read cap (to give to friend)
-
-        The BACAP stuff we will get from the thin client.
-        """
-
-        # Retrieve our read cap for selected convo:
+    async def generate_voucher(self):
+        """Joiner side of the Contact Voucher protocol: mint a Voucher over the
+        selected conversation's MessageStream, publish it, and show the token to
+        hand to an existing member out of band. The join completes in the
+        background once that member replies over the rendezvous stream."""
         try:
-          convo = self.convo_state()
+            convo = self.convo_state()
         except Exception:
-            dlg = QMessageBox.critical(self, f"ERROR: {APP_NAME}", "Can't invite when no conversation is selected. Click 'Create conversation' to create a conversation.")
-            return
-        import sqlalchemy as sa
-        async with persistent.asession() as sess:
-            # TODO this can definitely be rewritten as a more graceful JOIN:
-            co = (await sess.exec(sa.select(persistent.Conversation).where(persistent.Conversation.id==convo.conversation_id))).one()
-            co = co[0]  # TODO why doe .one() get us a tuple? probably the sa.select()
-            rcw = (await sess.exec(sa.select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.id==co.own_peer.read_cap_id))).one()[0]
-            print("RCW:", rcw)
-            pass
-        if rcw.read_cap is None:
-            dlg = QMessageBox.critical(self, f"ERROR: {APP_NAME}", "Can't invite when not connected to clientd")
+            QMessageBox.critical(
+                self, f"ERROR: {APP_NAME}",
+                "Select a conversation first (or create one) before generating a voucher.",
+            )
             return
 
-        display_name , ok = QInputDialog.getText(
-            self,
-            "Invite contact",
-            "Choose (your) name displayed to the other user:",
+        conv_id = convo.conversation_id
+        # You can only join a conversation once. If the client is already a
+        # member, a second voucher would re-run the join and duplicate every
+        # member and message, so refuse outright.
+        if await self.iothread.run_in_io(conversation_is_joined(conv_id)):
+            QMessageBox.information(
+                self, APP_NAME,
+                "You are already a member of this conversation, so a voucher is "
+                "not needed. Vouchers are only for joining a conversation you are "
+                "not yet part of.",
+            )
+            return
+        # At most one voucher in flight per conversation. If one is pending,
+        # offer to abandon it and mint a fresh one (e.g. the code was lost).
+        pending_id = await self.iothread.run_in_io(pending_voucher_for(conv_id))
+        if pending_id is not None:
+            if QMessageBox.question(
+                self, APP_NAME,
+                "A voucher for this conversation is already pending. Cancel it "
+                "and generate a new one?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                defaultButton=QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
+
+        display_name, ok = QInputDialog.getText(
+            self, "Generate voucher",
+            "Choose (your) name shown to the contact who inducts you:",
         )
-        if not ok:
+        if not ok or not display_name:
             return
 
-        # serialize:
-        # rcw.read_cap ( + rcw.next_index ? )
-        intro = GroupChatPleaseAdd(
-            display_name=display_name,
-            read_cap=rcw.read_cap
-        )
+        try:
+            voucher = await self.iothread.run_in_io(
+                mint_and_publish(self.iothread.kp_client, conv_id, display_name)
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, f"ERROR: {APP_NAME}",
+                "Could not mint the voucher. Is the conversation finished setting "
+                f"up and the client connected?\n\n{e}",
+            )
+            return
 
-        # So now if the other person plops this intro into their client, they can read our stream.
-        # We still don't have theirs.
-        print()
-        print(intro.to_human_readable())
-        print()
-        QTimer.singleShot(0, lambda: QMessageBox.information(self, f"Invite code: {APP_NAME}", f"Here is your invitation, {display_name}.\nPass it to your new contact:\n{intro.to_human_readable()}"))
-        # TODO instead of print, we want a GUI element diplaying this, with a button to copy to
-        # clipboard
+        code = b64encode(voucher).decode()
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, f"Voucher: {APP_NAME}",
+            f"Here is your voucher, {display_name}.\nHand it out of band to an "
+            f"existing member, who will induct you:\n\n{code}",
+        ))
+        # Completion is asynchronous: poll for the inductor's reply, then move
+        # this conversation onto the salt-mutated stream and add the members it
+        # names. PendingVoucher persists the handshake, so a restart resumes it.
+        ensure_future(self._await_voucher_join(convo))
 
-        # And then we need to persist the invitation (So we know what we're doing)
-        # async with persistent.asession() as session:
-        # await add_contacts(self, conversationpeer)
-
-        # And then we need to display the read cap + name to the user so they can copy-paste
+    async def _await_voucher_join(self, convo):
+        try:
+            added = await self.iothread.run_in_io(
+                await_and_open(self.iothread.kp_client, convo.conversation_id)
+            )
+        except Exception as e:
+            logging.warning("voucher await failed: %s", e)
+            QTimer.singleShot(0, lambda: QMessageBox.critical(
+                self, f"ERROR: {APP_NAME}", f"The voucher join did not complete:\n{e}",
+            ))
+            return
+        for name in added:
+            convo.contacts_standard_item.appendRow(QStandardItem(name))
+        await self.iothread.run_in_io(network.signal_readables_to_mixwal())
+        joined = ", ".join(added) or "(none)"
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
+        ))
 
     @async_cb
-    async def accept_invitation(self):
-        """User wants to input an invitation from a peer.
-
-        We need the following information from user:
-        - Peer display name
-        - BACAP read cap for their stream
-
-        - And then we should generate one for them. To avoid this two-pass protocol we should maybe
-          make the inviter give us a BACAP write cap for a temp stream we could write our invitation
-          to instead? (And then they should start checking that).
-        """
-
+    async def induct_via_voucher(self):
+        """Inductor side of the Contact Voucher protocol: read the joiner's
+        published voucher, reply over the rendezvous stream with this group's
+        read caps, and add the joiner on their salt-mutated read cap."""
         try:
-          convo = self.convo_state()
+            convo = self.convo_state()
         except Exception:
-          QTimer.singleShot(0, lambda: QMessageBox.critical(self, f"ERROR", f"You must first 'create new conversation' before you can 'Accept' an invitation"))
-          return
-
-        invite_string , ok = QInputDialog.getText(
-            self,
-            "Accept invitation",
-            "Enter an invitation you received:",
-        )
-        if not ok:
+            QTimer.singleShot(0, lambda: QMessageBox.critical(
+                self, "ERROR",
+                "Create or select a conversation before inducting a contact.",
+            ))
             return
-        print("accept invitation pressed", invite_string)
+
+        voucher_str, ok = QInputDialog.getText(
+            self, "Induct via voucher",
+            "Enter the voucher your new contact handed you:",
+        )
+        if not ok or not voucher_str:
+            return
         try:
-            please_add = GroupChatPleaseAdd.from_human_readable(invite_string)
-        except:
-            QTimer.singleShot(0, lambda: QMessageBox.critical(self, f"ERROR", f"Invalid invitation code."))
+            voucher = b64decode(voucher_str.strip().encode())
+        except Exception:
+            QTimer.singleShot(0, lambda: QMessageBox.critical(
+                self, "ERROR", "Invalid voucher code.",
+            ))
             return
 
-        # TODO need to validate these a bit more, like ensure we are not adding ourselves to our own convo, and so on.
-
-        # Now we need to parse it, validate the cap,
-        #   and confirm with the user that they like the display name
-        if QMessageBox.question(
-            self,
-            'Confirmation',
-            f"Add contact {please_add.display_name!r}?",
-            QMessageBox.StandardButton.Yes |
-            QMessageBox.StandardButton.No,
-            defaultButton = QMessageBox.StandardButton.Yes
-        ) != QMessageBox.StandardButton.Yes:
-            logging.warning('Canceled adding contact')
-            return
-
-        from sqlmodel import select
-        async with persistent.asession() as sess:
-            # insert into readcapwal
-            rcwal = persistent.ReadCapWAL(
-                id=uuid.uuid4(),
-                read_cap=please_add.read_cap,
-                next_index=please_add.read_cap[-104:]) # TODO don't hardcode 104 as length of messageboxindex?
-            sess.add(rcwal)
-            # TODO don't want to commit here but do need the uuid
-            # insert into conversationpeer:
-            x = select(persistent.Conversation).where(persistent.Conversation.id==convo.conversation_id)
-            conv_obj = (await sess.exec(x)).one()
-            sess.add(conv_obj)
-            cp = persistent.ConversationPeer(
-                name=please_add.display_name,
-                read_cap_id=rcwal.id,
-                active=True,
-                conversation=conv_obj,
+        try:
+            joiner_name = await self.iothread.run_in_io(
+                derive_read_and_induct(
+                    self.iothread.kp_client, convo.conversation_id, "", voucher,
+                )
             )
-            sess.add(cp)
-            await sess.commit()
+        except Exception as e:
+            QTimer.singleShot(0, lambda: QMessageBox.critical(
+                self, f"ERROR: {APP_NAME}", f"Induction failed:\n{e}",
+            ))
+            return
 
-        # update UI to show the new peer in the member list:
-        ptwi = QStandardItem(please_add.display_name)
-        convo.contacts_standard_item.appendRow(ptwi)
+        name = joiner_name or "contact"
+        convo.contacts_standard_item.appendRow(QStandardItem(name))
+        logging.warning("Peer inducted. Signaling readables_to_mixwal")
+        await self.iothread.run_in_io(network.signal_readables_to_mixwal())
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, f"Inducted: {APP_NAME}", f"Inducted {name} into this conversation.",
+        ))
 
-        logging.warning("Peer added. Signaling readables_to_mixwal")
-        await self.iothread.run_in_io(
-            network.signal_readables_to_mixwal()
-        )
-        # Then ask them for the Conversation name (or just default to the display name for now)
-        # Then we need to persist the contact:
-        # - persistent.ConversationPeer(name=..., read_cap=...)
-        # - persistent.Conversation()
-        # TODO: how do we know the write_cap? should we make them select from a list of outstanding
-        # invitations and / or existing groups?
+    @async_cb
+    async def show_pending_vouchers(self):
+        """Open the pending-voucher view so the user can abandon stale ones."""
+        rows = await self.iothread.run_in_io(list_pending_vouchers())
+        if not rows:
+            QMessageBox.information(self, APP_NAME, "There are no pending vouchers.")
+            return
+        def on_cancel(pv_id):
+            ensure_future(self.iothread.run_in_io(cancel_pending_voucher(pv_id)))
+        PendingVouchersDialog(self, rows, on_cancel).exec()
 
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):

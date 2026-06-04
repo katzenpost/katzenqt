@@ -42,12 +42,20 @@ def _run_role(
     )
 
 
-def _expect_prefix(stdout: str, prefix: str) -> str:
-    for line in stdout.splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix):]
+def _output(proc: subprocess.CompletedProcess) -> str:
+    return proc.stdout + proc.stderr
+
+
+def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+    """Find a logged line containing token; return the text after it. Results
+    are emitted through logging (stderr) with a level/name prefix, so match by
+    substring rather than line start."""
+    for line in _output(proc).splitlines():
+        idx = line.find(token)
+        if idx != -1:
+            return line[idx + len(token):].strip()
     raise AssertionError(
-        f"no stdout line starting with {prefix!r} in:\n---stdout---\n{stdout}"
+        f"no line containing {token!r}:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
 
 
@@ -55,16 +63,23 @@ def _sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def _bootstrap_invitation(alice_state: Path, bob_state: Path) -> None:
-    create = _run_role(
-        alice_state, "create-conv", "demo", "alice", timeout=180.0,
-    )
-    assert create.returncode == 0, create.stdout + create.stderr
-    invite = _expect_prefix(create.stdout, "INVITE=")
-    accept = _run_role(
-        bob_state, "accept-invite", "demo", "bob", "alice", invite, timeout=60.0,
-    )
-    assert accept.returncode == 0, accept.stdout + accept.stderr
+def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
+    """Establish contact via the Contact Voucher handshake: both create their
+    own MessageStream, Bob mints a voucher, Alice inducts him, Bob joins.
+    Afterwards Bob holds Alice's read cap and can read her stream."""
+    for state, name in ((alice_state, "alice"), (bob_state, "bob")):
+        create = _run_role(state, "create-conv", "demo", name, timeout=180.0)
+        assert create.returncode == 0, create.stdout + create.stderr
+
+    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    assert mint.returncode == 0, mint.stdout + mint.stderr
+    voucher = _expect_token(mint, "VOUCHER=")
+
+    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    assert induct.returncode == 0, induct.stdout + induct.stderr
+
+    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
+    assert joined.returncode == 0, joined.stdout + joined.stderr
 
 
 @pytest.mark.integration
@@ -84,14 +99,14 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
     assert src.stat().st_size == 2_000
     expected_sha = _sha256(src)
 
-    _bootstrap_invitation(alice_state, bob_state)
+    _bootstrap_voucher(alice_state, bob_state)
 
     t0 = time.monotonic()
     send = _run_role(
         alice_state, "send-file", "demo", str(src),
         timeout=900.0,
     )
-    assert send.returncode == 0 and "SENT" in send.stdout, (
+    assert send.returncode == 0 and "SENT" in _output(send), (
         f"send-file failed:\nstdout:\n{send.stdout}\nstderr:\n{send.stderr}"
     )
     print(f"[file] sent in {time.monotonic()-t0:.1f}s")
@@ -107,7 +122,7 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
         f"read-file failed:\nstdout tail:\n{read.stdout[-2000:]}\n"
         f"stderr tail:\n{read.stderr[-2000:]}"
     )
-    recv_path = Path(_expect_prefix(read.stdout, "RECV_FILE="))
+    recv_path = Path(_expect_token(read, "RECV_FILE="))
     assert recv_path.is_file(), f"reported path {recv_path} does not exist"
     assert _sha256(recv_path) == expected_sha
     print(f"[file] received in {time.monotonic()-t0:.1f}s -> {recv_path}")

@@ -29,14 +29,20 @@
    <bool>true</bool>
   </property>
   <property name="styleSheet">
-   <string notr="true">QLineEdit:focus {
+   <string notr="true">QLineEdit:focus, QPlainTextEdit:focus {
   /* override background on focused input to make it abundantly clear where the cursor is */
   background: rgb(173, 213, 251) !important;
+  /* that cue is a fixed light colour, so force dark text or the themed
+     (white, in dark mode) text is unreadable on it */
+  color: rgb(0, 0, 0);
 }
 
 QToolBar :hover {
    /* active item in the toolbar */
    background-color: #8effc3 !important;
+   /* that highlight is a fixed light green, so force dark text or the themed
+      (white, in dark mode) text is unreadable on it */
+   color: rgb(0, 0, 0);
 }
 
 QTreeView {
@@ -868,7 +874,7 @@ QToolButton {
 }</string>
                    </property>
                    <property name="text">
-                    <string>  Invite a contact</string>
+                    <string>  Generate voucher</string>
                    </property>
                    <property name="icon">
                     <iconset>
@@ -2269,6 +2275,8 @@ QToolButton {
     <addaction name="action_display_font"/>
     <addaction name="action_display_language"/>
     <addaction name="action_theme"/>
+    <addaction name="separator"/>
+    <addaction name="action_pending_vouchers"/>
    </widget>
    <widget class="QMenu" name="menuMixnetStatus">
     <property name="enabled">
@@ -2853,16 +2861,16 @@ QToolButton {
      <normaloff>resources/accept.png</normaloff>resources/accept.png</iconset>
    </property>
    <property name="text">
-    <string>Accept invitation</string>
+    <string>Induct via voucher</string>
    </property>
    <property name="iconText">
-    <string> Accept invitation   </string>
+    <string> Induct via voucher   </string>
    </property>
    <property name="toolTip">
-    <string>Accept invitation received from contact</string>
+    <string>Induct a new contact using the voucher they handed you</string>
    </property>
    <property name="statusTip">
-    <string>Accept invitation received from contact</string>
+    <string>Induct a new contact using the voucher they handed you</string>
    </property>
    <property name="whatsThis">
     <string>TODO-acceptinvitation</string>
@@ -2883,21 +2891,38 @@ QToolButton {
      <normaloff>resources/invite.png</normaloff>resources/invite.png</iconset>
    </property>
    <property name="text">
-    <string>Invite contact</string>
+    <string>Generate voucher</string>
    </property>
    <property name="iconText">
-    <string> Invite contact   </string>
+    <string> Generate voucher   </string>
    </property>
    <property name="toolTip">
-    <string>Generate a new invitation that can be passed on to a contact</string>
+    <string>Generate a voucher to hand to a member who will induct you</string>
    </property>
    <property name="statusTip">
-    <string>Generate a new invitation that can be passed on to a contact</string>
+    <string>Generate a voucher to hand to a member who will induct you</string>
    </property>
    <property name="font">
     <font>
      <bold>true</bold>
     </font>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
+   </property>
+  </action>
+  <action name="action_pending_vouchers">
+   <property name="text">
+    <string>Pending vouchers</string>
+   </property>
+   <property name="iconText">
+    <string> Pending vouchers   </string>
+   </property>
+   <property name="toolTip">
+    <string>Show and cancel vouchers that have not finished joining</string>
+   </property>
+   <property name="statusTip">
+    <string>Show and cancel vouchers that have not finished joining</string>
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>

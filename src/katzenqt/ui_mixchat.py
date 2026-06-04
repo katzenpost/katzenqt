@@ -38,14 +38,20 @@ class Ui_MainWindow(object):
         sizePolicy.setHeightForWidth(MainWindow.sizePolicy().hasHeightForWidth())
         MainWindow.setSizePolicy(sizePolicy)
         MainWindow.setAutoFillBackground(True)
-        MainWindow.setStyleSheet(u"QLineEdit:focus {\n"
+        MainWindow.setStyleSheet(u"QLineEdit:focus, QPlainTextEdit:focus {\n"
 "  /* override background on focused input to make it abundantly clear where the cursor is */\n"
 "  background: rgb(173, 213, 251) !important;\n"
+"  /* that cue is a fixed light colour, so force dark text or the themed\n"
+"     (white, in dark mode) text is unreadable on it */\n"
+"  color: rgb(0, 0, 0);\n"
 "}\n"
 "\n"
 "QToolBar :hover {\n"
 "   /* active item in the toolbar */\n"
 "   background-color: #8effc3 !important;\n"
+"   /* that highlight is a fixed light green, so force dark text or the themed\n"
+"      (white, in dark mode) text is unreadable on it */\n"
+"   color: rgb(0, 0, 0);\n"
 "}\n"
 "\n"
 "QTreeView {\n"
@@ -62,7 +68,8 @@ class Ui_MainWindow(object):
 "    border: 1px solid #bfcde4;*/\n"
 "}\n"
 "\n"
-"QTreeView::item:selected {\n"
+"QTreeView::it"
+                        "em:selected {\n"
 "    border: 1px solid #567dbc;\n"
 "}\n"
 "\n"
@@ -72,8 +79,7 @@ class Ui_MainWindow(object):
 "\n"
 "QTreeView::item:selected:!active {\n"
 " /*   background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #6b9be8, stop: 1 #577fbf);*/\n"
-""
-                        "}\n"
+"}\n"
 "QTreeView::branch {\n"
 "/*        background: palette(base);\n"
 "        border: 1px solid black;*/\n"
@@ -100,7 +106,8 @@ class Ui_MainWindow(object):
 "}\n"
 "\n"
 "QTreeView::branch:has-children:!has-siblings:closed {\n"
-"        background: gray;\n"
+"        backgrou"
+                        "nd: gray;\n"
 "}\n"
 "\n"
 "QTreeView::branch:open:has-children:has-siblings {\n"
@@ -139,6 +146,9 @@ class Ui_MainWindow(object):
         font1.setBold(True)
         self.action_invite_contact.setFont(font1)
         self.action_invite_contact.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+        self.action_pending_vouchers = QAction(MainWindow)
+        self.action_pending_vouchers.setObjectName(u"action_pending_vouchers")
+        self.action_pending_vouchers.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
         self.action_quit = QAction(MainWindow)
         self.action_quit.setObjectName(u"action_quit")
         icon3 = QIcon()
@@ -907,6 +917,8 @@ class Ui_MainWindow(object):
         self.menuSettings.addAction(self.action_display_font)
         self.menuSettings.addAction(self.action_display_language)
         self.menuSettings.addAction(self.action_theme)
+        self.menuSettings.addSeparator()
+        self.menuSettings.addAction(self.action_pending_vouchers)
         self.toolBar.addAction(self.action_new_conversation)
         self.toolBar.addAction(self.action_accept_invitation)
         self.toolBar.addAction(self.actionDocumentation)
@@ -936,24 +948,32 @@ class Ui_MainWindow(object):
 #if QT_CONFIG(statustip)
         self.action_testme.setStatusTip(QCoreApplication.translate("MainWindow", u"Accept invitation received from contact", None))
 #endif // QT_CONFIG(statustip)
-        self.action_accept_invitation.setText(QCoreApplication.translate("MainWindow", u"Accept invitation", None))
-        self.action_accept_invitation.setIconText(QCoreApplication.translate("MainWindow", u" Accept invitation   ", None))
+        self.action_accept_invitation.setText(QCoreApplication.translate("MainWindow", u"Induct via voucher", None))
+        self.action_accept_invitation.setIconText(QCoreApplication.translate("MainWindow", u" Induct via voucher   ", None))
 #if QT_CONFIG(tooltip)
-        self.action_accept_invitation.setToolTip(QCoreApplication.translate("MainWindow", u"Accept invitation received from contact", None))
+        self.action_accept_invitation.setToolTip(QCoreApplication.translate("MainWindow", u"Induct a new contact using the voucher they handed you", None))
 #endif // QT_CONFIG(tooltip)
 #if QT_CONFIG(statustip)
-        self.action_accept_invitation.setStatusTip(QCoreApplication.translate("MainWindow", u"Accept invitation received from contact", None))
+        self.action_accept_invitation.setStatusTip(QCoreApplication.translate("MainWindow", u"Induct a new contact using the voucher they handed you", None))
 #endif // QT_CONFIG(statustip)
 #if QT_CONFIG(whatsthis)
         self.action_accept_invitation.setWhatsThis(QCoreApplication.translate("MainWindow", u"TODO-acceptinvitation", None))
 #endif // QT_CONFIG(whatsthis)
-        self.action_invite_contact.setText(QCoreApplication.translate("MainWindow", u"Invite contact", None))
-        self.action_invite_contact.setIconText(QCoreApplication.translate("MainWindow", u" Invite contact   ", None))
+        self.action_invite_contact.setText(QCoreApplication.translate("MainWindow", u"Generate voucher", None))
+        self.action_invite_contact.setIconText(QCoreApplication.translate("MainWindow", u" Generate voucher   ", None))
 #if QT_CONFIG(tooltip)
-        self.action_invite_contact.setToolTip(QCoreApplication.translate("MainWindow", u"Generate a new invitation that can be passed on to a contact", None))
+        self.action_invite_contact.setToolTip(QCoreApplication.translate("MainWindow", u"Generate a voucher to hand to a member who will induct you", None))
 #endif // QT_CONFIG(tooltip)
 #if QT_CONFIG(statustip)
-        self.action_invite_contact.setStatusTip(QCoreApplication.translate("MainWindow", u"Generate a new invitation that can be passed on to a contact", None))
+        self.action_invite_contact.setStatusTip(QCoreApplication.translate("MainWindow", u"Generate a voucher to hand to a member who will induct you", None))
+#endif // QT_CONFIG(statustip)
+        self.action_pending_vouchers.setText(QCoreApplication.translate("MainWindow", u"Pending vouchers", None))
+        self.action_pending_vouchers.setIconText(QCoreApplication.translate("MainWindow", u" Pending vouchers   ", None))
+#if QT_CONFIG(tooltip)
+        self.action_pending_vouchers.setToolTip(QCoreApplication.translate("MainWindow", u"Show and cancel vouchers that have not finished joining", None))
+#endif // QT_CONFIG(tooltip)
+#if QT_CONFIG(statustip)
+        self.action_pending_vouchers.setStatusTip(QCoreApplication.translate("MainWindow", u"Show and cancel vouchers that have not finished joining", None))
 #endif // QT_CONFIG(statustip)
         self.action_quit.setText(QCoreApplication.translate("MainWindow", u"Quit", None))
         self.action_quit.setIconText(QCoreApplication.translate("MainWindow", u" Quit       ", None))
@@ -1011,7 +1031,7 @@ class Ui_MainWindow(object):
 #if QT_CONFIG(tooltip)
         self.invite_contact_toolButton.setToolTip(QCoreApplication.translate("MainWindow", u"Generate an invitation code for this conversation", None))
 #endif // QT_CONFIG(tooltip)
-        self.invite_contact_toolButton.setText(QCoreApplication.translate("MainWindow", u"  Invite a contact", None))
+        self.invite_contact_toolButton.setText(QCoreApplication.translate("MainWindow", u"  Generate voucher", None))
 #if QT_CONFIG(tooltip)
         self.search_in_chat.setToolTip(QCoreApplication.translate("MainWindow", u"Search the messages for keywords", None))
 #endif // QT_CONFIG(tooltip)

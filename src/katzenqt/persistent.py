@@ -164,6 +164,38 @@ class WriteCapWAL(SQLModel, table=True):
         # select_by_bacap_uuid: ClassVar[sa.select()] = sa.select(cls).where(cls.id==uuid)
         return sa.select(cls).where(cls.id==uuid)
 
+class PendingVoucher(SQLModel, table=True):
+    """An in-flight Contact Voucher handshake, durable across restarts.
+
+    The voucher protocol is a fixed two-box exchange on a rendezvous stream
+    (VoucherStream) derived from the ``voucher`` token. We do not push it through
+    the chat MixWAL/PlaintextWAL loops; instead the dedicated helper in
+    ``voucher.py`` drives the handshake and advances ``step`` on this row before
+    each network step, so a crash mid-handshake can resume from the persisted
+    state rather than starting over.
+
+    A ``joiner`` row carries the secret key needed to open the inductor's sealed
+    reply; an ``inductor`` row carries only the public rendezvous material. The
+    salt itself never lands here: it is the daemon's to mint and Bob's to recover
+    transiently at open time, and is never persisted.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    role: str = Field(description='"joiner" or "inductor"')
+    conversation_id: int = Field(foreign_key="conversation.id", index=True,
+        description="joiner: the conversation whose write cap is the MessageStream; "
+                    "inductor: the group the joiner is being inducted into")
+    step: str = Field(description="minted/published/awaiting/sealed/done")
+    voucher: bytes = Field(description="the token; derives the VoucherStream")
+    voucher_write_cap: bytes | None = Field(None, min_length=168, max_length=168)
+    voucher_read_cap: bytes | None = Field(None, min_length=136, max_length=136)
+    # joiner only: needed to MKEM-open the inductor's sealed reply at box 1.
+    voucher_secret_key: bytes | None = Field(None)
+    # box 1 index, learned from the box 0 encrypt result; the inductor writes
+    # its sealed reply here and the joiner reads it back here.
+    box1_index: bytes | None = Field(None, min_length=104, max_length=104)
+    display_name: str | None = Field(None, description="joiner's own name, for the mint")
+    peer_name: str | None = Field(None, description="inductor's name for the joining peer")
+
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
