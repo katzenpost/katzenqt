@@ -47,11 +47,38 @@ def _spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path
     )
 
 
-def _expect_prefix(stdout: str, prefix: str) -> str:
-    for line in stdout.splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix):]
-    raise AssertionError(f"no prefix {prefix!r} in:\n{stdout}")
+def _combined(proc: subprocess.CompletedProcess) -> str:
+    return proc.stdout + proc.stderr
+
+
+def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+    """Find a logged line containing token; return the text after it. Results
+    go through logging (stderr) with a level/name prefix, so match by
+    substring."""
+    for line in _combined(proc).splitlines():
+        idx = line.find(token)
+        if idx != -1:
+            return line[idx + len(token):].strip()
+    raise AssertionError(
+        f"no line containing {token!r}:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+
+def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
+    """Establish mutual contact via the Contact Voucher handshake. Bob mints a
+    voucher over his stream, Alice inducts him (gaining his salt-mutated read
+    cap) and replies with her read cap, and Bob joins (gaining hers). Both can
+    then read each other, the bidirectional state the restart tests exercise."""
+    for state, name in ((alice_state, "alice"), (bob_state, "bob")):
+        create = _run_role(state, "create-conv", "demo", name, timeout=180.0)
+        assert create.returncode == 0, create.stdout + create.stderr
+    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    assert mint.returncode == 0, mint.stdout + mint.stderr
+    voucher = _expect_token(mint, "VOUCHER=")
+    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    assert induct.returncode == 0, induct.stdout + induct.stderr
+    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
+    assert joined.returncode == 0, joined.stdout + joined.stderr
 
 
 def _run_concurrent_session(
@@ -97,16 +124,16 @@ def _run_concurrent_session(
     bob_out = bob_out_path.read_text()
     bob_err = bob_err_path.read_text()
 
+    # chat-session emits its STEP_*/SESSION_DONE tokens through logging,
+    # which the spawned process writes to its stderr file.
+    alice_all = alice_out + alice_err
+    bob_all = bob_out + bob_err
+
     # Surface per-step progress into the pytest log so a failure in
     # either side is locatable.
-    for who, out in (("alice", alice_out), ("bob", bob_out)):
-        for line in out.splitlines():
-            if (
-                line.startswith("STEP_OK")
-                or line.startswith("STEP_FAIL")
-                or line.startswith("STEP_POLL")
-                or line == "SESSION_DONE"
-            ):
+    for who, text in (("alice", alice_all), ("bob", bob_all)):
+        for line in text.splitlines():
+            if any(t in line for t in ("STEP_OK", "STEP_FAIL", "STEP_POLL", "SESSION_DONE")):
                 print(f"[{round_label}][{who}] {line}")
 
     assert alice_proc.returncode == 0, (
@@ -117,11 +144,11 @@ def _run_concurrent_session(
         f"[{round_label}] bob chat-session failed rc={bob_proc.returncode}\n"
         f"stdout tail:\n{bob_out[-3000:]}\nstderr tail:\n{bob_err[-3000:]}"
     )
-    assert "SESSION_DONE" in alice_out, (
-        f"[{round_label}] alice did not emit SESSION_DONE:\n{alice_out[-3000:]}"
+    assert "SESSION_DONE" in alice_all, (
+        f"[{round_label}] alice did not emit SESSION_DONE:\n{alice_err[-3000:]}"
     )
-    assert "SESSION_DONE" in bob_out, (
-        f"[{round_label}] bob did not emit SESSION_DONE:\n{bob_out[-3000:]}"
+    assert "SESSION_DONE" in bob_all, (
+        f"[{round_label}] bob did not emit SESSION_DONE:\n{bob_err[-3000:]}"
     )
 
 
@@ -140,19 +167,8 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
 
-    # --- Setup: create conv on both sides and exchange invites.
-    create_a = _run_role(alice_state, "create-conv", "demo", "alice", timeout=180.0)
-    assert create_a.returncode == 0, create_a.stdout + create_a.stderr
-    invite_a = _expect_prefix(create_a.stdout, "INVITE=")
-
-    create_b = _run_role(bob_state, "create-conv", "demo", "bob", timeout=180.0)
-    assert create_b.returncode == 0, create_b.stdout + create_b.stderr
-    invite_b = _expect_prefix(create_b.stdout, "INVITE=")
-
-    accept_b = _run_role(bob_state, "accept-invite", "demo", "bob", "alice", invite_a, timeout=30.0)
-    assert accept_b.returncode == 0
-    accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
-    assert accept_a.returncode == 0
+    # --- Setup: establish mutual contact via the Contact Voucher handshake.
+    _bootstrap_voucher(alice_state, bob_state)
 
     # --- Round 1: concurrent session. Each side sends one and reads one;
     # a single bidirectional exchange is enough to prove the round works,
@@ -205,17 +221,12 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
 
-    create = _run_role(alice_state, "create-conv", "demo", "alice", timeout=180.0)
-    assert create.returncode == 0, create.stdout + create.stderr
-    invite = _expect_prefix(create.stdout, "INVITE=")
-
-    accept = _run_role(bob_state, "accept-invite", "demo", "bob", "alice", invite, timeout=30.0)
-    assert accept.returncode == 0
+    _bootstrap_voucher(alice_state, bob_state)
 
     send = _run_role(
         alice_state, "multi-send", "demo", "m1|m2", timeout=600.0,
     )
-    assert send.returncode == 0 and "SENT" in send.stdout, send.stdout + send.stderr
+    assert send.returncode == 0 and "SENT" in _combined(send), send.stdout + send.stderr
 
     # Bob restarts fresh and must receive both in order.
     for expected in ("m1", "m2"):
@@ -247,20 +258,7 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
     bob_state = tmp_path_factory.mktemp("bob") / "state"
     log_dir = tmp_path_factory.mktemp("latency_logs")
 
-    create_a = _run_role(alice_state, "create-conv", "demo", "alice", timeout=180.0)
-    assert create_a.returncode == 0, create_a.stdout + create_a.stderr
-    invite_a = _expect_prefix(create_a.stdout, "INVITE=")
-
-    create_b = _run_role(bob_state, "create-conv", "demo", "bob", timeout=180.0)
-    assert create_b.returncode == 0
-    invite_b = _expect_prefix(create_b.stdout, "INVITE=")
-
-    # Both sides accept each other's invite so each has an active peer
-    # reading the other's stream.
-    accept_b = _run_role(bob_state, "accept-invite", "demo", "bob", "alice", invite_a, timeout=30.0)
-    assert accept_b.returncode == 0
-    accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
-    assert accept_a.returncode == 0
+    _bootstrap_voucher(alice_state, bob_state)
 
     n = 3
     bob_steps = []
@@ -284,18 +282,20 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
         alice_proc.kill()
         raise
 
-    bob_out = (log_dir / "bob.out").read_text()
-    alice_out = (log_dir / "alice.out").read_text()
+    # STEP_OK tokens are logged to stderr (with a level/name prefix), so
+    # combine both streams and match by search rather than anchored match.
+    bob_out = (log_dir / "bob.out").read_text() + (log_dir / "bob.err").read_text()
+    alice_out = (log_dir / "alice.out").read_text() + (log_dir / "alice.err").read_text()
 
     import re
     send_ts = {}  # text -> ts
     for line in bob_out.splitlines():
-        m = re.match(r"^STEP_OK:\d+:SEND:(m\d+):ts=(\d+\.\d+)$", line)
+        m = re.search(r"STEP_OK:\d+:SEND:(m\d+):ts=(\d+\.\d+)", line)
         if m:
             send_ts[m.group(1)] = float(m.group(2))
     recv_ts = {}
     for line in alice_out.splitlines():
-        m = re.match(r"^STEP_OK:\d+:READ:(m\d+):ts=(\d+\.\d+)$", line)
+        m = re.search(r"STEP_OK:\d+:READ:(m\d+):ts=(\d+\.\d+)", line)
         if m:
             recv_ts[m.group(1)] = float(m.group(2))
 
@@ -339,31 +339,15 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
 
-    # Both create a conversation named "demo" on each side.
-    create_a = _run_role(alice_state, "create-conv", "demo", "alice", timeout=180.0)
-    assert create_a.returncode == 0, create_a.stdout + create_a.stderr
-    invite_a = _expect_prefix(create_a.stdout, "INVITE=")
-    print(f"[setup] alice invite: {invite_a[:32]}...")
-
-    create_b = _run_role(bob_state, "create-conv", "demo", "bob", timeout=180.0)
-    assert create_b.returncode == 0, create_b.stdout + create_b.stderr
-    invite_b = _expect_prefix(create_b.stdout, "INVITE=")
-    print(f"[setup] bob invite: {invite_b[:32]}...")
-
-    # Bob accepts Alice's invite (into his 'demo' conv).
-    accept_b = _run_role(bob_state, "accept-invite", "demo", "bob", "alice", invite_a, timeout=30.0)
-    assert accept_b.returncode == 0, accept_b.stdout + accept_b.stderr
-
-    # Alice accepts Bob's invite (into her 'demo' conv).
-    accept_a = _run_role(alice_state, "accept-invite", "demo", "alice", "bob", invite_b, timeout=30.0)
-    assert accept_a.returncode == 0, accept_a.stdout + accept_a.stderr
+    # Establish mutual contact via the Contact Voucher handshake.
+    _bootstrap_voucher(alice_state, bob_state)
 
     # Round 1: each sends one message, the other reads.
     s1a = _run_role(alice_state, "send", "demo", "hello-from-alice", timeout=300.0)
-    assert s1a.returncode == 0 and "SENT" in s1a.stdout, s1a.stdout + s1a.stderr
+    assert s1a.returncode == 0 and "SENT" in _combined(s1a), s1a.stdout + s1a.stderr
 
     s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", timeout=300.0)
-    assert s1b.returncode == 0 and "SENT" in s1b.stdout, s1b.stdout + s1b.stderr
+    assert s1b.returncode == 0 and "SENT" in _combined(s1b), s1b.stdout + s1b.stderr
 
     r1b = _run_role(bob_state, "read", "demo", "360", "hello-from-alice", timeout=400.0)
     assert r1b.returncode == 0, f"bob read1 failed:\n{r1b.stdout}\n{r1b.stderr}"
@@ -374,10 +358,10 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
 
     # Round 2 — restart scenario. Fresh subprocesses, state loaded from disk.
     s2a = _run_role(alice_state, "send", "demo", "round2-from-alice", timeout=300.0)
-    assert s2a.returncode == 0 and "SENT" in s2a.stdout, s2a.stdout + s2a.stderr
+    assert s2a.returncode == 0 and "SENT" in _combined(s2a), s2a.stdout + s2a.stderr
 
     s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", timeout=300.0)
-    assert s2b.returncode == 0 and "SENT" in s2b.stdout, s2b.stdout + s2b.stderr
+    assert s2b.returncode == 0 and "SENT" in _combined(s2b), s2b.stdout + s2b.stderr
 
     r2b = _run_role(bob_state, "read", "demo", "360", "round2-from-alice", timeout=400.0)
     print(f"[r2] bob read2 stdout tail:\n{r2b.stdout[-2000:]}\nstderr tail:\n{r2b.stderr[-3000:]}")
