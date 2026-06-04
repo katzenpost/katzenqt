@@ -43,7 +43,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: d70099591fc6065503338a62034bbc281f4762d3 # v0.0.77
+          ref: 22a85f22ad59bf4da2ac4970a601987f781cf034 # Contact Voucher daemon API (lockstep with thin_client CI)
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
@@ -97,6 +97,11 @@ jobs:
           uv venv .venv
           uv pip install -e '.[dev]' || uv pip install -e .
           uv pip install pytest pytest-asyncio pytest-cov hypothesis
+          # The voucher API is not yet on PyPI, so override the pinned
+          # katzenpost_thinclient with the voucher-capable build. Keep this
+          # commit in lockstep with the katzenpost daemon ref above; drop it
+          # once a release carrying the voucher API is published.
+          uv pip install "katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@55946e588903d777288aa462973fdb7222cf2286"
 
       - name: Run integration tests
         working-directory: katzenqt
