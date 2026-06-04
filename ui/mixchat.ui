@@ -2272,6 +2272,8 @@ QToolButton {
     <addaction name="action_display_font"/>
     <addaction name="action_display_language"/>
     <addaction name="action_theme"/>
+    <addaction name="separator"/>
+    <addaction name="action_pending_vouchers"/>
    </widget>
    <widget class="QMenu" name="menuMixnetStatus">
     <property name="enabled">
@@ -2824,7 +2826,6 @@ QToolButton {
    </attribute>
    <addaction name="action_new_conversation"/>
    <addaction name="action_accept_invitation"/>
-   <addaction name="action_pending_vouchers"/>
    <addaction name="actionDocumentation"/>
    <addaction name="action_quit"/>
    <addaction name="action_testme"/>
