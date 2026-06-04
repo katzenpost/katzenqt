@@ -2821,6 +2821,7 @@ QToolButton {
    </attribute>
    <addaction name="action_new_conversation"/>
    <addaction name="action_accept_invitation"/>
+   <addaction name="action_pending_vouchers"/>
    <addaction name="actionDocumentation"/>
    <addaction name="action_quit"/>
    <addaction name="action_testme"/>
@@ -2898,6 +2899,23 @@ QToolButton {
     <font>
      <bold>true</bold>
     </font>
+   </property>
+   <property name="menuRole">
+    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
+   </property>
+  </action>
+  <action name="action_pending_vouchers">
+   <property name="text">
+    <string>Pending vouchers</string>
+   </property>
+   <property name="iconText">
+    <string> Pending vouchers   </string>
+   </property>
+   <property name="toolTip">
+    <string>Show and cancel vouchers that have not finished joining</string>
+   </property>
+   <property name="statusTip">
+    <string>Show and cancel vouchers that have not finished joining</string>
    </property>
    <property name="menuRole">
     <enum>QAction::MenuRole::ApplicationSpecificRole</enum>

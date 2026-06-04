@@ -29,10 +29,10 @@ from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
-                               QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QStyle, QSystemTrayIcon,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QToolButton, QTreeView,
-                               QTreeWidgetItem)
+                               QTreeWidgetItem, QVBoxLayout)
 from sqlalchemy import func
 from sqlmodel import select
 
@@ -41,7 +41,10 @@ from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
 from base64 import b64decode, b64encode
-from .voucher import await_and_open, derive_read_and_induct, mint_and_publish
+from .voucher import (await_and_open, cancel_pending_voucher,
+                     conversation_is_joined, derive_read_and_induct,
+                     list_pending_vouchers, mint_and_publish,
+                     pending_voucher_for)
 from .katzen_util import create_task
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
@@ -173,6 +176,40 @@ def duration_time_ns():
     except AttributeError:
         # BSDs use SI seconds by default:
         return time.monotonic_ns()
+
+class PendingVouchersDialog(QDialog):
+    """Lists in-flight vouchers and lets the user abandon stale ones, e.g. a
+    voucher whose code was lost and whose join never completed."""
+    def __init__(self, parent, rows, on_cancel):
+        super().__init__(parent)
+        self.setWindowTitle("Pending vouchers")
+        self._on_cancel = on_cancel
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Vouchers that have not finished joining. Cancel one to abandon it; "
+            "you may then generate a fresh voucher for that conversation."
+        ))
+        self.list_widget = QListWidget()
+        for pv_id, conv_name, role, step in rows:
+            item = QListWidgetItem(f"{conv_name}   [{role}, {step}]")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, pv_id)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+        cancel_btn = QPushButton("Cancel selected voucher")
+        cancel_btn.clicked.connect(self._cancel_selected)
+        layout.addWidget(cancel_btn)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+    def _cancel_selected(self):
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+        self._on_cancel(item.data(QtCore.Qt.ItemDataRole.UserRole))
+        self.list_widget.takeItem(self.list_widget.row(item))
+
 
 class MainWindow(QMainWindow):
     def X_keyPressEvent(self, ev: "QEvent") -> None:
@@ -399,6 +436,7 @@ class MainWindow(QMainWindow):
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
         self.ui.action_invite_contact.triggered.connect(self.generate_voucher)
+        self.ui.action_pending_vouchers.triggered.connect(self.show_pending_vouchers)
         # Make the [Quit] toolbar actually quit:
         self.ui.action_quit.triggered.connect(lambda ev: self.close(ev,really_quit=True))
 
@@ -823,6 +861,32 @@ class MainWindow(QMainWindow):
             )
             return
 
+        conv_id = convo.conversation_id
+        # You can only join a conversation once. If the client is already a
+        # member, a second voucher would re-run the join and duplicate every
+        # member and message, so refuse outright.
+        if await self.iothread.run_in_io(conversation_is_joined(conv_id)):
+            QMessageBox.information(
+                self, APP_NAME,
+                "You are already a member of this conversation, so a voucher is "
+                "not needed. Vouchers are only for joining a conversation you are "
+                "not yet part of.",
+            )
+            return
+        # At most one voucher in flight per conversation. If one is pending,
+        # offer to abandon it and mint a fresh one (e.g. the code was lost).
+        pending_id = await self.iothread.run_in_io(pending_voucher_for(conv_id))
+        if pending_id is not None:
+            if QMessageBox.question(
+                self, APP_NAME,
+                "A voucher for this conversation is already pending. Cancel it "
+                "and generate a new one?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                defaultButton=QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
+
         display_name, ok = QInputDialog.getText(
             self, "Generate voucher",
             "Choose (your) name shown to the contact who inducts you:",
@@ -832,7 +896,7 @@ class MainWindow(QMainWindow):
 
         try:
             voucher = await self.iothread.run_in_io(
-                mint_and_publish(self.iothread.kp_client, convo.conversation_id, display_name)
+                mint_and_publish(self.iothread.kp_client, conv_id, display_name)
             )
         except Exception as e:
             QMessageBox.critical(
@@ -919,6 +983,17 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: QMessageBox.information(
             self, f"Inducted: {APP_NAME}", f"Inducted {name} into this conversation.",
         ))
+
+    @async_cb
+    async def show_pending_vouchers(self):
+        """Open the pending-voucher view so the user can abandon stale ones."""
+        rows = await self.iothread.run_in_io(list_pending_vouchers())
+        if not rows:
+            QMessageBox.information(self, APP_NAME, "There are no pending vouchers.")
+            return
+        def on_cancel(pv_id):
+            ensure_future(self.iothread.run_in_io(cancel_pending_voucher(pv_id)))
+        PendingVouchersDialog(self, rows, on_cancel).exec()
 
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):

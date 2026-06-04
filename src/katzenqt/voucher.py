@@ -22,6 +22,7 @@ import uuid
 from sqlmodel import select
 
 from . import models, persistent
+from .network import _SUBSTREAM_NAME_PREFIX
 
 logger = logging.getLogger("katzen.voucher")
 
@@ -31,6 +32,62 @@ STEP_INDUCTING = "inducting"
 STEP_DONE = "done"
 
 _INDEX_LEN = 104
+
+
+class AlreadyJoinedError(Exception):
+    """Minting a voucher for a conversation the client already belongs to would
+    re-run the join, duplicating members and messages."""
+
+
+class PendingVoucherExistsError(Exception):
+    """A conversation already has an unfinished voucher in flight; cancel it
+    before minting another."""
+
+
+async def conversation_is_joined(conversation_id: int) -> bool:
+    """True if the conversation already has a real member: an active peer that
+    is not a synthetic substream peer. The client's own peer is inactive, so it
+    does not count."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return False
+        return any(
+            p.active and not p.name.startswith(_SUBSTREAM_NAME_PREFIX)
+            for p in conv.peers
+        )
+
+
+async def pending_voucher_for(conversation_id: int, role: str = "joiner") -> "uuid.UUID | None":
+    """The id of an unfinished voucher for this conversation and role, if any."""
+    async with persistent.asession() as sess:
+        row = (await sess.exec(
+            select(persistent.PendingVoucher).where(
+                persistent.PendingVoucher.conversation_id == conversation_id,
+                persistent.PendingVoucher.role == role,
+            )
+        )).first()
+        return row.id if row is not None else None
+
+
+async def list_pending_vouchers() -> "list[tuple]":
+    """Every unfinished voucher as (id, conversation_name, role, step), for the
+    pending-voucher view."""
+    out = []
+    async with persistent.asession() as sess:
+        for pv in (await sess.exec(select(persistent.PendingVoucher))).all():
+            conv = await sess.get(persistent.Conversation, pv.conversation_id)
+            out.append((pv.id, conv.name if conv is not None else "?", pv.role, pv.step))
+    return out
+
+
+async def cancel_pending_voucher(pending_id) -> None:
+    """Delete a pending voucher row, abandoning that half-finished handshake."""
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.PendingVoucher, pending_id)
+        if row is not None:
+            await sess.delete(row)
+            await sess.commit()
 
 
 async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, payload: bytes) -> bytes:
@@ -87,7 +144,20 @@ def _add_peer(sess, conversation, name: str, read_cap: bytes) -> None:
 
 async def mint_and_publish(connection, conversation_id: int, display_name: str) -> bytes:
     """Joiner: mint a Voucher over this conversation's MessageStream, publish the
-    payload to VoucherStream box 0, and return the Voucher to share out of band."""
+    payload to VoucherStream box 0, and return the Voucher to share out of band.
+
+    Refuses to mint for a conversation the client already belongs to, or one that
+    already has a voucher in flight: joining twice duplicates members and
+    messages. These checks run before any network IO, so a caller can pass a
+    dead connection and still rely on them."""
+    if await conversation_is_joined(conversation_id):
+        raise AlreadyJoinedError(
+            f"already a member of conversation {conversation_id}; no voucher needed"
+        )
+    if await pending_voucher_for(conversation_id) is not None:
+        raise PendingVoucherExistsError(
+            f"conversation {conversation_id} already has a pending voucher"
+        )
     async with persistent.asession() as sess:
         wcw = await _conversation_write_cap(sess, conversation_id)
         message_write_cap = wcw.write_cap
