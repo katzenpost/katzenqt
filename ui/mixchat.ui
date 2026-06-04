@@ -29,9 +29,12 @@
    <bool>true</bool>
   </property>
   <property name="styleSheet">
-   <string notr="true">QLineEdit:focus {
+   <string notr="true">QLineEdit:focus, QPlainTextEdit:focus {
   /* override background on focused input to make it abundantly clear where the cursor is */
   background: rgb(173, 213, 251) !important;
+  /* that cue is a fixed light colour, so force dark text or the themed
+     (white, in dark mode) text is unreadable on it */
+  color: rgb(0, 0, 0);
 }
 
 QToolBar :hover {
