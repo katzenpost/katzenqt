@@ -47,7 +47,7 @@ TreeView {
        id: msgReadTimer
        interval: 1500
        repeat: true
-       running: typeof ctx.first_unread !== 'undefined' && ctx.first_unread < rows
+       running: typeof ctx.first_unread !== 'undefined' && ctx.first_unread < chatTreeView.rows
 
        // TODO shouldn't say that our own messages are "unread"
 
@@ -61,30 +61,30 @@ TreeView {
          // have been in focus for more than one interval
 
          // and then we want to increase first_unread
-         for (var i = topRow; i <= bottomRow; i++) {
+         for (var i = chatTreeView.topRow; i <= chatTreeView.bottomRow; i++) {
            if (first_unread <= i) {
-           if (unread_map[i] && unread_map[i] == msgReadTimer_generation) {
+           if (chatTreeView.unread_map[i] && chatTreeView.unread_map[i] == chatTreeView.msgReadTimer_generation) {
              // they were in view last time and they still are, so we have
              // "read" this message. we mark it as read, but we can't
              // bump the split buffer yet
-             read_map[i] = 1
+             chatTreeView.read_map[i] = 1
              cull_read_map = true
              //print("read_map[i]", i, read_map[i])
            } // unread_map[i] && unread_map[i] == msgReadTimer_generation
            //print("unread_map", i, unread_map[i], first_unread, msgReadTimer_generation)
-           unread_map[i] = msgReadTimer_generation + 1;
+           chatTreeView.unread_map[i] = chatTreeView.msgReadTimer_generation + 1;
            } // first_unread <= i
          }
          if (cull_read_map) {
            //print("first_unread was", first_unread)
-           while (read_map[first_unread]) {
-             delete read_map[first_unread]
-             delete unread_map[first_unread]
+           while (chatTreeView.read_map[first_unread]) {
+             delete chatTreeView.read_map[first_unread]
+             delete chatTreeView.unread_map[first_unread]
              first_unread++
            } // while read_map[first_unread]
            //print("first_unread is now", first_unread)
          } // if cull_read_map
-         msgReadTimer_generation++
+         chatTreeView.msgReadTimer_generation++
          if (first_unread && ctx.first_unread != first_unread) {
            //ctx.insert("first_unread", first_unread)
            print("updating first_unread from",ctx.first_unread,"to",first_unread)
@@ -173,7 +173,7 @@ TreeView {
           function onModelChanged() {
             //console.log("model changed", vscrollbar.position, ctx.conversation_scroll, ctx.first_unread, rows)
 	    // if there's a new message and bottomRow would still be in view, we scroll to the bottom:
-            if (rows && bottomRow + (bottomRow - topRow)-1 > rows-1) {
+            if (chatTreeView.rows && chatTreeView.bottomRow + (chatTreeView.bottomRow - chatTreeView.topRow)-1 > chatTreeView.rows-1) {
 	      chatTreeView.contentY = chatTreeView.contentHeight
 	      // for some absurd reason scrolling past bottomRow+1 in one go positions the view at the beginning, so we do increments:
 	      //while (bottomRow < rows - 1) { positionViewAtCell(Qt.point(0, bottomRow+1), TableView.AlignLeft | TableView.AlignBottom) }
