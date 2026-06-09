@@ -93,6 +93,7 @@ from .. import models, network, persistent
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
 from ..tally import schema as tally_schema
+from ..tally import send as tally_send
 from ..tally import sync as tally_sync
 from ..tally.controller import INSTANCE as tally_instance
 from ..voucher import await_and_open, derive_read_and_induct, mint_and_publish
@@ -766,25 +767,36 @@ async def _action_tally_create(args):
     return rc
 
 
-async def _await_survey(survey_id: bytes, timeout_s: float) -> bool:
-    """Run the network loops until the survey's state has been received."""
-    connection, bg = await _connect_and_start()
-    try:
-        await network.signal_readables_to_mixwal()
-        deadline = asyncio.get_event_loop().time() + timeout_s
-        while asyncio.get_event_loop().time() < deadline:
-            async with persistent.asession() as sess:
-                if await sess.get(persistent.TallyState, survey_id) is not None:
-                    return True
-            await asyncio.sleep(0.5)
-        return False
-    finally:
-        await _shutdown(bg, connection)
+async def _wait_for_survey(survey_id: bytes, deadline: float) -> bool:
+    while asyncio.get_event_loop().time() < deadline:
+        async with persistent.asession() as sess:
+            if await sess.get(persistent.TallyState, survey_id) is not None:
+                return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def _wait_for_sent(final_pwal_id, deadline: float) -> bool:
+    while asyncio.get_event_loop().time() < deadline:
+        async with persistent.asession() as sess:
+            hit = (await sess.exec(
+                select(persistent.SentLog).where(persistent.SentLog.id == final_pwal_id)
+            )).first()
+            if hit is not None:
+                return True
+        await asyncio.sleep(0.25)
+    return False
 
 
 async def _action_tally_vote(args):
-    """Wait for the survey to arrive, record our own vote, and broadcast it.
-    Logs ``VOTED``."""
+    """Wait for the survey to arrive, record our own vote, and broadcast it,
+    all on a single connection. Logs ``VOTED``.
+
+    The whole sequence must share one ``_connect_and_start`` cycle: a
+    ``_shutdown`` sets the network module's global quit event, which would
+    stop the loops of any subsequent connection in this process, so we cannot
+    await the survey on one connection and send the vote on another.
+    """
     survey_id = bytes.fromhex(args.survey)
     try:
         choice = _parse_slot_votes(args.slot)
@@ -792,29 +804,43 @@ async def _action_tally_vote(args):
         logger.error("%s", exc)
         return 2
 
-    if not await _await_survey(survey_id, args.timeout):
-        logger.error("survey %s not received within %.0fs", survey_id.hex(), args.timeout)
-        return 1
-
-    async with persistent.asession() as sess:
-        convo = await _conversation_by_name(sess, args.conv_name)
-        if convo is None:
-            logger.error("conversation %r not found", args.conv_name)
-            return 2
-        try:
-            applied = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
-        except ValueError as exc:
-            logger.error("invalid vote: %s", exc)
-            return 2
-        if not applied:
-            logger.error("could not apply vote to survey %s", survey_id.hex())
+    connection, bg = await _connect_and_start()
+    try:
+        await network.signal_readables_to_mixwal()
+        if not await _wait_for_survey(
+            survey_id, asyncio.get_event_loop().time() + args.timeout,
+        ):
+            logger.error("survey %s not received within %.0fs", survey_id.hex(), args.timeout)
             return 1
-        await sess.commit()
 
-    rc = await _send_one_gcm(args.conv_name, tally_events.build_vote(survey_id, choice))
-    if rc == 0:
-        logger.info("VOTED")
-    return rc
+        async with persistent.asession() as sess:
+            convo = await _conversation_by_name(sess, args.conv_name)
+            if convo is None:
+                logger.error("conversation %r not found", args.conv_name)
+                return 2
+            try:
+                applied = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
+            except ValueError as exc:
+                logger.error("invalid vote: %s", exc)
+                return 2
+            if not applied:
+                logger.error("could not apply vote to survey %s", survey_id.hex())
+                return 1
+            final_pwal_id = await tally_send.stage_outbound(
+                sess, convo, tally_events.build_vote(survey_id, choice),
+            )
+            await sess.commit()
+
+        await network.check_for_new()
+        if await _wait_for_sent(
+            final_pwal_id, asyncio.get_event_loop().time() + max(120.0, args.timeout),
+        ):
+            logger.info("VOTED")
+            return 0
+        logger.error("vote send timed out for survey %s", survey_id.hex())
+        return 3
+    finally:
+        await _shutdown(bg, connection)
 
 
 async def _action_tally_result(args):
