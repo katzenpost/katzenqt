@@ -25,7 +25,7 @@ import cbor2
 
 from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
-from . import models, persistent
+from . import conversation_handlers, models, persistent
 from sqlmodel import select
 
 logger = logging.getLogger("katzen.network")
@@ -383,6 +383,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         sess, mw.bacap_stream, mw.current_message_index[:8],
     )
     convlog_added = False
+    signal_send = False
     notify_conv_id = cp.conversation.id
 
     if assembled is not None and assembled[0] == "F":
@@ -404,8 +405,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         # piece, and retire this synthetic peer.
         parent_id = int(cp.name.split(":")[2])
         parent_peer = await sess.get(persistent.ConversationPeer, parent_id)
-        cl = persistent.ConversationLog.append_from(parent_peer, full_payload)
-        sess.add(cl)
+        added, sig = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
+        signal_send = signal_send or sig
         parent_i = (await sess.exec(
             select(persistent.ReceivedPiece).where(
                 persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
@@ -418,13 +419,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         cp.active = False
         sess.add(cp)
         notify_conv_id = parent_peer.conversation.id
-        convlog_added = True
+        convlog_added = added
       else:
-        # Top-level F (single-box or contiguous on the parent stream):
-        # commit directly into this peer's log.
-        cl = persistent.ConversationLog.append_from(cp, full_payload)
-        sess.add(cl)
-        convlog_added = True
+        # Top-level F (single-box or contiguous on the parent stream): route
+        # by message type, chat into the log, tally into the controller.
+        convlog_added, sig = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
+        signal_send = signal_send or sig
       for rp in chain:
         await sess.delete(rp)
 
@@ -456,6 +456,11 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
+
+  if signal_send:
+    # A tally sync request staged a reply on the outgoing stream; poke the
+    # send loop now that the receive transaction has committed.
+    await check_for_new()
 
   draining_right_now.discard(bacap_uuid)
   __resend_queue.discard(bacap_uuid)  # this should be .remove(), but why is it empty?

@@ -509,3 +509,17 @@ class ConversationLog(SQLModel, table=True):
                 .scalar_subquery()),
         )
 
+
+class TallyState(SQLModel, table=True):
+    """The convergent state of one tally survey, as a single CRDT blob.
+
+    One row per survey, overwritten on every mutation (the blob is the whole
+    pycrdt ``Doc`` as one update). On startup the rows are loaded back into
+    in-memory Docs so surveys survive a restart and the sync path has prior
+    state to diff against. The survey id is the BACAP-derived identifier minted
+    at creation; ``conversation_id`` ties the survey to the group it lives in.
+    """
+    survey_id: bytes = Field(primary_key=True, min_length=1)
+    conversation_id: int = Field(foreign_key="conversation.id", index=True)
+    doc_state: bytes
+
