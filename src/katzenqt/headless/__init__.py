@@ -113,21 +113,47 @@ async def session(
 def _configure_logging() -> None:
     """Send katzenqt's logs to stderr for headless runs.
 
-    The headless CLI has no GUI to surface status, so diagnostics and
-    results go through the logging framework. KQT_LOG_LEVEL overrides the
-    default INFO level.
+    Quiet by default: only each verb's result tokens (``CREATED``, ``VOUCHER=``,
+    ``SENT``, ``RECV=``, ``TALLY=``, ..., logged on ``katzen.headless``) and any
+    warnings/errors are shown. Set ``KQT_LOG_LEVEL`` (e.g. ``INFO`` or
+    ``DEBUG``) for the full verbose stream.
+
+    The SQLAlchemy statement echo is turned off on the engines in :func:`cli`,
+    because it logs through a per-engine logger that ignores logging levels and
+    so cannot be hushed here.
     """
-    level = os.environ.get("KQT_LOG_LEVEL", "INFO").upper()
-    # force=True so we own the root handler and level even though importing
-    # persistent.py (engines created with echo=True) has already touched the
-    # logging machinery; without it basicConfig would no-op and our INFO
-    # records would be filtered by the default WARNING root level.
+    override = os.environ.get("KQT_LOG_LEVEL")
+    if override:
+        logging.basicConfig(
+            stream=sys.stderr,
+            level=getattr(logging, override.upper(), logging.INFO),
+            format="%(levelname)s %(name)s: %(message)s",
+            force=True,
+        )
+        return
+
+    # Default: quiet. force=True so we own the root handler even though
+    # importing persistent.py already touched logging.
     logging.basicConfig(
         stream=sys.stderr,
-        level=getattr(logging, level, logging.INFO),
+        level=logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
         force=True,
     )
+    # Several libraries (notably the thin client) force their own logger to
+    # DEBUG, so their records reach the root handler regardless of the root
+    # logger's level. Filter at the *handler* so only WARNING+ gets through.
+    for h in logging.root.handlers:
+        h.setLevel(logging.WARNING)
+    # Emit the verbs' result tokens bare (no level/name prefix) on their own
+    # handler, and stop them propagating to the root handler, so the quiet
+    # output is purely the query result.
+    results = logging.getLogger("katzen.headless")
+    results.setLevel(logging.INFO)
+    results.propagate = False
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    results.addHandler(handler)
 
 
 def cli(argv: "list[str] | None" = None) -> int:
@@ -139,6 +165,13 @@ def cli(argv: "list[str] | None" = None) -> int:
     chosen action.
     """
     args = _actions._build_parser().parse_args(argv)
+    if not os.environ.get("KQT_LOG_LEVEL"):
+        # The engines are created with echo=True, which logs every SQL
+        # statement through a per-engine logger that ignores logging levels.
+        # For the quiet default, turn it off at the source (before
+        # init_and_migrate, so its statements stay quiet too).
+        persistent._engine.echo = False
+        persistent._engine_sync.echo = False
     # After init_and_migrate: Alembic's env.py runs fileConfig() from
     # alembic.ini, which resets the root logger to WARNING. Configuring
     # afterwards lets our level stand.
