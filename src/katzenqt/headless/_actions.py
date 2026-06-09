@@ -78,7 +78,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import shutil
+import tempfile
 import time
 import uuid
 from base64 import b64decode, b64encode
@@ -101,16 +103,27 @@ from ..voucher import await_and_open, derive_read_and_induct, mint_and_publish
 logger = logging.getLogger("katzen.headless")
 
 
+# The explicit thinclient.toml path the connecting verbs dial. It is set by
+# `cli()` from the required `--config` / `--address` arguments before any action
+# runs, so there is no implicit search of the filesystem.
+_CONNECTION_CONFIG: "str | None" = None
+
+
+def set_connection_config(path: "str | None") -> None:
+    """Record the thinclient.toml path that connecting verbs will use."""
+    global _CONNECTION_CONFIG
+    _CONNECTION_CONFIG = path
+
+
 async def _connect_and_start():
     """Connect to kpclientd and kick the background threads running.
 
-    Returns ``(connection, background_task)``. The caller is
-    responsible for cancelling the background task on exit. The
-    thinclient config path is resolved by
-    :func:`katzenqt.network.resolve_thinclient_config`, which
-    honours ``$KATZENQT_THINCLIENT_CONFIG``.
+    Returns ``(connection, background_task)``. The caller is responsible for
+    cancelling the background task on exit. The connection is dialled using the
+    config recorded by :func:`set_connection_config` (the verb's explicit
+    ``--config`` / ``--address``); there is no filesystem search.
     """
-    connection = await network.reconnect()
+    connection = await network.reconnect(_CONNECTION_CONFIG)
     bg = asyncio.create_task(network.start_background_threads(connection))
     return connection, bg
 
@@ -870,6 +883,49 @@ async def _action_tally_result(args):
         await _shutdown(bg, connection)
 
 
+def _connection_parser() -> argparse.ArgumentParser:
+    """A shared parent parser carrying the explicit kpclientd connection.
+
+    Every verb that talks to the daemon requires exactly one of a
+    ``thinclient.toml`` (``--config``) or a dial address (``--address``, with an
+    optional ``--network``). There is no implicit search of the filesystem.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument(
+        "--config", metavar="THINCLIENT_TOML",
+        help="path to a thinclient.toml describing the kpclientd connection",
+    )
+    g.add_argument(
+        "--address", metavar="ADDR",
+        help="kpclientd dial address, e.g. 127.0.0.1:64331 (tcp) or @katzenpost (unix)",
+    )
+    p.add_argument(
+        "--network", choices=["tcp", "unix"], default="tcp",
+        help="dial transport for --address (default: tcp)",
+    )
+    return p
+
+
+def resolve_connection_config(args) -> "tuple[str, str | None]":
+    """Turn the parsed connection args into a thinclient.toml path.
+
+    Returns ``(config_path, temp_path)``. When ``--address`` was given the
+    config is synthesised into a temporary file whose path is returned as
+    ``temp_path`` for the caller to delete; with ``--config`` it is ``None``.
+    """
+    if args.config:
+        return args.config, None
+    if args.network == "unix":
+        body = f'[Dial]\n  [Dial.Unix]\n    Address = "{args.address}"\n'
+    else:
+        body = f'[Dial]\n  [Dial.Tcp]\n    Network = "tcp"\n    Address = "{args.address}"\n'
+    fd, path = tempfile.mkstemp(prefix="kqt-thinclient-", suffix=".toml")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    return path, path
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="katzenqt-headless",
@@ -877,43 +933,47 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="action", required=True)
 
-    p_create = sub.add_parser("create-conv")
+    # Every verb except `info` dials kpclientd and so inherits the explicit
+    # connection arguments via this parent parser.
+    conn = _connection_parser()
+
+    p_create = sub.add_parser("create-conv", parents=[conn])
     p_create.add_argument("conv_name")
     p_create.add_argument("own_display")
     p_create.set_defaults(func=_action_create_conv)
 
-    p_mint = sub.add_parser("voucher-mint")
+    p_mint = sub.add_parser("voucher-mint", parents=[conn])
     p_mint.add_argument("conv_name")
     p_mint.add_argument("display_name")
     p_mint.set_defaults(func=_action_voucher_mint)
 
-    p_induct = sub.add_parser("voucher-induct")
+    p_induct = sub.add_parser("voucher-induct", parents=[conn])
     p_induct.add_argument("conv_name")
     p_induct.add_argument("peer_name")
     p_induct.add_argument("voucher_b64")
     p_induct.set_defaults(func=_action_voucher_induct)
 
-    p_await = sub.add_parser("voucher-await")
+    p_await = sub.add_parser("voucher-await", parents=[conn])
     p_await.add_argument("conv_name")
     p_await.set_defaults(func=_action_voucher_await)
 
-    p_send = sub.add_parser("send")
+    p_send = sub.add_parser("send", parents=[conn])
     p_send.add_argument("conv_name")
     p_send.add_argument("text")
     p_send.set_defaults(func=_action_send)
 
-    p_multi = sub.add_parser("multi-send")
+    p_multi = sub.add_parser("multi-send", parents=[conn])
     p_multi.add_argument("conv_name")
     p_multi.add_argument("texts", help="pipe-separated list of texts to queue")
     p_multi.set_defaults(func=_action_multi_send)
 
-    p_read = sub.add_parser("read")
+    p_read = sub.add_parser("read", parents=[conn])
     p_read.add_argument("conv_name")
     p_read.add_argument("timeout_s", type=float)
     p_read.add_argument("expected_text", nargs="?", default=None)
     p_read.set_defaults(func=_action_read)
 
-    p_sess = sub.add_parser("chat-session")
+    p_sess = sub.add_parser("chat-session", parents=[conn])
     p_sess.add_argument("conv_name")
     p_sess.add_argument(
         "steps", nargs="+",
@@ -921,14 +981,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_sess.set_defaults(func=_action_chat_session)
 
-    p_send_file = sub.add_parser("send-file")
+    p_send_file = sub.add_parser("send-file", parents=[conn])
     p_send_file.add_argument("conv_name")
     p_send_file.add_argument("path", help="path to the file to send")
     p_send_file.add_argument("--basename", default=None)
     p_send_file.add_argument("--filetype", default=None)
     p_send_file.set_defaults(func=_action_send_file)
 
-    p_read_file = sub.add_parser("read-file")
+    p_read_file = sub.add_parser("read-file", parents=[conn])
     p_read_file.add_argument("conv_name")
     p_read_file.add_argument(
         "--to-dir", dest="to_dir", required=True,
@@ -951,7 +1011,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_info.set_defaults(func=_action_info)
 
-    p_tally_create = sub.add_parser("tally-create")
+    p_tally_create = sub.add_parser("tally-create", parents=[conn])
     p_tally_create.add_argument("conv_name")
     p_tally_create.add_argument("topic")
     p_tally_create.add_argument(
@@ -963,7 +1023,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_tally_create.set_defaults(func=_action_tally_create)
 
-    p_tally_vote = sub.add_parser("tally-vote")
+    p_tally_vote = sub.add_parser("tally-vote", parents=[conn])
     p_tally_vote.add_argument("conv_name")
     p_tally_vote.add_argument("--survey", required=True, help="survey id in hex")
     p_tally_vote.add_argument(
@@ -973,7 +1033,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tally_vote.add_argument("--timeout", type=float, default=600.0)
     p_tally_vote.set_defaults(func=_action_tally_vote)
 
-    p_tally_result = sub.add_parser("tally-result")
+    p_tally_result = sub.add_parser("tally-result", parents=[conn])
     p_tally_result.add_argument("conv_name")
     p_tally_result.add_argument("--survey", required=True, help="survey id in hex")
     p_tally_result.add_argument("--expect-voters", type=int, default=None, dest="expect_voters")

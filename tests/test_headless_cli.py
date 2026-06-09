@@ -51,7 +51,7 @@ def test_actions_module_exists_with_parser_builder():
 
 def test_cli_dispatches_read_against_missing_conv(monkeypatch, capsys):
     monkeypatch.setattr(persistent, "init_and_migrate", lambda: None)
-    rc = headless.cli(["read", "no-such-conv", "0.1"])
+    rc = headless.cli(["read", "no-such-conv", "0.1", "--address", "127.0.0.1:64331"])
     captured = capsys.readouterr()
     assert rc == 2
     assert "conversation 'no-such-conv' not found" in captured.out + captured.err
@@ -63,9 +63,9 @@ def test_main_is_thin_shim_for_cli(monkeypatch, capsys):
     is now a thin shim. (Output is compared by content, not byte-for-byte,
     since the logged stream carries per-record timestamps.)"""
     monkeypatch.setattr(persistent, "init_and_migrate", lambda: None)
-    rc1 = headless.cli(["read", "ghost", "0.1"])
+    rc1 = headless.cli(["read", "ghost", "0.1", "--address", "127.0.0.1:64331"])
     c1 = capsys.readouterr()
-    rc2 = integration_runner.main(["read", "ghost", "0.1"])
+    rc2 = integration_runner.main(["read", "ghost", "0.1", "--address", "127.0.0.1:64331"])
     c2 = capsys.readouterr()
     assert rc1 == rc2 == 2
     msg = "conversation 'ghost' not found"

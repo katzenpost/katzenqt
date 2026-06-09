@@ -145,6 +145,14 @@ def cli(argv: "list[str] | None" = None) -> int:
     persistent.init_and_migrate()
     _configure_logging()
 
+    # Connecting verbs carry the explicit `--config` / `--address`; resolve them
+    # to a thinclient.toml path now and hand it to the actions. `info` has no
+    # such arguments and needs no daemon.
+    temp_config = None
+    if hasattr(args, "config"):
+        config_path, temp_config = _actions.resolve_connection_config(args)
+        _actions.set_connection_config(config_path)
+
     loop = asyncio.new_event_loop()
     try:
         loop.add_signal_handler(signal.SIGTERM, loop.stop)
@@ -154,6 +162,11 @@ def cli(argv: "list[str] | None" = None) -> int:
         return loop.run_until_complete(args.func(args))
     finally:
         loop.close()
+        if temp_config is not None:
+            try:
+                os.remove(temp_config)
+            except OSError:
+                pass
 
 
 __all__ = [

@@ -80,8 +80,14 @@ handshake (`voucher-mint`, `voucher-induct`, `voucher-await`), messaging
 state-file summary (`info`), and the tally/voting protocol (`tally-create`,
 `tally-vote`, `tally-result`). Append `--help` to any verb for its arguments.
 
-Two things to know:
+Three things to know:
 
+- **The connection is explicit; there is no filesystem search.** Every verb that
+  talks to the daemon requires exactly one of `--config <thinclient.toml>` or
+  `--address <addr>` (with an optional `--network {tcp,unix}`, default `tcp`).
+  Use `--address 127.0.0.1:64331` for a docker mixnet, or
+  `--address @katzenpost --network unix` for a unix-socket daemon. `info` is the
+  only verb that needs no daemon, and so takes no connection argument.
 - **Each identity is a distinct `KQT_STATE`.** The state file is chosen once, at
   import, from `KQT_STATE` (see "Where is my data stored?"), so run separate
   identities as separate processes, each with its own `KQT_STATE`.
@@ -91,19 +97,24 @@ Two things to know:
   match them by substring, not `startswith`.
 
 Example, a two-identity tally over a running mixnet (see the docker section of
-the main katzenpost repo for bringing one up):
+the main katzenpost repo for bringing one up). The mixnet's `kpclientd` listens
+on TCP `127.0.0.1:64331`, so we pass that as `--address`:
 
 ```shell
-KQT_STATE=alice .venv/bin/katzenqt-headless create-conv demo alice
-KQT_STATE=bob   .venv/bin/katzenqt-headless create-conv demo bob
+A="--address 127.0.0.1:64331"
+KQT_STATE=alice .venv/bin/katzenqt-headless create-conv demo alice $A
+KQT_STATE=bob   .venv/bin/katzenqt-headless create-conv demo bob   $A
 # ... the voucher handshake makes the two members of each other ...
 KQT_STATE=alice .venv/bin/katzenqt-headless tally-create demo "lunch?" \
-    --mode approval --slot A --slot B --slot C      # prints TALLY_CREATED=<hex>
+    --mode approval --slot A --slot B --slot C $A    # prints TALLY_CREATED=<hex>
 KQT_STATE=bob   .venv/bin/katzenqt-headless tally-vote demo --survey <hex> \
-    --slot s0=yes --slot s2=yes                     # prints VOTED
+    --slot s0=yes --slot s2=yes $A                   # prints VOTED
 KQT_STATE=alice .venv/bin/katzenqt-headless tally-result demo --survey <hex> \
-    --expect-voters 2                               # prints TALLY={...}
+    --expect-voters 2 $A                             # prints TALLY={...}
 ```
+
+(The Python API surface, `connect` / `session`, takes the config path as an
+explicit argument too.)
 
 A single process may run only one connect/shutdown cycle, so a verb that must
 receive and then send (such as `tally-vote`, which awaits the survey before
