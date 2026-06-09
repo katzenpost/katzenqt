@@ -161,6 +161,15 @@ def cli(argv: "list[str] | None" = None) -> int:
     try:
         return loop.run_until_complete(args.func(args))
     finally:
+        # Cancel any stragglers (fire-and-forget read/send loops) and let them
+        # unwind while the loop is still running, so we do not close it under an
+        # in-flight thin-client call ("Event loop is closed" / "Task was
+        # destroyed but it is pending").
+        stragglers = asyncio.all_tasks(loop)
+        for task in stragglers:
+            task.cancel()
+        if stragglers:
+            loop.run_until_complete(asyncio.gather(*stragglers, return_exceptions=True))
         loop.close()
         if temp_config is not None:
             try:

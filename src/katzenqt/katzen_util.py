@@ -4,8 +4,10 @@ import traceback
 def create_task(coro):
     """Wrapper around asyncio.create_task() that logs exceptions"""
     def throw_if_needed(task):
+        if task.cancelled():
+            return  # cancellation is expected on shutdown, not an error
         try:
-            result = task.result()
+            task.result()
         except Exception:
             print(f"create_task {task.exception()}")
             traceback.print_exc()
