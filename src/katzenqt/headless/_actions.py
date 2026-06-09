@@ -90,6 +90,11 @@ from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
 from .. import models, network, persistent
+from ..tally import engine as tally_engine
+from ..tally import events as tally_events
+from ..tally import schema as tally_schema
+from ..tally import sync as tally_sync
+from ..tally.controller import INSTANCE as tally_instance
 from ..voucher import await_and_open, derive_read_and_induct, mint_and_publish
 
 logger = logging.getLogger("katzen.headless")
@@ -705,6 +710,140 @@ async def _action_info(args) -> int:
     return 0
 
 
+def _parse_slot_votes(items: "list[str]") -> "dict[str, str]":
+    """Turn ``["s0=yes", "s1=no"]`` into ``{"s0": "yes", "s1": "no"}``."""
+    choice = {}
+    for item in items:
+        slot, sep, avail = item.partition("=")
+        if not sep:
+            raise ValueError(f"slot vote {item!r} must be SLOT_ID=availability")
+        choice[slot] = avail
+    return choice
+
+
+def _tally_json(result: "tally_engine.TallyResult") -> str:
+    return json.dumps({
+        "survey_id": result.survey_id.hex(),
+        "mode": result.mode.value,
+        "status": result.status,
+        "n_voters": result.n_voters,
+        "slots": [
+            {"slot_id": s.slot_id, "text": s.text, "yes": s.yes, "maybe": s.maybe, "no": s.no}
+            for s in result.slots
+        ],
+    })
+
+
+async def _conversation_by_name(sess, conv_name: str):
+    return (await sess.exec(
+        select(persistent.Conversation).where(persistent.Conversation.name == conv_name)
+    )).first()
+
+
+async def _action_tally_create(args):
+    """Create a survey, persist its initial state, and broadcast it. Logs
+    ``TALLY_CREATED=<survey_id hex>``."""
+    try:
+        mode = tally_schema.Mode(args.mode)
+    except ValueError:
+        logger.error("unknown mode %r", args.mode)
+        return 2
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo = await _conversation_by_name(sess, args.conv_name)
+        if convo is None:
+            logger.error("conversation %r not found", args.conv_name)
+            return 2
+        doc = await tally_instance.create_local(
+            sess, convo, survey_id, args.topic, mode, args.slot,
+        )
+        blob = tally_sync.full_state(doc)
+        await sess.commit()
+
+    rc = await _send_one_gcm(args.conv_name, tally_events.build_create(survey_id, blob))
+    if rc == 0:
+        logger.info("TALLY_CREATED=%s", survey_id.hex())
+    return rc
+
+
+async def _await_survey(survey_id: bytes, timeout_s: float) -> bool:
+    """Run the network loops until the survey's state has been received."""
+    connection, bg = await _connect_and_start()
+    try:
+        await network.signal_readables_to_mixwal()
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            async with persistent.asession() as sess:
+                if await sess.get(persistent.TallyState, survey_id) is not None:
+                    return True
+            await asyncio.sleep(0.5)
+        return False
+    finally:
+        await _shutdown(bg, connection)
+
+
+async def _action_tally_vote(args):
+    """Wait for the survey to arrive, record our own vote, and broadcast it.
+    Logs ``VOTED``."""
+    survey_id = bytes.fromhex(args.survey)
+    try:
+        choice = _parse_slot_votes(args.slot)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
+
+    if not await _await_survey(survey_id, args.timeout):
+        logger.error("survey %s not received within %.0fs", survey_id.hex(), args.timeout)
+        return 1
+
+    async with persistent.asession() as sess:
+        convo = await _conversation_by_name(sess, args.conv_name)
+        if convo is None:
+            logger.error("conversation %r not found", args.conv_name)
+            return 2
+        try:
+            applied = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
+        except ValueError as exc:
+            logger.error("invalid vote: %s", exc)
+            return 2
+        if not applied:
+            logger.error("could not apply vote to survey %s", survey_id.hex())
+            return 1
+        await sess.commit()
+
+    rc = await _send_one_gcm(args.conv_name, tally_events.build_vote(survey_id, choice))
+    if rc == 0:
+        logger.info("VOTED")
+    return rc
+
+
+async def _action_tally_result(args):
+    """Run the loops until the survey has at least ``--expect-voters`` voters,
+    then emit the derived tally as ``TALLY=<json>``."""
+    survey_id = bytes.fromhex(args.survey)
+    connection, bg = await _connect_and_start()
+    try:
+        await network.signal_readables_to_mixwal()
+        deadline = asyncio.get_event_loop().time() + args.timeout
+        latest = None
+        while True:
+            async with persistent.asession() as sess:
+                row = await sess.get(persistent.TallyState, survey_id)
+            if row is not None:
+                latest = tally_engine.tally(tally_sync.load_doc(row.doc_state))
+                if args.expect_voters is None or latest.n_voters >= args.expect_voters:
+                    logger.info("TALLY=%s", _tally_json(latest))
+                    return 0
+            if asyncio.get_event_loop().time() >= deadline:
+                if latest is not None:
+                    logger.info("TALLY=%s", _tally_json(latest))
+                logger.error("tally result timed out for survey %s", survey_id.hex())
+                return 1
+            await asyncio.sleep(0.5)
+    finally:
+        await _shutdown(bg, connection)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="katzenqt-headless",
@@ -785,5 +924,34 @@ def _build_parser() -> argparse.ArgumentParser:
              "schema, conversations, and outstanding WAL counts",
     )
     p_info.set_defaults(func=_action_info)
+
+    p_tally_create = sub.add_parser("tally-create")
+    p_tally_create.add_argument("conv_name")
+    p_tally_create.add_argument("topic")
+    p_tally_create.add_argument(
+        "--mode", choices=["availability", "approval"], default="approval",
+    )
+    p_tally_create.add_argument(
+        "--slot", action="append", required=True,
+        help="descriptive text for one slot; repeat for each slot",
+    )
+    p_tally_create.set_defaults(func=_action_tally_create)
+
+    p_tally_vote = sub.add_parser("tally-vote")
+    p_tally_vote.add_argument("conv_name")
+    p_tally_vote.add_argument("--survey", required=True, help="survey id in hex")
+    p_tally_vote.add_argument(
+        "--slot", action="append", required=True,
+        help="a per-slot vote SLOT_ID=availability; repeat per slot",
+    )
+    p_tally_vote.add_argument("--timeout", type=float, default=600.0)
+    p_tally_vote.set_defaults(func=_action_tally_vote)
+
+    p_tally_result = sub.add_parser("tally-result")
+    p_tally_result.add_argument("conv_name")
+    p_tally_result.add_argument("--survey", required=True, help="survey id in hex")
+    p_tally_result.add_argument("--expect-voters", type=int, default=None, dest="expect_voters")
+    p_tally_result.add_argument("--timeout", type=float, default=600.0)
+    p_tally_result.set_defaults(func=_action_tally_result)
 
     return parser
