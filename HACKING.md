@@ -18,6 +18,21 @@ pip install -e .
 uv run -v --with-editable ~/thin_client katzenqt
 ```
 
+### Just the Python dependencies (no full bootstrap)
+
+`make deps` runs the whole first-time provisioning: system packages, the venv,
+**the entire test suite**, the `kpclientd` binary and a systemd unit. That is a
+lot if you only changed a dependency. To create or refresh `.venv` with the
+locked dependencies and nothing else (e.g. after a new dependency such as
+`pycrdt` was added to `pyproject.toml`), use:
+
+```shell
+uv sync          # or: make setup-uv
+```
+
+Neither runs the tests. Run them yourself with `uv run pytest` (or
+`.venv/bin/python -m pytest`) when you want them.
+
 ### System deps
 
 Most debian systems will already have these packages, but they are required:
@@ -39,6 +54,61 @@ make
 ```
 
 - TODO: despite `pyside6-rcc` we don't actually load the icons from the qrc, yet
+
+# Headless CLI
+
+`katzenqt` can be driven without the Qt GUI through the `katzenqt.headless`
+module, which talks to a running `kpclientd` over the thin client protocol and
+is deliberately free of any PySide6 import. It offers two surfaces: a small
+async Python API (`connect`, `start`, `stop`, and the `session` context
+manager) for in-process callers, and a line-oriented CLI.
+
+The CLI is one command with many subcommands. Invoke it through the repo's
+`.venv`. The bare `katzenqt-headless` name is only on `PATH` once the venv is
+activated; otherwise call the venv's copy directly, or run it as a module:
+
+```shell
+# the venv's console script, by path:
+.venv/bin/katzenqt-headless --help
+# or as a module (works whenever the package imports in that venv):
+.venv/bin/python -m katzenqt.headless --help
+```
+
+The subcommands cover conversation setup (`create-conv`), the Contact Voucher
+handshake (`voucher-mint`, `voucher-induct`, `voucher-await`), messaging
+(`send`, `multi-send`, `read`, `chat-session`, `send-file`, `read-file`), a
+state-file summary (`info`), and the tally/voting protocol (`tally-create`,
+`tally-vote`, `tally-result`). Append `--help` to any verb for its arguments.
+
+Two things to know:
+
+- **Each identity is a distinct `KQT_STATE`.** The state file is chosen once, at
+  import, from `KQT_STATE` (see "Where is my data stored?"), so run separate
+  identities as separate processes, each with its own `KQT_STATE`.
+- **Results go to stderr, as token lines.** Verbs report through the logging
+  framework: `VOUCHER=`, `SENT`, `JOINED`, `TALLY_CREATED=`, `VOTED`,
+  `TALLY=<json>`, etc., each carrying a `LEVEL name:` prefix. A harness should
+  match them by substring, not `startswith`.
+
+Example, a two-identity tally over a running mixnet (see the docker section of
+the main katzenpost repo for bringing one up):
+
+```shell
+KQT_STATE=alice .venv/bin/katzenqt-headless create-conv demo alice
+KQT_STATE=bob   .venv/bin/katzenqt-headless create-conv demo bob
+# ... the voucher handshake makes the two members of each other ...
+KQT_STATE=alice .venv/bin/katzenqt-headless tally-create demo "lunch?" \
+    --mode approval --slot A --slot B --slot C      # prints TALLY_CREATED=<hex>
+KQT_STATE=bob   .venv/bin/katzenqt-headless tally-vote demo --survey <hex> \
+    --slot s0=yes --slot s2=yes                     # prints VOTED
+KQT_STATE=alice .venv/bin/katzenqt-headless tally-result demo --survey <hex> \
+    --expect-voters 2                               # prints TALLY={...}
+```
+
+A single process may run only one connect/shutdown cycle, so a verb that must
+receive and then send (such as `tally-vote`, which awaits the survey before
+casting) does the whole of it on one connection; for separate steps or
+identities, use separate processes.
 
 # Where is my data stored?
 
