@@ -93,15 +93,19 @@ class TallyController:
         await self._save(sess, survey_id, conversation.id)
         return doc
 
-    async def cast_local_vote(self, sess, conversation, survey_id, choice, version: int = 0) -> bool:
+    async def cast_local_vote(self, sess, conversation, survey_id, choice) -> "int | None":
+        """Record the user's own vote, minting the next version so a recast
+        supersedes their prior one. Returns the version used, or ``None`` if the
+        survey is unknown; the caller puts that version on the outbound event."""
         doc = await self._ensure_loaded(sess, survey_id)
         if doc is None:
             logger.warning("cannot vote on unknown survey %s", survey_id.hex())
-            return False
+            return None
         voter = await _voter_id(sess, conversation.own_peer)
+        version = engine.current_version(doc, voter) + 1
         engine.apply_vote(doc, voter, choice, version)
         await self._save(sess, survey_id, conversation.id)
-        return True
+        return version
 
     async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> bool:
         """Apply an inbound tally message to the local Doc. Returns True when

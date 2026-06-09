@@ -819,15 +819,15 @@ async def _action_tally_vote(args):
                 logger.error("conversation %r not found", args.conv_name)
                 return 2
             try:
-                applied = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
+                version = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
             except ValueError as exc:
                 logger.error("invalid vote: %s", exc)
                 return 2
-            if not applied:
+            if version is None:
                 logger.error("could not apply vote to survey %s", survey_id.hex())
                 return 1
             final_pwal_id = await tally_send.stage_outbound(
-                sess, convo, tally_events.build_vote(survey_id, choice),
+                sess, convo, tally_events.build_vote(survey_id, choice, version),
             )
             await sess.commit()
 

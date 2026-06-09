@@ -62,6 +62,39 @@ def test_revote_overwrites_prior_choice():
     assert by["s1"].yes == 1
 
 
+def test_newer_version_supersedes_prior_vote():
+    doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
+    engine.apply_vote(doc, b"x", {"s0": "yes"}, version=0)
+    engine.apply_vote(doc, b"x", {"s0": "no", "s1": "yes"}, version=1)
+
+    res = engine.tally(doc)
+    assert res.n_voters == 1
+    by = _by_id(res)
+    assert by["s0"].yes == 0
+    assert by["s1"].yes == 1
+
+
+def test_older_version_is_discarded_out_of_order():
+    doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a"])
+    engine.apply_vote(doc, b"x", {"s0": "yes"}, version=2)
+    engine.apply_vote(doc, b"x", {"s0": "no"}, version=1)  # stale, must be ignored
+
+    res = engine.tally(doc)
+    assert res.n_voters == 1
+    assert res.slots[0].yes == 1  # the version-2 vote stands
+
+
+def test_current_version_tracks_the_latest():
+    doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a"])
+    assert engine.current_version(doc, b"x") == -1
+    engine.apply_vote(doc, b"x", {"s0": "yes"}, version=0)
+    assert engine.current_version(doc, b"x") == 0
+    engine.apply_vote(doc, b"x", {"s0": "no"}, version=3)
+    assert engine.current_version(doc, b"x") == 3
+    engine.apply_vote(doc, b"x", {"s0": "yes"}, version=1)  # stale
+    assert engine.current_version(doc, b"x") == 3
+
+
 def test_close_changes_status():
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a"])
     assert engine.tally(doc).status == "open"

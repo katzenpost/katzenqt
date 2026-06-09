@@ -13,7 +13,7 @@ group chat live elsewhere (``katzenqt.models``, ``katzenqt.tally.controller``,
 """
 from __future__ import annotations
 
-from .engine import SlotTally, TallyResult, apply_vote, close_survey, tally
+from .engine import SlotTally, TallyResult, apply_vote, close_survey, current_version, tally
 from .schema import Mode, domain, new_survey_doc, slot_id, slots_of
 
 __all__ = [
@@ -22,6 +22,7 @@ __all__ = [
     "TallyResult",
     "apply_vote",
     "close_survey",
+    "current_version",
     "domain",
     "new_survey_doc",
     "slot_id",
