@@ -1,6 +1,6 @@
 import annotated_types
 from typing_extensions import Annotated
-from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict
+from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict, field_serializer, model_validator
 import cbor2
 from enum import Enum
 import uuid
@@ -59,6 +59,14 @@ class GroupChatTypeEnum(Enum):
     FILE_UPLOAD = 2
     WHO = 3
     REPLY_WHO = 4
+    # The tally protocol's message family. A survey is created, voted upon, and
+    # closed; the two SYNC kinds carry the CRDT catch-up exchange. See
+    # ``katzenqt.tally`` and ``katzenqt.conversation_handlers``.
+    TALLY_CREATE = 5
+    TALLY_VOTE = 6
+    TALLY_CLOSE = 7
+    TALLY_SYNC_REQ = 8
+    TALLY_SYNC_RESP = 9
 
 class SendOperation(BaseModel):
     messages: "List[GroupChatMessage]"
@@ -158,6 +166,24 @@ class GroupChatFileUpload(BaseModel):
     filetype: str # "image, sound, arbitrary"
     basename: str
 
+class GroupChatTally(BaseModel):
+    """The payload carried by every tally message. Which fields are populated
+    follows from the message's ``msg_type``:
+
+    * ``TALLY_CREATE`` / ``TALLY_SYNC_RESP``: ``crdt`` holds an opaque CRDT
+      update (the full initial state, or a diff since a state vector).
+    * ``TALLY_VOTE``: ``choice`` holds the sender's ``slot_id -> availability``
+      selection. The receiver writes it under the *authenticated* sender's key,
+      never an id taken from the payload.
+    * ``TALLY_SYNC_REQ``: ``crdt`` holds the requester's state vector.
+    * ``TALLY_CLOSE``: neither; ``survey_id`` and ``version`` suffice.
+    """
+    model_config = {'validate_assignment': True}
+    survey_id: bytes = Field(min_length=1)
+    version: int = Field(default=0, ge=0)
+    choice: dict[str, str] | None = Field(default=None)
+    crdt: bytes | None = Field(default=None)
+
 class GroupChatMessage(BaseModel):
     """
     """
@@ -165,11 +191,47 @@ class GroupChatMessage(BaseModel):
     version: int = Field(ge=0,)
     membership_hash : "Annotated[bytes, Strict(), annotated_types.Len(32, 32),]"
 
+    # The message's type, made explicit so a conversation handler can route by
+    # it rather than guessing from which optional field is set. Serialised as
+    # its integer value (cbor2 cannot encode a bare Enum); decoded back to the
+    # enum. Absent on payloads written before this field existed, in which case
+    # it is inferred from the populated field below.
+    msg_type: GroupChatTypeEnum = Field(default=GroupChatTypeEnum.TEXT)
+
     text: str | None = Field(default=None)
     introduction: GroupChatPleaseAdd | None = Field(default=None)
     file_upload: GroupChatFileUpload | None = Field(default=None)
     who: str | None = Field(default=None)
     reply_who: str | None = Field(default=None)
+    tally: GroupChatTally | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_msg_type(cls, data):
+        """Fill ``msg_type`` from the populated field when it is absent, so a
+        legacy payload decodes to the right type."""
+        if isinstance(data, dict) and data.get("msg_type") is None:
+            data = dict(data)
+            for field, kind in (
+                ("introduction", GroupChatTypeEnum.INTRODUCTION),
+                ("file_upload", GroupChatTypeEnum.FILE_UPLOAD),
+                ("who", GroupChatTypeEnum.WHO),
+                ("reply_who", GroupChatTypeEnum.REPLY_WHO),
+                ("tally", None),
+            ):
+                if field == "tally":
+                    continue  # tally messages always carry an explicit msg_type
+                if data.get(field) is not None:
+                    data["msg_type"] = kind.value
+                    break
+            else:
+                data["msg_type"] = GroupChatTypeEnum.TEXT.value
+        return data
+
+    @field_serializer("msg_type")
+    def _serialize_msg_type(self, value: GroupChatTypeEnum, _info):
+        return value.value
+
     def to_cbor(self):
         """A group chat message consists of one CBOR messages potentially
         serialized over one or more BACAP boxes.
