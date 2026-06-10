@@ -736,6 +736,7 @@ def _parse_slot_votes(items: "list[str]") -> "dict[str, str]":
 
 
 def _tally_json(result: "tally_engine.TallyResult") -> str:
+    out = tally_engine.outcome(result)
     return json.dumps({
         "survey_id": result.survey_id.hex(),
         "mode": result.mode.value,
@@ -745,7 +746,22 @@ def _tally_json(result: "tally_engine.TallyResult") -> str:
             {"slot_id": s.slot_id, "text": s.text, "yes": s.yes, "maybe": s.maybe, "no": s.no}
             for s in result.slots
         ],
+        "outcome": out.kind,
+        "winners": [
+            {"slot_id": s.slot_id, "text": s.text, "yes": s.yes} for s in out.winners
+        ],
     })
+
+
+def _declare_outcome(result: "tally_engine.TallyResult") -> str:
+    """A one-line human declaration of the tally's outcome."""
+    out = tally_engine.outcome(result)
+    if out.kind == "no_winner":
+        return "WINNER=none (no yes votes)"
+    names = ", ".join(s.text for s in out.winners)
+    if out.kind == "tie":
+        return f"TIE={names} ({out.top_yes} yes each)"
+    return f"WINNER={names} ({out.top_yes} yes)"
 
 
 async def _conversation_by_name(sess, conv_name: str):
@@ -872,10 +888,12 @@ async def _action_tally_result(args):
                 latest = tally_engine.tally(tally_sync.load_doc(row.doc_state))
                 if args.expect_voters is None or latest.n_voters >= args.expect_voters:
                     logger.info("TALLY=%s", _tally_json(latest))
+                    logger.info("%s", _declare_outcome(latest))
                     return 0
             if asyncio.get_event_loop().time() >= deadline:
                 if latest is not None:
                     logger.info("TALLY=%s", _tally_json(latest))
+                    logger.info("%s", _declare_outcome(latest))
                 logger.error("tally result timed out for survey %s", survey_id.hex())
                 return 1
             await asyncio.sleep(0.5)

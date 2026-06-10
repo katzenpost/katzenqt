@@ -119,3 +119,25 @@ def tally(doc: Doc) -> TallyResult:
         n_voters=len(choices),
         slots=slots,
     )
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """The declared result of a tally. ``kind`` is ``"winner"`` (one slot has
+    the most yes votes), ``"tie"`` (several share the top), or ``"no_winner"``
+    (no slot received a yes). ``winners`` is the slot(s) at the top, empty for
+    ``no_winner``; ``top_yes`` is their yes count."""
+
+    kind: str
+    winners: "list[SlotTally]"
+    top_yes: int
+
+
+def outcome(result: TallyResult) -> Outcome:
+    """Declare the winner of a tally, ties and all, by yes count. Pure."""
+    top_yes = max((s.yes for s in result.slots), default=0)
+    if top_yes == 0:
+        return Outcome(kind="no_winner", winners=[], top_yes=0)
+    winners = [s for s in result.slots if s.yes == top_yes]
+    kind = "tie" if len(winners) > 1 else "winner"
+    return Outcome(kind=kind, winners=winners, top_yes=top_yes)

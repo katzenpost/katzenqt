@@ -111,3 +111,32 @@ def test_survey_id_round_trips():
     sid = _sid()
     doc = schema.new_survey_doc(sid, "x", Mode.APPROVAL, ["a"])
     assert engine.tally(doc).survey_id == sid
+
+
+def test_outcome_declares_a_clear_winner():
+    doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
+    engine.apply_vote(doc, b"v1", {"s0": "yes"})
+    engine.apply_vote(doc, b"v2", {"s0": "yes", "s1": "yes"})
+    out = engine.outcome(engine.tally(doc))
+    assert out.kind == "winner"
+    assert [s.slot_id for s in out.winners] == ["s0"]
+    assert out.top_yes == 2
+
+
+def test_outcome_declares_a_tie():
+    doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
+    engine.apply_vote(doc, b"v1", {"s0": "yes"})
+    engine.apply_vote(doc, b"v2", {"s1": "yes"})
+    out = engine.outcome(engine.tally(doc))
+    assert out.kind == "tie"
+    assert sorted(s.slot_id for s in out.winners) == ["s0", "s1"]
+    assert out.top_yes == 1
+
+
+def test_outcome_no_winner_without_a_single_yes():
+    doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
+    engine.apply_vote(doc, b"v1", {"s0": "no", "s1": "no"})
+    out = engine.outcome(engine.tally(doc))
+    assert out.kind == "no_winner"
+    assert out.winners == []
+    assert out.top_yes == 0
