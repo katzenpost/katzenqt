@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (C) 2026 David Stainton
-# SPDX-License-Identifier: AGPL-3.0-only
-
 """Light, dark, and window-manager-aware theming for katzenqt.
 
 The desktop's own preference is honoured through Qt's colour-scheme
