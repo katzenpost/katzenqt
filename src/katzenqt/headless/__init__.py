@@ -145,6 +145,11 @@ def _configure_logging() -> None:
     # logger's level. Filter at the *handler* so only WARNING+ gets through.
     for h in logging.root.handlers:
         h.setLevel(logging.WARNING)
+    # SQLAlchemy's async pool logs a benign "Exception during reset" at ERROR
+    # when the loop tears down with connections a cancelled task abandoned.
+    # That is teardown noise, not a query result; hush it (verbose mode, via
+    # KQT_LOG_LEVEL, still shows it).
+    logging.getLogger("sqlalchemy").setLevel(logging.CRITICAL)
     # Emit the verbs' result tokens bare (no level/name prefix) on their own
     # handler, and stop them propagating to the root handler, so the quiet
     # output is purely the query result.
@@ -203,6 +208,10 @@ def cli(argv: "list[str] | None" = None) -> int:
             task.cancel()
         if stragglers:
             loop.run_until_complete(asyncio.gather(*stragglers, return_exceptions=True))
+        # Dispose the async engine's connection pool inside the running loop;
+        # otherwise its aiosqlite connections are finalised as the loop closes
+        # and their rollback fails ("Exception during reset", CancelledError).
+        loop.run_until_complete(persistent._engine.dispose())
         loop.close()
         if temp_config is not None:
             try:
