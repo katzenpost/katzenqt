@@ -1,48 +1,44 @@
-So you want to try the `katzenqt` program? These instructions should help
-developers to start to run the software.
+# katzenqt
 
-WARNING: DO NOT USE THIS SOFTWARE UNLESS YOU ARE DEVELOPING IT AND AWARE OF THE
-TECHNICAL RISKS. DO NOT RELY ON THIS SOFTWARE FOR ANONYMITY, SECURITY, PRIVACY,
-RELIABILITY, RESILENCY, CREDIBILITY, FRIENDSHIP, FUN, OR ANY SERIOUS BUSINESS.
+`katzenqt` is a PySide6 GUI chat client for Katzenpost mixnet group chat. It can
+also be driven headlessly from the command line.
 
-To use the new `Makefile` targets please ensure that you have `git` and `make`
-installed before proceeding:
-```
-  sudo apt install -y git make
-```
+## Project status
 
-First, git clone the `katzenqt` repo and `cd` into `katzenqt`:
-```
-  git clone https://www.github.com/katzenpost/katzenqt ~/katzenqt
-  cd ~/katzenqt/
-```
+This is pre-alpha developer software. There is **no easily installable package
+yet**, so the instructions below are aimed at developers building and running
+from source against a Katzenpost client daemon (`kpclientd`). A single,
+well-documented install command for end users is future work. Please read the
+warning at the end of this document.
 
-At this point your system should have all of the required tools to proceed.
-Your user account should have `~/.local/katzenpost/client.toml` and
-`~/.local/katzenpost/thinclient.toml` ready for software that expects to find
-the configuration files in those locations.
+## Running the GUI
 
-Run these two commands on Debian GNU/Linux to setup the system, the environment
-and to run `katzenqt`:
-```
-make deps
-make run
+On Debian GNU/Linux, install `git` and `make`, clone the repo, and build:
+
+```shell
+sudo apt install -y git make
+git clone https://www.github.com/katzenpost/katzenqt ~/katzenqt
+cd ~/katzenqt
+make deps      # full bootstrap: system packages, the venv, kpclientd, a systemd unit
+make run       # launch the GUI
 ```
 
-Or you could run a series of make targets inside `katzenqt` if the previous
-commands did not result in `katzenqt` displaying a user interface:
-```
-  make system-setup
-  make setup-uv
-  make setup
-  make test
-  make kpclientd
-  make install-kpclient
-  make kpclientd.service
-  make status
+`make deps` is a first-time bootstrap and also runs the test suite. If you only
+need to refresh Python dependencies, use `uv sync` instead. If `make run` does
+not bring up a window, run the steps individually:
+
+```shell
+make system-setup
+make setup-uv
+make setup
+make kpclientd
+make install-kpclient
+make kpclientd.service
+make status
 ```
 
-If the `make status` shows the following then things are probably working:
+`make status` reports a working setup roughly as:
+
 ```
 backend: uv
 venv: .venv
@@ -51,56 +47,67 @@ kpclientd(service): active
 kpclientd(path): found
 ```
 
-It should then be possible to run `katzenqt` using your configured and prepared
-virtual environment as shown by the `make status` command. There are several
-ways to run `katzenqt` and one that is expected to work at this point is `make
-run`:
-```
-  make run
-```
+Once that looks right, `make run` launches the GUI.
 
-## Headless mode (no GUI)
+## Headless CLI (no GUI)
 
-`katzenqt` can also be driven without the Qt interface, through the
-`katzenqt.headless` command-line tool. It talks to a running `kpclientd` over
-the thin-client protocol and is useful for scripting and testing. Invoke it
-through the project's virtualenv (the bare `katzenqt-headless` name is only on
-`PATH` once the venv is activated):
+`katzenqt` can be driven without the Qt interface through the `katzenqt-headless`
+command installed in the venv. It talks to a running `kpclientd` and is quiet by
+default, printing only each verb's result token (set `KQT_LOG_LEVEL=DEBUG` for
+the full log).
 
-```
+```shell
 .venv/bin/katzenqt-headless --help
-# or, as a module:
-.venv/bin/python -m katzenqt.headless --help
 ```
 
-It is one command with many subcommands: `create-conv`, the Contact Voucher
-handshake (`voucher-mint`, `voucher-induct`, `voucher-await`), messaging
-(`send`, `read`, `send-file`, `read-file`, ...), an offline state summary
-(`info`), and the tally/voting protocol (`tally-create`, `tally-vote`,
-`tally-result`). Append `--help` to any subcommand for its arguments.
+Two things to know:
 
-**The connection is explicit; nothing is searched for on disk.** Every verb that
-talks to the daemon requires exactly one of:
+- **The connection is explicit.** Every verb that talks to the daemon needs one
+  of `--config <thinclient.toml>` or `--address <addr> [--network tcp|unix]`.
+- **Each identity is a separate `KQT_STATE`** (its own SQLite file), so two
+  parties on one machine are just two `KQT_STATE` values sharing one daemon.
 
-- `--config <thinclient.toml>` , a thin-client config file, or
-- `--address <addr>` with an optional `--network {tcp,unix}` (default `tcp`),
-  for example `--address 127.0.0.1:64331` (a docker mixnet) or
-  `--address @katzenpost --network unix` (a unix socket).
+The walkthrough below takes Alice and Bob through **joining a conversation with
+the Contact Voucher protocol**, then **exchanging messages**, then **running a
+vote**. It assumes a daemon reachable on TCP `127.0.0.1:64331` (for example the
+docker mixnet under `katzenpost/docker`); change `$CONN` to match yours.
 
-`info` is the one verb that needs no daemon and so takes no connection argument.
-Each identity is a separate `KQT_STATE` (see HACKING.md); run separate
-identities as separate processes. For example, a survey created and read over a
-local docker mixnet:
+```shell
+KH=.venv/bin/katzenqt-headless
+CONN="--address 127.0.0.1:64331"     # or: --config /path/to/thinclient.toml
+ALICE=/tmp/alice; BOB=/tmp/bob
 
+# 1. Join the same conversation using the voucher token protocol
+KQT_STATE=$ALICE $KH create-conv demo alice $CONN
+KQT_STATE=$BOB   $KH create-conv demo bob   $CONN
+V=$(KQT_STATE=$BOB $KH voucher-mint demo bob $CONN 2>&1 | sed -n 's/^VOUCHER=//p')   # Bob mints a token
+KQT_STATE=$ALICE $KH voucher-induct demo bob "$V" $CONN                              # Alice inducts Bob
+KQT_STATE=$BOB   $KH voucher-await demo $CONN                                        # -> JOINED
+
+# 2. Exchange messages (the channel is bidirectional)
+KQT_STATE=$ALICE $KH send demo "hi bob"   $CONN
+KQT_STATE=$BOB   $KH read demo 600 $CONN          # -> RECV=hi bob
+KQT_STATE=$BOB   $KH send demo "hi alice" $CONN
+KQT_STATE=$ALICE $KH read demo 600 $CONN          # -> RECV=hi alice
+
+# 3. Vote: Bob opens an approval poll, both vote, the tool declares the winner
+S=$(KQT_STATE=$BOB $KH tally-create demo "Where to eat?" \
+      --mode approval --slot Pizza --slot Sushi --slot Tacos $CONN 2>&1 | sed -n 's/^TALLY_CREATED=//p')
+KQT_STATE=$BOB   $KH tally-vote demo --survey $S --slot s0=yes --slot s1=yes $CONN   # Bob: Pizza, Sushi
+KQT_STATE=$ALICE $KH tally-vote demo --survey $S --slot s0=yes --slot s2=yes $CONN   # Alice: Pizza, Tacos
+KQT_STATE=$BOB   $KH tally-close demo --survey $S $CONN                              # only the creator may close
+KQT_STATE=$ALICE $KH tally-result demo --survey $S --expect-voters 2 $CONN
+# -> TALLY={..., "outcome": "winner", "winners": [{"slot_id": "s0", "text": "Pizza", "yes": 2}]}
+# -> WINNER=Pizza (2 yes)
 ```
-KQT_STATE=alice .venv/bin/katzenqt-headless tally-create demo "lunch?" \
-    --mode approval --slot A --slot B --slot C \
-    --address 127.0.0.1:64331            # prints TALLY_CREATED=<hex>
-KQT_STATE=alice .venv/bin/katzenqt-headless tally-result demo --survey <hex> \
-    --address 127.0.0.1:64331            # prints TALLY={...}
-```
 
-See HACKING.md for the fuller headless walkthrough.
+Every network step crosses the mixnet, so over a real network each can take from
+seconds to minutes (the docker mixnet is near-instant). The full set of verbs,
+`info`, `multi-send`, `send-file`, `read-file`, `chat-session`, `tally-list`, and
+so on, is listed by `--help`; see HACKING.md for the fuller reference.
 
-These instructions are temporary and later the user story should include a
-single command that will be well documented.
+## Warning
+
+DO NOT USE THIS SOFTWARE UNLESS YOU ARE DEVELOPING IT AND AWARE OF THE TECHNICAL
+RISKS. DO NOT RELY ON THIS SOFTWARE FOR ANONYMITY, SECURITY, PRIVACY,
+RELIABILITY, RESILENCY, CREDIBILITY, FRIENDSHIP, FUN, OR ANY SERIOUS BUSINESS.
