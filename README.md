@@ -95,11 +95,18 @@ S=$(KQT_STATE=$BOB $KH tally-create demo "Where to eat?" \
       --mode approval --slot Pizza --slot Sushi --slot Tacos $CONN 2>&1 | sed -n 's/^TALLY_CREATED=//p')
 KQT_STATE=$BOB   $KH tally-vote demo --survey $S --slot s0=yes --slot s1=yes $CONN   # Bob: Pizza, Sushi
 KQT_STATE=$ALICE $KH tally-vote demo --survey $S --slot s0=yes --slot s2=yes $CONN   # Alice: Pizza, Tacos
-KQT_STATE=$BOB   $KH tally-close demo --survey $S $CONN                              # only the creator may close
+KQT_STATE=$BOB   $KH tally-close demo --survey $S $CONN                              # advisory; only the creator may close
 KQT_STATE=$ALICE $KH tally-result demo --survey $S --expect-voters 2 $CONN
 # -> TALLY={..., "outcome": "winner", "winners": [{"slot_id": "s0", "text": "Pizza", "yes": 2}]}
 # -> WINNER=Pizza (2 yes)
 ```
+
+The winner is derivable from the votes at any time, so `tally-close` is not
+needed to read the result. Closing is **advisory**: it sets the survey's status
+to `closed` (and only the creator may do so), but it does **not** currently
+prevent further votes, a ballot cast after a close is still counted. Enforcing
+"no votes after close" convergently across peers needs causal ordering and is
+future work.
 
 Every network step crosses the mixnet, so over a real network each can take from
 seconds to minutes (the docker mixnet is near-instant). The full set of verbs,
