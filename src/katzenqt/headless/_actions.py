@@ -883,6 +883,67 @@ async def _action_tally_result(args):
         await _shutdown(bg, connection)
 
 
+async def _action_tally_close(args):
+    """Close the survey and broadcast it. Only the creator may close; a
+    non-creator's attempt is refused. Logs ``CLOSED``."""
+    survey_id = bytes.fromhex(args.survey)
+    connection, bg = await _connect_and_start()
+    try:
+        await network.signal_readables_to_mixwal()
+        if not await _wait_for_survey(
+            survey_id, asyncio.get_event_loop().time() + args.timeout,
+        ):
+            logger.error("survey %s not received within %.0fs", survey_id.hex(), args.timeout)
+            return 1
+
+        async with persistent.asession() as sess:
+            convo = await _conversation_by_name(sess, args.conv_name)
+            if convo is None:
+                logger.error("conversation %r not found", args.conv_name)
+                return 2
+            if not await tally_instance.close_local(sess, convo, survey_id):
+                logger.error("could not close survey %s (only the creator may)", survey_id.hex())
+                return 1
+            final_pwal_id = await tally_send.stage_outbound(
+                sess, convo, tally_events.build_close(survey_id),
+            )
+            await sess.commit()
+
+        await network.check_for_new()
+        if await _wait_for_sent(
+            final_pwal_id, asyncio.get_event_loop().time() + max(120.0, args.timeout),
+        ):
+            logger.info("CLOSED")
+            return 0
+        logger.error("close send timed out for survey %s", survey_id.hex())
+        return 3
+    finally:
+        await _shutdown(bg, connection)
+
+
+async def _action_tally_list(args):
+    """List the surveys a conversation holds. Offline; needs no daemon. Prints
+    one ``SURVEY=`` line per survey."""
+    async with persistent.asession() as sess:
+        convo = await _conversation_by_name(sess, args.conv_name)
+        if convo is None:
+            logger.error("conversation %r not found", args.conv_name)
+            return 2
+        docs = await tally_instance.list_for_conversation(sess, convo.id)
+
+    if not docs:
+        logger.info("(no surveys)")
+        return 0
+    for doc in docs:
+        res = tally_engine.tally(doc)
+        logger.info(
+            "SURVEY=%s status=%s voters=%d mode=%s topic=%s",
+            res.survey_id.hex(), res.status, res.n_voters, res.mode.value,
+            json.dumps(tally_schema.topic_of(doc)),
+        )
+    return 0
+
+
 def _connection_parser() -> argparse.ArgumentParser:
     """A shared parent parser carrying the explicit kpclientd connection.
 
@@ -1039,5 +1100,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tally_result.add_argument("--expect-voters", type=int, default=None, dest="expect_voters")
     p_tally_result.add_argument("--timeout", type=float, default=600.0)
     p_tally_result.set_defaults(func=_action_tally_result)
+
+    p_tally_close = sub.add_parser("tally-close", parents=[conn])
+    p_tally_close.add_argument("conv_name")
+    p_tally_close.add_argument("--survey", required=True, help="survey id in hex")
+    p_tally_close.add_argument("--timeout", type=float, default=600.0)
+    p_tally_close.set_defaults(func=_action_tally_close)
+
+    # tally-list reads only the local state file, so (like info) it takes no
+    # connection argument.
+    p_tally_list = sub.add_parser("tally-list")
+    p_tally_list.add_argument("conv_name")
+    p_tally_list.set_defaults(func=_action_tally_list)
 
     return parser

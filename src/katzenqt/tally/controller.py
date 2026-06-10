@@ -88,10 +88,38 @@ class TallyController:
             sess.add(row)
 
     async def create_local(self, sess, conversation, survey_id, topic, mode, slots) -> Doc:
-        doc = schema.new_survey_doc(survey_id, topic, mode, slots)
+        creator = await _voter_id(sess, conversation.own_peer)
+        doc = schema.new_survey_doc(survey_id, topic, mode, slots, creator=creator)
         self._docs[survey_id] = doc
         await self._save(sess, survey_id, conversation.id)
         return doc
+
+    async def close_local(self, sess, conversation, survey_id) -> bool:
+        """Close the survey if the local user opened it. Returns False if the
+        survey is unknown or the user is not its creator."""
+        doc = await self._ensure_loaded(sess, survey_id)
+        if doc is None:
+            logger.warning("cannot close unknown survey %s", survey_id.hex())
+            return False
+        creator = schema.creator_of(doc)
+        me = await _voter_id(sess, conversation.own_peer)
+        if creator is not None and creator != me:
+            logger.warning("refusing to close survey %s: not the creator", survey_id.hex())
+            return False
+        engine.close_survey(doc)
+        await self._save(sess, survey_id, conversation.id)
+        return True
+
+    async def list_for_conversation(self, sess, conversation_id) -> "list[Doc]":
+        """The survey Docs stored for a conversation, loaded from persisted state."""
+        rows = (await sess.exec(persistent.select(persistent.TallyState).where(
+            persistent.TallyState.conversation_id == conversation_id))).all()
+        docs = []
+        for row in rows:
+            doc = self._docs.get(row.survey_id) or sync.load_doc(row.doc_state)
+            self._docs[row.survey_id] = doc
+            docs.append(doc)
+        return docs
 
     async def cast_local_vote(self, sess, conversation, survey_id, choice) -> "int | None":
         """Record the user's own vote, minting the next version so a recast
@@ -144,6 +172,11 @@ class TallyController:
         if kind is GroupChatTypeEnum.TALLY_CLOSE:
             doc = await self._ensure_loaded(sess, survey_id)
             if doc is None:
+                return False
+            creator = schema.creator_of(doc)
+            sender = await _voter_id(sess, peer)
+            if creator is not None and creator != sender:
+                logger.warning("ignoring close of %s from a non-creator", survey_id.hex())
                 return False
             engine.close_survey(doc)
             await self._save(sess, survey_id, conversation_id)

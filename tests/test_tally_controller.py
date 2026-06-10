@@ -144,3 +144,44 @@ async def test_dispatch_routes_tally_off_the_log_and_chat_into_it():
             )
         )).all()
         assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_creator_can_close_but_non_creator_cannot_locally():
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
+
+        # We created it, so we may close it.
+        await ctrl.create_local(sess, convo, survey_id, "x", Mode.APPROVAL, ["a"])
+        assert await ctrl.close_local(sess, convo, survey_id) is True
+        assert engine.tally(ctrl.get(survey_id)).status == "closed"
+
+        # A survey whose creator is Alice: our local user must not close it.
+        other = uuid.uuid4().bytes
+        blob = sync.full_state(schema.new_survey_doc(
+            other, "y", Mode.APPROVAL, ["a"], creator=voter_id_from_read_cap(ALICE_CAP)))
+        await ctrl.handle_event(sess, peers["alice"], events.build_create(other, blob))
+        assert await ctrl.close_local(sess, convo, other) is False
+        assert engine.tally(ctrl.get(other)).status == "open"
+
+
+@pytest.mark.asyncio
+async def test_close_event_honoured_only_from_the_creator():
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        # The creator (OWN_CAP) is also reachable as a remote peer "creator".
+        convo, _own, peers = await _make_convo(
+            sess, "g", OWN_CAP, {"alice": ALICE_CAP, "creator": OWN_CAP})
+        await ctrl.create_local(sess, convo, survey_id, "x", Mode.APPROVAL, ["a"])
+
+        # A close from Alice (not the creator) is ignored.
+        await ctrl.handle_event(sess, peers["alice"], events.build_close(survey_id))
+        assert engine.tally(ctrl.get(survey_id)).status == "open"
+
+        # A close from the creator's read cap is honoured.
+        await ctrl.handle_event(sess, peers["creator"], events.build_close(survey_id))
+        assert engine.tally(ctrl.get(survey_id)).status == "closed"
+        await sess.commit()

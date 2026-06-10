@@ -57,9 +57,12 @@ def slot_id(index: int) -> str:
     return f"s{index}"
 
 
-def new_survey_doc(survey_id: bytes, topic: str, mode: Mode, slots: "list[str]") -> Doc:
+def new_survey_doc(survey_id: bytes, topic: str, mode: Mode, slots: "list[str]",
+                   creator: "bytes | None" = None) -> Doc:
     """Build a fresh survey ``Doc``. ``slots`` is the list of descriptive texts,
-    one per slot; slot ids are assigned by position."""
+    one per slot; slot ids are assigned by position. ``creator`` is the voter id
+    of whoever opened the survey; it is recorded so peers can verify that a close
+    came from the creator."""
     if not slots:
         raise ValueError("a survey needs at least one slot")
     doc = Doc()
@@ -73,6 +76,8 @@ def new_survey_doc(survey_id: bytes, topic: str, mode: Mode, slots: "list[str]")
         meta["mode"] = mode.value
         meta["n_slots"] = len(slots)
         meta["status"] = "open"
+        if creator is not None:
+            meta["creator"] = creator.hex()
         arr = doc.get(_SLOTS, type=Array)
         for i, text in enumerate(slots):
             arr.append(Map({"id": slot_id(i), "text": text}))
@@ -101,6 +106,15 @@ def survey_id_of(doc: Doc) -> bytes:
 
 def topic_of(doc: Doc) -> str:
     return meta_map(doc)["topic"]
+
+
+def creator_of(doc: Doc) -> "bytes | None":
+    """The voter id that opened the survey, or ``None`` for surveys created
+    before the creator was recorded."""
+    meta = meta_map(doc)
+    if "creator" in set(meta.keys()):
+        return bytes.fromhex(meta["creator"])
+    return None
 
 
 def slots_of(doc: Doc) -> "list[tuple[str, str]]":
