@@ -18,6 +18,21 @@ pip install -e .
 uv run -v --with-editable ~/thin_client katzenqt
 ```
 
+### Just the Python dependencies (no full bootstrap)
+
+`make deps` runs the whole first-time provisioning: system packages, the venv,
+**the entire test suite**, the `kpclientd` binary and a systemd unit. That is a
+lot if you only changed a dependency. To create or refresh `.venv` with the
+locked dependencies and nothing else (e.g. after a new dependency such as
+`pycrdt` was added to `pyproject.toml`), use:
+
+```shell
+uv sync          # or: make setup-uv
+```
+
+Neither runs the tests. Run them yourself with `uv run pytest` (or
+`.venv/bin/python -m pytest`) when you want them.
+
 ### System deps
 
 Most debian systems will already have these packages, but they are required:
@@ -39,6 +54,55 @@ make
 ```
 
 - TODO: despite `pyside6-rcc` we don't actually load the icons from the qrc, yet
+
+# Headless CLI
+
+`katzenqt` can be driven without the Qt GUI through the `katzenqt.headless`
+module, which talks to a running `kpclientd` over the thin client protocol and
+is deliberately free of any PySide6 import. It offers two surfaces: a small
+async Python API (`connect`, `start`, `stop`, and the `session` context
+manager) for in-process callers, and a line-oriented CLI.
+
+The CLI is installed as the `katzenqt-headless` console script in the venv; run
+it by path (its shebang points at the venv's Python, so no activation is
+needed):
+
+```shell
+.venv/bin/katzenqt-headless --help
+```
+
+The subcommands cover conversation setup (`create-conv`), the Contact Voucher
+handshake (`voucher-mint`, `voucher-induct`, `voucher-await`), messaging
+(`send`, `multi-send`, `read`, `chat-session`, `send-file`, `read-file`), a
+state-file summary (`info`), and the tally/voting protocol (`tally-create`,
+`tally-vote`, `tally-close`, `tally-result`, `tally-list`). Append `--help` to
+any verb for its arguments. For worked end-to-end examples, the voucher join, a
+message exchange, and a vote, see the headless section of the README.
+
+Three things to know:
+
+- **The connection is explicit; there is no filesystem search.** Every verb that
+  talks to the daemon requires exactly one of `--config <thinclient.toml>` or
+  `--address <addr>` (with an optional `--network {tcp,unix}`, default `tcp`).
+  Use `--address 127.0.0.1:64331` for a docker mixnet, or
+  `--address @katzenpost --network unix` for a unix-socket daemon. `info` and
+  `tally-list` are offline and take no connection argument.
+- **Each identity is a distinct `KQT_STATE`.** The state file is chosen once, at
+  import, from `KQT_STATE` (see "Where is my data stored?"), so run separate
+  identities as separate processes, each with its own `KQT_STATE`.
+- **Quiet by default.** The CLI prints only each verb's result token, bare
+  (`CREATED`, `VOUCHER=`, `JOINED`, `SENT`, `RECV=`, `TALLY_CREATED=`, `VOTED`,
+  `CLOSED`, `TALLY=<json>`, `WINNER=` / `TIE=`), plus any warnings and errors,
+  all on stderr. A harness should match a token by substring. Set
+  `KQT_LOG_LEVEL` (`INFO` or `DEBUG`) for the full prefixed log.
+
+(The Python API surface, `connect` / `session`, takes the config path as an
+explicit argument too.)
+
+A single process may run only one connect/shutdown cycle, so a verb that must
+receive and then send (such as `tally-vote`, which awaits the survey before
+casting) does the whole of it on one connection; for separate steps or
+identities, use separate processes.
 
 # Where is my data stored?
 

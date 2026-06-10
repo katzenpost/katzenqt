@@ -26,7 +26,7 @@ def test_main_calls_init_and_migrate(monkeypatch, capsys):
     # ``read`` against a missing conversation returns 2 without ever
     # touching kpclientd. That is enough surface to confirm the
     # bootstrap fired before the action body.
-    rc = integration_runner.main(["read", "no-such-conv", "0.1"])
+    rc = integration_runner.main(["read", "no-such-conv", "0.1", "--address", "127.0.0.1:64331"])
 
     assert calls == ["init_and_migrate"]
     assert rc == 2

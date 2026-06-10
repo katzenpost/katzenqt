@@ -23,11 +23,20 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
 _PYTHON = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
 
+# Connecting verbs require an explicit kpclientd connection. The docker mixnet's
+# kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
+# / KATZENQT_KPCLIENTD_PORT, matching conftest).
+_KP_ADDR = "{}:{}".format(
+    os.environ.get("KATZENQT_KPCLIENTD_HOST", "127.0.0.1"),
+    os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331"),
+)
+_CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
+
 
 def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
-    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args]
+    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
     return subprocess.run(
         cmd, env=env, cwd=str(_REPO_ROOT),
         capture_output=True, text=True, timeout=timeout,

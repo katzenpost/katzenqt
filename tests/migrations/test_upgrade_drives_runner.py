@@ -76,7 +76,7 @@ def test_info_then_read_against_upgraded_state(tmp_path):
     # integration marker.
     read = subprocess.run(
         [_PYTHON, "-m", "katzenqt.integration_runner",
-         "read", "no-such-conv", "1"],
+         "read", "no-such-conv", "1", "--address", "127.0.0.1:64331"],
         env=env, cwd=str(_REPO_ROOT),
         capture_output=True, text=True, timeout=60,
     )

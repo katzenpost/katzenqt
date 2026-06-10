@@ -78,7 +78,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import shutil
+import tempfile
 import time
 import uuid
 from base64 import b64decode, b64encode
@@ -90,21 +92,38 @@ from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
 from .. import models, network, persistent
+from ..tally import engine as tally_engine
+from ..tally import events as tally_events
+from ..tally import schema as tally_schema
+from ..tally import send as tally_send
+from ..tally import sync as tally_sync
+from ..tally.controller import INSTANCE as tally_instance
 from ..voucher import await_and_open, derive_read_and_induct, mint_and_publish
 
 logger = logging.getLogger("katzen.headless")
 
 
+# The explicit thinclient.toml path the connecting verbs dial. It is set by
+# `cli()` from the required `--config` / `--address` arguments before any action
+# runs, so there is no implicit search of the filesystem.
+_CONNECTION_CONFIG: "str | None" = None
+
+
+def set_connection_config(path: "str | None") -> None:
+    """Record the thinclient.toml path that connecting verbs will use."""
+    global _CONNECTION_CONFIG
+    _CONNECTION_CONFIG = path
+
+
 async def _connect_and_start():
     """Connect to kpclientd and kick the background threads running.
 
-    Returns ``(connection, background_task)``. The caller is
-    responsible for cancelling the background task on exit. The
-    thinclient config path is resolved by
-    :func:`katzenqt.network.resolve_thinclient_config`, which
-    honours ``$KATZENQT_THINCLIENT_CONFIG``.
+    Returns ``(connection, background_task)``. The caller is responsible for
+    cancelling the background task on exit. The connection is dialled using the
+    config recorded by :func:`set_connection_config` (the verb's explicit
+    ``--config`` / ``--address``); there is no filesystem search.
     """
-    connection = await network.reconnect()
+    connection = await network.reconnect(_CONNECTION_CONFIG)
     bg = asyncio.create_task(network.start_background_threads(connection))
     return connection, bg
 
@@ -705,6 +724,287 @@ async def _action_info(args) -> int:
     return 0
 
 
+def _parse_slot_votes(items: "list[str]") -> "dict[str, str]":
+    """Turn ``["s0=yes", "s1=no"]`` into ``{"s0": "yes", "s1": "no"}``."""
+    choice = {}
+    for item in items:
+        slot, sep, avail = item.partition("=")
+        if not sep:
+            raise ValueError(f"slot vote {item!r} must be SLOT_ID=availability")
+        choice[slot] = avail
+    return choice
+
+
+def _tally_json(result: "tally_engine.TallyResult") -> str:
+    out = tally_engine.outcome(result)
+    return json.dumps({
+        "survey_id": result.survey_id.hex(),
+        "mode": result.mode.value,
+        "status": result.status,
+        "n_voters": result.n_voters,
+        "slots": [
+            {"slot_id": s.slot_id, "text": s.text, "yes": s.yes, "maybe": s.maybe, "no": s.no}
+            for s in result.slots
+        ],
+        "outcome": out.kind,
+        "winners": [
+            {"slot_id": s.slot_id, "text": s.text, "yes": s.yes} for s in out.winners
+        ],
+    })
+
+
+def _declare_outcome(result: "tally_engine.TallyResult") -> str:
+    """A one-line human declaration of the tally's outcome."""
+    out = tally_engine.outcome(result)
+    if out.kind == "no_winner":
+        return "WINNER=none (no yes votes)"
+    names = ", ".join(s.text for s in out.winners)
+    if out.kind == "tie":
+        return f"TIE={names} ({out.top_yes} yes each)"
+    return f"WINNER={names} ({out.top_yes} yes)"
+
+
+async def _conversation_by_name(sess, conv_name: str):
+    return (await sess.exec(
+        select(persistent.Conversation).where(persistent.Conversation.name == conv_name)
+    )).first()
+
+
+async def _action_tally_create(args):
+    """Create a survey, persist its initial state, and broadcast it. Logs
+    ``TALLY_CREATED=<survey_id hex>``."""
+    try:
+        mode = tally_schema.Mode(args.mode)
+    except ValueError:
+        logger.error("unknown mode %r", args.mode)
+        return 2
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo = await _conversation_by_name(sess, args.conv_name)
+        if convo is None:
+            logger.error("conversation %r not found", args.conv_name)
+            return 2
+        doc = await tally_instance.create_local(
+            sess, convo, survey_id, args.topic, mode, args.slot,
+        )
+        blob = tally_sync.full_state(doc)
+        await sess.commit()
+
+    rc = await _send_one_gcm(args.conv_name, tally_events.build_create(survey_id, blob))
+    if rc == 0:
+        logger.info("TALLY_CREATED=%s", survey_id.hex())
+    return rc
+
+
+async def _wait_for_survey(survey_id: bytes, deadline: float) -> bool:
+    while asyncio.get_event_loop().time() < deadline:
+        async with persistent.asession() as sess:
+            if await sess.get(persistent.TallyState, survey_id) is not None:
+                return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def _wait_for_sent(final_pwal_id, deadline: float) -> bool:
+    while asyncio.get_event_loop().time() < deadline:
+        async with persistent.asession() as sess:
+            hit = (await sess.exec(
+                select(persistent.SentLog).where(persistent.SentLog.id == final_pwal_id)
+            )).first()
+            if hit is not None:
+                return True
+        await asyncio.sleep(0.25)
+    return False
+
+
+async def _action_tally_vote(args):
+    """Wait for the survey to arrive, record our own vote, and broadcast it,
+    all on a single connection. Logs ``VOTED``.
+
+    The whole sequence must share one ``_connect_and_start`` cycle: a
+    ``_shutdown`` sets the network module's global quit event, which would
+    stop the loops of any subsequent connection in this process, so we cannot
+    await the survey on one connection and send the vote on another.
+    """
+    survey_id = bytes.fromhex(args.survey)
+    try:
+        choice = _parse_slot_votes(args.slot)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
+
+    connection, bg = await _connect_and_start()
+    try:
+        await network.signal_readables_to_mixwal()
+        if not await _wait_for_survey(
+            survey_id, asyncio.get_event_loop().time() + args.timeout,
+        ):
+            logger.error("survey %s not received within %.0fs", survey_id.hex(), args.timeout)
+            return 1
+
+        async with persistent.asession() as sess:
+            convo = await _conversation_by_name(sess, args.conv_name)
+            if convo is None:
+                logger.error("conversation %r not found", args.conv_name)
+                return 2
+            try:
+                version = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
+            except ValueError as exc:
+                logger.error("invalid vote: %s", exc)
+                return 2
+            if version is None:
+                logger.error("could not apply vote to survey %s", survey_id.hex())
+                return 1
+            final_pwal_id = await tally_send.stage_outbound(
+                sess, convo, tally_events.build_vote(survey_id, choice, version),
+            )
+            await sess.commit()
+
+        await network.check_for_new()
+        if await _wait_for_sent(
+            final_pwal_id, asyncio.get_event_loop().time() + max(120.0, args.timeout),
+        ):
+            logger.info("VOTED")
+            return 0
+        logger.error("vote send timed out for survey %s", survey_id.hex())
+        return 3
+    finally:
+        await _shutdown(bg, connection)
+
+
+async def _action_tally_result(args):
+    """Run the loops until the survey has at least ``--expect-voters`` voters,
+    then emit the derived tally as ``TALLY=<json>``."""
+    survey_id = bytes.fromhex(args.survey)
+    connection, bg = await _connect_and_start()
+    try:
+        await network.signal_readables_to_mixwal()
+        deadline = asyncio.get_event_loop().time() + args.timeout
+        latest = None
+        while True:
+            async with persistent.asession() as sess:
+                row = await sess.get(persistent.TallyState, survey_id)
+            if row is not None:
+                latest = tally_engine.tally(tally_sync.load_doc(row.doc_state))
+                if args.expect_voters is None or latest.n_voters >= args.expect_voters:
+                    logger.info("TALLY=%s", _tally_json(latest))
+                    logger.info("%s", _declare_outcome(latest))
+                    return 0
+            if asyncio.get_event_loop().time() >= deadline:
+                if latest is not None:
+                    logger.info("TALLY=%s", _tally_json(latest))
+                    logger.info("%s", _declare_outcome(latest))
+                logger.error("tally result timed out for survey %s", survey_id.hex())
+                return 1
+            await asyncio.sleep(0.5)
+    finally:
+        await _shutdown(bg, connection)
+
+
+async def _action_tally_close(args):
+    """Close the survey and broadcast it. Only the creator may close; a
+    non-creator's attempt is refused. Logs ``CLOSED``."""
+    survey_id = bytes.fromhex(args.survey)
+    connection, bg = await _connect_and_start()
+    try:
+        await network.signal_readables_to_mixwal()
+        if not await _wait_for_survey(
+            survey_id, asyncio.get_event_loop().time() + args.timeout,
+        ):
+            logger.error("survey %s not received within %.0fs", survey_id.hex(), args.timeout)
+            return 1
+
+        async with persistent.asession() as sess:
+            convo = await _conversation_by_name(sess, args.conv_name)
+            if convo is None:
+                logger.error("conversation %r not found", args.conv_name)
+                return 2
+            if not await tally_instance.close_local(sess, convo, survey_id):
+                logger.error("could not close survey %s (only the creator may)", survey_id.hex())
+                return 1
+            final_pwal_id = await tally_send.stage_outbound(
+                sess, convo, tally_events.build_close(survey_id),
+            )
+            await sess.commit()
+
+        await network.check_for_new()
+        if await _wait_for_sent(
+            final_pwal_id, asyncio.get_event_loop().time() + max(120.0, args.timeout),
+        ):
+            logger.info("CLOSED")
+            return 0
+        logger.error("close send timed out for survey %s", survey_id.hex())
+        return 3
+    finally:
+        await _shutdown(bg, connection)
+
+
+async def _action_tally_list(args):
+    """List the surveys a conversation holds. Offline; needs no daemon. Prints
+    one ``SURVEY=`` line per survey."""
+    async with persistent.asession() as sess:
+        convo = await _conversation_by_name(sess, args.conv_name)
+        if convo is None:
+            logger.error("conversation %r not found", args.conv_name)
+            return 2
+        docs = await tally_instance.list_for_conversation(sess, convo.id)
+
+    if not docs:
+        logger.info("(no surveys)")
+        return 0
+    for doc in docs:
+        res = tally_engine.tally(doc)
+        logger.info(
+            "SURVEY=%s status=%s voters=%d mode=%s topic=%s",
+            res.survey_id.hex(), res.status, res.n_voters, res.mode.value,
+            json.dumps(tally_schema.topic_of(doc)),
+        )
+    return 0
+
+
+def _connection_parser() -> argparse.ArgumentParser:
+    """A shared parent parser carrying the explicit kpclientd connection.
+
+    Every verb that talks to the daemon requires exactly one of a
+    ``thinclient.toml`` (``--config``) or a dial address (``--address``, with an
+    optional ``--network``). There is no implicit search of the filesystem.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument(
+        "--config", metavar="THINCLIENT_TOML",
+        help="path to a thinclient.toml describing the kpclientd connection",
+    )
+    g.add_argument(
+        "--address", metavar="ADDR",
+        help="kpclientd dial address, e.g. 127.0.0.1:64331 (tcp) or @katzenpost (unix)",
+    )
+    p.add_argument(
+        "--network", choices=["tcp", "unix"], default="tcp",
+        help="dial transport for --address (default: tcp)",
+    )
+    return p
+
+
+def resolve_connection_config(args) -> "tuple[str, str | None]":
+    """Turn the parsed connection args into a thinclient.toml path.
+
+    Returns ``(config_path, temp_path)``. When ``--address`` was given the
+    config is synthesised into a temporary file whose path is returned as
+    ``temp_path`` for the caller to delete; with ``--config`` it is ``None``.
+    """
+    if args.config:
+        return args.config, None
+    if args.network == "unix":
+        body = f'[Dial]\n  [Dial.Unix]\n    Address = "{args.address}"\n'
+    else:
+        body = f'[Dial]\n  [Dial.Tcp]\n    Network = "tcp"\n    Address = "{args.address}"\n'
+    fd, path = tempfile.mkstemp(prefix="kqt-thinclient-", suffix=".toml")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    return path, path
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="katzenqt-headless",
@@ -712,43 +1012,47 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="action", required=True)
 
-    p_create = sub.add_parser("create-conv")
+    # Every verb except `info` dials kpclientd and so inherits the explicit
+    # connection arguments via this parent parser.
+    conn = _connection_parser()
+
+    p_create = sub.add_parser("create-conv", parents=[conn])
     p_create.add_argument("conv_name")
     p_create.add_argument("own_display")
     p_create.set_defaults(func=_action_create_conv)
 
-    p_mint = sub.add_parser("voucher-mint")
+    p_mint = sub.add_parser("voucher-mint", parents=[conn])
     p_mint.add_argument("conv_name")
     p_mint.add_argument("display_name")
     p_mint.set_defaults(func=_action_voucher_mint)
 
-    p_induct = sub.add_parser("voucher-induct")
+    p_induct = sub.add_parser("voucher-induct", parents=[conn])
     p_induct.add_argument("conv_name")
     p_induct.add_argument("peer_name")
     p_induct.add_argument("voucher_b64")
     p_induct.set_defaults(func=_action_voucher_induct)
 
-    p_await = sub.add_parser("voucher-await")
+    p_await = sub.add_parser("voucher-await", parents=[conn])
     p_await.add_argument("conv_name")
     p_await.set_defaults(func=_action_voucher_await)
 
-    p_send = sub.add_parser("send")
+    p_send = sub.add_parser("send", parents=[conn])
     p_send.add_argument("conv_name")
     p_send.add_argument("text")
     p_send.set_defaults(func=_action_send)
 
-    p_multi = sub.add_parser("multi-send")
+    p_multi = sub.add_parser("multi-send", parents=[conn])
     p_multi.add_argument("conv_name")
     p_multi.add_argument("texts", help="pipe-separated list of texts to queue")
     p_multi.set_defaults(func=_action_multi_send)
 
-    p_read = sub.add_parser("read")
+    p_read = sub.add_parser("read", parents=[conn])
     p_read.add_argument("conv_name")
     p_read.add_argument("timeout_s", type=float)
     p_read.add_argument("expected_text", nargs="?", default=None)
     p_read.set_defaults(func=_action_read)
 
-    p_sess = sub.add_parser("chat-session")
+    p_sess = sub.add_parser("chat-session", parents=[conn])
     p_sess.add_argument("conv_name")
     p_sess.add_argument(
         "steps", nargs="+",
@@ -756,14 +1060,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_sess.set_defaults(func=_action_chat_session)
 
-    p_send_file = sub.add_parser("send-file")
+    p_send_file = sub.add_parser("send-file", parents=[conn])
     p_send_file.add_argument("conv_name")
     p_send_file.add_argument("path", help="path to the file to send")
     p_send_file.add_argument("--basename", default=None)
     p_send_file.add_argument("--filetype", default=None)
     p_send_file.set_defaults(func=_action_send_file)
 
-    p_read_file = sub.add_parser("read-file")
+    p_read_file = sub.add_parser("read-file", parents=[conn])
     p_read_file.add_argument("conv_name")
     p_read_file.add_argument(
         "--to-dir", dest="to_dir", required=True,
@@ -785,5 +1089,46 @@ def _build_parser() -> argparse.ArgumentParser:
              "schema, conversations, and outstanding WAL counts",
     )
     p_info.set_defaults(func=_action_info)
+
+    p_tally_create = sub.add_parser("tally-create", parents=[conn])
+    p_tally_create.add_argument("conv_name")
+    p_tally_create.add_argument("topic")
+    p_tally_create.add_argument(
+        "--mode", choices=["availability", "approval"], default="approval",
+    )
+    p_tally_create.add_argument(
+        "--slot", action="append", required=True,
+        help="descriptive text for one slot; repeat for each slot",
+    )
+    p_tally_create.set_defaults(func=_action_tally_create)
+
+    p_tally_vote = sub.add_parser("tally-vote", parents=[conn])
+    p_tally_vote.add_argument("conv_name")
+    p_tally_vote.add_argument("--survey", required=True, help="survey id in hex")
+    p_tally_vote.add_argument(
+        "--slot", action="append", required=True,
+        help="a per-slot vote SLOT_ID=availability; repeat per slot",
+    )
+    p_tally_vote.add_argument("--timeout", type=float, default=600.0)
+    p_tally_vote.set_defaults(func=_action_tally_vote)
+
+    p_tally_result = sub.add_parser("tally-result", parents=[conn])
+    p_tally_result.add_argument("conv_name")
+    p_tally_result.add_argument("--survey", required=True, help="survey id in hex")
+    p_tally_result.add_argument("--expect-voters", type=int, default=None, dest="expect_voters")
+    p_tally_result.add_argument("--timeout", type=float, default=600.0)
+    p_tally_result.set_defaults(func=_action_tally_result)
+
+    p_tally_close = sub.add_parser("tally-close", parents=[conn])
+    p_tally_close.add_argument("conv_name")
+    p_tally_close.add_argument("--survey", required=True, help="survey id in hex")
+    p_tally_close.add_argument("--timeout", type=float, default=600.0)
+    p_tally_close.set_defaults(func=_action_tally_close)
+
+    # tally-list reads only the local state file, so (like info) it takes no
+    # connection argument.
+    p_tally_list = sub.add_parser("tally-list")
+    p_tally_list.add_argument("conv_name")
+    p_tally_list.set_defaults(func=_action_tally_list)
 
     return parser
