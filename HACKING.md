@@ -63,22 +63,21 @@ is deliberately free of any PySide6 import. It offers two surfaces: a small
 async Python API (`connect`, `start`, `stop`, and the `session` context
 manager) for in-process callers, and a line-oriented CLI.
 
-The CLI is one command with many subcommands. Invoke it through the repo's
-`.venv`. The bare `katzenqt-headless` name is only on `PATH` once the venv is
-activated; otherwise call the venv's copy directly, or run it as a module:
+The CLI is installed as the `katzenqt-headless` console script in the venv; run
+it by path (its shebang points at the venv's Python, so no activation is
+needed):
 
 ```shell
-# the venv's console script, by path:
 .venv/bin/katzenqt-headless --help
-# or as a module (works whenever the package imports in that venv):
-.venv/bin/python -m katzenqt.headless --help
 ```
 
 The subcommands cover conversation setup (`create-conv`), the Contact Voucher
 handshake (`voucher-mint`, `voucher-induct`, `voucher-await`), messaging
 (`send`, `multi-send`, `read`, `chat-session`, `send-file`, `read-file`), a
 state-file summary (`info`), and the tally/voting protocol (`tally-create`,
-`tally-vote`, `tally-result`). Append `--help` to any verb for its arguments.
+`tally-vote`, `tally-close`, `tally-result`, `tally-list`). Append `--help` to
+any verb for its arguments. For worked end-to-end examples, the voucher join, a
+message exchange, and a vote, see the headless section of the README.
 
 Three things to know:
 
@@ -86,32 +85,16 @@ Three things to know:
   talks to the daemon requires exactly one of `--config <thinclient.toml>` or
   `--address <addr>` (with an optional `--network {tcp,unix}`, default `tcp`).
   Use `--address 127.0.0.1:64331` for a docker mixnet, or
-  `--address @katzenpost --network unix` for a unix-socket daemon. `info` is the
-  only verb that needs no daemon, and so takes no connection argument.
+  `--address @katzenpost --network unix` for a unix-socket daemon. `info` and
+  `tally-list` are offline and take no connection argument.
 - **Each identity is a distinct `KQT_STATE`.** The state file is chosen once, at
   import, from `KQT_STATE` (see "Where is my data stored?"), so run separate
   identities as separate processes, each with its own `KQT_STATE`.
-- **Results go to stderr, as token lines.** Verbs report through the logging
-  framework: `VOUCHER=`, `SENT`, `JOINED`, `TALLY_CREATED=`, `VOTED`,
-  `TALLY=<json>`, etc., each carrying a `LEVEL name:` prefix. A harness should
-  match them by substring, not `startswith`.
-
-Example, a two-identity tally over a running mixnet (see the docker section of
-the main katzenpost repo for bringing one up). The mixnet's `kpclientd` listens
-on TCP `127.0.0.1:64331`, so we pass that as `--address`:
-
-```shell
-A="--address 127.0.0.1:64331"
-KQT_STATE=alice .venv/bin/katzenqt-headless create-conv demo alice $A
-KQT_STATE=bob   .venv/bin/katzenqt-headless create-conv demo bob   $A
-# ... the voucher handshake makes the two members of each other ...
-KQT_STATE=alice .venv/bin/katzenqt-headless tally-create demo "lunch?" \
-    --mode approval --slot A --slot B --slot C $A    # prints TALLY_CREATED=<hex>
-KQT_STATE=bob   .venv/bin/katzenqt-headless tally-vote demo --survey <hex> \
-    --slot s0=yes --slot s2=yes $A                   # prints VOTED
-KQT_STATE=alice .venv/bin/katzenqt-headless tally-result demo --survey <hex> \
-    --expect-voters 2 $A                             # prints TALLY={...}
-```
+- **Quiet by default.** The CLI prints only each verb's result token, bare
+  (`CREATED`, `VOUCHER=`, `JOINED`, `SENT`, `RECV=`, `TALLY_CREATED=`, `VOTED`,
+  `CLOSED`, `TALLY=<json>`, `WINNER=` / `TIE=`), plus any warnings and errors,
+  all on stderr. A harness should match a token by substring. Set
+  `KQT_LOG_LEVEL` (`INFO` or `DEBUG`) for the full prefixed log.
 
 (The Python API surface, `connect` / `session`, takes the config path as an
 explicit argument too.)
