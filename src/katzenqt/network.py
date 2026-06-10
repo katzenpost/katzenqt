@@ -340,7 +340,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
 
-  logger.critical(f"got reply for outbound read mw {resp}")
+  logger.debug(f"got reply for outbound read mw {resp}")
   assert resp is not None, "outbound read reply is None, but ought to be retrying"
   async with persistent.asession() as sess:
     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
