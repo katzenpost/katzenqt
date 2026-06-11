@@ -56,7 +56,7 @@ async def _make_keypair(fake, seed: bytes = b"\x11" * 32):
 
 async def _insert_write_setup(
     fake, *, conv_name: str = "demo", peer_name: str = "self",
-    seed: bytes = b"\x33" * 32,
+    seed: bytes = b"\x33" * 32, active: bool = True,
 ):
     """Insert the minimal DB rows representing 'we have just created a
     new conversation and provisioned a write keypair'. Returns a dict
@@ -85,7 +85,7 @@ async def _insert_write_setup(
         cpeer = persistent.ConversationPeer(
             name=peer_name,
             read_cap_id=bacap_stream,
-            active=True,
+            active=active,
         )
         sess.add_all([wcw, rcw, cpeer])
         await sess.commit()
@@ -209,8 +209,14 @@ async def _set_up_write_flow(
     Returns dict with keys: bacap_stream, write_cap, read_cap,
     first_message_index, conversation_id, peer_id, mw_id, pwal_id.
     """
+    # active=False mirrors production: the own peer of a stream we write
+    # is never read back (katzen.py's "we are not reading from ourself").
+    # An active self peer lets a concurrently running readables_to_mixwal
+    # stage a read-MixWAL for this same stream between our two commits,
+    # and the write-MixWAL below then violates UNIQUE(bacap_stream).
     setup = await _insert_write_setup(
         fake, seed=seed, conv_name=conv_name, peer_name=peer_name,
+        active=False,
     )
     # Encrypt write through the fake so the envelope_hash is recognised.
     wcr = await fake.encrypt_write(

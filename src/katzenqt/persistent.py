@@ -1,3 +1,4 @@
+import asyncio
 import sqlalchemy as sa
 from sqlalchemy.orm import declarative_base
 #from pydantic import BaseModel, ConfigDict, Field
@@ -75,9 +76,33 @@ metadata.naming_convention = NAMING_CONVENTION
 
 @asynccontextmanager
 async def asession() -> "AsyncContextManager[sqlmodel.ext.asyncio.session.AsyncSession]":
-    """Opens a sqlmodel.ext.asyncio.session.AsyncSession"""
-    async with AsyncSession(_engine) as session:
+    """Opens a sqlmodel.ext.asyncio.session.AsyncSession
+
+    Connection acquisition and release are shielded from task
+    cancellation. A task cancelled while aiosqlite is still opening
+    the database (or while the session is being closed) abandons the
+    raw sqlite connection unclosed; shutdown cancelling the network
+    loops did exactly that, and the garbage collector later reported
+    it as an "unclosed database" ResourceWarning. The shields let the
+    checkout and the close run to completion before the cancellation
+    unwinds.
+    """
+    session = AsyncSession(_engine)
+    acquire = asyncio.ensure_future(session.connection())
+    try:
+        await asyncio.shield(acquire)
         yield session
+    except asyncio.CancelledError:
+        if not acquire.done():
+            await acquire
+        raise
+    finally:
+        close = asyncio.ensure_future(session.close())
+        try:
+            await asyncio.shield(close)
+        except asyncio.CancelledError:
+            await close
+            raise
 
 def init_and_migrate():
     """Initialize database and migrates application schema.
