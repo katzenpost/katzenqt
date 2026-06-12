@@ -271,6 +271,10 @@ kpclientd-podman:
         voting_mixnet/kpclientd.bookworm && \
         mv voting_mixnet/kpclientd.bookworm ../cmd/kpclientd/kpclientd
 
+# Installs the namenlos production configs: a kpclientd config that dials
+# the namenlos mixnet and a thin client config that reaches the daemon over
+# the @katzenpost abstract socket. The integration tests do not read these,
+# dialing kpclientd directly via --address instead.
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/

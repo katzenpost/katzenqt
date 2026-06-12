@@ -1,16 +1,13 @@
-# Dial transport: pick one subtable. The docker mixnet's kpclientd listens
-# on TCP 127.0.0.1:64331; prod katzenpost typically uses an abstract unix
-# socket. Exactly one of [Dial.Tcp] / [Dial.Unix] must be set.
 [Dial]
-  [Dial.Tcp]
-    Network = "tcp"
-    Address = "127.0.0.1:64331"
-  # [Dial.Unix]
-  #   Network = "unix"
-  #   Address = "@katzenpost"
+  [Dial.Unix]
+    Address = "@katzenpost"
 
-# Geometry is no longer configured here. The client daemon now delivers the
-# Sphinx and Pigeonhole geometries to the thin client over the connection
-# handshake, and a leftover [SphinxGeometry] or [PigeonholeGeometry] section
-# is rejected by the thin client as a drifted config.
-
+# To dial the client daemon over TCP instead of the abstract Unix
+# socket, comment out the [Dial.Unix] block above and uncomment the
+# block below. Exactly one of [Dial.Unix] or [Dial.Tcp] must be set;
+# the thin client rejects a file that populates both. The daemon's
+# matching [Listen] block in client.toml must agree.
+#
+# [Dial.Tcp]
+#   Address = "localhost:64331"
+#   Network = "tcp"
