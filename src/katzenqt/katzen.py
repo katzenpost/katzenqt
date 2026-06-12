@@ -180,10 +180,13 @@ def duration_time_ns():
 class PendingVouchersDialog(QDialog):
     """Lists in-flight vouchers and lets the user abandon stale ones, e.g. a
     voucher whose code was lost and whose join never completed."""
-    def __init__(self, parent, rows, on_cancel):
+    def __init__(self, parent, rows):
         super().__init__(parent)
         self.setWindowTitle("Pending vouchers")
-        self._on_cancel = on_cancel
+        # ids the user marked for abandonment; the caller deletes them once the
+        # dialog closes. Scheduling the deletion here, while exec()'s nested event
+        # loop runs, would re-enter QtAsyncio's task machinery and crash.
+        self.cancelled = []
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             "Vouchers that have not finished joining. Cancel one to abandon it; "
@@ -207,7 +210,7 @@ class PendingVouchersDialog(QDialog):
         item = self.list_widget.currentItem()
         if item is None:
             return
-        self._on_cancel(item.data(QtCore.Qt.ItemDataRole.UserRole))
+        self.cancelled.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
         self.list_widget.takeItem(self.list_widget.row(item))
 
 
@@ -991,9 +994,10 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(self, APP_NAME, "There are no pending vouchers.")
             return
-        def on_cancel(pv_id):
-            ensure_future(self.iothread.run_in_io(cancel_pending_voucher(pv_id)))
-        PendingVouchersDialog(self, rows, on_cancel).exec()
+        dialog = PendingVouchersDialog(self, rows)
+        dialog.exec()
+        for pv_id in dialog.cancelled:
+            await self.iothread.run_in_io(cancel_pending_voucher(pv_id))
 
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):
