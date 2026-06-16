@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 David Stainton
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Light, dark, and window-manager-aware theming for katzenqt.
 
 The desktop's own preference is honoured through Qt's colour-scheme
@@ -17,8 +20,8 @@ The chosen mode persists in the ``AppSetting`` table under
 
 import logging
 
-from PySide6.QtCore import Qt, QObject, QTimer
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QObject, QSize, Qt, QTimer
+from PySide6.QtGui import QIcon, QImage, QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QRadioButton, QVBoxLayout,
 )
@@ -46,6 +49,35 @@ _PINNED_PALETTE_WIDGETS = (
     "chat_lineEdit",
     "toolBar",
 )
+
+_TOOLBAR_ICON_SIZE = 27
+_INVITE_BUTTON_ICON_SIZE = 25
+
+# Toolbar actions whose icons are re-tinted for dark mode (black SVG/PNG -> white).
+_THEMED_ACTIONS = (
+    ("action_accept_invitation", "resources/accept.svg"),
+    ("action_invite_contact", "resources/invite.svg"),
+    ("action_quit", "resources/quit.svg"),
+    ("action_new_conversation", "resources/3-chat.svg"),
+    ("action_display_font", "fugue-icons-3.5.6/icons/edit-small-caps.png"),
+    ("action_display_language", "fugue-icons-3.5.6/icons/edit-language.png"),
+    ("action_theme", "fugue-icons-3.5.6/icons/contrast.png"),
+    ("actionDocumentation", "resources/information.svg"),
+)
+
+
+def themed_icon(path, foreground, size=_TOOLBAR_ICON_SIZE):
+    """Load ``path`` (SVG or PNG) at ``size`` and recolor opaque pixels to
+    ``foreground``. Used in dark mode so black toolbar glyphs stay visible."""
+    pixmap = QIcon(path).pixmap(QSize(size, size))
+    if pixmap.isNull():
+        return QIcon()
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(image.rect(), foreground)
+    painter.end()
+    return QIcon(QPixmap.fromImage(image))
 
 
 def normalize_mode(mode):
@@ -168,6 +200,7 @@ class ThemeManager(QObject):
             qml.setClearColor(themed.base().color())
             qml.update()
         self._sync_themed_stylesheets(ui, themed)
+        self._sync_action_icons(ui, themed)
         # A live palette change does not fully re-propagate to every widget:
         # toolbar buttons and group-box titles keep the previous scheme's text
         # colour (e.g. white "Conversations and contacts" on a light panel
@@ -214,6 +247,31 @@ class ThemeManager(QObject):
                 "    qproperty-alignment: AlignCenter;\n"
                 "}"
             )
+
+    def _sync_action_icons(self, ui, pal):
+        """Re-apply toolbar icons; in dark mode tint black SVG glyphs to white."""
+        scheme = self._resolve_scheme()
+        if scheme == "dark":
+            fg = pal.buttonText().color()
+            for name, path in _THEMED_ACTIONS:
+                action = getattr(ui, name, None)
+                if action is not None:
+                    action.setIcon(themed_icon(path, fg, _TOOLBAR_ICON_SIZE))
+            invite_btn = getattr(ui, "invite_contact_toolButton", None)
+            if invite_btn is not None:
+                invite_btn.setIcon(
+                    themed_icon(
+                        "resources/invite.svg", fg, _INVITE_BUTTON_ICON_SIZE
+                    )
+                )
+        else:
+            for name, path in _THEMED_ACTIONS:
+                action = getattr(ui, name, None)
+                if action is not None:
+                    action.setIcon(QIcon(path))
+            invite_btn = getattr(ui, "invite_contact_toolButton", None)
+            if invite_btn is not None:
+                invite_btn.setIcon(QIcon("resources/invite.svg"))
 
     def _load_mode(self):
         try:

@@ -43,6 +43,41 @@ class FilterProxyModel(QtCore.QSortFilterProxyModel):
 
 ROLE_CHAT_AUTHOR = 0x100  # see ConversationLogModel.roleNames()
 ROLE_CHAT_NETWORK_STATUS = 0x101  # ConversationLog.network_status
+ROLE_CHAT_MESSAGE_ID = 0x102
+ROLE_CHAT_ATTACHMENT_BASENAME = 0x103
+ROLE_CHAT_ATTACHMENT_FILETYPE = 0x104
+ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
+
+
+@lru_cache(maxsize=10000)
+def _decode_group_chat_payload(payload: bytes) -> tuple[str, str | None, str | None, bool]:
+    # Keep ConversationLog as the source of truth and derive renderer-friendly
+    # roles lazily so audio rows can share the same persistence format as text.
+    if payload[:1] != b"F":
+        return payload.decode(errors="replace"), None, None, False
+
+    try:
+        from .models import GroupChatMessage
+
+        group_message = GroupChatMessage.from_cbor(payload[1:])
+    except Exception:
+        return payload.decode(errors="replace"), None, None, False
+
+    if group_message.text:
+        return group_message.text, None, None, False
+
+    if group_message.file_upload is not None:
+        basename = group_message.file_upload.basename
+        filetype = group_message.file_upload.filetype
+        is_audio_message = filetype == "audio/opus"
+        display = (
+            f"Voice note: {basename}"
+            if is_audio_message
+            else f"[attachment] {basename}"
+        )
+        return display, basename, filetype, is_audio_message
+
+    return "", None, None, False
 
 def lru_cache_for_data_roles(maxsize=10000):
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
@@ -91,6 +126,10 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             #3: QByteArray(b'toolTip'),
             ROLE_CHAT_AUTHOR: QByteArray(b'author'),
             ROLE_CHAT_NETWORK_STATUS: QByteArray(b'network_status'),
+            ROLE_CHAT_MESSAGE_ID: QByteArray(b'message_id'),
+            ROLE_CHAT_ATTACHMENT_BASENAME: QByteArray(b'attachment_basename'),
+            ROLE_CHAT_ATTACHMENT_FILETYPE: QByteArray(b'attachment_filetype'),
+            ROLE_CHAT_IS_AUDIO_MESSAGE: QByteArray(b'is_audio_message'),
         }
 
     @lru_cache(maxsize=10000)
@@ -136,7 +175,15 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         """returns data for index
         PySide6.QtCore.Qt.DisplayRole
         """
-        if role not in (0, ROLE_CHAT_AUTHOR, ROLE_CHAT_NETWORK_STATUS):
+        if role not in (
+            0,
+            ROLE_CHAT_AUTHOR,
+            ROLE_CHAT_NETWORK_STATUS,
+            ROLE_CHAT_MESSAGE_ID,
+            ROLE_CHAT_ATTACHMENT_BASENAME,
+            ROLE_CHAT_ATTACHMENT_FILETYPE,
+            ROLE_CHAT_IS_AUDIO_MESSAGE,
+        ):
             return None
         index_row : int = index.row()
         #print("DATA: INDEX ROW IS", index_row, repr(index))
@@ -155,17 +202,20 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                     return cl.conversation_peer.name
                 elif role == ROLE_CHAT_NETWORK_STATUS:
                     return cl.network_status
-                elif role == 0:
-                    if cl.payload.startswith(b'F'):                        
-                        try:
-                            from .models import GroupChatMessage
-                            cm = GroupChatMessage.from_cbor(cl.payload[1:])
-                            return cm.text
-                        except Exception as e:
-                            print(e, cl.payload)
-                            return cl.payload.decode()
-                    else:
-                        return cl.payload.decode()
+                elif role == ROLE_CHAT_MESSAGE_ID:
+                    return str(cl.id)
+                else:
+                    display, basename, filetype, is_audio_message = _decode_group_chat_payload(
+                        cl.payload
+                    )
+                    if role == 0:
+                        return display
+                    if role == ROLE_CHAT_ATTACHMENT_BASENAME:
+                        return basename
+                    if role == ROLE_CHAT_ATTACHMENT_FILETYPE:
+                        return filetype
+                    if role == ROLE_CHAT_IS_AUDIO_MESSAGE:
+                        return is_audio_message
                 # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent
         #print(self,"data", index, repr(QtCore.Qt.ItemDataRole(role)))
         #return f"hi {self.convo_id}"
