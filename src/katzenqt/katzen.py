@@ -482,7 +482,6 @@ class MainWindow(QMainWindow):
             bacap_stream=convo_state.own_peer_bacap_uuid,
             messages=[group_chat_message]
         )
-        print("serializing SendOperation for outgoing message",send_op)
         # TODO this code is duplicated in self.send_file
         new_write_caps, db_entries = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
