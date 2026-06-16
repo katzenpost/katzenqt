@@ -10,6 +10,7 @@ from . import persistent
 import hashlib
 from base64 import b64encode, b64decode
 from typing import List
+from pathlib import Path
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
@@ -165,6 +166,18 @@ class GroupChatFileUpload(BaseModel):
     payload : bytes
     filetype: str # "image, sound, arbitrary"
     basename: str
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> "GroupChatFileUpload":
+        file_path = Path(path)
+        # Voice notes reuse the generic file-upload transport, so the filetype
+        # tag is the only signal the renderer needs to switch to audio UI.
+        filetype = "audio/opus" if file_path.suffix.lower() == ".opus" else "arbitrary"
+        return cls(
+            payload=file_path.read_bytes(),
+            filetype=filetype,
+            basename=file_path.name,
+        )
 
 class GroupChatTally(BaseModel):
     """The payload carried by every tally message. Which fields are populated
