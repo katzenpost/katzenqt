@@ -195,7 +195,7 @@ TreeView {
           implicitWidth: parent.parent.width || 1
 
           // NB: without this, it looks like shit if you scroll up:
-          implicitHeight: Math.max(itemMessageTextArea.implicitHeight,
+          implicitHeight: Math.max(messageColumn.implicitHeight,
 	                    Math.max(contact_name.implicitHeight, (entry_picture.visible ? entry_picture.height : 0)
 			    )) // tallest element
 
@@ -232,6 +232,13 @@ TreeView {
 	     }
 	  }
 
+          // Text and attachment controls stack vertically so the action row
+          // is not clipped by the greedy TextArea width.
+          Column {
+            id: messageColumn
+            spacing: 2
+            width: parent.width - contact_name.width
+
           TextArea {
             id: itemMessageTextArea
 	    visible: model.display != ""
@@ -242,7 +249,7 @@ TreeView {
 	    // hovered: when mouse is over
             //Layout.fillWidth: parent
             //property alias maxWidth: "chatTreeView"
-            width: parent.width - contact_name.width
+            width: parent.width
             //implicitWidth: 100;
             //anchors.fill: parent
             //openExternalLinks: false
@@ -255,6 +262,32 @@ TreeView {
 	      color: hovered ? sysPalette.alternateBase : sysPalette.base
 	    }
           } // Text
+
+          // Attachment actions: only shown for received markers and our own
+          // sent file rows. Oversized and plain-text rows get no buttons.
+          Row {
+            id: attachmentActions
+            spacing: 4
+            visible: model.attachment_kind === "marker" || model.attachment_kind === "outgoing"
+
+            Button {
+              text: "Play"
+              visible: model.is_audio_message  // voice notes only
+              onClicked: chatController.playReceivedMessage(model.message_id)
+            }
+            Button {
+              text: "Open"
+              visible: !model.is_audio_message  // let the OS pick a handler
+              onClicked: chatController.openAttachment(model.message_id)
+            }
+            Button {
+              text: "Save as…"
+              visible: !model.is_audio_message
+              onClicked: chatController.saveAttachment(model.message_id)
+            }
+          } // Row attachmentActions
+
+          } // Column messageColumn
 } // contentItem: Row
         } // delegate: TreeViewDelegate
 

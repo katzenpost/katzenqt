@@ -4,16 +4,20 @@ APP_NAME = "KatzenQt"
 import argparse
 import asyncio
 import fcntl
+import hashlib
 import logging
 import math
 import os
+import shutil
 import sys
 import threading
 import time
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import NamedTuple, TYPE_CHECKING
+
+import cbor2
 
 import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
@@ -21,8 +25,8 @@ from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
                             QSettings, QSize, Slot, QThread, QUrl, Signal,
                             QTimer)
-from PySide6.QtGui import (QAction, QIcon, QKeySequence, QPixmap, QShortcut,
-                           QStandardItem, QStandardItemModel)
+from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
+                           QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
@@ -60,6 +64,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
+
+
+class _AttachmentError(Exception):
+    """User-facing attachment problem (missing file, checksum mismatch,
+    oversized body that was dropped on receive)."""
+
+
+class _ResolvedAttachment(NamedTuple):
+    """On-disk path for a chat attachment, looked up from ConversationLog."""
+    basename: str
+    filetype: str | None
+    path: Path
 
 class AsyncioThread(threading.Thread):
     def run(self):
@@ -362,41 +378,125 @@ class MainWindow(QMainWindow):
         convo.attached_files.discard(str(path))
         self.refresh_attached_files_for_conversation(convo)
 
-    def _load_audio_upload_message(self, message_id: str):
+    def _resolve_attachment(self, message_id: str) -> "_ResolvedAttachment | None":
+        """Rehydrate an attachment to a concrete on-disk path.
+
+        QML only carries lightweight model roles, so the payload is decoded
+        here on demand. Handles the three persisted shapes:
+
+        * ``file_marker`` (received): the bytes are already spilled to disk by
+          :func:`network._spill_attachment`; verify the SHA-256 and return it.
+        * ``file_outgoing`` (sent): read from the original ``src_path`` if it
+          is still on disk; an empty ``src_path`` (voice-note draft) yields
+          ``None``.
+        * inline ``GroupChatMessage.file_upload`` (legacy): spill the inline
+          bytes into a per-message cache file.
+
+        Raises :class:`_AttachmentError` for oversized markers, missing
+        spilled files, and checksum mismatches. ``self`` is intentionally
+        unused so the helper can be exercised in isolation.
+        """
         try:
             message_uuid = uuid.UUID(message_id)
         except ValueError:
             return None
 
-        # QML only gets lightweight model roles, so rehydrate the full payload on
-        # demand here before handing the cached file path to the Rust backend.
         with persistent.Session(persistent._engine_sync) as sess:
             conversation_log = sess.get(persistent.ConversationLog, message_uuid)
             if conversation_log is None or conversation_log.payload[:1] != b"F":
                 return None
-            try:
-                group_message = GroupChatMessage.from_cbor(conversation_log.payload[1:])
-            except Exception:
-                return None
-            if group_message.file_upload is None:
-                return None
-            if group_message.file_upload.filetype != "audio/opus":
-                return None
-            return group_message.file_upload
+            body = conversation_log.payload[1:]  # strip framing byte shared with wire format
+
+        state_root = persistent.state_file.parent
+
+        # Attachment markers are CBOR dicts carrying a "kind" key.
+        try:
+            decoded = cbor2.loads(body)
+        except Exception:
+            decoded = None
+
+        if isinstance(decoded, dict) and "kind" in decoded:
+            kind = decoded.get("kind")
+            basename = decoded.get("basename") or "unnamed"
+            filetype = decoded.get("filetype")
+
+            if kind == "file_oversized":
+                raise _AttachmentError(
+                    f"{basename} was too large to receive and its contents "
+                    "were dropped."
+                )
+
+            if kind == "file_marker":
+                # Bytes live under state_dir/attachments/; marker holds rel_path + sha256.
+                rel_path = decoded.get("rel_path")
+                if not rel_path:
+                    raise _AttachmentError(f"{basename} has no stored location.")
+                abs_path = state_root / rel_path
+                if not abs_path.is_file():
+                    raise _AttachmentError(
+                        f"The received file for {basename} is missing on disk."
+                    )
+                marker_sha = decoded.get("sha256")
+                if marker_sha is not None:
+                    actual_sha = hashlib.sha256(abs_path.read_bytes()).digest()
+                    if actual_sha != marker_sha:
+                        raise _AttachmentError(
+                            f"Checksum mismatch for {basename}; the file may be "
+                            "corrupt."
+                        )
+                return _ResolvedAttachment(basename, filetype, abs_path)
+
+            if kind == "file_outgoing":
+                src_path = decoded.get("src_path") or ""
+                if not src_path:
+                    # Voice-note draft was discarded after sending; nothing to
+                    # play back until the peer echoes it.
+                    return None
+                abs_path = Path(src_path)
+                if not abs_path.is_file():
+                    raise _AttachmentError(
+                        f"The original file for {basename} is no longer "
+                        f"available at {src_path}."
+                    )
+                return _ResolvedAttachment(basename, filetype, abs_path)
+
+            return None
+
+        # Legacy inline file upload: spill the bytes to a cache file.
+        try:
+            group_message = GroupChatMessage.from_cbor(body)
+        except Exception:
+            return None
+        if group_message.file_upload is None:
+            return None
+        upload = group_message.file_upload
+        cache_dir = state_root / "attachments" / "_inline_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        safe = network._safe_basename(upload.basename)
+        cache_path = cache_dir / f"{message_id}-{safe}"
+        if not cache_path.exists() or cache_path.read_bytes() != upload.payload:
+            cache_path.write_bytes(upload.payload)
+        return _ResolvedAttachment(upload.basename, upload.filetype, cache_path)
 
     @Slot(str)
     def playReceivedMessage(self, message_id: str) -> None:
+        """QML slot: play a received or sent voice note."""
         audio = self._push_to_talk_audio()
         if not audio:
             return
-        upload = self._load_audio_upload_message(message_id)
-        if upload is None:
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if resolved is None:
             return
         try:
+            # Rust playback wants a stable file path; cache from resolved bytes.
             cached_path = audio.cache_received_clip(
                 message_id,
-                upload.basename,
-                upload.payload,
+                resolved.basename,
+                resolved.path.read_bytes(),
             )
             audio.play_received(cached_path)
             self._start_playback_monitor("Failed to play the received voice note.")
@@ -405,6 +505,49 @@ class MainWindow(QMainWindow):
                 self,
                 f"ERROR: {APP_NAME}",
                 f"Failed to play the received voice note.\n\n{exc}",
+            )
+
+    @Slot(str)
+    def openAttachment(self, message_id: str) -> None:
+        """QML slot: open a non-audio attachment with the desktop handler."""
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This attachment is not available locally yet.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.path)))
+
+    @Slot(str)
+    def saveAttachment(self, message_id: str) -> None:
+        """QML slot: copy attachment bytes to a user-chosen path."""
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This attachment is not available locally yet.",
+            )
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save attachment", resolved.basename,
+        )
+        if not dest:
+            return
+        try:
+            shutil.copyfile(resolved.path, dest)
+        except OSError as exc:
+            QMessageBox.critical(
+                self, f"ERROR: {APP_NAME}",
+                f"Could not save the attachment.\n\n{exc}",
             )
 
     @Slot()
@@ -756,30 +899,34 @@ class MainWindow(QMainWindow):
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
 
-    @async_cb
-    async def chat_msg_single_line(self):
-        """Send a single line message to the currently selected chat window."""
-        msg = self.ui.chat_lineEdit.text()
-        self.ui.chat_lineEdit.setText("")
-        convo_state = self.convo_state()
-        if not convo_state:
-            return
-        convo_state.chat_lineEdit_buffer = ''
-        if not msg.strip():
-            return
+    async def _enqueue_outgoing_gcm(
+        self,
+        convo_state: "ConversationUIState",
+        gcm: GroupChatMessage,
+        *,
+        local_payload: bytes,
+    ) -> None:
+        """Shared WAL-commit path for both text and file sends.
 
-        group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
+        Serialises ``gcm`` into the conversation's own write-cap BACAP stream,
+        records the WriteCapWAL/PlaintextWAL rows the network writer consumes,
+        appends an optimistic ConversationLog row (so the message shows up
+        immediately as "pending"), then nudges both the UI refresh queue and
+        the network thread.
 
-        # TODO: this is general code that should live in a shared place:
+        ``local_payload`` is what gets stored in ConversationLog.payload for
+        local display; the network wire format comes from ``gcm`` itself.
+        """
         send_op = SendOperation(
+            # Must match convo.write_cap so find_resendable picks up our PWAL rows.
             bacap_stream=convo_state.own_peer_bacap_uuid,
-            messages=[group_chat_message]
+            messages=[gcm],
         )
-        print("serializing SendOperation for outgoing message",send_op)
-        # TODO this code is duplicated in self.send_file
+        print("serializing SendOperation for outgoing message", send_op)
         new_write_caps, db_entries = send_op.serialize(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
-            conversation_id=convo_state.conversation_id)
+            chunk_size=1530,  # TODO SphinxGeometry.somethingPayloadLength
+            conversation_id=convo_state.conversation_id,
+        )
 
         async with persistent.asession() as sess:
             for cap_uuid in new_write_caps:
@@ -796,18 +943,39 @@ class MainWindow(QMainWindow):
                 .select_from(persistent.ConversationLog)
                 .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
                 .scalar_subquery(),
-                payload=b"F"+group_chat_message.to_cbor(), # TODO massive hack here because we don't reassemble sendops yet
+                payload=local_payload,
                 network_status=1,
                 outgoing_pwal=final_pwal_id,
             ))
             await sess.commit()
 
-        # signal self.receive_msg_listener() that we have news for it:
-        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id,False)))
+        # Wake the chat view (was missing from the old send_file path).
+        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id, False)))
 
         # Signal the network module that we have a new outgoing message:
         await self.iothread.run_in_io(
             network.check_for_new()
+        )
+
+    @async_cb
+    async def chat_msg_single_line(self):
+        """Send a single line message to the currently selected chat window."""
+        msg = self.ui.chat_lineEdit.text()
+        self.ui.chat_lineEdit.setText("")
+        convo_state = self.convo_state()
+        if not convo_state:
+            return
+        convo_state.chat_lineEdit_buffer = ''
+        if not msg.strip():
+            return
+
+        group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
+
+        await self._enqueue_outgoing_gcm(
+            convo_state,
+            group_chat_message,
+            # TODO massive hack here because we don't reassemble sendops yet
+            local_payload=b"F" + group_chat_message.to_cbor(),
         )
 
     async def receive_msg_listener(self):
@@ -870,61 +1038,69 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def send_file(self):
-        """Send attached files.
+        """Send each queued attachment as its own SendOperation.
 
-        This is more or less like self.chat_msg_single_line(),
-        except of course we're sending some potentially big files.
-        If we don't think the files will change, we can stream them to the temp stream.
-        But the safest would be to load the whole thing into the WAL, that way user can delete
-        or modify their file. In the future that should probably be a setting.
-        For now let's just do the simple thing:
-        - Each file is one big message
-        - We send them back to back and end up with a huge ephemeral BACAP stream
-        - When done uploading, we put a reference to the big stream into the chat.
-        - We can choose whether we want to block the user's chat stream or not (if we don't,
-          they can keep chatting but their attached files may look out of order).
-          This might be a good reason to allow sending a message along with the files.
+        Wire format is a full GroupChatMessage (bytes in PWAL); the local
+        ConversationLog row gets a lightweight ``file_outgoing`` marker so
+        the chat view does not store megabytes inline.
         """
         convo = self.convo_state()
         print("should send files", convo.attached_files)
 
-        # send them
-        fmsgs = []
         voice_note_drafts = []
         audio = getattr(self, "_ptt_audio", None)
-        for fn in convo.attached_files:
+        # One SendOperation per file — unserialize() only decodes one GCM.
+        for fn in sorted(convo.attached_files):
             f_path = Path(fn)
-            if audio and audio.is_draft_path(f_path):
-                voice_note_drafts.append(f_path)
-            fmsgs.append(
-                GroupChatMessage(
-                version=0,
-                membership_hash=b"t"*32, # TODO: mocked for now; convo_state.group_chat_state.membership_hash
-                    file_upload=GroupChatFileUpload.from_path(f_path)
+            is_draft = bool(audio and audio.is_draft_path(f_path))
+
+            if not f_path.is_file():
+                QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    f"Attachment no longer exists and was skipped:\n{f_path}",
                 )
+                continue
+
+            size = f_path.stat().st_size
+            # Same cap network._spill_attachment uses on receive.
+            if size > network._ATTACHMENT_HARD_CAP:
+                cap_mib = network._ATTACHMENT_HARD_CAP / (1024 * 1024)
+                QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    f"{f_path.name} is {size / (1024 * 1024):.1f} MiB, which "
+                    f"exceeds the {cap_mib:.0f} MiB attachment limit. "
+                    "It was not sent.",
+                )
+                continue
+
+            upload = GroupChatFileUpload.from_path(f_path)
+            gcm = GroupChatMessage(
+                version=0,
+                membership_hash=b"TODO" * (32 // 4),  # TODO: convo_state.group_chat_state.membership_hash
+                file_upload=upload,
             )
 
-        send_op = SendOperation(
-            messages=fmsgs,
-            bacap_stream=uuid.uuid4() # TODO look up the right uuid in convo_state.group_chat_state.bacap_uuid
-        )
+            # Store a lightweight local marker rather than the file bytes: the
+            # renderer only needs the basename/filetype, and the bytes are
+            # already on disk at src_path (empty for voice-note drafts, which
+            # are discarded right after this send).
+            local_payload = b"F" + cbor2.dumps({
+                "v": 0,
+                "kind": "file_outgoing",
+                "basename": upload.basename,
+                "filetype": upload.filetype,
+                "size": size,
+                "src_path": "" if is_draft else str(f_path),
+            })
 
-        new_write_caps, db_entries = send_op.serialize(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
-            conversation_id=convo.conversation_id)
+            await self._enqueue_outgoing_gcm(
+                convo, gcm, local_payload=local_payload,
+            )
 
-        # open a new transaction: TODO: need to only READ COMMITTED, we do not want dirty reads here
-        async with persistent.asession() as sess:
-            for cap_uuid in new_write_caps:
-                sess.add(persistent.WriteCapWAL(id=cap_uuid))  # the network writer needs to create these before it can process plaintextwals
-            for db_obj in db_entries:
-                sess.add(db_obj)  # These are PlaintextWAL and ReadCapWal entries
-            await sess.commit()
-
-        # Signal network.py that we have written a new SendOperation to PlaintextWAL
-        await self.iothread.run_in_io(
-            network.check_for_new()
-        )
+            if is_draft:
+                voice_note_drafts.append(f_path)
 
         # Remove sent files from model and view:
         convo.attached_files.clear()
