@@ -7,6 +7,9 @@ from PySide6.QtQuick import QQuickImageProvider
 
 from pydantic import BaseModel, Field
 import uuid
+from typing import NamedTuple
+
+import cbor2
 
 from . import persistent
 
@@ -47,24 +50,106 @@ ROLE_CHAT_MESSAGE_ID = 0x102
 ROLE_CHAT_ATTACHMENT_BASENAME = 0x103
 ROLE_CHAT_ATTACHMENT_FILETYPE = 0x104
 ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
+ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind — drives Play/Open/Save visibility
+ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path — spilled file (received only)
+
+
+class AttachmentDisplay(NamedTuple):
+    """Renderer-friendly view of a ConversationLog.payload.
+
+    ``kind`` is one of ``"text"``, ``"inline"``, ``"marker"``, ``"outgoing"``
+    or ``"oversized"`` and drives which (if any) attachment controls QML shows.
+    """
+    display: str
+    basename: str | None
+    filetype: str | None
+    is_audio: bool
+    kind: str  # text | inline | marker | outgoing | oversized
+    rel_path: str | None
+
+
+def _attachment_display_for_marker(decoded: dict) -> AttachmentDisplay:
+    """Build an :class:`AttachmentDisplay` from a decoded CBOR marker dict
+    (``file_marker`` / ``file_outgoing`` / ``file_oversized``)."""
+    kind = decoded.get("kind")
+    basename = decoded.get("basename") or "unnamed"
+    filetype = decoded.get("filetype")
+    is_audio = filetype == "audio/opus"
+
+    if kind == "file_oversized":
+        size = decoded.get("size") or 0
+        mib = size / (1024 * 1024)
+        return AttachmentDisplay(
+            display=f"[attachment too large] {basename} ({mib:.1f} MiB)",
+            basename=basename,
+            filetype=filetype,
+            is_audio=False,
+            kind="oversized",
+            rel_path=None,
+        )
+
+    display = (
+        f"Voice note: {basename}" if is_audio else f"[attachment] {basename}"
+    )
+    if kind == "file_outgoing":
+        # src_path is never surfaced to QML; the resolve helper reads it from
+        # the persisted payload on demand.
+        return AttachmentDisplay(
+            display=display,
+            basename=basename,
+            filetype=filetype,
+            is_audio=is_audio,
+            kind="outgoing",
+            rel_path=None,
+        )
+    # file_marker (received)
+    return AttachmentDisplay(
+        display=display,
+        basename=basename,
+        filetype=filetype,
+        is_audio=is_audio,
+        kind="marker",
+        rel_path=decoded.get("rel_path"),
+    )
 
 
 @lru_cache(maxsize=10000)
-def _decode_group_chat_payload(payload: bytes) -> tuple[str, str | None, str | None, bool]:
+def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
     # Keep ConversationLog as the source of truth and derive renderer-friendly
     # roles lazily so audio rows can share the same persistence format as text.
     if payload[:1] != b"F":
-        return payload.decode(errors="replace"), None, None, False
+        # Pre-protocol rows: raw UTF-8 text, no CBOR wrapper.
+        return AttachmentDisplay(
+            payload.decode(errors="replace"), None, None, False, "text", None,
+        )
+
+    body = payload[1:]
+
+    # Attachment markers (received/sent/oversized) are CBOR dicts carrying a
+    # "kind" key; try that before the inline GroupChatMessage decode.
+    try:
+        decoded = cbor2.loads(body)
+    except Exception:
+        decoded = None
+    if isinstance(decoded, dict) and decoded.get("kind") in (
+        "file_marker", "file_outgoing", "file_oversized",
+    ):
+        return _attachment_display_for_marker(decoded)
 
     try:
         from .models import GroupChatMessage
 
-        group_message = GroupChatMessage.from_cbor(payload[1:])
+        # Older rows store the full GroupChatMessage CBOR inline (bytes in payload).
+        group_message = GroupChatMessage.from_cbor(body)
     except Exception:
-        return payload.decode(errors="replace"), None, None, False
+        return AttachmentDisplay(
+            payload.decode(errors="replace"), None, None, False, "text", None,
+        )
 
     if group_message.text:
-        return group_message.text, None, None, False
+        return AttachmentDisplay(
+            group_message.text, None, None, False, "text", None,
+        )
 
     if group_message.file_upload is not None:
         basename = group_message.file_upload.basename
@@ -75,9 +160,11 @@ def _decode_group_chat_payload(payload: bytes) -> tuple[str, str | None, str | N
             if is_audio_message
             else f"[attachment] {basename}"
         )
-        return display, basename, filetype, is_audio_message
+        return AttachmentDisplay(
+            display, basename, filetype, is_audio_message, "inline", None,
+        )
 
-    return "", None, None, False
+    return AttachmentDisplay("", None, None, False, "text", None)
 
 def lru_cache_for_data_roles(maxsize=10000):
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
@@ -130,6 +217,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_BASENAME: QByteArray(b'attachment_basename'),
             ROLE_CHAT_ATTACHMENT_FILETYPE: QByteArray(b'attachment_filetype'),
             ROLE_CHAT_IS_AUDIO_MESSAGE: QByteArray(b'is_audio_message'),
+            ROLE_CHAT_ATTACHMENT_KIND: QByteArray(b'attachment_kind'),
+            ROLE_CHAT_ATTACHMENT_REL_PATH: QByteArray(b'attachment_rel_path'),
         }
 
     @lru_cache(maxsize=10000)
@@ -183,6 +272,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_BASENAME,
             ROLE_CHAT_ATTACHMENT_FILETYPE,
             ROLE_CHAT_IS_AUDIO_MESSAGE,
+            ROLE_CHAT_ATTACHMENT_KIND,
+            ROLE_CHAT_ATTACHMENT_REL_PATH,
         ):
             return None
         index_row : int = index.row()
@@ -205,17 +296,20 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 elif role == ROLE_CHAT_MESSAGE_ID:
                     return str(cl.id)
                 else:
-                    display, basename, filetype, is_audio_message = _decode_group_chat_payload(
-                        cl.payload
-                    )
+                    # Derive display text and attachment roles from the raw payload.
+                    info = _decode_group_chat_payload(cl.payload)
                     if role == 0:
-                        return display
+                        return info.display
                     if role == ROLE_CHAT_ATTACHMENT_BASENAME:
-                        return basename
+                        return info.basename
                     if role == ROLE_CHAT_ATTACHMENT_FILETYPE:
-                        return filetype
+                        return info.filetype
                     if role == ROLE_CHAT_IS_AUDIO_MESSAGE:
-                        return is_audio_message
+                        return info.is_audio
+                    if role == ROLE_CHAT_ATTACHMENT_KIND:
+                        return info.kind
+                    if role == ROLE_CHAT_ATTACHMENT_REL_PATH:
+                        return info.rel_path
                 # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent
         #print(self,"data", index, repr(QtCore.Qt.ItemDataRole(role)))
         #return f"hi {self.convo_id}"
