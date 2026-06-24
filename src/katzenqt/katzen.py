@@ -23,8 +23,8 @@ import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
-                            QSettings, QSize, Slot, QThread, QUrl, Signal,
-                            QTimer)
+                            QSettings, QSize, Property, Slot, QThread, QUrl,
+                            Signal, QTimer)
 from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
                            QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
@@ -281,6 +281,7 @@ class MainWindow(QMainWindow):
     def _stop_playback_monitor(self) -> None:
         self._playback_failure_message = None
         self._playback_error_timer.stop()
+        self._set_playing_message_id("")
 
     def _poll_playback_error(self) -> None:
         audio = getattr(self, "_ptt_audio", None)
@@ -478,6 +479,22 @@ class MainWindow(QMainWindow):
             cache_path.write_bytes(upload.payload)
         return _ResolvedAttachment(upload.basename, upload.filetype, cache_path)
 
+    # Emitted whenever the currently-playing voice note changes so QML can
+    # flip a row's Play/Stop button without polling.
+    playingMessageIdChanged = Signal()
+
+    def _set_playing_message_id(self, message_id: str) -> None:
+        if getattr(self, "_playing_message_id", "") != message_id:
+            self._playing_message_id = message_id
+            self.playingMessageIdChanged.emit()
+
+    @Property(str, notify=playingMessageIdChanged)
+    def playingMessageId(self) -> str:
+        """The message id of the voice note currently playing, or "" if none.
+        QML binds against this to show Stop on the active row and Play on the
+        rest."""
+        return getattr(self, "_playing_message_id", "")
+
     @Slot(str)
     def playReceivedMessage(self, message_id: str) -> None:
         """QML slot: play a received or sent voice note."""
@@ -490,7 +507,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, str(exc))
             return
         if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This voice note is not available locally yet.",
+            )
             return
+        # Stop any clip already playing so a second Play does not overlap.
+        self.stopAudioPlayback()
         try:
             # Rust playback wants a stable file path; cache from resolved bytes.
             cached_path = audio.cache_received_clip(
@@ -499,8 +522,10 @@ class MainWindow(QMainWindow):
                 resolved.path.read_bytes(),
             )
             audio.play_received(cached_path)
+            self._set_playing_message_id(message_id)
             self._start_playback_monitor("Failed to play the received voice note.")
         except AudioEngineError as exc:
+            self._set_playing_message_id("")
             QMessageBox.critical(
                 self,
                 f"ERROR: {APP_NAME}",
@@ -537,8 +562,11 @@ class MainWindow(QMainWindow):
                 "This attachment is not available locally yet.",
             )
             return
+        name_filter = (
+            "Opus audio (*.opus)" if resolved.filetype == "audio/opus" else ""
+        )
         dest, _ = QFileDialog.getSaveFileName(
-            self, "Save attachment", resolved.basename,
+            self, "Save attachment", resolved.basename, name_filter,
         )
         if not dest:
             return
@@ -777,6 +805,7 @@ class MainWindow(QMainWindow):
         self.ui.qml_ChatLines.rootContext().setContextProperty("chatController", self)
         self._ptt_audio: PttAudioBridge | None = None
         self._ptt_audio_failed = False
+        self._playing_message_id: str = ""
         self._playback_failure_message: str | None = None
         self._playback_error_timer = QTimer(self)
         self._playback_error_timer.setInterval(100)
@@ -905,6 +934,7 @@ class MainWindow(QMainWindow):
         gcm: GroupChatMessage,
         *,
         local_payload: bytes,
+        log_id: uuid.UUID | None = None,
     ) -> None:
         """Shared WAL-commit path for both text and file sends.
 
@@ -916,6 +946,10 @@ class MainWindow(QMainWindow):
 
         ``local_payload`` is what gets stored in ConversationLog.payload for
         local display; the network wire format comes from ``gcm`` itself.
+
+        ``log_id`` lets the caller pre-assign the ConversationLog primary key
+        so it can key cached side-data (e.g. a sent voice note's playback clip)
+        to the same id the renderer resolves against.
         """
         send_op = SendOperation(
             # Must match convo.write_cap so find_resendable picks up our PWAL rows.
@@ -924,7 +958,7 @@ class MainWindow(QMainWindow):
         )
         print("serializing SendOperation for outgoing message", send_op)
         new_write_caps, db_entries = send_op.serialize(
-            chunk_size=1530,  # TODO SphinxGeometry.somethingPayloadLength
+            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo_state.conversation_id,
         )
 
@@ -937,6 +971,7 @@ class MainWindow(QMainWindow):
 
             # Then we pretend that we have received it:
             sess.add(persistent.ConversationLog(
+                id=log_id or uuid.uuid4(),
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
                 conversation_order=select(func.count())
@@ -1039,7 +1074,7 @@ class MainWindow(QMainWindow):
     @async_cb
     async def send_file(self):
         """Send each queued attachment as its own SendOperation.
-
+        
         Wire format is a full GroupChatMessage (bytes in PWAL); the local
         ConversationLog row gets a lightweight ``file_outgoing`` marker so
         the chat view does not store megabytes inline.
@@ -1082,21 +1117,37 @@ class MainWindow(QMainWindow):
                 file_upload=upload,
             )
 
+            # Pre-assign the ConversationLog id so a voice-note draft (which is
+            # discarded right after sending) can be cached for playback under
+            # the same id the renderer later resolves against.
+            log_id = uuid.uuid4()
+
+            # Voice-note drafts are deleted after send, so persist a stable
+            # playback copy keyed to the log id and point src_path at it. Other
+            # attachments stay on disk at their original src_path.
+            if is_draft and audio:
+                src_path = str(
+                    audio.cache_received_clip(
+                        str(log_id), upload.basename, f_path.read_bytes(),
+                    )
+                )
+            else:
+                src_path = str(f_path)
+
             # Store a lightweight local marker rather than the file bytes: the
             # renderer only needs the basename/filetype, and the bytes are
-            # already on disk at src_path (empty for voice-note drafts, which
-            # are discarded right after this send).
+            # already on disk at src_path.
             local_payload = b"F" + cbor2.dumps({
                 "v": 0,
                 "kind": "file_outgoing",
                 "basename": upload.basename,
                 "filetype": upload.filetype,
                 "size": size,
-                "src_path": "" if is_draft else str(f_path),
+                "src_path": src_path,
             })
 
             await self._enqueue_outgoing_gcm(
-                convo, gcm, local_payload=local_payload,
+                convo, gcm, local_payload=local_payload, log_id=log_id,
             )
 
             if is_draft:

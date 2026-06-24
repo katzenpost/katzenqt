@@ -150,3 +150,28 @@ def test_file_outgoing_empty_src_path_returns_none():
     message_id = _insert_payload(payload)
 
     assert _resolve(message_id) is None
+
+
+def test_file_outgoing_audio_resolves_to_cached_clip(tmp_path):
+    # A sent voice note keeps a playback copy under the audio cache (see
+    # send_file), so its file_outgoing marker resolves like any other sent
+    # attachment rather than returning None.
+    clip = tmp_path / "audio" / "received" / "abc-ptt.opus"
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(b"opus clip bytes")
+
+    payload = b"F" + cbor2.dumps({
+        "v": 0,
+        "kind": "file_outgoing",
+        "basename": "ptt.opus",
+        "filetype": "audio/opus",
+        "size": clip.stat().st_size,
+        "src_path": str(clip),
+    })
+    message_id = _insert_payload(payload)
+
+    resolved = _resolve(message_id)
+    assert isinstance(resolved, _ResolvedAttachment)
+    assert resolved.filetype == "audio/opus"
+    assert resolved.path == clip
+    assert resolved.path.read_bytes() == b"opus clip bytes"
