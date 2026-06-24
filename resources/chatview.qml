@@ -268,12 +268,22 @@ TreeView {
           Row {
             id: attachmentActions
             spacing: 4
-            visible: model.attachment_kind === "marker" || model.attachment_kind === "outgoing"
+            visible: model.attachment_kind === "marker"
+                  || model.attachment_kind === "outgoing"
+                  || model.attachment_kind === "inline"
 
             Button {
               text: "Play"
-              visible: model.is_audio_message  // voice notes only
+              // voice notes only, and only when this row is not already playing
+              visible: model.is_audio_message
+                    && chatController.playingMessageId !== model.message_id
               onClicked: chatController.playReceivedMessage(model.message_id)
+            }
+            Button {
+              text: "Stop"
+              visible: model.is_audio_message
+                    && chatController.playingMessageId === model.message_id
+              onClicked: chatController.stopAudioPlayback()
             }
             Button {
               text: "Open"
@@ -282,7 +292,6 @@ TreeView {
             }
             Button {
               text: "Save as…"
-              visible: !model.is_audio_message
               onClicked: chatController.saveAttachment(model.message_id)
             }
           } // Row attachmentActions
