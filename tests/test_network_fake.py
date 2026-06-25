@@ -808,6 +808,14 @@ class TestProvisionReadCaps:
 # ---------------------------------------------------------------------------
 
 
+# The genuine asyncio.sleep, captured before the autouse fast_asyncio_sleep
+# fixture rebinds asyncio.sleep to an instant stub. The poll loop below needs
+# a real sleep, not the stub: a zero-delay busy-spin never lets the event loop
+# idle in epoll, so it starves the aiosqlite worker thread of GIL time and the
+# detached DB work in start_resending crawls, racing the deadline (flaky).
+_REAL_SLEEP = asyncio.sleep
+
+
 async def _run_loop_until(loop_coro, condition_callable, *, timeout: float = 5.0):
     """Run a long-running coroutine and shut it down once
     `condition_callable()` returns truthy or the wall-clock deadline
@@ -823,7 +831,7 @@ async def _run_loop_until(loop_coro, condition_callable, *, timeout: float = 5.0
     loop_task = asyncio.create_task(loop_coro)
     try:
         while True:
-            await asyncio.sleep(0)
+            await _REAL_SLEEP(0.002)
             result = await condition_callable() if is_async else condition_callable()
             if result:
                 break
