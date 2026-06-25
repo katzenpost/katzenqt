@@ -3,6 +3,7 @@ import katzenpost_thinclient
 from katzenpost_thinclient import (
     ThinClient, ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
+    DatabaseFailureError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -339,6 +340,19 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     await asyncio.sleep(5)
     give_up()
     return
+  except DatabaseFailureError as e:
+    # A transient replica-side database fault (ErrFailedDBRead, deserialise
+    # failure, or a momentarily closed DB; see replica/handlers.go
+    # handleReplicaRead). The daemon does not retry it (it only retries
+    # BoxIDNotFound), so we back off and reschedule the same read rather than
+    # advancing the stream or disabling the conversation. This is the only
+    # replica error code that reaches a read this way: ReplicationFailed and
+    # InternalError ride the outer proxy reply with an empty envelope, which
+    # the courier serves as an ACK, so they never surface here.
+    logger.warning("drain_mixwal_read_single transient database failure, will retry: %s", e)
+    await asyncio.sleep(5)
+    give_up()
+    return
 
   logger.debug(f"got reply for outbound read mw {resp}")
   assert resp is not None, "outbound read reply is None, but ought to be retrying"
@@ -657,6 +671,8 @@ def on_error(task, func, *args, **kwargs):
     Usage: task.add_done_callback(on_error(lambda: foo.bar()))
     """
     def on_error_done(task):
+        if task.cancelled():
+            return  # cancellation is expected on shutdown, not an error
         try:
             task.result()
         except Exception:

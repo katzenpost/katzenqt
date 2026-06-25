@@ -25,6 +25,7 @@ from sqlmodel import select
 
 from katzenpost_thinclient import (
     BACAPDecryptionFailedError,
+    DatabaseFailureError,
     StartResendingCancelledError,
     ThinClientOfflineError,
 )
@@ -629,6 +630,28 @@ class TestDrainMixwalReadSingle:
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
 
+    @pytest.mark.asyncio
+    async def test_database_failure_reschedules(self, fake_thinclient):
+        """A transient replica database failure must back off and retry: the
+        MixWAL row survives (the stream is not advanced) and the stream is
+        released from draining_right_now so it can be picked up again. This is
+        the only replica error code that reaches a read; ReplicationFailed and
+        InternalError are served by the courier as ACKs and never surface."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", DatabaseFailureError("database failure"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+
 
 # ---------------------------------------------------------------------------
 # start_resending (PlaintextWAL -> MixWAL)
@@ -785,6 +808,14 @@ class TestProvisionReadCaps:
 # ---------------------------------------------------------------------------
 
 
+# The genuine asyncio.sleep, captured before the autouse fast_asyncio_sleep
+# fixture rebinds asyncio.sleep to an instant stub. The poll loop below needs
+# a real sleep, not the stub: a zero-delay busy-spin never lets the event loop
+# idle in epoll, so it starves the aiosqlite worker thread of GIL time and the
+# detached DB work in start_resending crawls, racing the deadline (flaky).
+_REAL_SLEEP = asyncio.sleep
+
+
 async def _run_loop_until(loop_coro, condition_callable, *, timeout: float = 5.0):
     """Run a long-running coroutine and shut it down once
     `condition_callable()` returns truthy or the wall-clock deadline
@@ -800,7 +831,7 @@ async def _run_loop_until(loop_coro, condition_callable, *, timeout: float = 5.0
     loop_task = asyncio.create_task(loop_coro)
     try:
         while True:
-            await asyncio.sleep(0)
+            await _REAL_SLEEP(0.002)
             result = await condition_callable() if is_async else condition_callable()
             if result:
                 break
