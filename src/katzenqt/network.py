@@ -671,6 +671,8 @@ def on_error(task, func, *args, **kwargs):
     Usage: task.add_done_callback(on_error(lambda: foo.bar()))
     """
     def on_error_done(task):
+        if task.cancelled():
+            return  # cancellation is expected on shutdown, not an error
         try:
             task.result()
         except Exception:
