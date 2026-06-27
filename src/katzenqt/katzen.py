@@ -39,6 +39,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
+from . import attachment_images
 from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
@@ -1137,14 +1138,28 @@ class MainWindow(QMainWindow):
             # Store a lightweight local marker rather than the file bytes: the
             # renderer only needs the basename/filetype, and the bytes are
             # already on disk at src_path.
-            local_payload = b"F" + cbor2.dumps({
+            marker_fields = {
                 "v": 0,
                 "kind": "file_outgoing",
                 "basename": upload.basename,
                 "filetype": upload.filetype,
                 "size": size,
                 "src_path": src_path,
-            })
+            }
+            safe_basename = network._safe_basename(upload.basename)
+            is_image = attachment_images.is_image_attachment(
+                upload.filetype, safe_basename,
+            )
+            if is_image:
+                thumb_rel_path = attachment_images.spill_image_thumbnail(
+                    conversation_id=convo.conversation_id,
+                    file_uuid=log_id,
+                    safe_basename=safe_basename,
+                    source=f_path,
+                )
+                if thumb_rel_path is not None:
+                    marker_fields["thumb_rel_path"] = thumb_rel_path
+            local_payload = b"F" + cbor2.dumps(marker_fields)
 
             await self._enqueue_outgoing_gcm(
                 convo, gcm, local_payload=local_payload, log_id=log_id,

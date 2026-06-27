@@ -101,17 +101,18 @@ def test_file_oversized():
 def test_file_outgoing_regular():
     payload = _marker(
         kind="file_outgoing",
-        basename="photo.jpg",
+        basename="report.pdf",
         filetype="arbitrary",
         size=9999,
-        src_path="/home/me/photo.jpg",
+        src_path="/home/me/report.pdf",
     )
     info = _decode_group_chat_payload(payload)
-    assert info.display == "[attachment] photo.jpg"
+    assert info.display == "[attachment] report.pdf"
     assert info.kind == "outgoing"
     assert info.is_audio is False
     # src_path is intentionally not exposed to QML:
     assert info.rel_path is None
+    assert info.picture_path is None
 
 
 def test_file_outgoing_audio_draft_empty_src_path():
@@ -126,4 +127,56 @@ def test_file_outgoing_audio_draft_empty_src_path():
     assert info.display == "Voice note: ptt.opus"
     assert info.kind == "outgoing"
     assert info.is_audio is True
+    assert info.rel_path is None
+
+
+def test_file_marker_image_uses_thumbnail():
+    payload = _marker(
+        kind="file_marker",
+        basename="photo.jpg",
+        filetype="image/jpeg",
+        size=1234,
+        rel_path="attachments/7/abc-photo.jpg",
+        thumb_rel_path="attachments/7/abc-thumb-photo.jpg.jpg",
+        sha256=b"\x00" * 32,
+        membership_hash=b"TODO" * 8,
+    )
+    info = _decode_group_chat_payload(payload)
+    # Image rows render as a thumbnail, so the text line is suppressed.
+    assert info.display == ""
+    assert info.kind == "marker"
+    assert info.is_audio is False
+    assert info.picture_path == "attachments/7/abc-thumb-photo.jpg.jpg"
+    assert info.rel_path == "attachments/7/abc-photo.jpg"
+
+
+def test_file_marker_image_without_thumb_falls_back_to_full():
+    payload = _marker(
+        kind="file_marker",
+        basename="diagram.png",
+        filetype="arbitrary",  # legacy rows tagged generic; extension wins
+        size=99,
+        rel_path="attachments/7/def-diagram.png",
+        sha256=b"\x11" * 32,
+        membership_hash=b"TODO" * 8,
+    )
+    info = _decode_group_chat_payload(payload)
+    assert info.display == ""
+    assert info.picture_path == "attachments/7/def-diagram.png"
+
+
+def test_file_outgoing_image_uses_thumbnail():
+    payload = _marker(
+        kind="file_outgoing",
+        basename="photo.jpg",
+        filetype="image/jpeg",
+        size=9999,
+        src_path="/home/me/photo.jpg",
+        thumb_rel_path="attachments/3/ghi-thumb-photo.jpg.jpg",
+    )
+    info = _decode_group_chat_payload(payload)
+    assert info.display == ""
+    assert info.kind == "outgoing"
+    assert info.picture_path == "attachments/3/ghi-thumb-photo.jpg.jpg"
+    # src_path is still not exposed to QML.
     assert info.rel_path is None

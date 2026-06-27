@@ -25,7 +25,7 @@ import cbor2
 
 from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
-from . import conversation_handlers, models, persistent
+from . import attachment_images, conversation_handlers, models, persistent
 from sqlmodel import select
 
 logger = logging.getLogger("katzen.network")
@@ -212,7 +212,7 @@ def _spill_attachment(
         os.close(fd)
 
     sha = hashlib.sha256(blob).digest()
-    marker = cbor2.dumps({
+    marker_fields = {
         "v": 0,
         "kind": "file_marker",
         "basename": safe,
@@ -221,8 +221,17 @@ def _spill_attachment(
         "rel_path": rel_path,
         "sha256": sha,
         "membership_hash": membership_hash,
-    })
-    return b"F" + marker
+    }
+    if attachment_images.is_image_attachment(file_upload.filetype, safe):
+        thumb_rel_path = attachment_images.spill_image_thumbnail(
+            conversation_id=conversation_id,
+            file_uuid=msg_uuid,
+            safe_basename=safe,
+            source=blob,
+        )
+        if thumb_rel_path is not None:
+            marker_fields["thumb_rel_path"] = thumb_rel_path
+    return b"F" + cbor2.dumps(marker_fields)
 
 
 async def _get_received_piece(sess, rcw_id: "uuid.UUID", idx_8b: bytes):
