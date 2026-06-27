@@ -169,10 +169,17 @@ class GroupChatFileUpload(BaseModel):
 
     @classmethod
     def from_path(cls, path: str | Path) -> "GroupChatFileUpload":
+        from . import attachment_images
+
         file_path = Path(path)
         # Voice notes reuse the generic file-upload transport, so the filetype
         # tag is the only signal the renderer needs to switch to audio UI.
-        filetype = "audio/opus" if file_path.suffix.lower() == ".opus" else "arbitrary"
+        # Images get an image/* tag so the renderer can show a thumbnail;
+        # everything else falls back to the generic "arbitrary" marker.
+        if file_path.suffix.lower() == ".opus":
+            filetype = "audio/opus"
+        else:
+            filetype = attachment_images.guess_image_filetype(file_path)
         return cls(
             payload=file_path.read_bytes(),
             filetype=filetype,
