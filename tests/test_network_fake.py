@@ -25,9 +25,11 @@ from sqlmodel import select
 
 from katzenpost_thinclient import (
     BACAPDecryptionFailedError,
+    BoxIDNotFoundError,
     DatabaseFailureError,
     StartResendingCancelledError,
     ThinClientOfflineError,
+    TombstoneError,
 )
 from katzenpost_thinclient.core import MKEMDecryptionFailedError
 
@@ -640,6 +642,31 @@ class TestDrainMixwalReadSingle:
         setup = await _set_up_read_flow(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message", DatabaseFailureError("database failure"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.parametrize("benign", [
+        BoxIDNotFoundError("box ID not found"),
+        TombstoneError("tombstone"),
+    ])
+    @pytest.mark.asyncio
+    async def test_benign_replica_outcome_does_not_wedge(self, fake_thinclient, benign):
+        """A benign replica read outcome (no data yet, or a tombstone) must not
+        be treated as a failure: it must not crash, must leave the MixWAL for a
+        later retry, and must release the stream from draining_right_now so it
+        is not stranded (an uncaught one would wedge the stream)."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", benign,
         )
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])

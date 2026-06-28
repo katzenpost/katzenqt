@@ -3,7 +3,7 @@ import katzenpost_thinclient
 from katzenpost_thinclient import (
     ThinClient, ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
-    DatabaseFailureError,
+    DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -340,16 +340,35 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     await asyncio.sleep(5)
     give_up()
     return
-  except DatabaseFailureError as e:
-    # A transient replica-side database fault (ErrFailedDBRead, deserialise
-    # failure, or a momentarily closed DB; see replica/handlers.go
-    # handleReplicaRead). The daemon does not retry it (it only retries
-    # BoxIDNotFound), so we back off and reschedule the same read rather than
-    # advancing the stream or disabling the conversation. This is the only
-    # replica error code that reaches a read this way: ReplicationFailed and
-    # InternalError ride the outer proxy reply with an empty envelope, which
-    # the courier serves as an ACK, so they never surface here.
-    logger.warning("drain_mixwal_read_single transient database failure, will retry: %s", e)
+  except (BoxIDNotFoundError, TombstoneError) as e:
+    # Benign replica read outcomes, not failures (cf. the thin client's
+    # is_expected_outcome). BoxIDNotFound means the stream simply has no
+    # further data yet; kpclientd normally rides this out for us while
+    # no_retry_on_box_id_not_found is False, so it rarely reaches here.
+    # Tombstone means the writer deleted this box. Neither warrants an
+    # error to the user: release the stream and wait for more, rather than
+    # wedging it (an uncaught one would strand the stream in
+    # draining_right_now exactly as DatabaseFailure once did).
+    logger.debug("drain_mixwal_read_single: benign replica outcome, nothing to advance: %s", e)
+    await asyncio.sleep(5)
+    give_up()
+    return
+  except DatabaseFailureError:
+    # A storage replica reported a database error from ITS OWN backend store
+    # (the replica's RocksDB; ErrFailedDBRead, a deserialise failure, or a
+    # momentarily closed DB, see replica/handlers.go handleReplicaRead). This
+    # is NOT katzenqt's local SQLite. The daemon does not retry it (it only
+    # retries BoxIDNotFound), so we back off and reschedule the same read
+    # rather than advancing the stream or disabling the conversation. It is
+    # the only genuine replica failure code that reaches a read this way;
+    # ReplicationFailed and InternalError ride the outer proxy reply with an
+    # empty envelope, which the courier serves as an ACK, so they never
+    # surface here.
+    logger.warning(
+        "drain_mixwal_read_single: a storage replica reported a database error "
+        "from its own backend store (not katzenqt's local SQLite); "
+        "treating as transient and will retry"
+    )
     await asyncio.sleep(5)
     give_up()
     return
