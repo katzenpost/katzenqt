@@ -43,7 +43,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: 22a85f22ad59bf4da2ac4970a601987f781cf034 # Contact Voucher daemon API (lockstep with thin_client CI)
+          ref: 86d4dbc5f11d9162d52b371708f41c937566cf7f # courier/replica error-code disambiguation (lockstep with thin_client CI)
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
