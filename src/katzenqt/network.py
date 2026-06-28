@@ -4,6 +4,7 @@ from katzenpost_thinclient import (
     ThinClient, ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
     DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
+    CourierError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -357,17 +358,26 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # A storage replica reported a database error from ITS OWN backend store
     # (the replica's RocksDB; ErrFailedDBRead, a deserialise failure, or a
     # momentarily closed DB, see replica/handlers.go handleReplicaRead). This
-    # is NOT katzenqt's local SQLite. The daemon does not retry it (it only
-    # retries BoxIDNotFound), so we back off and reschedule the same read
-    # rather than advancing the stream or disabling the conversation. It is
-    # the only genuine replica failure code that reaches a read this way;
-    # ReplicationFailed and InternalError ride the outer proxy reply with an
-    # empty envelope, which the courier serves as an ACK, so they never
-    # surface here.
+    # is NOT katzenqt's local SQLite, and (since the daemon now remaps courier
+    # errors out of the replica code range) NOT a courier rejection either. The
+    # daemon does not retry it, so we back off and reschedule the same read
+    # rather than advancing the stream or disabling the conversation.
     logger.warning(
         "drain_mixwal_read_single: a storage replica reported a database error "
         "from its own backend store (not katzenqt's local SQLite); "
         "treating as transient and will retry"
+    )
+    await asyncio.sleep(5)
+    give_up()
+    return
+  except CourierError as e:
+    # A courier-side rejection of the read envelope (e.g. a stale replica epoch,
+    # or a malformed/uncacheable envelope), distinct from any replica error and
+    # from our local SQLite. The daemon remaps these out of the replica code
+    # range precisely so we can tell them apart. Treat as transient and retry.
+    logger.warning(
+        "drain_mixwal_read_single: the courier rejected the read envelope (%s); "
+        "will retry", e,
     )
     await asyncio.sleep(5)
     give_up()

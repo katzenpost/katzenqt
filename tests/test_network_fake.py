@@ -26,6 +26,7 @@ from sqlmodel import select
 from katzenpost_thinclient import (
     BACAPDecryptionFailedError,
     BoxIDNotFoundError,
+    CourierInvalidEpochError,
     DatabaseFailureError,
     StartResendingCancelledError,
     ThinClientOfflineError,
@@ -642,6 +643,28 @@ class TestDrainMixwalReadSingle:
         setup = await _set_up_read_flow(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message", DatabaseFailureError("database failure"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_courier_error_reschedules(self, fake_thinclient):
+        """A courier-side rejection (e.g. stale epoch) is distinct from a replica
+        error and must not wedge the stream: it leaves the MixWAL for retry and
+        releases the stream from draining_right_now. Guards against the former
+        collision where a stale epoch arrived as a replica database failure."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("courier rejected envelope: replica epoch outside tolerance window"),
         )
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
