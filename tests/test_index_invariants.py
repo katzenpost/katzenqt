@@ -98,7 +98,6 @@ def _make_mw(
         bacap_stream=bacap_stream,
         plaintextwal=pwal_id,
         envelope_hash=envelope_hash or uuid.uuid4().bytes + b"\x00" * 16,
-        destination=b"C" * 32,
         encrypted_payload=b"ciphertext",
         envelope_descriptor=b"descriptor",
         current_message_index=mbi(current_idx),

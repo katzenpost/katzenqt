@@ -316,13 +316,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     readables_to_mixwal_event.set()
     return
 
-  # we should check that mw.destination exists:
-  if not courier_destination_exists(connection, mw.destination):
-      logger.error("outbound read mw for courier that no longer exists")
-      await asyncio.sleep(500)  # we want to wait until next PKI doc
-      give_up()
-      return
-
   try:
     resp = await connection.start_resending_encrypted_message(
         read_cap=rcw_read_cap,
@@ -583,9 +576,6 @@ async def drain_mixwal2(connection: ThinClient):
                 else:
                     new_write_mws.append(mw)
         for mw in new_write_mws:
-            if not courier_destination_exists(connection, mw.destination):
-                logger.warning("mw courier is currently not in PKI")
-                continue
             logger.debug("drain_mixwal: NEW (write) MIXWAL idx=%s is_read=%s bacap_stream=%s",
                          await connection.get_message_box_index_counter(mw.current_message_index),
                          mw.is_read, mw.bacap_stream)
@@ -639,12 +629,10 @@ async def readables_to_mixwal(connection):
         logger.debug("process box cpeer-rcw:", cpeer, await connection.get_message_box_index_counter(rcw.next_index))
         rcreply: "EncryptReadResult" = await connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
         logger.debug("process_box got this from encrypt_read: %s", rcreply)
-        courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
             plaintextwal=None,
             envelope_hash=rcreply.envelope_hash,
-            destination=courier,
             encrypted_payload=rcreply.message_ciphertext,
             envelope_descriptor=rcreply.envelope_descriptor,
             next_message_index=rcreply.next_message_box_index,
@@ -812,12 +800,10 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
 
     next_message_index = wcr.next_message_box_index
 
-    courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     mw = persistent.MixWAL(
         bacap_stream=pwal.bacap_stream,
         plaintextwal=pwal.id,
         envelope_hash = wcr.envelope_hash,
-        destination = courier,  # TODO not used anywhere
         encrypted_payload = wcr.message_ciphertext,
         envelope_descriptor = wcr.envelope_descriptor,
         current_message_index = wc.next_index,
@@ -981,23 +967,8 @@ def create_new_keypair(seed: bytes):
     assert len(read_cap)  == 32 + 104
     return write_cap, read_cap
 
-def courier_destination_exists(connection, destination) -> bool:
-    """Check that an old destination (hash of the IdentityKey) exists in this PKI, and that the node is a Courier.
-    We should not be resending MixWAL entries whose courier has gone away.
-
-    TODO: when ensuring courier exists we usually also want to make sure there are (some) replicas present.
-    """
-    try:
-        couriers = connection.get_all_couriers()
-    except Exception:
-        return False
-    return any(identity_hash == destination for identity_hash, _queue_id in couriers)
-
 async def test_keypair(connection, write_cap, read_cap):
     """Test that create_new_keypair() results in usable+matching write/read caps."""
-    courier = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
-    logger.debug("courier exists? %s %s", courier, courier_destination_exists(connection, courier))
-
     wcr = await connection.encrypt_write(
         plaintext=b'hello',
         write_cap=write_cap,
