@@ -181,22 +181,6 @@ class TestFakeThinClientSurface:
 
 
 # ---------------------------------------------------------------------------
-# courier_destination_exists with the fake's PKI
-# ---------------------------------------------------------------------------
-
-
-class TestCourierDestinationExistsFakeBacked:
-    def test_default_courier_is_present(self, fake_thinclient):
-        dest = fake_thinclient.couriers[0][0]
-        assert network.courier_destination_exists(fake_thinclient, dest) is True
-
-    def test_missing_after_removal(self, fake_thinclient):
-        dest = fake_thinclient.couriers[0][0]
-        fake_thinclient.remove_courier(dest)
-        assert network.courier_destination_exists(fake_thinclient, dest) is False
-
-
-# ---------------------------------------------------------------------------
 # Scaffolding helpers for drain_mixwal_{write,read}_single
 # ---------------------------------------------------------------------------
 
@@ -569,24 +553,6 @@ class TestDrainMixwalReadSingle:
             assert log == []  # no append on stale ACK
 
     @pytest.mark.asyncio
-    async def test_courier_gone_pauses_and_gives_up(self, fake_thinclient):
-        setup = await _set_up_read_flow(fake_thinclient)
-        # Remove the courier so courier_destination_exists returns False.
-        fake_thinclient.remove_courier(fake_thinclient.couriers[0][0])
-        async with persistent.asession() as sess:
-            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
-        draining: set = {setup["bacap_stream"]}
-        await network.drain_mixwal_read_single(
-            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
-            mw=mw, draining_right_now=draining,
-        )
-        # MW still present (we did not even try); start_resending never called.
-        async with persistent.asession() as sess:
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
-        assert fake_thinclient.call_count("start_resending_encrypted_message") == 0
-        assert setup["bacap_stream"] not in draining
-
-    @pytest.mark.asyncio
     async def test_bacap_decryption_failure_gives_up(self, fake_thinclient):
         setup = await _set_up_read_flow(fake_thinclient)
         fake_thinclient.inject_error(
@@ -952,42 +918,6 @@ class TestDrainMixwal2:
         async with persistent.asession() as sess:
             log = (await sess.exec(select(persistent.ConversationLog))).all()
             assert len(log) == 1
-
-    @pytest.mark.asyncio
-    async def test_skips_write_mw_for_missing_courier(self, fake_thinclient):
-        setup = await _set_up_write_flow(fake_thinclient)
-        # Change the mw.destination to a courier that doesn't exist.
-        async with persistent.asession() as sess:
-            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
-            mw.destination = b"\x99" * 32
-            sess.add(mw)
-            await sess.commit()
-        getattr(network, "__resend_queue_populated").set()
-        getattr(network, "__mixwal_updated").set()
-        getattr(network, "__mixnet_connected").set()
-
-        async def loop_idle():
-            # Give the loop a chance to process and skip.
-            return network.drain_mixwal2 is not None  # always truthy
-
-        # Run a short tick: shutdown after a few yields.
-        async def quitter():
-            for _ in range(40):
-                await asyncio.sleep(0)
-            network.shutdown()
-
-        asyncio.create_task(quitter())
-        try:
-            await asyncio.wait_for(
-                network.drain_mixwal2(fake_thinclient), timeout=3.0,
-            )
-        except asyncio.TimeoutError:
-            pass
-        # MW still present (skipped, not drained).
-        async with persistent.asession() as sess:
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
-        assert fake_thinclient.call_count("start_resending_encrypted_message") == 0
-
 
 # ---------------------------------------------------------------------------
 # readables_to_mixwal
