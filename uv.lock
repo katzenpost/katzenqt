@@ -447,14 +447,18 @@ wheels = [
 
 [[package]]
 name = "katzenpost-thinclient"
-version = "0.0.17"
-source = { git = "https://github.com/katzenpost/thin_client?rev=55946e588903d777288aa462973fdb7222cf2286#55946e588903d777288aa462973fdb7222cf2286" }
+version = "0.0.22"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asyncio" },
     { name = "cbor2" },
     { name = "coloredlogs" },
     { name = "pprintpp" },
     { name = "toml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a7/72/e24f34c9243359e88d11af8a4a1e6c86ca200d71fcc1ee1da5551a6a7a6e/katzenpost_thinclient-0.0.22.tar.gz", hash = "sha256:3cb673e472e74f929d1a3f54a1f067559efbb093080d14727f0b270d52331112", size = 145391, upload-time = "2026-07-06T17:26:01.007Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/17/946d133c628c943481ae2a6ad49878ee5dbdd26c889b699a0f3fd04f770a/katzenpost_thinclient-0.0.22-py3-none-any.whl", hash = "sha256:849ff7f40fa1eeef1271e9b0fc1bcd0603f509b0fe51bd3c3ad9ce6e89c24ab5", size = 49710, upload-time = "2026-07-06T17:25:59.234Z" },
 ]
 
 [[package]]
@@ -490,7 +494,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = "~=0.21.0" },
     { name = "alembic", specifier = "~=1.16.5" },
     { name = "cbor2", specifier = "~=5.6.5" },
-    { name = "katzenpost-thinclient", git = "https://github.com/katzenpost/thin_client?rev=55946e588903d777288aa462973fdb7222cf2286" },
+    { name = "katzenpost-thinclient", specifier = "==0.0.22" },
     { name = "pycrdt", specifier = "~=0.13.1" },
     { name = "pydantic", specifier = "~=2.11.7" },
     { name = "pynacl", specifier = "==1.6.0" },

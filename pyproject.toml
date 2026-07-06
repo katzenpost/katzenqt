@@ -19,11 +19,9 @@ dependencies = [
 "pydantic~=2.11.7",
 "cbor2~=5.6.5",
 "pycrdt~=0.13.1",
-# Pinned to a thin_client dev-branch commit (descends from the Contact Voucher
-# API, and adds the courier/replica error-code disambiguation) until a release
-# carrying it lands on PyPI, when this reverts to a version pin. Keep in lockstep
-# with the katzenpost daemon ref in .github/workflows/test-integration-docker.yml.
-"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@86b9c606d5057dbc3989a37314fcf51b6ac7d92c"
+# Keep in lockstep with the katzenpost daemon ref in
+# .github/workflows/test-integration-docker.yml.
+"katzenpost_thinclient==0.0.22"
 ]
 
 [dependency-groups]
