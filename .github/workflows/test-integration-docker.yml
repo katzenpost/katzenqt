@@ -43,7 +43,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: 86d4dbc5f11d9162d52b371708f41c937566cf7f # courier/replica error-code disambiguation (lockstep with thin_client CI)
+          ref: 04b0ef718d454fbb1570eaab4e809658d34b06ab # PR #1054: remove superfluous courier methods (lockstep with thin_client 0.0.22 CI)
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
