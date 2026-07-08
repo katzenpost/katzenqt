@@ -447,7 +447,7 @@ wheels = [
 
 [[package]]
 name = "katzenpost-thinclient"
-version = "0.0.22"
+version = "0.0.23"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asyncio" },
@@ -456,9 +456,9 @@ dependencies = [
     { name = "pprintpp" },
     { name = "toml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/72/e24f34c9243359e88d11af8a4a1e6c86ca200d71fcc1ee1da5551a6a7a6e/katzenpost_thinclient-0.0.22.tar.gz", hash = "sha256:3cb673e472e74f929d1a3f54a1f067559efbb093080d14727f0b270d52331112", size = 145391, upload-time = "2026-07-06T17:26:01.007Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8e/41/df3bae4138028b135b762d73c35a5ed26e0c99a425cbe9b54115ec25aebe/katzenpost_thinclient-0.0.23.tar.gz", hash = "sha256:2268a6f44afdedaf5e01309ea40d0da46af45873c16b812f2d11e0d274f13e7f", size = 143747, upload-time = "2026-07-08T12:40:38.327Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/17/946d133c628c943481ae2a6ad49878ee5dbdd26c889b699a0f3fd04f770a/katzenpost_thinclient-0.0.22-py3-none-any.whl", hash = "sha256:849ff7f40fa1eeef1271e9b0fc1bcd0603f509b0fe51bd3c3ad9ce6e89c24ab5", size = 49710, upload-time = "2026-07-06T17:25:59.234Z" },
+    { url = "https://files.pythonhosted.org/packages/45/d2/57eaa14e83364f91c1144ab95cd2038558392f011fada1f2e8eb50280a32/katzenpost_thinclient-0.0.23-py3-none-any.whl", hash = "sha256:c9c9aeab68c3fcdef15a46894e8d556dcdcbc7bcc70f29e8f7171fba38e0f176", size = 48555, upload-time = "2026-07-08T12:40:36.879Z" },
 ]
 
 [[package]]
@@ -494,7 +494,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = "~=0.21.0" },
     { name = "alembic", specifier = "~=1.16.5" },
     { name = "cbor2", specifier = "~=5.6.5" },
-    { name = "katzenpost-thinclient", specifier = "==0.0.22" },
+    { name = "katzenpost-thinclient", specifier = "==0.0.23" },
     { name = "pycrdt", specifier = "~=0.13.1" },
     { name = "pydantic", specifier = "~=2.11.7" },
     { name = "pynacl", specifier = "==1.6.0" },
