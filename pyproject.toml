@@ -21,7 +21,7 @@ dependencies = [
 "pycrdt~=0.13.1",
 # Keep in lockstep with the katzenpost daemon ref in
 # .github/workflows/test-integration-docker.yml.
-"katzenpost_thinclient==0.0.22"
+"katzenpost_thinclient==0.0.23"
 ]
 
 [dependency-groups]
