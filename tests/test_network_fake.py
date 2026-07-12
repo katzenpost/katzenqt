@@ -18,6 +18,7 @@ The high-level pattern of every test:
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 import pytest
@@ -26,6 +27,7 @@ from sqlmodel import select
 from katzenpost_thinclient import (
     BACAPDecryptionFailedError,
     BoxIDNotFoundError,
+    CourierError,
     CourierInvalidEpochError,
     DatabaseFailureError,
     StartResendingCancelledError,
@@ -322,10 +324,9 @@ class TestDrainMixwalWriteSingle:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
             sent = (await sess.exec(select(persistent.SentLog))).all()
             assert len(sent) == 0
-        # draining_right_now intentionally NOT released — the docstring
-        # admits this is rough, but the test pins the current behaviour
-        # so a future cleanup is observable.
-        assert setup["bacap_stream"] in draining
+        # The stream is released so the scheduler re-picks the row after
+        # reconnect instead of wedging it until restart.
+        assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
     async def test_broken_pipe_is_swallowed(self, fake_thinclient):
@@ -335,11 +336,13 @@ class TestDrainMixwalWriteSingle:
         )
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
         await network.drain_mixwal_write_single(
-            fake_thinclient, mw, {setup["bacap_stream"]},
+            fake_thinclient, mw, draining,
         )
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
     async def test_cancelled_is_swallowed(self, fake_thinclient):
@@ -349,11 +352,122 @@ class TestDrainMixwalWriteSingle:
         )
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_courier_invalid_epoch_remints_write(self, fake_thinclient):
+        """A stale-epoch rejection of a write re-mints from the retained
+        PlaintextWAL payload at the same index, then the next drain
+        completes the send."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("stale"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        getattr(network, "__mixwal_updated").clear()
+        await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert row is not None
+            assert row.envelope_hash != setup["wcr"].envelope_hash
+            assert row.current_message_index == setup["first_message_index"]
+            assert await sess.get(persistent.PlaintextWAL, setup["pwal_id"]) is not None
+            sent = (await sess.exec(select(persistent.SentLog))).all()
+            assert len(sent) == 0
+        assert fake_thinclient.call_count("encrypt_write") == 2
+        last = fake_thinclient.last_call("encrypt_write")
+        assert last["plaintext"] == b"Fhello"
+        assert last["write_cap"] == setup["write_cap"]
+        assert last["message_box_index"] == setup["first_message_index"]
+        assert setup["bacap_stream"] not in draining
+        assert getattr(network, "__mixwal_updated").is_set()
+
+        # Second drain: the re-minted envelope goes through.
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         await network.drain_mixwal_write_single(
             fake_thinclient, mw, {setup["bacap_stream"]},
         )
         async with persistent.asession() as sess:
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            assert await sess.get(persistent.PlaintextWAL, setup["pwal_id"]) is None
+            sent = (await sess.exec(select(persistent.SentLog))).all()
+            assert len(sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_write_remint_failure_keeps_row(self, fake_thinclient):
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("stale"),
+        )
+        fake_thinclient.inject_error("encrypt_write", ThinClientOfflineError())
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        getattr(network, "__mixwal_updated").clear()
+        await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert row is not None
+            assert row.envelope_hash == setup["wcr"].envelope_hash
+        assert setup["bacap_stream"] not in draining
+        assert not getattr(network, "__mixwal_updated").is_set()
+
+    @pytest.mark.asyncio
+    async def test_generic_courier_error_releases_write_stream(self, fake_thinclient):
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", CourierError("boom"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert row is not None
+            assert row.envelope_hash == setup["wcr"].envelope_hash
+            sent = (await sess.exec(select(persistent.SentLog))).all()
+            assert len(sent) == 0
+        assert fake_thinclient.call_count("encrypt_write") == 1
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_missing_plaintextwal_blocks_remint(self, fake_thinclient, caplog):
+        """A write MixWAL whose PlaintextWAL vanished cannot be re-minted:
+        keep the row, release the stream, and shout at CRITICAL so a human
+        sees the should-not-happen state."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        async with persistent.asession() as sess:
+            pwal = await sess.get(persistent.PlaintextWAL, setup["pwal_id"])
+            await sess.delete(pwal)
+            await sess.commit()
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("stale"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        with caplog.at_level(logging.CRITICAL, logger="katzen.network"):
+            await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
+        assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert row is not None
+            assert row.envelope_hash == setup["wcr"].envelope_hash
+        assert fake_thinclient.call_count("encrypt_write") == 1
+        assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
     async def test_conv_id_propagates_when_pwal_has_convlog(self, fake_thinclient):
@@ -622,15 +736,47 @@ class TestDrainMixwalReadSingle:
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
-    async def test_courier_error_reschedules(self, fake_thinclient):
-        """A courier-side rejection (e.g. stale epoch) is distinct from a replica
-        error and must not wedge the stream: it leaves the MixWAL for retry and
-        releases the stream from draining_right_now. Guards against the former
-        collision where a stale epoch arrived as a replica database failure."""
+    async def test_courier_invalid_epoch_remints_envelope(self, fake_thinclient):
+        """A stale-replica-epoch rejection is permanent for the stored blob:
+        the envelope targets rotated replica keys and can never be delivered.
+        The drain must re-mint the envelope at the same index, persist the
+        fresh envelope onto the same MixWAL row, release the stream, and
+        signal the scheduler for a prompt resend."""
         setup = await _set_up_read_flow(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message",
             CourierInvalidEpochError("courier rejected envelope: replica epoch outside tolerance window"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        getattr(network, "__mixwal_updated").clear()
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert row is not None
+            assert row.envelope_hash != setup["rcr"].envelope_hash
+            assert row.encrypted_payload != setup["rcr"].message_ciphertext
+            assert row.current_message_index == setup["first_message_index"]
+        assert fake_thinclient.call_count("encrypt_read") == 2
+        last = fake_thinclient.last_call("encrypt_read")
+        assert last["read_cap"] == setup["read_cap"]
+        assert last["message_box_index"] == setup["first_message_index"]
+        assert setup["bacap_stream"] not in draining
+        assert getattr(network, "__mixwal_updated").is_set()
+
+    @pytest.mark.asyncio
+    async def test_generic_courier_error_still_reschedules(self, fake_thinclient):
+        """Other courier rejections (malformed envelope, cache corruption)
+        are not fixable by re-minting: leave the MixWAL untouched for retry
+        and release the stream. Also pins the except ordering (the invalid
+        epoch subclass must be caught before the CourierError base)."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", CourierError("boom"),
         )
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
@@ -640,8 +786,69 @@ class TestDrainMixwalReadSingle:
             mw=mw, draining_right_now=draining,
         )
         async with persistent.asession() as sess:
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            row = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert row is not None
+            assert row.envelope_hash == setup["rcr"].envelope_hash
+        assert fake_thinclient.call_count("encrypt_read") == 1
         assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_courier_invalid_epoch_remint_then_drain_succeeds(self, fake_thinclient):
+        """Full recovery: one stale-epoch rejection, then the re-minted
+        envelope drains normally and the stream advances."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("stale"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert len(log) == 1
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            # Deterministic derivation: the re-mint at the same current
+            # index yields the same next index as the original envelope.
+            assert rcw.next_index == setup["rcr"].next_message_box_index
+
+    @pytest.mark.asyncio
+    async def test_remint_failure_releases_stream(self, fake_thinclient):
+        """If the re-mint itself fails (daemon offline, no PKI doc), the
+        stream must be released, the row kept as-is, and no exception may
+        escape; the stale row re-trips the re-mint on the next round."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("stale"),
+        )
+        fake_thinclient.inject_error("encrypt_read", ThinClientOfflineError())
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        getattr(network, "__mixwal_updated").clear()
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert row is not None
+            assert row.envelope_hash == setup["rcr"].envelope_hash
+        assert setup["bacap_stream"] not in draining
+        assert not getattr(network, "__mixwal_updated").is_set()
 
     @pytest.mark.parametrize("benign", [
         BoxIDNotFoundError("box ID not found"),
@@ -915,6 +1122,36 @@ class TestDrainMixwal2:
         )
         assert await mw_drained()
         # ConversationLog should have the message appended.
+        async with persistent.asession() as sess:
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert len(log) == 1
+
+    @pytest.mark.asyncio
+    async def test_read_remint_resends_via_scheduler(self, fake_thinclient):
+        """End of the recovery loop: a stale-epoch rejection re-mints, the
+        scheduler is signalled, and the fresh envelope drains. The 5 s
+        deadline sits under drain_mixwal2's 15 s poll, so this fails if the
+        release-then-signal ordering regresses."""
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("hi"),
+        )
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("stale"),
+        )
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "__mixwal_updated").set()
+        getattr(network, "__mixnet_connected").set()
+
+        async def mw_drained():
+            async with persistent.asession() as sess:
+                return await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+
+        await _run_loop_until(
+            network.drain_mixwal2(fake_thinclient), mw_drained, timeout=5.0,
+        )
+        assert await mw_drained()
+        assert fake_thinclient.call_count("start_resending_encrypted_message") >= 2
         async with persistent.asession() as sess:
             log = (await sess.exec(select(persistent.ConversationLog))).all()
             assert len(log) == 1
