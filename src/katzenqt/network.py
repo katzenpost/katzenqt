@@ -136,6 +136,29 @@ async def _remint_read_envelope(connection: ThinClient, rcw_read_cap: bytes, mw:
     return await _remint_mixwal(mw, fresh)
 
 
+async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, wcw: persistent.WriteCapWAL) -> bool:
+    """Re-encrypt a stale write envelope at the same index, from the
+    PlaintextWAL payload that is retained until the write is ACK'ed."""
+    pwal = None
+    if mw.plaintextwal is not None:
+        async with persistent.asession() as sess:
+            pwal = await sess.get(persistent.PlaintextWAL, mw.plaintextwal)
+    if pwal is None:
+        logger.critical(
+            "cannot re-mint write for stream %s: PlaintextWAL %s missing",
+            mw.bacap_stream, mw.plaintextwal)
+        return False
+    try:
+        fresh = await connection.encrypt_write(
+            plaintext=pwal.bacap_payload,
+            write_cap=wcw.write_cap,
+            message_box_index=mw.current_message_index)
+    except Exception as e:
+        logger.warning("re-mint encrypt_write failed, will retry: %s", e)
+        return False
+    return await _remint_mixwal(mw, fresh)
+
+
 async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]") -> None:
     """Resend a write until it is ACK'ed by courier.
 
@@ -155,7 +178,31 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
 
       )
     except (ThinClientOfflineError, BrokenPipeError, StartResendingCancelledError):
+      # Release the stream so the scheduler re-picks the row once the
+      # connection is back; drain_mixwal2 gates each iteration on
+      # __mixnet_connected, so this cannot busy-loop while offline.
       logger.warning("thin client is offline or resend cancelled, can't drain mixwal.")
+      draining_right_now.discard(mw.bacap_stream)
+      return
+    except CourierInvalidEpochError as e:
+      # Permanent for the stored blob (rotated replica keys); re-mint from
+      # the retained plaintext and let the scheduler resend. Sleep even on
+      # success so a daemon holding a stale PKI document cannot hot-loop.
+      logger.warning(
+          "drain_mixwal_write_single: stale replica epoch (%s); re-minting envelope", e,
+      )
+      reminted = await _remint_write_envelope(connection, mw, wcw)
+      await asyncio.sleep(5)
+      draining_right_now.discard(mw.bacap_stream)
+      if reminted:
+        __mixwal_updated.set()
+      return
+    except CourierError as e:
+      logger.warning(
+          "drain_mixwal_write_single: courier rejected envelope (%s); will retry", e,
+      )
+      await asyncio.sleep(5)
+      draining_right_now.discard(mw.bacap_stream)
       return
 
     logger.info(f"drain_mixwal_write_single got resp: {resp}")
