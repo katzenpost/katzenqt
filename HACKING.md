@@ -79,6 +79,9 @@ state-file summary (`info`), and the tally/voting protocol (`tally-create`,
 any verb for its arguments. For worked end-to-end examples, the voucher join, a
 message exchange, and a vote, see the headless section of the README.
 
+The tally verbs are documented in full, along with the protocol behind them, in
+`docs/tally-api.md`; `docs/tally-howto.md` is the task-by-task guide to using it.
+
 Three things to know:
 
 - **The connection is explicit; there is no filesystem search.** Every verb that
@@ -157,6 +160,11 @@ This application is a GUI chat client for mixnet group chat.
 - `network.py`: interface with the KP thin client
   - read WAL from `persistent` and transmit messages
   - read messages from network and log them
+- `tally/`: the tally (survey/voting) protocol: a pycrdt `Doc` per survey,
+  replicated over the group chat. Qt-free and network-free at its core; see
+  `docs/tally-api.md` and `docs/tally-howto.md`.
+- `conversation_handlers.py`: routes an assembled `GroupChatMessage` by its
+  `msg_type` — chat into the conversation log, tally into the tally controller.
 
 ## HACKING
 

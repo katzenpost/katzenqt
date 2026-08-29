@@ -3,6 +3,8 @@ import katzenpost_thinclient
 from katzenpost_thinclient import (
     ThinClient, ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
+    DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
+    CourierError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -323,13 +325,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     readables_to_mixwal_event.set()
     return
 
-  # we should check that mw.destination exists:
-  if not courier_destination_exists(connection, mw.destination):
-      logger.error("outbound read mw for courier that no longer exists")
-      await asyncio.sleep(500)  # we want to wait until next PKI doc
-      give_up()
-      return
-
   try:
     resp = await connection.start_resending_encrypted_message(
         read_cap=rcw_read_cap,
@@ -345,6 +340,47 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
           BACAPDecryptionFailedError, StartResendingCancelledError,
           ThinClientOfflineError, BrokenPipeError) as e:
     logger.warning("drain_mixwal_read_single giving up: %s", e)
+    await asyncio.sleep(5)
+    give_up()
+    return
+  except (BoxIDNotFoundError, TombstoneError) as e:
+    # Benign replica read outcomes, not failures (cf. the thin client's
+    # is_expected_outcome). BoxIDNotFound means the stream simply has no
+    # further data yet; kpclientd normally rides this out for us while
+    # no_retry_on_box_id_not_found is False, so it rarely reaches here.
+    # Tombstone means the writer deleted this box. Neither warrants an
+    # error to the user: release the stream and wait for more, rather than
+    # wedging it (an uncaught one would strand the stream in
+    # draining_right_now exactly as DatabaseFailure once did).
+    logger.debug("drain_mixwal_read_single: benign replica outcome, nothing to advance: %s", e)
+    await asyncio.sleep(5)
+    give_up()
+    return
+  except DatabaseFailureError:
+    # A storage replica reported a database error from ITS OWN backend store
+    # (the replica's RocksDB; ErrFailedDBRead, a deserialise failure, or a
+    # momentarily closed DB, see replica/handlers.go handleReplicaRead). This
+    # is NOT katzenqt's local SQLite, and (since the daemon now remaps courier
+    # errors out of the replica code range) NOT a courier rejection either. The
+    # daemon does not retry it, so we back off and reschedule the same read
+    # rather than advancing the stream or disabling the conversation.
+    logger.warning(
+        "drain_mixwal_read_single: a storage replica reported a database error "
+        "from its own backend store (not katzenqt's local SQLite); "
+        "treating as transient and will retry"
+    )
+    await asyncio.sleep(5)
+    give_up()
+    return
+  except CourierError as e:
+    # A courier-side rejection of the read envelope (e.g. a stale replica epoch,
+    # or a malformed/uncacheable envelope), distinct from any replica error and
+    # from our local SQLite. The daemon remaps these out of the replica code
+    # range precisely so we can tell them apart. Treat as transient and retry.
+    logger.warning(
+        "drain_mixwal_read_single: the courier rejected the read envelope (%s); "
+        "will retry", e,
+    )
     await asyncio.sleep(5)
     give_up()
     return
@@ -549,9 +585,6 @@ async def drain_mixwal2(connection: ThinClient):
                 else:
                     new_write_mws.append(mw)
         for mw in new_write_mws:
-            if not courier_destination_exists(connection, mw.destination):
-                logger.warning("mw courier is currently not in PKI")
-                continue
             logger.debug("drain_mixwal: NEW (write) MIXWAL idx=%s is_read=%s bacap_stream=%s",
                          await connection.get_message_box_index_counter(mw.current_message_index),
                          mw.is_read, mw.bacap_stream)
@@ -605,12 +638,10 @@ async def readables_to_mixwal(connection):
         logger.debug("process box cpeer-rcw:", cpeer, await connection.get_message_box_index_counter(rcw.next_index))
         rcreply: "EncryptReadResult" = await connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
         logger.debug("process_box got this from encrypt_read: %s", rcreply)
-        courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
             plaintextwal=None,
             envelope_hash=rcreply.envelope_hash,
-            destination=courier,
             encrypted_payload=rcreply.message_ciphertext,
             envelope_descriptor=rcreply.envelope_descriptor,
             next_message_index=rcreply.next_message_box_index,
@@ -666,6 +697,8 @@ def on_error(task, func, *args, **kwargs):
     Usage: task.add_done_callback(on_error(lambda: foo.bar()))
     """
     def on_error_done(task):
+        if task.cancelled():
+            return  # cancellation is expected on shutdown, not an error
         try:
             task.result()
         except Exception:
@@ -776,12 +809,10 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
 
     next_message_index = wcr.next_message_box_index
 
-    courier: bytes = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
     mw = persistent.MixWAL(
         bacap_stream=pwal.bacap_stream,
         plaintextwal=pwal.id,
         envelope_hash = wcr.envelope_hash,
-        destination = courier,  # TODO not used anywhere
         encrypted_payload = wcr.message_ciphertext,
         envelope_descriptor = wcr.envelope_descriptor,
         current_message_index = wc.next_index,
@@ -945,23 +976,8 @@ def create_new_keypair(seed: bytes):
     assert len(read_cap)  == 32 + 104
     return write_cap, read_cap
 
-def courier_destination_exists(connection, destination) -> bool:
-    """Check that an old destination (hash of the IdentityKey) exists in this PKI, and that the node is a Courier.
-    We should not be resending MixWAL entries whose courier has gone away.
-
-    TODO: when ensuring courier exists we usually also want to make sure there are (some) replicas present.
-    """
-    try:
-        couriers = connection.get_all_couriers()
-    except Exception:
-        return False
-    return any(identity_hash == destination for identity_hash, _queue_id in couriers)
-
 async def test_keypair(connection, write_cap, read_cap):
     """Test that create_new_keypair() results in usable+matching write/read caps."""
-    courier = secrets.choice(katzenpost_thinclient.find_services("courier", connection.pki_document())).to_destination()[0]
-    logger.debug("courier exists? %s %s", courier, courier_destination_exists(connection, courier))
-
     wcr = await connection.encrypt_write(
         plaintext=b'hello',
         write_cap=write_cap,

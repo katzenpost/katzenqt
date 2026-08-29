@@ -15,7 +15,7 @@ import time
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
-from typing import NamedTuple, TYPE_CHECKING
+from typing import NamedTuple, Optional, TYPE_CHECKING
 
 import cbor2
 
@@ -957,7 +957,6 @@ class MainWindow(QMainWindow):
             bacap_stream=convo_state.own_peer_bacap_uuid,
             messages=[gcm],
         )
-        print("serializing SendOperation for outgoing message", send_op)
         new_write_caps, db_entries = send_op.serialize(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo_state.conversation_id,
@@ -1030,7 +1029,7 @@ class MainWindow(QMainWindow):
             # And then we can increment the row count to let the UI register it:
 
             # x) Scrolling - two cases:
-            if convo_state is self.convo_state():
+            if convo_state is self.convo_state_or_none():
                 #   x.1) Scrolling: Conversation is in focus:
                 # TODO make which of these to do configurable:
                 convo_state.chat_lines_scroll_idx = 1.0
@@ -1060,6 +1059,15 @@ class MainWindow(QMainWindow):
             self.systray.has_new_messages() # TODO move this into block above
 
     def convo_state(self) -> ConversationUIState:
+        convo = self.convo_state_or_none()
+        if convo is None:
+            raise Exception("Can't find selected conversation")
+        return convo
+
+    def convo_state_or_none(self) -> Optional[ConversationUIState]:
+        """Like convo_state(), but returns None when no conversation is
+        selected rather than raising. Suited to background listeners that
+        merely wish to know whether a conversation is currently in focus."""
         # TODO there must be a more graceful way to do this:
         idx = self.ui.contacts_treeWidget.selectionModel().currentIndex()
         if idx.parent().isValid():
@@ -1068,7 +1076,7 @@ class MainWindow(QMainWindow):
         q = self.all_contacts.item(idx.row(), idx.column())
         #q = self.ui.contacts_treeWidget.currentItem()
         if not q:
-            raise Exception("Can't find selected conversation")
+            return None
         #q = q.parent() or q
         return self.conversation_state_by_id[q.conversation_id]
 
