@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+runner=${KATZENQT_INTEGRATION_PYTHON:?}
+address=${KATZENQT_KPCLIENTD_TCP:-127.0.0.1:64331}
+i=0
+while [ "$i" -lt 12 ]; do
+    i=$((i + 1))
+    state=readiness-$$-$i
+    if KQT_STATE=$state timeout 60 "$runner" -m katzenqt.integration_runner create-conv readiness probe --address "$address" --network tcp >/dev/null 2>&1 && \
+       KQT_STATE=$state timeout 60 "$runner" -m katzenqt.integration_runner voucher-mint readiness probe --address "$address" --network tcp >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 5
+done
+printf '%s\n' 'mixnet did not accept a storage write' >&2
+exit 1

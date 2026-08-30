@@ -34,12 +34,18 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=dbus
+BusName=network.katzenpost.kpclientd
+RuntimeDirectory=katzenpost
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 
-ExecStart=%h/.local/bin/kpclientd -c %h/.local/katzenpost/client.toml
+ExecStartPre=/usr/bin/rm -f %t/katzenpost/kpclientd.sock
+ExecStart=%h/.local/bin/kpclientd --config %h/.local/katzenpost/client.toml --dbus-name network.katzenpost.kpclientd
 
 Restart=on-failure
 RestartSec=5s
 
 [Install]
 WantedBy=default.target
+Alias=dbus-network.katzenpost.kpclientd.service

@@ -1,37 +1,38 @@
-name: pytest (uv)
+name: Python and Flatpak tests
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: pytest (uv)
+  python:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libfontconfig1 libpulse0 libxkbcommon0 libxcb-cursor0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          go-version: '>=1.26'
-          cache: false
+          version: 0.11.14
+      - run: uv python install 3.13.11
+      - run: UV_PYTHON=3.13.11 uv sync --locked --dev
+      - run: UV_PYTHON=3.13.11 uv run pytest -m "not integration"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: latest
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: |
-          make deps
-          uv sync --all-extras --dev --locked
-
-      - name: Run tests
-        run: |
-          uv run pytest
+  flatpak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: sudo apt-get update && sudo apt-get install -y appstream flatpak flatpak-builder git-lfs
+      - run: flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+      - run: appstreamcli validate --no-net packaging/flatpak/network.katzenpost.katzenqt.metainfo.xml
+      - run: flatpak-builder --show-manifest packaging/flatpak/network.katzenpost.katzenqt.yaml >/dev/null
+      - run: make flatpak-runtime
+      - run: make flatpak flatpak-test

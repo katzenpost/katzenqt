@@ -5,6 +5,7 @@ mixnet and a live kpclientd reachable at 127.0.0.1:64331. Set the env var
 ``KATZENQT_DOCKER_INTEGRATION=1`` to enable them; otherwise all tests in
 this directory are skipped.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,7 +29,10 @@ def pytest_collection_modifyitems(config, items):
     if os.environ.get("KATZENQT_DOCKER_INTEGRATION") == "1":
         return
     skip_marker = pytest.mark.skip(
-        reason="set KATZENQT_DOCKER_INTEGRATION=1 to run docker integration tests"
+        reason=(
+            "set KATZENQT_DOCKER_INTEGRATION=1 to run docker "
+            "integration tests"
+        )
     )
     for item in items:
         if "integration" in str(item.fspath):
@@ -39,8 +43,9 @@ def pytest_collection_modifyitems(config, items):
 def kpclientd_endpoint():
     """Assert the docker mixnet's kpclientd is reachable before running."""
     if not _kpclientd_reachable(_KPCLIENTD_HOST, _KPCLIENTD_PORT):
-        pytest.skip(
-            f"kpclientd not reachable at {_KPCLIENTD_HOST}:{_KPCLIENTD_PORT}; "
-            "start the docker mixnet first (katzenpost/docker: make start wait)"
+        endpoint = f"{_KPCLIENTD_HOST}:{_KPCLIENTD_PORT}"
+        pytest.fail(
+            f"kpclientd not reachable at {endpoint}; start the docker "
+            "mixnet first (katzenpost/docker: make start wait)"
         )
     return (_KPCLIENTD_HOST, _KPCLIENTD_PORT)

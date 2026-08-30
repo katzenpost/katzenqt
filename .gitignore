@@ -13,3 +13,10 @@ katzenpost/
 .system-setup.stamp
 .coverage
 .hypothesis/
+.go-cache/
+.flatpak-build/
+.flatpak-builder/
+.flatpak-export/
+.flatpak-repo/
+.flathub-dist/
+patches/kpclientd*.patch

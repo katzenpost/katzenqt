@@ -3,6 +3,7 @@ quit (separate process), then send + read again in fresh processes.
 
 Skipped unless ``KATZENQT_DOCKER_INTEGRATION=1`` (see conftest.py).
 """
+
 from __future__ import annotations
 
 import os
@@ -15,7 +16,10 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
-_PYTHON = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
+_PYTHON = os.environ.get(
+    "KATZENQT_INTEGRATION_PYTHON",
+    str(_VENV_PY) if _VENV_PY.exists() else sys.executable,
+)
 
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
@@ -30,14 +34,26 @@ _CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
 def _run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
-    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
+    cmd = [
+        _PYTHON,
+        "-m",
+        "katzenqt.integration_runner",
+        *cli_args,
+        *_CONN_ARGS,
+    ]
     return subprocess.run(
-        cmd, env=env, cwd=str(_REPO_ROOT),
-        capture_output=True, text=True, timeout=timeout,
+        cmd,
+        env=env,
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
 
 
-def _spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path) -> subprocess.Popen:
+def _spawn_role(
+    role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path
+) -> subprocess.Popen:
     """Popen variant for long-running chat-session subprocesses that we
     want running in parallel. We redirect stdout/stderr to files instead
     of pipes to avoid the classic 64 KB pipe-buffer deadlock: when one
@@ -47,9 +63,17 @@ def _spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path
     """
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
-    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
+    cmd = [
+        _PYTHON,
+        "-m",
+        "katzenqt.integration_runner",
+        *cli_args,
+        *_CONN_ARGS,
+    ]
     return subprocess.Popen(
-        cmd, env=env, cwd=str(_REPO_ROOT),
+        cmd,
+        env=env,
+        cwd=str(_REPO_ROOT),
         stdout=open(stdout_path, "w"),
         stderr=open(stderr_path, "w"),
         text=True,
@@ -67,7 +91,7 @@ def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
     for line in _combined(proc).splitlines():
         idx = line.find(token)
         if idx != -1:
-            return line[idx + len(token):].strip()
+            return line[idx + len(token) :].strip()
     raise AssertionError(
         f"no line containing {token!r}:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
@@ -84,16 +108,21 @@ def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
     mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
     assert mint.returncode == 0, mint.stdout + mint.stderr
     voucher = _expect_token(mint, "VOUCHER=")
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    induct = _run_role(
+        alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0
+    )
     assert induct.returncode == 0, induct.stdout + induct.stderr
     joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
     assert joined.returncode == 0, joined.stdout + joined.stderr
 
 
 def _run_concurrent_session(
-    alice_state: Path, bob_state: Path,
-    alice_steps: list, bob_steps: list,
-    *, round_label: str,
+    alice_state: Path,
+    bob_state: Path,
+    alice_steps: list,
+    bob_steps: list,
+    *,
+    round_label: str,
     process_timeout_s: float = 2400.0,
     log_dir: Path,
 ) -> None:
@@ -112,12 +141,20 @@ def _run_concurrent_session(
     bob_err_path = log_dir / f"bob.{round_label}.err"
 
     alice_proc = _spawn_role(
-        alice_state, "chat-session", "demo", *alice_steps,
-        stdout_path=alice_out_path, stderr_path=alice_err_path,
+        alice_state,
+        "chat-session",
+        "demo",
+        *alice_steps,
+        stdout_path=alice_out_path,
+        stderr_path=alice_err_path,
     )
     bob_proc = _spawn_role(
-        bob_state, "chat-session", "demo", *bob_steps,
-        stdout_path=bob_out_path, stderr_path=bob_err_path,
+        bob_state,
+        "chat-session",
+        "demo",
+        *bob_steps,
+        stdout_path=bob_out_path,
+        stderr_path=bob_err_path,
     )
 
     try:
@@ -142,7 +179,10 @@ def _run_concurrent_session(
     # either side is locatable.
     for who, text in (("alice", alice_all), ("bob", bob_all)):
         for line in text.splitlines():
-            if any(t in line for t in ("STEP_OK", "STEP_FAIL", "STEP_POLL", "SESSION_DONE")):
+            if any(
+                t in line
+                for t in ("STEP_OK", "STEP_FAIL", "STEP_POLL", "SESSION_DONE")
+            ):
                 print(f"[{round_label}][{who}] {line}")
 
     assert alice_proc.returncode == 0, (
@@ -162,7 +202,9 @@ def _run_concurrent_session(
 
 
 @pytest.mark.integration
-def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_factory):
+def test_concurrent_session_shutdown_then_restart(
+    kpclientd_endpoint, tmp_path_factory
+):
     """Critical bug-hunting test: Alice and Bob each run as a single
     long-lived subprocess (not one subprocess per step), exchange
     messages in BOTH directions, shut down cleanly, and then a NEW pair
@@ -198,8 +240,12 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
     ]
     log_dir = tmp_path_factory.mktemp("concurrent_logs")
     _run_concurrent_session(
-        alice_state, bob_state, alice_steps_r1, bob_steps_r1,
-        round_label="round1", log_dir=log_dir,
+        alice_state,
+        bob_state,
+        alice_steps_r1,
+        bob_steps_r1,
+        round_label="round1",
+        log_dir=log_dir,
     )
 
     # --- Shutdown confirmed (both emitted SESSION_DONE). State is on
@@ -216,8 +262,12 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
         "READ:a-r2-msg1",
     ]
     _run_concurrent_session(
-        alice_state, bob_state, alice_steps_r2, bob_steps_r2,
-        round_label="round2", log_dir=log_dir,
+        alice_state,
+        bob_state,
+        alice_steps_r2,
+        bob_steps_r2,
+        round_label="round2",
+        log_dir=log_dir,
     )
 
 
@@ -233,13 +283,21 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     send = _run_role(
-        alice_state, "multi-send", "demo", "m1|m2", timeout=600.0,
+        alice_state,
+        "multi-send",
+        "demo",
+        "m1|m2",
+        timeout=600.0,
     )
-    assert send.returncode == 0 and "SENT" in _combined(send), send.stdout + send.stderr
+    assert send.returncode == 0 and "SENT" in _combined(send), (
+        send.stdout + send.stderr
+    )
 
     # Bob restarts fresh and must receive both in order.
     for expected in ("m1", "m2"):
-        r = _run_role(bob_state, "read", "demo", "360", expected, timeout=400.0)
+        r = _run_role(
+            bob_state, "read", "demo", "360", expected, timeout=400.0
+        )
         assert r.returncode == 0, (
             f"bob failed to read {expected!r}:\n"
             f"stdout tail:\n{r.stdout[-3000:]}\nstderr tail:\n{r.stderr[-3000:]}"
@@ -248,7 +306,9 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
 
 
 @pytest.mark.integration
-def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_factory):
+def test_read_latency_after_continuous_peer_sends(
+    kpclientd_endpoint, tmp_path_factory
+):
     """Measure end-to-end latency from Bob's send completion to Alice's
     ConvLog commit, over several back-to-back messages.
 
@@ -276,12 +336,20 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
         bob_steps.append(f"SEND:m{i}")
         alice_steps.append(f"READ:m{i}")
     bob_proc = _spawn_role(
-        bob_state, "chat-session", "demo", *bob_steps,
-        stdout_path=log_dir / "bob.out", stderr_path=log_dir / "bob.err",
+        bob_state,
+        "chat-session",
+        "demo",
+        *bob_steps,
+        stdout_path=log_dir / "bob.out",
+        stderr_path=log_dir / "bob.err",
     )
     alice_proc = _spawn_role(
-        alice_state, "chat-session", "demo", *alice_steps,
-        stdout_path=log_dir / "alice.out", stderr_path=log_dir / "alice.err",
+        alice_state,
+        "chat-session",
+        "demo",
+        *alice_steps,
+        stdout_path=log_dir / "alice.out",
+        stderr_path=log_dir / "alice.err",
     )
     try:
         bob_proc.wait(timeout=1200.0)
@@ -293,10 +361,15 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
 
     # STEP_OK tokens are logged to stderr (with a level/name prefix), so
     # combine both streams and match by search rather than anchored match.
-    bob_out = (log_dir / "bob.out").read_text() + (log_dir / "bob.err").read_text()
-    alice_out = (log_dir / "alice.out").read_text() + (log_dir / "alice.err").read_text()
+    bob_out = (log_dir / "bob.out").read_text() + (
+        log_dir / "bob.err"
+    ).read_text()
+    alice_out = (log_dir / "alice.out").read_text() + (
+        log_dir / "alice.err"
+    ).read_text()
 
     import re
+
     send_ts = {}  # text -> ts
     for line in bob_out.splitlines():
         m = re.search(r"STEP_OK:\d+:SEND:(m\d+):ts=(\d+\.\d+)", line)
@@ -308,21 +381,34 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
         if m:
             recv_ts[m.group(1)] = float(m.group(2))
 
-    print(f"[latency] bob sent {len(send_ts)} messages, alice received {len(recv_ts)}")
-    assert len(send_ts) == n, f"bob didn't complete all sends: {send_ts}\n---\n{bob_out[-2000:]}"
-    assert len(recv_ts) == n, f"alice didn't receive all messages: {recv_ts}\n---\n{alice_out[-2000:]}"
+    print(
+        f"[latency] bob sent {len(send_ts)} messages, "
+        f"alice received {len(recv_ts)}"
+    )
+    assert len(send_ts) == n, (
+        f"bob didn't complete all sends: {send_ts}\n---\n{bob_out[-2000:]}"
+    )
+    assert len(recv_ts) == n, (
+        f"alice didn't receive all messages: {recv_ts}\n---\n"
+        f"{alice_out[-2000:]}"
+    )
 
     gaps = []
     for i in range(n):
         key = f"m{i}"
         gap = recv_ts[key] - send_ts[key]
         gaps.append(gap)
-        print(f"[latency] {key}: bob SEND_ACK={send_ts[key]:.3f} alice OBSERVED={recv_ts[key]:.3f} gap={gap:+.2f}s")
+        print(
+            f"[latency] {key}: bob SEND_ACK={send_ts[key]:.3f} "
+            f"alice OBSERVED={recv_ts[key]:.3f} gap={gap:+.2f}s"
+        )
 
     mean_gap = sum(gaps) / len(gaps)
     max_gap = max(gaps)
-    print(f"[latency] gap stats: min={min(gaps):.2f}s max={max_gap:.2f}s "
-          f"mean={mean_gap:.2f}s")
+    print(
+        f"[latency] gap stats: min={min(gaps):.2f}s max={max_gap:.2f}s "
+        f"mean={mean_gap:.2f}s"
+    )
     assert bob_proc.returncode == 0
     assert alice_proc.returncode == 0
     assert mean_gap < 120.0, (
@@ -352,30 +438,64 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     # Round 1: each sends one message, the other reads.
-    s1a = _run_role(alice_state, "send", "demo", "hello-from-alice", timeout=300.0)
-    assert s1a.returncode == 0 and "SENT" in _combined(s1a), s1a.stdout + s1a.stderr
+    s1a = _run_role(
+        alice_state, "send", "demo", "hello-from-alice", timeout=300.0
+    )
+    assert s1a.returncode == 0 and "SENT" in _combined(s1a), (
+        s1a.stdout + s1a.stderr
+    )
 
-    s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", timeout=300.0)
-    assert s1b.returncode == 0 and "SENT" in _combined(s1b), s1b.stdout + s1b.stderr
+    s1b = _run_role(
+        bob_state, "send", "demo", "hello-from-bob", timeout=300.0
+    )
+    assert s1b.returncode == 0 and "SENT" in _combined(s1b), (
+        s1b.stdout + s1b.stderr
+    )
 
-    r1b = _run_role(bob_state, "read", "demo", "360", "hello-from-alice", timeout=400.0)
-    assert r1b.returncode == 0, f"bob read1 failed:\n{r1b.stdout}\n{r1b.stderr}"
+    r1b = _run_role(
+        bob_state, "read", "demo", "360", "hello-from-alice", timeout=400.0
+    )
+    assert r1b.returncode == 0, (
+        f"bob read1 failed:\n{r1b.stdout}\n{r1b.stderr}"
+    )
 
-    r1a = _run_role(alice_state, "read", "demo", "360", "hello-from-bob", timeout=400.0)
-    assert r1a.returncode == 0, f"alice read1 failed:\n{r1a.stdout}\n{r1a.stderr}"
+    r1a = _run_role(
+        alice_state, "read", "demo", "360", "hello-from-bob", timeout=400.0
+    )
+    assert r1a.returncode == 0, (
+        f"alice read1 failed:\n{r1a.stdout}\n{r1a.stderr}"
+    )
     print("[r1] bidirectional exchange complete")
 
     # Round 2 — restart scenario. Fresh subprocesses, state loaded from disk.
-    s2a = _run_role(alice_state, "send", "demo", "round2-from-alice", timeout=300.0)
-    assert s2a.returncode == 0 and "SENT" in _combined(s2a), s2a.stdout + s2a.stderr
+    s2a = _run_role(
+        alice_state, "send", "demo", "round2-from-alice", timeout=300.0
+    )
+    assert s2a.returncode == 0 and "SENT" in _combined(s2a), (
+        s2a.stdout + s2a.stderr
+    )
 
-    s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", timeout=300.0)
-    assert s2b.returncode == 0 and "SENT" in _combined(s2b), s2b.stdout + s2b.stderr
+    s2b = _run_role(
+        bob_state, "send", "demo", "round2-from-bob", timeout=300.0
+    )
+    assert s2b.returncode == 0 and "SENT" in _combined(s2b), (
+        s2b.stdout + s2b.stderr
+    )
 
-    r2b = _run_role(bob_state, "read", "demo", "360", "round2-from-alice", timeout=400.0)
-    print(f"[r2] bob read2 stdout tail:\n{r2b.stdout[-2000:]}\nstderr tail:\n{r2b.stderr[-3000:]}")
+    r2b = _run_role(
+        bob_state, "read", "demo", "360", "round2-from-alice", timeout=400.0
+    )
+    print(
+        f"[r2] bob read2 stdout tail:\n{r2b.stdout[-2000:]}\n"
+        f"stderr tail:\n{r2b.stderr[-3000:]}"
+    )
     assert r2b.returncode == 0, "bob read2 did not find round2-from-alice"
 
-    r2a = _run_role(alice_state, "read", "demo", "360", "round2-from-bob", timeout=400.0)
-    print(f"[r2] alice read2 stdout tail:\n{r2a.stdout[-2000:]}\nstderr tail:\n{r2a.stderr[-3000:]}")
+    r2a = _run_role(
+        alice_state, "read", "demo", "360", "round2-from-bob", timeout=400.0
+    )
+    print(
+        f"[r2] alice read2 stdout tail:\n{r2a.stdout[-2000:]}\n"
+        f"stderr tail:\n{r2a.stderr[-3000:]}"
+    )
     assert r2a.returncode == 0, "alice read2 did not find round2-from-bob"

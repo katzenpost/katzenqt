@@ -1,0 +1,66 @@
+app-id: network.katzenpost.katzenqt
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: katzenqt
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --filesystem=xdg-run/katzenpost:ro
+  - --talk-name=network.katzenpost.kpclientd
+  - --env=GIO_USE_VFS=local
+
+modules:
+  - python3-deps.json
+
+  - name: pyside6
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-warn-script-location
+        --ignore-installed --no-index --find-links="file://${PWD}/pip-cache"
+        pyside6==6.9.3
+    sources:
+      - pyside6-sources.json
+
+  - name: katzenqt
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-deps --no-index
+        --no-build-isolation --no-warn-script-location .
+      - mv /app/bin/katzenqt /app/bin/katzenqt-bin
+      - install -Dm755 launcher.py /app/bin/katzenqt
+      - install -d /app/share/katzenqt
+      - cp -a resources /app/share/katzenqt/
+      - install -Dm600 config/client.toml /app/share/katzenqt/client.toml
+      - install -Dm644 network.katzenpost.katzenqt.desktop
+        /app/share/applications/network.katzenpost.katzenqt.desktop
+      - install -Dm644 network.katzenpost.katzenqt.metainfo.xml
+        /app/share/metainfo/network.katzenpost.katzenqt.metainfo.xml
+      - install -Dm644 resources/echomix_icon.svg
+        /app/share/icons/hicolor/scalable/apps/network.katzenpost.katzenqt.svg
+      - install -Dm644 LICENSE.flatpak
+        /app/share/licenses/network.katzenpost.katzenqt/katzenqt/LICENSE
+    sources:
+      - type: archive
+        url: https://github.com/katzenpost/katzenqt/archive/a47f0aa25a4cb4623b8549e6ce5136426405e19f.tar.gz
+        sha256: 8e3c7f02be111db67bea33eb770c3f9c330f646532691bab24ec92608b67bbbe
+      - type: file
+        path: ../../src/katzenqt/katzen.py
+        dest: src/katzenqt
+      - type: file
+        path: ../../src/katzenqt/persistent.py
+        dest: src/katzenqt
+      - type: file
+        path: ../../pyproject.toml
+      - type: file
+        path: launcher.py
+      - type: file
+        path: network.katzenpost.katzenqt.metainfo.xml
+      - type: file
+        path: ../network.katzenpost.katzenqt.desktop
+      - type: file
+        path: LICENSE
+        dest-filename: LICENSE.flatpak

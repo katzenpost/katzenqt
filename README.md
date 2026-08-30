@@ -49,6 +49,44 @@ kpclientd(path): found
 
 Once that looks right, `make run` launches the GUI.
 
+## Flatpak
+
+The katzenqt Flatpak is experimental developer packaging. Do not rely on it for
+security, anonymity, privacy, availability, delivery, or data retention.
+
+The sandbox denies direct network sockets and connects to the native user
+`kpclientd` through D-Bus activation and a read-only Unix socket. Wayland,
+fallback X11, graphics, D-Bus, and that socket remain trusted interfaces; this
+is not a complete non-exfiltration boundary. The package is currently
+x86-64-only.
+
+```shell
+make flatpak
+make flatpak-test
+make flatpak-run
+```
+
+With the Docker testnet already running, launch two isolated identities in
+separate terminals with `make flatpak-run-docker` and
+`make flatpak-run-docker-second`. Both connect to its single kpclientd at
+`127.0.0.1:64331`. If it is unavailable, the targets print the command needed
+to start it from `katzenpost/docker/`.
+
+The generated thinclient configuration uses the current `[Dial.Unix]` API and
+is selected through `KATZENQT_THINCLIENT_CONFIG`.
+
+If the native service is unavailable, the shared launcher can supervise the
+user-installed kpclientd only after explicitly granting network access and
+read-only access to that binary:
+
+```shell
+flatpak override --user --share=network --filesystem=~/.local/bin/kpclientd:ro network.katzenpost.katzenqt
+```
+
+That override removes the direct-network boundary and is intended only for
+development. Tagged Flathub submissions are built with `make flathub-check
+TAG=MAJOR.MINOR.PATCH` and submitted with `make flathub-submit`.
+
 ## Headless CLI (no GUI)
 
 `katzenqt` can be driven without the Qt interface through the `katzenqt-headless`

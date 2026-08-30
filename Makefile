@@ -7,6 +7,7 @@ MAKEFLAGS += --no-print-directory
 
 export PATH:=$(PATH):~/.local/bin/
 export UV_VENV_CLEAR:=1
+export GOCACHE:=$(CURDIR)/.go-cache
 # override uv with:
 #   make setup-uv UV=$$HOME/.local/bin/uv
 UV ?= uv
@@ -21,6 +22,8 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
+KATZENPOST_REV := 6973c80709c5b65a69beddc1d4378c786cde9c95
+KPCLIENTD_PATCH := patches/kpclientd-main.patch
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
@@ -28,6 +31,19 @@ GEN_UI_FONT := src/katzenqt/ui_font_settings.py
 
 PYPROJECT := pyproject.toml
 UV_LOCK := $(wildcard uv.lock)
+
+FLATPAK_ID := network.katzenpost.katzenqt
+FLATPAK_MANIFEST := packaging/flatpak/$(FLATPAK_ID).yaml
+FLATPAK_EPOCH := 1787647836
+FLATPAK_TIMESTAMP := 2026-08-25T08:50:36Z
+FLATPAK_REPO := .flatpak-repo
+FLATPAK_EXPORT := .flatpak-export
+FLATPAK_SCREENSHOT := packaging/flatpak/screenshots/katzenqt.png
+FLATPAK_SCREENSHOT_URL := https://raw.githubusercontent.com/katzenpost/katzenqt/main/packaging/flatpak/screenshots/katzenqt.png
+FLATPAK_MEDIA_URL := https://dl.flathub.org/media/network/katzenpost/katzenqt/katzenqt.png
+FLATPAK_SECOND_STATE ?= katzen-second
+FLATPAK_DOCKER_ADDRESS ?= 127.0.0.1:64331
+FLATHUB_DIST := .flathub-dist
 
 # make alembic-revision-uv ALEMBIC_MSG='some changeset details'
 ALEMBIC_MSG ?=
@@ -41,7 +57,11 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	clean clean-venv deps
+	flatpak-install-system-deps flatpak-runtime flatpak-not-running flatpak flatpak-run flatpak-run-second \
+	flatpak-docker-check flatpak-docker-existing-check flatpak-docker-start flatpak-run-docker flatpak-run-docker-second flatpak-test flatpak-daemon-status \
+	flatpak-validate flatpak-lint-runtime flatpak-lint flatpak-permissions flatpak-reproducible flatpak-test-docker \
+	flathub-validate flathub-dist flathub-check flathub-submit \
+	test-extensive flatpak-clean clean clean-venv deps
 
 deps: default_uv_setup
 
@@ -77,11 +97,33 @@ help:
 		'  make alembic-revision-pip  Alembic revision using pip (requires ALEMBIC_MSG="msg")'\
 		'' \
 		'Katzenpost / kpclientd:' \
-		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
+		'  make katzenpost-update     Restore the pinned ignored Katzenpost checkout' \
 		'  make kpclientd             Build kpclientd (golang native build; falls back to podman)' \
 		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
 		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
+		'' \
+		'Flatpak:' \
+		'  make flatpak-install-system-deps Install Flatpak build tools (Debian/Ubuntu)' \
+		'  make flatpak-runtime       Install the GNOME 50 SDK and runtime' \
+		'  make flatpak               Build and install the Flatpak for this user' \
+		'  make flatpak-run           Run the installed Flatpak' \
+		'  make flatpak-run-second    Run a second Flatpak identity' \
+		'  make flatpak-run-docker    Run the first identity on the Docker testnet' \
+		'  make flatpak-run-docker-second Run the second identity on the Docker testnet' \
+		'  make flatpak-docker-start  Start and wait for the local Docker testnet' \
+		'  make flatpak-test          Test imports, migrations, and daemon configuration' \
+		'  make flatpak-daemon-status Show the selected Flatpak daemon' \
+		'  make flatpak-validate      Validate the application metadata' \
+		'  make flatpak-lint          Run Flathub manifest and repository lint' \
+		'  make flatpak-permissions   Verify the installed sandbox policy' \
+		'  make flatpak-reproducible  Compare two clean Flatpak exports' \
+		'  make flatpak-test-docker   Run the real-network integration suite' \
+		'  make test-extensive        Run the complete release gate' \
+		'  make flathub-dist TAG=v0.0.1 Create a tagged Flathub submission tree' \
+		'  make flathub-check TAG=v0.0.1 Test a tagged Flathub release' \
+		'  make flathub-submit TAG=v0.0.1 Open or update the Flathub pull request' \
+		'  make flatpak-clean         Remove local Flatpak build output' \
 		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \
@@ -196,10 +238,10 @@ run: setup code-generator
 	fi
 
 run-uv: $(STAMP_UV) code-generator
-	@$(UV) run katzenqt
+	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python packaging/flatpak/launcher.py
 
 run-pip: $(STAMP_PIP) code-generator
-	@$(VENV)/bin/katzenqt
+	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python packaging/flatpak/launcher.py
 
 test: setup
 	@if [[ -e "$(BACKEND_UV)" ]]; then \
@@ -212,10 +254,10 @@ test: setup
 	fi
 
 test-uv: $(STAMP_UV)
-	@$(UV) run pytest
+	@env -u KATZENQT_DOCKER_INTEGRATION $(UV) run pytest -m "not integration"
 
 test-pip: $(STAMP_PIP)
-	@$(VENV)/bin/pytest
+	@env -u KATZENQT_DOCKER_INTEGRATION $(VENV)/bin/pytest -m "not integration"
 
 # Run the docker-integration tests. Requires a Katzenpost docker mixnet
 # already running (see katzenpost-update + $(KATZENPOST_DIR)/docker: make
@@ -252,11 +294,17 @@ docker-integration: setup
 
 $(KATZENPOST_DIR):
 	@git clone $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
 
 katzenpost-update: $(KATZENPOST_DIR)
-	@cd $(KATZENPOST_DIR) && git pull --ff-only >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) fetch origin $(KATZENPOST_REV) >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
 
 kpclientd: $(KATZENPOST_DIR)
+	@test -z "$$(git -C $(KATZENPOST_DIR) status --porcelain)" || { printf '%s\n' 'error: katzenpost checkout is dirty; run make katzenpost-update'; exit 1; }
+	@if test -f $(KPCLIENTD_PATCH) && git -C $(KATZENPOST_DIR) apply --check ../$(KPCLIENTD_PATCH) >/dev/null 2>&1; then \
+		git -C $(KATZENPOST_DIR) apply ../$(KPCLIENTD_PATCH); \
+	fi
 	@set +e; \
 	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1 ) ; \
 	rc=$$?; \
@@ -284,15 +332,158 @@ install-kpclient: kpclientd
 
 kpclientd.service: install-kpclient
 	@install -d -m 0700 ~/.config/systemd/user
+	@install -d -m 0755 ~/.local/share/dbus-1/services
+	@rm -f ~/.config/systemd/user/dbus-network.katzenpost.kpclientd.Native.service ~/.local/share/dbus-1/services/network.katzenpost.kpclientd.Native.service
 	@install -m 0644 config/kpclientd.service ~/.config/systemd/user/kpclientd.service
+	@install -m 0644 config/network.katzenpost.kpclientd.service ~/.local/share/dbus-1/services/network.katzenpost.kpclientd.service
 	@systemctl --user daemon-reload
-	@systemctl --user enable --now kpclientd >/dev/null 2>&1
+	@systemctl --user reenable kpclientd >/dev/null 2>&1
+	@systemctl --user restart kpclientd
+
+flatpak-install-system-deps:
+	@sudo apt install -y appstream flatpak flatpak-builder git-lfs
+
+flatpak-runtime:
+	@flatpak install --user -y flathub org.gnome.Platform//50 org.gnome.Sdk//50
+
+flatpak-lint-runtime:
+	@flatpak install --user -y flathub org.flatpak.Builder
+
+flatpak-not-running:
+	@for _ in {1..50}; do \
+		if ! flatpak ps --columns=application | grep -Fxq $(FLATPAK_ID); then exit 0; fi; \
+		sleep .1; \
+	done; \
+	printf '%s\n' 'Close all running katzenqt Flatpak clients before rebuilding.'; \
+	exit 1
+
+flatpak: flatpak-runtime flatpak-not-running
+	@rm -rf $(FLATPAK_REPO) $(FLATPAK_EXPORT)
+	@flatpak-builder --force-clean --override-source-date-epoch=$(FLATPAK_EPOCH) --repo=$(FLATPAK_EXPORT) .flatpak-build $(FLATPAK_MANIFEST)
+	@python3 packaging/flatpak/mirror-screenshot.py catalog .flatpak-build $(FLATPAK_SCREENSHOT) $(FLATPAK_MEDIA_URL) $(FLATPAK_TIMESTAMP)
+	@flatpak build-export --update-appstream --timestamp=$(FLATPAK_TIMESTAMP) $(FLATPAK_REPO) .flatpak-build master
+	@python3 packaging/flatpak/mirror-screenshot.py repo $(FLATPAK_REPO) $(FLATPAK_SCREENSHOT) $(FLATPAK_MEDIA_URL) $(FLATPAK_TIMESTAMP)
+	@flatpak build-update-repo --no-update-appstream $(FLATPAK_REPO)
+	@flatpak install --user --reinstall -y $(CURDIR)/$(FLATPAK_REPO) $(FLATPAK_ID)
+
+flatpak-run:
+	@flatpak run $(FLATPAK_ID)
+
+flatpak-run-second:
+	@flatpak run --env=KQT_STATE=$(FLATPAK_SECOND_STATE) $(FLATPAK_ID)
+
+flatpak-docker-check:
+	@python3 -c 'import socket; socket.create_connection(("$(word 1,$(subst :, ,$(FLATPAK_DOCKER_ADDRESS)))", $(word 2,$(subst :, ,$(FLATPAK_DOCKER_ADDRESS)))), 1).close()' 2>/dev/null || { printf '%s\n' 'Docker kpclientd is unavailable at $(FLATPAK_DOCKER_ADDRESS).' 'Start it with: cd katzenpost/docker && make start wait'; exit 1; }
+
+flatpak-docker-existing-check: flatpak-docker-check
+	@test -f $(KATZENPOST_DIR)/docker/voting_mixnet/running.stamp
+	@$(MAKE) -C $(KATZENPOST_DIR)/docker ps | grep -Eq '(^|[[:space:]])kpclientd([[:space:]]|$$)'
+
+flatpak-docker-start: $(KATZENPOST_DIR)
+	@$(MAKE) -C $(KATZENPOST_DIR)/docker start wait
+	@$(MAKE) flatpak-docker-check
+
+flatpak-run-docker: flatpak-docker-check
+	@flatpak run --share=network --env=KQT_STATE=katzen-docker --env=KATZENQT_KPCLIENTD_TCP=$(FLATPAK_DOCKER_ADDRESS) $(FLATPAK_ID)
+
+flatpak-run-docker-second: flatpak-docker-check
+	@flatpak run --share=network --env=KQT_STATE=katzen-docker-second --env=KATZENQT_KPCLIENTD_TCP=$(FLATPAK_DOCKER_ADDRESS) $(FLATPAK_ID)
+
+flatpak-test:
+	@flatpak run --command=python3 $(FLATPAK_ID) -c \
+		'import importlib.resources; import katzenqt, katzenpost_thinclient; assert (importlib.resources.files("katzenqt") / "migrations").is_dir()'
+	@flatpak run --command=python3 $(FLATPAK_ID) -c \
+		'import configparser; c=configparser.ConfigParser(); c.read("/.flatpak-info"); assert "network" not in c.get("Context", "shared", fallback="").split(";")'
+	@flatpak run --command=sh $(FLATPAK_ID) -c 'test ! -e /app/bin/kpclientd'
+	@flatpak run --command=python3 --env=KQT_STATE=flatpak-test-a $(FLATPAK_ID) -c \
+		'from katzenqt.persistent import state_file; assert state_file.name == "flatpak-test-a.sqlite3"; state_file.touch()'
+	@flatpak run --command=python3 --env=KQT_STATE=flatpak-test-b $(FLATPAK_ID) -c \
+		'from katzenqt.persistent import state_file; assert state_file.name == "flatpak-test-b.sqlite3"; assert state_file.with_name("flatpak-test-a.sqlite3") != state_file'
+
+flatpak-daemon-status:
+	@flatpak run $(FLATPAK_ID) --status
+
+flatpak-validate:
+	@appstreamcli validate --no-net packaging/flatpak/$(FLATPAK_ID).metainfo.xml
+
+flatpak-lint: flatpak-lint-runtime
+	@if command -v flatpak-builder-lint >/dev/null 2>&1; then \
+		flatpak-builder-lint manifest $(FLATPAK_MANIFEST); \
+		flatpak-builder-lint repo $(FLATPAK_REPO); \
+	elif flatpak info org.flatpak.Builder >/dev/null 2>&1; then \
+		flatpak run --filesystem=$(CURDIR) --command=flatpak-builder-lint org.flatpak.Builder manifest $(CURDIR)/$(FLATPAK_MANIFEST); \
+		flatpak run --filesystem=$(CURDIR) --command=flatpak-builder-lint org.flatpak.Builder repo $(CURDIR)/$(FLATPAK_REPO); \
+	else \
+		printf '%s\n' 'flatpak-builder-lint is unavailable; install it or org.flatpak.Builder'; \
+		exit 1; \
+	fi
+
+flatpak-permissions:
+	@flatpak run --command=python3 $(FLATPAK_ID) -c \
+		'import configparser; c=configparser.ConfigParser(); c.read("/.flatpak-info"); shared=c.get("Context", "shared", fallback="").split(";"); files=c.get("Context", "filesystems", fallback="").split(";"); assert "network" not in shared; assert files == ["xdg-run/katzenpost:ro", ""]'
+	@flatpak run --command=python3 $(FLATPAK_ID) -c \
+		'import socket; s=socket.socket(); s.settimeout(.2); r=s.connect_ex(("1.1.1.1", 53)); assert r != 0, r'
+
+flatpak-reproducible: flatpak
+	@first=$$(ostree refs --repo=$(FLATPAK_REPO) | sort | while read ref; do printf '%s %s\n' "$$ref" "$$(ostree --repo=$(FLATPAK_REPO) rev-parse "$$ref")"; done); \
+	$(MAKE) flatpak >/dev/null; \
+	second=$$(ostree refs --repo=$(FLATPAK_REPO) | sort | while read ref; do printf '%s %s\n' "$$ref" "$$(ostree --repo=$(FLATPAK_REPO) rev-parse "$$ref")"; done); \
+	test "$$first" = "$$second"; \
+	printf '%s\n' "$$second"
+
+flatpak-test-docker: $(KATZENPOST_DIR)
+	@started=; \
+	cleanup() { if [[ -n "$$started" ]]; then $(MAKE) -C $(KATZENPOST_DIR)/docker stop; fi; }; \
+	trap cleanup EXIT INT TERM; \
+	if $(MAKE) flatpak-docker-check >/dev/null 2>&1; then \
+		$(MAKE) flatpak-docker-existing-check; \
+	else \
+		started=1; \
+		$(MAKE) -C $(KATZENPOST_DIR)/docker start wait; \
+	fi; \
+	$(MAKE) setup-uv; \
+	$(MAKE) flatpak-docker-check; \
+	KATZENQT_INTEGRATION_PYTHON=$(CURDIR)/packaging/flatpak/integration-python packaging/flatpak/wait-for-mixnet; \
+	KATZENQT_DOCKER_INTEGRATION=1 KATZENQT_INTEGRATION_PYTHON=$(CURDIR)/packaging/flatpak/integration-python $(UV) run pytest --no-cov tests/integration; \
+	if [[ -n "$$started" ]]; then \
+		cleanup; \
+		started=; \
+		if $(MAKE) flatpak-docker-check >/dev/null 2>&1; then printf '%s\n' 'error: managed test mixnet is still reachable'; exit 1; fi; \
+	fi
+
+test-extensive: setup-uv test-uv alembic-check-uv flatpak-validate flatpak flatpak-test flatpak-permissions flatpak-reproducible flatpak-lint flatpak-test-docker
+
+flathub-validate:
+	@test -n "$(TAG)" || { printf '%s\n' 'error: TAG=MAJOR.MINOR.PATCH is required'; exit 1; }
+	@python3 packaging/flatpak/release.py validate --tag "$(TAG)" --remote
+
+flathub-dist: flathub-validate
+	@python3 packaging/flatpak/release.py dist --tag "$(TAG)" --destination $(FLATHUB_DIST) --remote
+
+flathub-check: flathub-dist test-extensive
+	@cd $(FLATHUB_DIST) && flatpak run --filesystem=$(CURDIR) --command=flathub-build org.flatpak.Builder --install $(FLATPAK_ID).yaml
+	@cd $(FLATHUB_DIST) && flatpak run --filesystem=$(CURDIR) --command=flatpak-builder-lint org.flatpak.Builder manifest $(FLATPAK_ID).yaml
+	@cd $(FLATHUB_DIST) && flatpak run --filesystem=$(CURDIR) --command=flatpak-builder-lint org.flatpak.Builder repo repo
+	@printf '%s\n' "$(TAG)" > $(FLATHUB_DIST)/.checked-tag
+
+flathub-submit: flathub-check
+	@test "$$(cat $(FLATHUB_DIST)/.checked-tag)" = "$(TAG)"
+	@python3 packaging/flatpak/release.py submit --tag "$(TAG)" --destination $(FLATHUB_DIST)
+
+flatpak-clean:
+	@rm -rf .flatpak-build .flatpak-builder $(FLATPAK_REPO) $(FLATPAK_EXPORT) $(FLATHUB_DIST)
 
 alembic-check-uv:
-	@$(UV) run alembic -c config/alembic.ini check
+	@state=$$(mktemp -d); \
+	trap 'rm -rf "$$state"' EXIT; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c config/alembic.ini upgrade head; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c config/alembic.ini check
 
 alembic-check-pip:
-	@$(VENV)/bin/alembic -c config/alembic.ini check
+	@state=$$(mktemp -d); \
+	trap 'rm -rf "$$state"' EXIT; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c config/alembic.ini upgrade head; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c config/alembic.ini check
 
 alembic-revision-uv:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
@@ -314,4 +505,3 @@ clean-venv:
 clean:
 	@rm -r $(VENV)
 	@rm $(SYSTEM_STAMP)
-
