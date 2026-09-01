@@ -35,6 +35,7 @@ UV_LOCK := $(wildcard uv.lock)
 
 FLATPAK_ID := network.katzenpost.katzenqt
 FLATPAK_MANIFEST := packaging/flatpak/$(FLATPAK_ID).yaml
+# Fixed SOURCE_DATE_EPOCH so builds are bit-for-bit reproducible.
 FLATPAK_EPOCH := 1787647836
 FLATPAK_TIMESTAMP := 2026-08-25T08:50:36Z
 FLATPAK_REPO := .flatpak-repo

@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Actions pinned to commit SHAs (supply-chain hardening); bump deliberately.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: sudo apt-get update && sudo apt-get install -y libegl1 libfontconfig1 libpulse0 libxkbcommon0 libxcb-cursor0
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
