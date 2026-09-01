@@ -22,8 +22,9 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
-KATZENPOST_REV := 6973c80709c5b65a69beddc1d4378c786cde9c95
-KPCLIENTD_PATCH := patches/kpclientd-main.patch
+# Branch tip: the --dbus-name + multi-unix-listener fix is not yet on
+# katzenpost main, so we pin the exact commit until it merges.
+KATZENPOST_REV := 3b0e511ea64690070a583484a04b58681ca3eb12
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
@@ -302,9 +303,6 @@ katzenpost-update: $(KATZENPOST_DIR)
 
 kpclientd: $(KATZENPOST_DIR)
 	@test -z "$$(git -C $(KATZENPOST_DIR) status --porcelain)" || { printf '%s\n' 'error: katzenpost checkout is dirty; run make katzenpost-update'; exit 1; }
-	@if test -f $(KPCLIENTD_PATCH) && git -C $(KATZENPOST_DIR) apply --check ../$(KPCLIENTD_PATCH) >/dev/null 2>&1; then \
-		git -C $(KATZENPOST_DIR) apply ../$(KPCLIENTD_PATCH); \
-	fi
 	@set +e; \
 	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1 ) ; \
 	rc=$$?; \
