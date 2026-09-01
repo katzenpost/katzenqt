@@ -58,7 +58,7 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	flatpak-install-system-deps flatpak-runtime flatpak-not-running flatpak flatpak-run flatpak-run-second \
+	flatpak-install-system-deps flatpak-runtime flatpak-not-running flatpak flatpak-build flatpak-install flatpak-run flatpak-run-second \
 	flatpak-docker-check flatpak-docker-existing-check flatpak-docker-start flatpak-run-docker flatpak-run-docker-second flatpak-test flatpak-daemon-status \
 	flatpak-validate flatpak-lint-runtime flatpak-lint flatpak-permissions flatpak-reproducible flatpak-test-docker \
 	flathub-validate flathub-dist flathub-check flathub-submit \
@@ -107,7 +107,9 @@ help:
 		'Flatpak:' \
 		'  make flatpak-install-system-deps Install Flatpak build tools (Debian/Ubuntu)' \
 		'  make flatpak-runtime       Install the GNOME 50 SDK and runtime' \
-		'  make flatpak               Build and install the Flatpak for this user' \
+		'  make flatpak               Runtime deps, build, then install (meta)' \
+		'  make flatpak-build         Build the Flatpak into a local repo (no install)' \
+		'  make flatpak-install       Install the already-built local repo' \
 		'  make flatpak-run           Run the installed Flatpak' \
 		'  make flatpak-run-second    Run a second Flatpak identity' \
 		'  make flatpak-run-docker    Run the first identity on the Docker testnet' \
@@ -350,14 +352,21 @@ flatpak-not-running:
 	printf '%s\n' 'Close all running katzenqt Flatpak clients before rebuilding.'; \
 	exit 1
 
-flatpak: flatpak-runtime flatpak-not-running
+# Build the Flatpak into a local ostree repo; does not install anything.
+flatpak-build: flatpak-runtime
 	@rm -rf $(FLATPAK_REPO) $(FLATPAK_EXPORT)
 	@flatpak-builder --force-clean --override-source-date-epoch=$(FLATPAK_EPOCH) --repo=$(FLATPAK_EXPORT) .flatpak-build $(FLATPAK_MANIFEST)
 	@python3 packaging/flatpak/mirror-screenshot.py catalog .flatpak-build $(FLATPAK_SCREENSHOT) $(FLATPAK_MEDIA_URL) $(FLATPAK_TIMESTAMP)
 	@flatpak build-export --update-appstream --timestamp=$(FLATPAK_TIMESTAMP) $(FLATPAK_REPO) .flatpak-build master
 	@python3 packaging/flatpak/mirror-screenshot.py repo $(FLATPAK_REPO) $(FLATPAK_SCREENSHOT) $(FLATPAK_MEDIA_URL) $(FLATPAK_TIMESTAMP)
 	@flatpak build-update-repo --no-update-appstream $(FLATPAK_REPO)
+
+# Install the already-built local repo for this user.
+flatpak-install: flatpak-not-running
 	@flatpak install --user --reinstall -y $(CURDIR)/$(FLATPAK_REPO) $(FLATPAK_ID)
+
+# Meta-target: install runtime deps, build, then install.
+flatpak: flatpak-runtime flatpak-not-running flatpak-build flatpak-install
 
 flatpak-run:
 	@flatpak run $(FLATPAK_ID)
