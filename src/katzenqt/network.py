@@ -339,6 +339,25 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
         reconnect_wait.cancel()
         epoch_wait.cancel()
 
+async def _substream_parent(
+    sess: persistent.AsyncSession, name: str,
+) -> persistent.ConversationPeer | None:
+    """Resolve the parent ConversationPeer a substream peer belongs to.
+
+    A synthetic substream peer is named ``:substream:<parent_id>:<nonce>``.
+    Returns the parent peer, or None when the name is malformed or the parent
+    no longer exists, so the caller can retire the peer instead of raising in
+    the read loop (a non-integer id used to crash it on every restart).
+    """
+    parts = name.split(":")
+    if len(parts) < 4:
+        return None
+    try:
+        parent_id = int(parts[2])
+    except ValueError:
+        return None
+    return await sess.get(persistent.ConversationPeer, parent_id)
+
 # Cap on attachment size after reassembly. Anything larger is
 # logged at WARNING, the bytes are discarded, and a
 # ``file_oversized`` marker is committed in place of a real
@@ -695,51 +714,55 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         assembled is not None and assembled[0] == "F"
         and cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
     ):
-        parent_peer = await sess.get(
-            persistent.ConversationPeer, int(cp.name.split(":")[2]),
-        )
-        notify_conv_id = parent_peer.conversation.id
+        parent_peer = await _substream_parent(sess, cp.name)
+        if parent_peer is not None:
+            notify_conv_id = parent_peer.conversation.id
 
     try:
       async with persistent.conversation_log_order_lock(notify_conv_id):
         if assembled is not None and assembled[0] == "F":
             _, chunks, chain, gcm = assembled
-            if gcm.file_upload is not None:
-                target_conv_id = (
-                    parent_peer.conversation.id
-                    if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
-                    else cp.conversation.id
-                )
-                full_payload = _spill_attachment(
-                    gcm.file_upload, gcm.membership_hash, target_conv_id,
-                )
-            else:
-                full_payload = b"F" + gcm.to_cbor()
-            if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
-                # Substream's terminal F: commit the assembled message into the
-                # parent peer's ConversationLog, prune the parent's indirection
-                # piece, and retire this synthetic peer.
-                added, sig, pa = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
-                signal_send = signal_send or sig
-                peer_added = peer_added or pa
-                parent_i = (await sess.exec(
-                    select(persistent.ReceivedPiece).where(
-                        persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
-                        persistent.ReceivedPiece.chunk_type == b"I",
-                        persistent.ReceivedPiece.chunk == rcw.read_cap,
-                    )
-                )).first()
-                if parent_i is not None:
-                    await sess.delete(parent_i)
+            if cp.name.startswith(_SUBSTREAM_NAME_PREFIX) and parent_peer is None:
+                logger.warning("retiring substream with no parent: %r", cp.name)
                 cp.active = False
                 sess.add(cp)
-                convlog_added = added
             else:
-                # Top-level F (single-box or contiguous on the parent stream):
-                # route by message type, chat into the log, tally into the
-                # controller.
-                convlog_added, sig, peer_added = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
-                signal_send = signal_send or sig
+                if gcm.file_upload is not None:
+                    target_conv_id = (
+                        parent_peer.conversation.id
+                        if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+                        else cp.conversation.id
+                    )
+                    full_payload = _spill_attachment(
+                        gcm.file_upload, gcm.membership_hash, target_conv_id,
+                    )
+                else:
+                    full_payload = b"F" + gcm.to_cbor()
+                if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+                    # Substream's terminal F: commit the assembled message into the
+                    # parent peer's ConversationLog, prune the parent's indirection
+                    # piece, and retire this synthetic peer.
+                    added, sig, pa = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
+                    signal_send = signal_send or sig
+                    peer_added = peer_added or pa
+                    parent_i = (await sess.exec(
+                        select(persistent.ReceivedPiece).where(
+                            persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
+                            persistent.ReceivedPiece.chunk_type == b"I",
+                            persistent.ReceivedPiece.chunk == rcw.read_cap,
+                        )
+                    )).first()
+                    if parent_i is not None:
+                        await sess.delete(parent_i)
+                    cp.active = False
+                    sess.add(cp)
+                    convlog_added = added
+                else:
+                    # Top-level F (single-box or contiguous on the parent stream):
+                    # route by message type, chat into the log, tally into the
+                    # controller.
+                    convlog_added, sig, peer_added = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
+                    signal_send = signal_send or sig
             for rp in chain:
                 await sess.delete(rp)
 

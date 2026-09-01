@@ -240,6 +240,23 @@ async def _conversation_write_cap(sess, conversation_id: int) -> persistent.Writ
     return wcw
 
 
+def _sanitize_peer_name(name: str) -> str:
+    """A peer-supplied display name, made safe to store as a ConversationPeer
+    name. Strips C0/C1 control characters (which could break the substream
+    name parse or spoof the display) and neutralises the reserved
+    ``:substream:`` prefix so a peer cannot masquerade as a synthetic
+    substream peer and have their messages routed onto another peer's log.
+
+    Pure and total: never raises, always returns a non-empty string.
+    """
+    cleaned = "".join(
+        ch for ch in (name or "") if not (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F)
+    )
+    while cleaned.startswith(_SUBSTREAM_NAME_PREFIX):
+        cleaned = cleaned[len(_SUBSTREAM_NAME_PREFIX):]
+    return cleaned or "unnamed"
+
+
 def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
     if not read_cap or len(read_cap) != _INDEX_LEN + 32:
         # 136 bytes total: a 32-byte public key plus the 104-byte index. A
@@ -257,7 +274,8 @@ def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
     )
     sess.add(rcw)
     sess.add(persistent.ConversationPeer(
-        name=name, read_cap_id=rcw.id, active=True, conversation=conversation,
+        name=_sanitize_peer_name(name), read_cap_id=rcw.id, active=True,
+        conversation=conversation,
     ))
 
 
