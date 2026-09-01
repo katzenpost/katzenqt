@@ -48,7 +48,7 @@ def _resolve_alembic_ini() -> Path:
 
 _alembic_cfg = alembic.config.Config(_resolve_alembic_ini())
 
-xdg_data_home = (Path().home()/".local"/"share")
+xdg_data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home()/".local"/"share")
 xdg_data_home.mkdir(parents=True,exist_ok=True)
 app_data = xdg_data_home / "katzenqt"
 app_data.mkdir(exist_ok=True, mode=0o700)
