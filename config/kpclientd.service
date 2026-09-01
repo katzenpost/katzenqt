@@ -41,7 +41,7 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 
 ExecStartPre=/usr/bin/rm -f %t/katzenpost/kpclientd.sock
-ExecStart=%h/.local/bin/kpclientd --config %h/.local/katzenpost/client.toml --dbus-name network.katzenpost.kpclientd
+ExecStart=%h/.local/bin/kpclientd --config %h/.local/katzenpost/client.toml --dbus-name=network.katzenpost.kpclientd
 
 Restart=on-failure
 RestartSec=5s
