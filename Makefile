@@ -25,6 +25,7 @@ KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
 # Branch tip: the --dbus-name + multi-unix-listener fix is not yet on
 # katzenpost main, so we pin the exact commit until it merges.
 KATZENPOST_REV := 3b0e511ea64690070a583484a04b58681ca3eb12
+KPCLIENTD_BIN := $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
@@ -303,17 +304,21 @@ $(KATZENPOST_DIR):
 katzenpost-update: $(KATZENPOST_DIR)
 	@git -C $(KATZENPOST_DIR) fetch origin $(KATZENPOST_REV) >/dev/null 2>&1
 	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
+	@rm -f $(KPCLIENTD_BIN)
 
-kpclientd: $(KATZENPOST_DIR)
+# built only when missing; katzenpost-update removes it to force a rebuild
+$(KPCLIENTD_BIN): | $(KATZENPOST_DIR)
 	@test -z "$$(git -C $(KATZENPOST_DIR) status --porcelain)" || { printf '%s\n' 'error: katzenpost checkout is dirty; run make katzenpost-update'; exit 1; }
 	@set +e; \
-	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1 ) ; \
+	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v ) ; \
 	rc=$$?; \
 	set -e; \
 	if [[ $$rc -ne 0 ]]; then \
 		printf '%s\n' "warn: native kpclientd build failed; falling back to kpclientd-podman"; \
 		$(MAKE) kpclientd-podman; \
 	fi
+
+kpclientd: $(KPCLIENTD_BIN)
 
 kpclientd-podman:
 	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=bookworm \
@@ -324,18 +329,24 @@ kpclientd-podman:
 # the namenlos mixnet and a thin client config that reaches the daemon over
 # the @katzenpost abstract socket. The integration tests do not read these,
 # dialing kpclientd directly via --address instead.
-install-kpclient: kpclientd
+install-kpclient: $(KPCLIENTD_BIN)
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
 	@install -m 0600 src/katzenqt/data/client.toml ~/.local/katzenpost/client.toml
 	@install -m 0600 src/katzenqt/data/thinclient.toml ~/.local/katzenpost/thinclient.toml
-	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
+	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
-# Install + start the user service via the shared launcher code (single
-# implementation, also used by the non-Flatpak runtime fallback). Uses the
-# set-up venv interpreter (the unit + config ship as katzenqt package data),
-# so it works for both the uv and pip backends.
-kpclientd.service: setup install-kpclient
+kpclientd.service: setup
+	@printf '%s\n' '==> [1/3] kpclientd binary'
+	@if [[ -x $(KPCLIENTD_BIN) ]]; then \
+		printf '%s\n' '    up to date (skipping go build)'; \
+	else \
+		printf '%s\n' '    building via go build (slow on a cold cache)...'; \
+		$(MAKE) $(KPCLIENTD_BIN); \
+	fi
+	@printf '%s\n' '==> [2/3] install binary + config into ~/.local'
+	@$(MAKE) install-kpclient
+	@printf '%s\n' '==> [3/3] install and start the systemd user service'
 	@$(VENV)/bin/python -m katzenqt.launcher --install-service
 
 flatpak-install-system-deps:

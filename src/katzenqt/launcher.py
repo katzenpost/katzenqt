@@ -113,12 +113,15 @@ def install_service():
     (services / "network.katzenpost.kpclientd.Native.service").unlink(
         missing_ok=True
     )
+    print("    writing kpclientd.service and its D-Bus activation file")
     unit = units / "kpclientd.service"
     unit.write_bytes((DATA / "kpclientd.service").read_bytes())
     (services / f"{BUS}.service").write_bytes(
         (DATA / "network.katzenpost.kpclientd.service").read_bytes()
     )
+    print("    systemctl --user daemon-reload")
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    print("    systemctl --user reenable + restart kpclientd")
     subprocess.run(
         ["systemctl", "--user", "reenable", "kpclientd"],
         stdout=subprocess.DEVNULL,
