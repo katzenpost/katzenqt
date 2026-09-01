@@ -45,8 +45,8 @@ KQT_INTEGRATION_PARALLEL ?= 4
 .PHONY: default default_uv_setup default_pip_setup help \
 	system-setup install-debian-packages install-uv clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
-	run test status code-generator regen-code \
-	run-uv run-pip test-uv test-pip \
+	run test mypy status code-generator regen-code \
+	run-uv run-pip test-uv test-pip mypy-uv mypy-pip \
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
@@ -75,6 +75,7 @@ help:
 		'  make setup                 Ensure setup is complete for the chosen backend and print status' \
 		'  make run                   Run katzenqt using the chosen backend' \
 		'  make test                  Run pytest using the chosen backend' \
+		'  make mypy                  Run mypy using the chosen backend' \
 		'  make status                Show backend, venv, and kpclientd status' \
 		'' \
 		'Code generation:' \
@@ -238,6 +239,22 @@ test-uv: $(STAMP_UV)
 
 test-pip: $(STAMP_PIP)
 	@$(VENV)/bin/pytest
+
+mypy: setup
+	@if [[ -e "$(BACKEND_UV)" ]]; then \
+		$(MAKE) mypy-uv; \
+	elif [[ -e "$(BACKEND_PIP)" ]]; then \
+		$(MAKE) mypy-pip; \
+	else \
+		printf '%s\n' "error: no backend selected. run: make setup-uv OR make setup-pip"; \
+		exit 1; \
+	fi
+
+mypy-uv: $(STAMP_UV)
+	@$(UV) run mypy
+
+mypy-pip: $(STAMP_PIP)
+	@$(VENV)/bin/mypy
 
 # Run the docker-integration tests. Requires a Katzenpost docker mixnet
 # already running (see katzenpost-update + $(KATZENPOST_DIR)/docker: make
