@@ -22,8 +22,7 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
-# Branch tip: the --dbus-name + multi-unix-listener fix is not yet on
-# katzenpost main, so we pin the exact commit until it merges.
+# pinned commit: the kpclientd fix is not yet on katzenpost main
 KATZENPOST_REV := 3b0e511ea64690070a583484a04b58681ca3eb12
 KPCLIENTD_BIN := $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd
 
@@ -36,7 +35,7 @@ UV_LOCK := $(wildcard uv.lock)
 
 FLATPAK_ID := network.katzenpost.katzenqt
 FLATPAK_MANIFEST := packaging/flatpak/$(FLATPAK_ID).yaml
-# Fixed SOURCE_DATE_EPOCH so builds are bit-for-bit reproducible.
+# constant epoch for reproducible builds
 FLATPAK_EPOCH := 1787647836
 FLATPAK_TIMESTAMP := 2026-08-25T08:50:36Z
 FLATPAK_REPO := .flatpak-repo
@@ -366,7 +365,6 @@ flatpak-not-running:
 	printf '%s\n' 'Close all running katzenqt Flatpak clients before rebuilding.'; \
 	exit 1
 
-# Build the Flatpak into a local ostree repo; does not install anything.
 flatpak-build: flatpak-runtime
 	@rm -rf $(FLATPAK_REPO) $(FLATPAK_EXPORT)
 	@flatpak-builder --force-clean --override-source-date-epoch=$(FLATPAK_EPOCH) --repo=$(FLATPAK_EXPORT) .flatpak-build $(FLATPAK_MANIFEST)
@@ -375,11 +373,9 @@ flatpak-build: flatpak-runtime
 	@python3 packaging/flatpak/mirror-screenshot.py repo $(FLATPAK_REPO) $(FLATPAK_SCREENSHOT) $(FLATPAK_MEDIA_URL) $(FLATPAK_TIMESTAMP)
 	@flatpak build-update-repo --no-update-appstream $(FLATPAK_REPO)
 
-# Install the already-built local repo for this user.
 flatpak-install: flatpak-not-running
 	@flatpak install --user --reinstall -y $(CURDIR)/$(FLATPAK_REPO) $(FLATPAK_ID)
 
-# Meta-target: install runtime deps, build, then install.
 flatpak: flatpak-runtime flatpak-not-running flatpak-build flatpak-install
 
 flatpak-run:

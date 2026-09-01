@@ -43,7 +43,7 @@ modules:
       - install -Dm644 LICENSE.flatpak
         /app/share/licenses/network.katzenpost.katzenqt/katzenqt/LICENSE
     sources:
-      # Pinned to a commit + sha256 so the source is fixed and verifiable.
+      # pinned commit + sha256 for a verifiable source
       - type: archive
         url: https://github.com/katzenpost/katzenqt/archive/a47f0aa25a4cb4623b8549e6ce5136426405e19f.tar.gz
         sha256: 8e3c7f02be111db67bea33eb770c3f9c330f646532691bab24ec92608b67bbbe
