@@ -419,6 +419,17 @@ class MainWindow(QMainWindow):
         convo.attached_files.discard(str(path))
         self.refresh_attached_files_for_conversation(convo)
 
+    def _warn_attachment(self, text: str) -> None:
+        """Show an attachment warning with the message rendered as plain text.
+
+        The text embeds a peer-chosen basename; QMessageBox defaults to
+        Qt::AutoText, which would render HTML in that basename, so pin the
+        format to plain text to keep a hostile name from spoofing the dialog.
+        """
+        box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.exec()
+
     def _resolve_attachment(self, message_id: str) -> "_ResolvedAttachment | None":
         """Rehydrate an attachment to a concrete on-disk path.
 
@@ -447,6 +458,7 @@ class MainWindow(QMainWindow):
             if conversation_log is None or conversation_log.payload[:1] != b"F":
                 return None
             body = conversation_log.payload[1:]  # strip framing byte shared with wire format
+            authored = conversation_log.network_status != 0
 
         state_root = persistent.state_file.parent
 
@@ -484,16 +496,24 @@ class MainWindow(QMainWindow):
                         f"The received file for {basename} is missing on disk."
                     )
                 marker_sha = decoded.get("sha256")
-                if marker_sha is not None:
-                    actual_sha = hashlib.sha256(abs_path.read_bytes()).digest()
-                    if actual_sha != marker_sha:
-                        raise _AttachmentError(
-                            f"Checksum mismatch for {basename}; the file may be "
-                            "corrupt."
-                        )
+                if not isinstance(marker_sha, bytes):
+                    raise _AttachmentError(
+                        f"{basename} has no checksum and cannot be verified."
+                    )
+                actual_sha = hashlib.sha256(abs_path.read_bytes()).digest()
+                if actual_sha != marker_sha:
+                    raise _AttachmentError(
+                        f"Checksum mismatch for {basename}; the file may be "
+                        "corrupt."
+                    )
                 return _ResolvedAttachment(basename, filetype, abs_path)
 
             if kind == "file_outgoing":
+                if not authored:
+                    raise _AttachmentError(
+                        f"{basename} refers to a local file but was received "
+                        "from a peer; refusing to open it."
+                    )
                 src_path = decoded.get("src_path") or ""
                 if not src_path:
                     # Voice-note draft was discarded after sending; nothing to
@@ -550,7 +570,7 @@ class MainWindow(QMainWindow):
         try:
             resolved = self._resolve_attachment(message_id)
         except _AttachmentError as exc:
-            QMessageBox.warning(self, APP_NAME, str(exc))
+            self._warn_attachment(str(exc))
             return
         if resolved is None:
             QMessageBox.information(
@@ -584,7 +604,7 @@ class MainWindow(QMainWindow):
         try:
             resolved = self._resolve_attachment(message_id)
         except _AttachmentError as exc:
-            QMessageBox.warning(self, APP_NAME, str(exc))
+            self._warn_attachment(str(exc))
             return
         if resolved is None:
             QMessageBox.information(
@@ -600,7 +620,7 @@ class MainWindow(QMainWindow):
         try:
             resolved = self._resolve_attachment(message_id)
         except _AttachmentError as exc:
-            QMessageBox.warning(self, APP_NAME, str(exc))
+            self._warn_attachment(str(exc))
             return
         if resolved is None:
             QMessageBox.information(

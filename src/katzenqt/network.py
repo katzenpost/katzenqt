@@ -714,7 +714,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     gcm.file_upload, gcm.membership_hash, target_conv_id,
                 )
             else:
-                full_payload = b"F" + b"".join(body for _kind, body in chunks)
+                full_payload = b"F" + gcm.to_cbor()
             if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
                 # Substream's terminal F: commit the assembled message into the
                 # parent peer's ConversationLog, prune the parent's indirection
