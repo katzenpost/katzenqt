@@ -332,9 +332,11 @@ install-kpclient: kpclientd
 	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
 
 # Install + start the user service via the shared launcher code (single
-# implementation, also used by the non-Flatpak runtime fallback).
-kpclientd.service: install-kpclient
-	@$(UV) run python -m katzenqt.launcher --install-service
+# implementation, also used by the non-Flatpak runtime fallback). Uses the
+# set-up venv interpreter (the unit + config ship as katzenqt package data),
+# so it works for both the uv and pip backends.
+kpclientd.service: setup install-kpclient
+	@$(VENV)/bin/python -m katzenqt.launcher --install-service
 
 flatpak-install-system-deps:
 	@sudo apt install -y appstream flatpak flatpak-builder git-lfs

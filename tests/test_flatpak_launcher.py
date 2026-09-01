@@ -237,16 +237,30 @@ def test_install_service_skips_without_config(launcher, monkeypatch, tmp_path):
     assert called == []
 
 
-def test_install_service_mode_maps_result_to_exit_code(launcher, monkeypatch):
+def test_install_service_mode_reports_blocker(launcher, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["launcher", "--install-service"])
-    monkeypatch.setattr(launcher, "install_service", lambda: True)
-    with pytest.raises(SystemExit) as ok:
+    monkeypatch.setattr(
+        launcher, "service_blocker", lambda: "run: make install-kpclient"
+    )
+    monkeypatch.setattr(
+        launcher, "install_service", lambda: pytest.fail("should not install")
+    )
+    with pytest.raises(SystemExit, match="make install-kpclient"):
         launcher.main()
-    assert ok.value.code == 0
-    monkeypatch.setattr(launcher, "install_service", lambda: False)
-    with pytest.raises(SystemExit) as fail:
-        launcher.main()
-    assert fail.value.code == 1
+
+
+def test_install_service_mode_runs_when_unblocked(
+    launcher, monkeypatch, capsys
+):
+    installed = []
+    monkeypatch.setattr(sys, "argv", ["launcher", "--install-service"])
+    monkeypatch.setattr(launcher, "service_blocker", lambda: None)
+    monkeypatch.setattr(
+        launcher, "install_service", lambda: installed.append(True) or True
+    )
+    launcher.main()
+    assert installed == [True]
+    assert "installed" in capsys.readouterr().out
 
 
 def test_activatable_requires_installed_service(

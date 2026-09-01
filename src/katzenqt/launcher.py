@@ -72,28 +72,37 @@ def activatable():
     )
 
 
+def service_blocker():
+    """Return why install_service() cannot proceed, or None if it can.
+
+    The installed binary and its ``client.toml`` are preconditions
+    (placed by ``make install-kpclient``); the reason is surfaced to the
+    user so a failed ``make kpclientd.service`` is not a silent no-op.
+    """
+    if FLATPAK:
+        return "cannot install a host service from inside Flatpak"
+    if not (Path.home() / ".local/bin/kpclientd").is_file():
+        return "kpclientd is not installed at ~/.local/bin (run: make install-kpclient)"
+    if not (Path.home() / ".local/katzenpost/client.toml").is_file():
+        return "client.toml is not at ~/.local/katzenpost (run: make install-kpclient)"
+    if not shutil.which("systemctl"):
+        return "systemctl not found (a systemd user session is required)"
+    return None
+
+
 def install_service():
     """Install and start the native kpclientd user systemd service.
 
     Single implementation shared by ``make kpclientd.service`` (via
     ``launcher.py --install-service``) and the non-Flatpak runtime
     fallback: copy the systemd unit and its D-Bus activation file from
-    the source tree, drop any stale legacy units, then reload, enable,
-    and start the user service. The installed binary and its
-    ``client.toml`` are preconditions (placed by ``make install-kpclient``);
-    this never writes the daemon config, so a hand-tuned one is untouched.
-    Return True on success, or False when it cannot proceed -- inside
-    Flatpak, without the binary or config, or without systemctl -- so the
-    caller can fall back to guidance.
+    package data, drop any stale legacy units, then reload, enable, and
+    start the user service. Preconditions are checked by
+    ``service_blocker``; the daemon config is never written here, so a
+    hand-tuned one is untouched. Return True on success, or False when a
+    precondition is unmet so the caller can fall back to guidance.
     """
-    binary = Path.home() / ".local/bin/kpclientd"
-    config = Path.home() / ".local/katzenpost/client.toml"
-    if (
-        FLATPAK
-        or not binary.is_file()
-        or not config.is_file()
-        or not shutil.which("systemctl")
-    ):
+    if service_blocker():
         return False
     units = Path.home() / ".config/systemd/user"
     services = Path.home() / ".local/share/dbus-1/services"
@@ -223,7 +232,12 @@ def supervise():
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode == "--install-service":
-        raise SystemExit(0 if install_service() else 1)
+        blocker = service_blocker()
+        if blocker:
+            raise SystemExit(f"kpclientd.service not installed: {blocker}")
+        install_service()
+        print("kpclientd.service installed, enabled, and started")
+        return
     tcp = os.environ.get("KATZENQT_KPCLIENTD_TCP")
     if tcp:
         if not networked():
