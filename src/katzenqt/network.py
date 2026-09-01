@@ -1031,8 +1031,8 @@ async def provision_read_caps(connection: ThinClient):
         wait = 5
         async with persistent.asession() as sess:
             for (rcw, wcw) in await sess.exec(sa.select(persistent.ReadCapWAL,persistent.WriteCapWAL).where(persistent.ReadCapWAL.read_cap == None).where(persistent.ReadCapWAL.write_cap_id==persistent.WriteCapWAL.id)): #  &
-                logger.debug("provision_read_caps UPDATING rcw=%s wcw=%s write_cap=%s next_index=%s",
-                             rcw, wcw, wcw.write_cap, wcw.next_index)
+                logger.debug("provision_read_caps UPDATING rcw_id=%s wcw_id=%s",
+                             rcw.id, wcw.id)
                 if wcw.write_cap is None:
                     try:
                         keypair_res = await connection.new_keypair(seed=secrets.token_bytes(32))
