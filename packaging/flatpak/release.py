@@ -45,9 +45,12 @@ def tag_details(tag, remote=False):
         raise ValueError("HEAD does not match TAG")
     if run("git", "status", "--porcelain"):
         raise ValueError("the worktree is dirty")
-    run("git", "merge-base", "--is-ancestor", commit, "main")
-    origin_main = run("git", "rev-parse", "origin/main")
-    run("git", "merge-base", "--is-ancestor", commit, origin_main)
+    if remote:
+        run("git", "fetch", "origin", "main", capture=False)
+        main_ref = run("git", "rev-parse", "FETCH_HEAD")
+    else:
+        main_ref = "main"
+    run("git", "merge-base", "--is-ancestor", commit, main_ref)
     version = match.group(1)
     project = tomllib.loads(run("git", "show", f"{tag}:pyproject.toml"))
     if project["project"]["version"] != version:

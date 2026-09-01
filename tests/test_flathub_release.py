@@ -22,7 +22,7 @@ def test_tag_details_requires_annotated_main_tag(monkeypatch):
             ("git", "rev-parse", "v0.0.1^{commit}"): "abc",
             ("git", "rev-parse", "HEAD"): "abc",
             ("git", "status", "--porcelain"): "",
-            ("git", "rev-parse", "origin/main"): "def",
+            ("git", "rev-parse", "FETCH_HEAD"): "def",
             (
                 "git",
                 "show",
@@ -54,7 +54,7 @@ def test_tag_details_requires_annotated_main_tag(monkeypatch):
         "0.0.1",
         "2026-08-28",
     )
-    assert ("git", "merge-base", "--is-ancestor", "abc", "main") in calls
+    assert ("git", "fetch", "origin", "main") in calls
     assert ("git", "merge-base", "--is-ancestor", "abc", "def") in calls
 
 
@@ -86,7 +86,6 @@ def test_tag_details_accepts_repository_tag_style(monkeypatch):
             ("git", "rev-parse", "0.0.1^{commit}"): "abc",
             ("git", "rev-parse", "HEAD"): "abc",
             ("git", "status", "--porcelain"): "",
-            ("git", "rev-parse", "origin/main"): "def",
             (
                 "git",
                 "show",
