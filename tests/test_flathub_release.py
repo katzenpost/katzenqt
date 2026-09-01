@@ -119,7 +119,6 @@ def test_stage_contains_only_tagged_application_source(tmp_path, monkeypatch):
         "packaging/flatpak/LICENSE": b"license",
         "packaging/flatpak/README.md": b"readme",
         "packaging/flatpak/flathub.json": b'{"skip-arches":["aarch64"]}',
-        "packaging/flatpak/launcher.py": b"launcher",
         "packaging/flatpak/pyside6-sources.json": b"[]",
         "packaging/flatpak/python3-deps.json": b"{}",
         f"packaging/flatpak/{release.APP_ID}.metainfo.xml": (

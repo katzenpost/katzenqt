@@ -239,10 +239,10 @@ run: setup code-generator
 	fi
 
 run-uv: $(STAMP_UV) code-generator
-	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python packaging/flatpak/launcher.py
+	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python -m katzenqt.launcher
 
 run-pip: $(STAMP_PIP) code-generator
-	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python packaging/flatpak/launcher.py
+	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python -m katzenqt.launcher
 
 test: setup
 	@if [[ -e "$(BACKEND_UV)" ]]; then \
@@ -324,19 +324,14 @@ kpclientd-podman:
 install-kpclient: kpclientd
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
-	@install -m 0600 config/client.toml ~/.local/katzenpost/client.toml
-	@install -m 0600 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
+	@install -m 0600 src/katzenqt/data/client.toml ~/.local/katzenpost/client.toml
+	@install -m 0600 src/katzenqt/data/thinclient.toml ~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
 
+# Install + start the user service via the shared launcher code (single
+# implementation, also used by the non-Flatpak runtime fallback).
 kpclientd.service: install-kpclient
-	@install -d -m 0700 ~/.config/systemd/user
-	@install -d -m 0755 ~/.local/share/dbus-1/services
-	@rm -f ~/.config/systemd/user/dbus-network.katzenpost.kpclientd.Native.service ~/.local/share/dbus-1/services/network.katzenpost.kpclientd.Native.service
-	@install -m 0644 config/kpclientd.service ~/.config/systemd/user/kpclientd.service
-	@install -m 0644 config/network.katzenpost.kpclientd.service ~/.local/share/dbus-1/services/network.katzenpost.kpclientd.service
-	@systemctl --user daemon-reload
-	@systemctl --user reenable kpclientd >/dev/null 2>&1
-	@systemctl --user restart kpclientd
+	@$(UV) run python -m katzenqt.launcher --install-service
 
 flatpak-install-system-deps:
 	@sudo apt install -y appstream flatpak flatpak-builder git-lfs
@@ -474,28 +469,28 @@ flatpak-clean:
 alembic-check-uv:
 	@state=$$(mktemp -d); \
 	trap 'rm -rf "$$state"' EXIT; \
-	XDG_DATA_HOME=$$state $(UV) run alembic -c config/alembic.ini upgrade head; \
-	XDG_DATA_HOME=$$state $(UV) run alembic -c config/alembic.ini check
+	XDG_DATA_HOME=$$state $(UV) run alembic -c src/katzenqt/data/alembic.ini upgrade head; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c src/katzenqt/data/alembic.ini check
 
 alembic-check-pip:
 	@state=$$(mktemp -d); \
 	trap 'rm -rf "$$state"' EXIT; \
-	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c config/alembic.ini upgrade head; \
-	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c config/alembic.ini check
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini upgrade head; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini check
 
 alembic-revision-uv:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(UV) run alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(UV) run alembic -c src/katzenqt/data/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
 
 alembic-revision-pip:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(VENV)/bin/alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
 
 clean-venv:
 	@rm -r $(VENV)

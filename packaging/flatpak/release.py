@@ -103,7 +103,6 @@ def stage(tag, destination, remote=False):
         "packaging/flatpak/LICENSE",
         "packaging/flatpak/README.md",
         "packaging/flatpak/flathub.json",
-        "packaging/flatpak/launcher.py",
         "packaging/flatpak/pyside6-sources.json",
         "packaging/flatpak/python3-deps.json",
         f"packaging/flatpak/{APP_ID}.metainfo.xml",
@@ -135,7 +134,7 @@ def stage(tag, destination, remote=False):
     manifest = re.sub(
         r"      - type: file\n"
         r"        path: \..*/src/katzenqt/[^\n]+\n"
-        r"        dest: src/katzenqt(?:/headless)?\n",
+        r"        dest: src/katzenqt(?:/[^\n]+)?\n",
         "",
         manifest,
     )

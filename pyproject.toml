@@ -40,6 +40,7 @@ release = [
 [project.scripts]
 katzenqt = "katzenqt:cli"
 katzenqt-headless = "katzenqt.headless:cli"
+katzenqt-launcher = "katzenqt.launcher:main"
 
 #[tool.pyside6-project]
 #files = ["main.py", "main_window.py"]

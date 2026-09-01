@@ -119,7 +119,9 @@ def test_docker_tests_run_the_installed_flatpak_once():
 
 
 def test_service_removes_only_stale_socket_before_restart():
-    service = (ROOT / "config" / "kpclientd.service").read_text()
+    service = (
+        ROOT / "src" / "katzenqt" / "data" / "kpclientd.service"
+    ).read_text()
     assert (
         "ExecStartPre=/usr/bin/rm -f %t/katzenpost/kpclientd.sock" in service
     )

@@ -31,10 +31,9 @@ modules:
       - pip3 install --prefix=/app --no-deps --no-index
         --no-build-isolation --no-warn-script-location .
       - mv /app/bin/katzenqt /app/bin/katzenqt-bin
-      - install -Dm755 launcher.py /app/bin/katzenqt
+      - mv /app/bin/katzenqt-launcher /app/bin/katzenqt
       - install -d /app/share/katzenqt
       - cp -a resources /app/share/katzenqt/
-      - install -Dm600 config/client.toml /app/share/katzenqt/client.toml
       - install -Dm644 network.katzenpost.katzenqt.desktop
         /app/share/applications/network.katzenpost.katzenqt.desktop
       - install -Dm644 network.katzenpost.katzenqt.metainfo.xml
@@ -54,9 +53,19 @@ modules:
         path: ../../src/katzenqt/persistent.py
         dest: src/katzenqt
       - type: file
-        path: ../../pyproject.toml
+        path: ../../src/katzenqt/launcher.py
+        dest: src/katzenqt
       - type: file
-        path: launcher.py
+        path: ../../src/katzenqt/data/client.toml
+        dest: src/katzenqt/data
+      - type: file
+        path: ../../src/katzenqt/data/kpclientd.service
+        dest: src/katzenqt/data
+      - type: file
+        path: ../../src/katzenqt/data/network.katzenpost.kpclientd.service
+        dest: src/katzenqt/data
+      - type: file
+        path: ../../pyproject.toml
       - type: file
         path: network.katzenpost.katzenqt.metainfo.xml
       - type: file
