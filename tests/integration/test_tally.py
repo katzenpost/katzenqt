@@ -12,7 +12,6 @@ peers readers of each other, so votes flow both ways.
 
 Skipped unless ``KATZENQT_DOCKER_INTEGRATION=1`` (see conftest.py).
 """
-
 from __future__ import annotations
 
 import json
@@ -26,10 +25,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
-_PYTHON = os.environ.get(
-    "KATZENQT_INTEGRATION_PYTHON",
-    str(_VENV_PY) if _VENV_PY.exists() else sys.executable,
-)
+_PYTHON = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
 
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
@@ -41,25 +37,13 @@ _KP_ADDR = "{}:{}".format(
 _CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
 
 
-def _run_role(
-    role_state: Path, *cli_args: str, timeout: float = 300.0
-) -> subprocess.CompletedProcess:
+def _run_role(role_state: Path, *cli_args: str, timeout: float = 300.0) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
-    cmd = [
-        _PYTHON,
-        "-m",
-        "katzenqt.integration_runner",
-        *cli_args,
-        *_CONN_ARGS,
-    ]
+    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
     return subprocess.run(
-        cmd,
-        env=env,
-        cwd=str(_REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
+        cmd, env=env, cwd=str(_REPO_ROOT),
+        capture_output=True, text=True, timeout=timeout,
     )
 
 
@@ -71,7 +55,7 @@ def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
     for line in _output(proc).splitlines():
         idx = line.find(token)
         if idx != -1:
-            return line[idx + len(token) :].strip()
+            return line[idx + len(token):].strip()
     raise AssertionError(
         f"no line containing {token!r}:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
@@ -88,9 +72,7 @@ def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
     assert mint.returncode == 0, _output(mint)
     voucher = _expect_token(mint, "VOUCHER=")
 
-    induct = _run_role(
-        alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0
-    )
+    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
     assert induct.returncode == 0, _output(induct)
 
     joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
@@ -110,18 +92,8 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
 
     # Alice creates a three-slot approval survey and broadcasts it.
     create = _run_role(
-        alice_state,
-        "tally-create",
-        "demo",
-        "lunch?",
-        "--mode",
-        "approval",
-        "--slot",
-        "A",
-        "--slot",
-        "B",
-        "--slot",
-        "C",
+        alice_state, "tally-create", "demo", "lunch?",
+        "--mode", "approval", "--slot", "A", "--slot", "B", "--slot", "C",
         timeout=600.0,
     )
     assert create.returncode == 0, _output(create)
@@ -129,17 +101,8 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
 
     # Bob votes for A and C (he must first receive the survey).
     bob_vote = _run_role(
-        bob_state,
-        "tally-vote",
-        "demo",
-        "--survey",
-        survey,
-        "--slot",
-        "s0=yes",
-        "--slot",
-        "s2=yes",
-        "--timeout",
-        "600",
+        bob_state, "tally-vote", "demo", "--survey", survey,
+        "--slot", "s0=yes", "--slot", "s2=yes", "--timeout", "600",
         timeout=900.0,
     )
     assert bob_vote.returncode == 0, _output(bob_vote)
@@ -147,17 +110,8 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
 
     # Alice votes for A and B.
     alice_vote = _run_role(
-        alice_state,
-        "tally-vote",
-        "demo",
-        "--survey",
-        survey,
-        "--slot",
-        "s0=yes",
-        "--slot",
-        "s1=yes",
-        "--timeout",
-        "600",
+        alice_state, "tally-vote", "demo", "--survey", survey,
+        "--slot", "s0=yes", "--slot", "s1=yes", "--timeout", "600",
         timeout=900.0,
     )
     assert alice_vote.returncode == 0, _output(alice_vote)
@@ -165,29 +119,13 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
 
     # Both read the tally, waiting for two voters.
     alice_res = _run_role(
-        alice_state,
-        "tally-result",
-        "demo",
-        "--survey",
-        survey,
-        "--expect-voters",
-        "2",
-        "--timeout",
-        "600",
-        timeout=700.0,
+        alice_state, "tally-result", "demo", "--survey", survey,
+        "--expect-voters", "2", "--timeout", "600", timeout=700.0,
     )
     assert alice_res.returncode == 0, _output(alice_res)
     bob_res = _run_role(
-        bob_state,
-        "tally-result",
-        "demo",
-        "--survey",
-        survey,
-        "--expect-voters",
-        "2",
-        "--timeout",
-        "600",
-        timeout=700.0,
+        bob_state, "tally-result", "demo", "--survey", survey,
+        "--expect-voters", "2", "--timeout", "600", timeout=700.0,
     )
     assert bob_res.returncode == 0, _output(bob_res)
 
