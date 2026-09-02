@@ -50,7 +50,7 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      list_pending_vouchers, mint_and_publish,
                      pending_joiner_join_conversation_ids, pending_voucher_for)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
-from .katzen_util import create_task
+from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
@@ -77,6 +77,7 @@ class _ResolvedAttachment(NamedTuple):
     basename: str
     filetype: str | None
     path: Path
+    received: bool = True
 
 # Bound on how long receive_msg_listener/peer_added_listener wait for a
 # conversation_id to appear in conversation_state_by_id before giving up on
@@ -525,7 +526,7 @@ class MainWindow(QMainWindow):
                         f"The original file for {basename} is no longer "
                         f"available at {src_path}."
                     )
-                return _ResolvedAttachment(basename, filetype, abs_path)
+                return _ResolvedAttachment(basename, filetype, abs_path, received=False)
 
             return None
 
@@ -612,7 +613,37 @@ class MainWindow(QMainWindow):
                 "This attachment is not available locally yet.",
             )
             return
+        if resolved.received and not self._confirm_open_attachment(resolved):
+            return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.path)))
+
+    def _confirm_open_attachment(self, resolved: "_ResolvedAttachment") -> bool:
+        """Ask the user before opening a peer-supplied file with the desktop
+        handler. Returns True only on an explicit Yes."""
+        filetype = resolved.filetype or "unknown type"
+        lines = [
+            "Open this attachment received from a peer with your desktop "
+            "application?",
+            "",
+            f"Name: {resolved.basename}",
+            f"Type: {filetype}",
+        ]
+        if is_risky_attachment_extension(resolved.basename):
+            lines += [
+                "",
+                "Warning: files of this kind can open in a browser, document "
+                "viewer, or other program that may run content the sender "
+                "controls. Only open it if you trust the sender.",
+            ]
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, APP_NAME, "\n".join(lines), parent=self,
+        )
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     @Slot(str)
     def saveAttachment(self, message_id: str) -> None:
