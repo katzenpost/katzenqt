@@ -249,12 +249,28 @@ async def asession() -> "AsyncContextManager[sqlmodel.ext.asyncio.session.AsyncS
             await close
             raise
 
+def _restrict_state_file_perms(path: Path) -> None:
+    """Tighten the on-disk state database to owner-only (0600).
+
+    The state directory is already 0700, but the database file itself is
+    created with the process umask, so on a permissive umask it can be group-
+    or world-readable. It holds BACAP caps, signing keys, and message
+    plaintext, so clamp it to 0600. Best-effort: a missing file or a
+    filesystem that does not honour chmod is not fatal to startup."""
+    try:
+        if path.is_file():
+            os.chmod(path, 0o600)
+    except OSError as exc:  # pragma: no cover - platform/filesystem dependent
+        logger.warning("could not restrict permissions on %s: %s", path, exc)
+
+
 def init_and_migrate():
     """Initialize database and migrates application schema.
 
     This MUST be called on application startup.
     """
     alembic.command.upgrade(_alembic_cfg, "head")
+    _restrict_state_file_perms(state_file)
 
 def id_field(table_name: str):
     sequence = sa.Sequence(f"{table_name}_id_seq")
