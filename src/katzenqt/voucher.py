@@ -48,6 +48,8 @@ def _brief(b: "bytes | None") -> str:
         return "None"
     return b[:8].hex() + ".." + b[-8:].hex()
 
+MAX_GROUP_MEMBERS = 256
+
 
 class AlreadyJoinedError(Exception):
     """Minting a voucher for a conversation the client already belongs to would
@@ -383,7 +385,13 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         wcw.next_index = opened.mutated_message_write_cap[-_INDEX_LEN:]
         sess.add(wcw)
         added = []
-        for please_add in reply_who.please_adds:
+        please_adds = reply_who.please_adds[:MAX_GROUP_MEMBERS]
+        if len(reply_who.please_adds) > MAX_GROUP_MEMBERS:
+            logger.warning(
+                "voucher reply named %d members; capping intake at %d",
+                len(reply_who.please_adds), MAX_GROUP_MEMBERS,
+            )
+        for please_add in please_adds:
             if await persistent.peer_has_read_cap(
                 sess, conversation_id, please_add.read_cap,
             ):
