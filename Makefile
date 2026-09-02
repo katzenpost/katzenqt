@@ -23,7 +23,7 @@ SYSTEM_STAMP := .system-setup.stamp
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
 # pinned commit: the kpclientd fix is not yet on katzenpost main
-KATZENPOST_REV := 3b0e511ea64690070a583484a04b58681ca3eb12
+KATZENPOST_REV := 817bd958f6a91ad185bf39a1718fec237392b6d3
 KPCLIENTD_BIN := $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd
 
 GEN_RES := src/katzenqt/resources_rc.py
