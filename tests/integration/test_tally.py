@@ -25,7 +25,10 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
-_PYTHON = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
+_PYTHON = os.environ.get(
+    "KATZENQT_INTEGRATION_PYTHON",
+    str(_VENV_PY) if _VENV_PY.exists() else sys.executable,
+)
 
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
