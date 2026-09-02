@@ -54,11 +54,13 @@ Once that looks right, `make run` launches the GUI.
 The katzenqt Flatpak is experimental developer packaging. Do not rely on it for
 security, anonymity, privacy, availability, delivery, or data retention.
 
-The sandbox denies direct network sockets and connects to the native user
-`kpclientd` through D-Bus activation and a read-only Unix socket. Wayland,
-fallback X11, graphics, D-Bus, and that socket remain trusted interfaces; this
-is not a complete non-exfiltration boundary. The package is currently
-x86-64-only.
+The sandbox denies direct network sockets and reaches the native user
+`kpclientd` over a read-only Unix socket. D-Bus activation autostarts that
+daemon from its installed service file; readiness is not signalled back over
+D-Bus, so the launcher then polls the socket until it accepts connections.
+Wayland, fallback X11, graphics, D-Bus, and that socket remain trusted
+interfaces; this is not a complete non-exfiltration boundary. The package is
+currently x86-64-only.
 
 ```shell
 make flatpak
