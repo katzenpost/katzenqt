@@ -18,3 +18,5 @@ katzenpost/
 .demo-state/
 
 .ci-local/
+.go-cache/
+dist/
