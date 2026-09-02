@@ -1,4 +1,13 @@
 #!/usr/bin/python3
+"""Resolve a kpclientd endpoint and launch the katzenqt GUI against it.
+
+The Flatpak sandbox cannot open network sockets, so the GUI must reach a
+kpclientd over a Unix socket instead of dialling the mixnet itself. This
+shared entry point, used by both ``make run`` and the Flatpak, finds a
+running daemon or starts one -- the native systemd user service via D-Bus
+activation, a supervised bundled daemon, or a Docker testnet over TCP --
+writes the matching thinclient config, then execs the GUI binary.
+"""
 import configparser
 import fcntl
 import importlib.resources
