@@ -1,3 +1,11 @@
+"""Attach the appstream screenshot to the built Flatpak repo.
+
+flatpak-builder emits app-info metadata that references a screenshot, but the
+image itself is not in the repo. In ``catalog`` mode this rewrites the
+compressed app-info XML to point at the mirrored media; otherwise it commits
+the screenshot into the ostree repo under ``screenshots/<arch>`` so the
+reference resolves and appstream validation passes.
+"""
 import gzip
 import shutil
 import subprocess

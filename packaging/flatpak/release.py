@@ -1,3 +1,11 @@
+"""Flathub release automation for network.katzenpost.katzenqt.
+
+Turns a tagged upstream release into a Flathub submission: ``validate`` checks
+the tag, ``dist`` stages the generated manifest and metainfo with pinned
+source hashes, and ``submit`` checks out the Flathub repo, commits the staged
+files, and opens the update PR. It keeps the published Flatpak in sync with
+upstream tags without hand-editing the Flathub manifest.
+"""
 import argparse
 import hashlib
 import re
