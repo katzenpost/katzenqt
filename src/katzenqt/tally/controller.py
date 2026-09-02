@@ -165,7 +165,7 @@ class TallyController:
             return True
         return False
 
-    async def _apply_full_or_update(self, sess, conversation_id: int, survey_id: bytes, crdt) -> None:
+    async def _apply_full_or_update(self, sess, conversation_id: int, survey_id: bytes, crdt: "bytes | None") -> None:
         """Load a fresh Doc from ``crdt`` or merge it into the existing one, then
         persist, all keyed by ``(conversation_id, survey_id)``."""
         doc = self._docs.get((conversation_id, survey_id))
