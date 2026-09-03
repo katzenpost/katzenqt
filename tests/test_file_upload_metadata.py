@@ -3,7 +3,7 @@ from pathlib import Path
 from katzenqt.models import GroupChatFileUpload
 
 
-def test_group_chat_file_upload_marks_opus_paths_as_audio(tmp_path: Path):
+def test_group_chat_file_upload_marks_opus_paths_as_audio(tmp_path: Path) -> None:
     clip_path = tmp_path / "voice-note.opus"
     clip_path.write_bytes(b"OggSfake")
 
@@ -14,7 +14,7 @@ def test_group_chat_file_upload_marks_opus_paths_as_audio(tmp_path: Path):
     assert upload.payload == b"OggSfake"
 
 
-def test_group_chat_file_upload_leaves_other_suffixes_arbitrary(tmp_path: Path):
+def test_group_chat_file_upload_leaves_other_suffixes_arbitrary(tmp_path: Path) -> None:
     file_path = tmp_path / "notes.txt"
     file_path.write_bytes(b"hello")
 

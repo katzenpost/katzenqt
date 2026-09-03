@@ -7,7 +7,7 @@ from PySide6.QtQuick import QQuickImageProvider
 
 from pydantic import BaseModel, Field
 import uuid
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import cbor2
 
@@ -72,7 +72,7 @@ class AttachmentDisplay(NamedTuple):
     picture_path: str | None = None
 
 
-def _attachment_display_for_marker(decoded: dict) -> AttachmentDisplay:
+def _attachment_display_for_marker(decoded: dict[str, Any]) -> AttachmentDisplay:
     """Build an :class:`AttachmentDisplay` from a decoded CBOR marker dict
     (``file_marker`` / ``file_outgoing`` / ``file_oversized``)."""
     kind = decoded.get("kind")
@@ -193,6 +193,26 @@ def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
         )
 
     return AttachmentDisplay("", None, None, False, "text", None)
+
+
+def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
+    """Map a decoded payload to the value for one attachment/display role."""
+    if role == 0:
+        return info.display
+    if role == ROLE_CHAT_ATTACHMENT_BASENAME:
+        return info.basename
+    if role == ROLE_CHAT_ATTACHMENT_FILETYPE:
+        return info.filetype
+    if role == ROLE_CHAT_IS_AUDIO_MESSAGE:
+        return info.is_audio
+    if role == ROLE_CHAT_ATTACHMENT_KIND:
+        return info.kind
+    if role == ROLE_CHAT_ATTACHMENT_REL_PATH:
+        return info.rel_path
+    if role == ROLE_CHAT_PICTURE_PATH:
+        return info.picture_path
+    return None
+
 
 def lru_cache_for_data_roles(maxsize=10000):
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
@@ -326,22 +346,9 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 elif role == ROLE_CHAT_MESSAGE_ID:
                     return str(cl.id)
                 else:
-                    # Derive display text and attachment roles from the raw payload.
+                    # Derive display text and attachment roles from the payload.
                     info = _decode_group_chat_payload(cl.payload)
-                    if role == 0:
-                        return info.display
-                    if role == ROLE_CHAT_ATTACHMENT_BASENAME:
-                        return info.basename
-                    if role == ROLE_CHAT_ATTACHMENT_FILETYPE:
-                        return info.filetype
-                    if role == ROLE_CHAT_IS_AUDIO_MESSAGE:
-                        return info.is_audio
-                    if role == ROLE_CHAT_ATTACHMENT_KIND:
-                        return info.kind
-                    if role == ROLE_CHAT_ATTACHMENT_REL_PATH:
-                        return info.rel_path
-                    if role == ROLE_CHAT_PICTURE_PATH:
-                        return info.picture_path
+                    return _attachment_role_value(info, role)
                 # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent
         #print(self,"data", index, repr(QtCore.Qt.ItemDataRole(role)))
         #return f"hi {self.convo_id}"
@@ -365,8 +372,8 @@ class ChatImageProvider(QQuickImageProvider):
     legacy rows without a dedicated thumbnail, the full received image.
     Missing or undecodable files yield a null image, which QML renders as
     an empty (hidden) row picture rather than an error."""
-    def __init__(self):
-        super(ChatImageProvider, self).__init__(QQuickImageProvider.Image)
+    def __init__(self) -> None:
+        super().__init__(QQuickImageProvider.Image)  # type: ignore[attr-defined]
 
     def requestImage(self, path: str, size: QtCore.QSize, requestedSize: QtCore.QSize) -> QImage:
         if not path:

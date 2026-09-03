@@ -13,8 +13,12 @@ import mimetypes
 import os
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import persistent
+
+if TYPE_CHECKING:
+    from PySide6.QtGui import QImage
 
 logger = logging.getLogger("katzen.attachment_images")
 
@@ -35,7 +39,7 @@ DECODE_MAX_EDGE_PX = 4096
 DECODE_ALLOC_LIMIT_MIB = DECODE_MAX_EDGE_PX * DECODE_MAX_EDGE_PX * 4 // (1024 * 1024)
 
 
-def load_bounded_image(source: "Path | bytes"):
+def load_bounded_image(source: "Path | bytes") -> "QImage | None":
     """Decode an untrusted image with dimension and allocation caps.
 
     Returns a ``QImage``, or ``None`` when the source is undecodable, exceeds
@@ -129,10 +133,11 @@ def spill_image_thumbnail(
     # QByteArray would leave a dangling reference and crash under PySide6.
     buffer = QBuffer()
     buffer.open(QBuffer.OpenModeFlag.WriteOnly)
-    if not scaled.save(buffer, "JPEG", _THUMB_JPEG_QUALITY):
-        logger.warning("failed to encode thumbnail for %s", safe_basename)
-        return None
-    jpeg_bytes = bytes(buffer.data())
+    # PySide6 stubs omit the (QIODevice, format, quality) save() overload.
+    if not scaled.save(buffer, "JPEG", _THUMB_JPEG_QUALITY):  # type: ignore[call-overload]
+        logger.warning("failed to encode thumbnail for %s", safe_basename)  # pragma: no cover
+        return None  # pragma: no cover
+    jpeg_bytes = buffer.data().data()
 
     conv_dir = persistent.state_file.parent / "attachments" / str(conversation_id)
     conv_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

@@ -9,6 +9,7 @@ The method does not touch ``self``, so it is exercised here against a bare
 import hashlib
 import types
 import uuid
+from pathlib import Path
 
 import cbor2
 import pytest
@@ -34,11 +35,11 @@ def _insert_payload(payload: bytes) -> str:
     return str(message_uuid)
 
 
-def _resolve(message_id: str):
+def _resolve(message_id: str) -> "_ResolvedAttachment | None":
     return MainWindow._resolve_attachment(types.SimpleNamespace(), message_id)
 
 
-def test_file_marker_resolves_to_spilled_file(tmp_path):
+def test_file_marker_resolves_to_spilled_file(tmp_path: Path) -> None:
     blob = b"received attachment bytes"
     conv_dir = persistent.state_file.parent / "attachments" / "9"
     conv_dir.mkdir(parents=True, exist_ok=True)
@@ -64,7 +65,7 @@ def test_file_marker_resolves_to_spilled_file(tmp_path):
     assert resolved.path.read_bytes() == blob
 
 
-def test_file_marker_checksum_mismatch_raises():
+def test_file_marker_checksum_mismatch_raises() -> None:
     rel_path = "attachments/9/bbb-tampered.bin"
     abs_path = persistent.state_file.parent / rel_path
     abs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,7 +87,7 @@ def test_file_marker_checksum_mismatch_raises():
         _resolve(message_id)
 
 
-def test_file_marker_missing_file_raises():
+def test_file_marker_missing_file_raises() -> None:
     payload = b"F" + cbor2.dumps({
         "v": 0,
         "kind": "file_marker",
@@ -103,7 +104,7 @@ def test_file_marker_missing_file_raises():
         _resolve(message_id)
 
 
-def test_file_oversized_raises():
+def test_file_oversized_raises() -> None:
     payload = b"F" + cbor2.dumps({
         "v": 0,
         "kind": "file_oversized",
@@ -118,7 +119,7 @@ def test_file_oversized_raises():
         _resolve(message_id)
 
 
-def test_file_outgoing_resolves_to_src_path(tmp_path):
+def test_file_outgoing_resolves_to_src_path(tmp_path: Path) -> None:
     src = tmp_path / "photo.jpg"
     src.write_bytes(b"jpeg bytes")
 
@@ -138,7 +139,7 @@ def test_file_outgoing_resolves_to_src_path(tmp_path):
     assert resolved.path.read_bytes() == b"jpeg bytes"
 
 
-def test_file_outgoing_empty_src_path_returns_none():
+def test_file_outgoing_empty_src_path_returns_none() -> None:
     payload = b"F" + cbor2.dumps({
         "v": 0,
         "kind": "file_outgoing",
@@ -152,7 +153,7 @@ def test_file_outgoing_empty_src_path_returns_none():
     assert _resolve(message_id) is None
 
 
-def test_file_outgoing_audio_resolves_to_cached_clip(tmp_path):
+def test_file_outgoing_audio_resolves_to_cached_clip(tmp_path: Path) -> None:
     # A sent voice note keeps a playback copy under the audio cache (see
     # send_file), so its file_outgoing marker resolves like any other sent
     # attachment rather than returning None.
@@ -175,3 +176,16 @@ def test_file_outgoing_audio_resolves_to_cached_clip(tmp_path):
     assert resolved.filetype == "audio/opus"
     assert resolved.path == clip
     assert resolved.path.read_bytes() == b"opus clip bytes"
+
+
+def test_is_previewable_attachment(tmp_path: Path) -> None:
+    call = MainWindow._is_previewable_attachment
+    ns = types.SimpleNamespace()
+    opus = tmp_path / "a.opus"
+    opus.write_bytes(b"x")
+    txt = tmp_path / "a.txt"
+    txt.write_bytes(b"x")
+    assert call(ns, opus) is True
+    assert call(ns, txt) is False
+    assert call(ns, tmp_path / "missing.opus") is False
+    assert call(ns, None) is False

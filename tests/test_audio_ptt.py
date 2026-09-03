@@ -63,7 +63,7 @@ class _FakeModule:
     PttAudioEngine = _FakeEngine
 
 
-def test_start_and_stop_capture_use_managed_drafts_dir(tmp_path):
+def test_start_and_stop_capture_use_managed_drafts_dir(tmp_path: Path) -> None:
     bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_FakeModule)
 
     started_path = bridge.start_capture(42)
@@ -75,7 +75,7 @@ def test_start_and_stop_capture_use_managed_drafts_dir(tmp_path):
     assert draft.file_size_bytes == 2048
 
 
-def test_received_clip_path_sanitizes_message_id_and_filename(tmp_path):
+def test_received_clip_path_sanitizes_message_id_and_filename(tmp_path: Path) -> None:
     bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_FakeModule)
 
     clip_path = bridge.received_clip_path("message/42", "../voice note.opus")
@@ -83,7 +83,7 @@ def test_received_clip_path_sanitizes_message_id_and_filename(tmp_path):
     assert clip_path == tmp_path.resolve() / "received" / "message-42-voice-note.opus"
 
 
-def test_discard_draft_only_removes_managed_voice_note(tmp_path):
+def test_discard_draft_only_removes_managed_voice_note(tmp_path: Path) -> None:
     bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_FakeModule)
     managed_draft = tmp_path / "drafts" / "voice-note.opus"
     external_file = tmp_path / "external.opus"
@@ -98,7 +98,7 @@ def test_discard_draft_only_removes_managed_voice_note(tmp_path):
     assert external_file.exists()
 
 
-def test_take_playback_error_clears_cached_backend_failure(tmp_path):
+def test_take_playback_error_clears_cached_backend_failure(tmp_path: Path) -> None:
     bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_FakeModule)
     bridge._engine.playback_error = "stream callback error: BufferUnderrun"
 
@@ -106,12 +106,12 @@ def test_take_playback_error_clears_cached_backend_failure(tmp_path):
     assert bridge.take_playback_error() is None
 
 
-def test_load_backend_module_returns_installed_extension():
+def test_load_backend_module_returns_installed_extension() -> None:
     with patch.object(audio_ptt.importlib, "import_module", return_value=_FakeModule):
         assert _load_backend_module() is _FakeModule
 
 
-def test_load_backend_module_reports_missing_extension():
+def test_load_backend_module_reports_missing_extension() -> None:
     with patch.object(
         audio_ptt.importlib, "import_module", side_effect=ImportError("missing")
     ):
@@ -119,7 +119,7 @@ def test_load_backend_module_reports_missing_extension():
             _load_backend_module()
 
 
-def test_load_backend_module_rejects_extension_without_error_polling():
+def test_load_backend_module_rejects_extension_without_error_polling() -> None:
     class _OldModule:
         class PttAudioEngine:
             pass
@@ -127,3 +127,59 @@ def test_load_backend_module_rejects_extension_without_error_polling():
     with patch.object(audio_ptt.importlib, "import_module", return_value=_OldModule):
         with pytest.raises(AudioEngineUnavailable, match="too old"):
             _load_backend_module()
+
+def test_bridge_capture_playback_and_query_methods(tmp_path: Path) -> None:
+    bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_FakeModule)
+    bridge.start_capture(7)
+    draft = bridge.stop_capture()
+    assert draft.file_size_bytes == 2048
+    assert bridge.active_draft_path == draft.path
+    bridge.play_preview(draft.path)
+    bridge.play_received(draft.path)
+    bridge.stop_playback()
+    assert bridge.is_recording is False
+    assert bridge.is_playing is False
+    bridge.start_capture(8)
+    assert bridge.cancel_capture() is True
+    assert bridge.active_draft_path is None
+
+
+def test_cache_received_clip_writes_once_then_rewrites_on_change(
+    tmp_path: Path,
+) -> None:
+    bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_FakeModule)
+    clip = bridge.cache_received_clip("m1", "note.opus", b"abc")
+    assert clip.read_bytes() == b"abc"
+    assert bridge.cache_received_clip("m1", "note.opus", b"abc") == clip
+    bridge.cache_received_clip("m1", "note.opus", b"abcd")
+    assert clip.read_bytes() == b"abcd"
+
+
+def test_is_draft_path_and_discard_draft(tmp_path: Path) -> None:
+    bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_FakeModule)
+    draft = bridge.drafts_dir / "d.opus"
+    draft.write_bytes(b"x")
+    assert bridge.is_draft_path(draft) is True
+    assert bridge.is_draft_path(bridge.received_dir / "r.opus") is False
+    bridge.active_draft_path = bridge._normalize_path(draft)
+    bridge.discard_draft(draft)
+    assert not draft.exists()
+    assert bridge.active_draft_path is None
+    outside = tmp_path / "outside.opus"
+    outside.write_bytes(b"y")
+    bridge.discard_draft(outside)  # not a draft -> no-op
+    assert outside.exists()
+
+
+def test_take_playback_error_none_when_engine_lacks_method(
+    tmp_path: Path,
+) -> None:
+    class _NoPollEngine:
+        def __init__(self, cache_dir: str) -> None:
+            pass
+
+    class _NoPollModule:
+        PttAudioEngine = _NoPollEngine
+
+    bridge = PttAudioBridge(cache_root=tmp_path, backend_module=_NoPollModule)
+    assert bridge.take_playback_error() is None
