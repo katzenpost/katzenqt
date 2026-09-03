@@ -18,7 +18,7 @@ if TYPE_CHECKING:  # pragma: no cover — type-checker hint only
 __all__ = ["cli"]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> object:
     if name == "cli":
         from .katzen import cli
         return cli
