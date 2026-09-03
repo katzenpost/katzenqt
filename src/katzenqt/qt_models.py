@@ -370,8 +370,8 @@ class ChatImageProvider(QQuickImageProvider):
             abs_path.resolve().relative_to(persistent.state_file.parent.resolve())
         except ValueError:
             return QImage()
-        img = QImage()
-        if not img.load(str(abs_path)) or img.isNull():
+        img = attachment_images.load_bounded_image(abs_path)
+        if img is None:
             return QImage()
         # Full images (legacy fallback) are scaled to the thumbnail box so
         # rows stay compact; pre-sized thumbnails pass through unchanged.

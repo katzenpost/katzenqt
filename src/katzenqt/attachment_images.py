@@ -25,6 +25,49 @@ THUMB_MAX_PX = 256
 # JPEG quality used when writing thumbnails (0-100).
 _THUMB_JPEG_QUALITY = 85
 
+# Bound untrusted image decoding. A small compressed attachment can expand to
+# an enormous raster (a decompression bomb), so cap decoded dimensions and the
+# decoder allocation. The ceiling is DECODE_MAX_EDGE_PX squared at 4 bytes per
+# RGBA pixel: 4096 * 4096 * 4 = 64 MiB. An out-of-process or seccomp decoder
+# would be stronger but is not yet cross platform; keep this the single decode
+# choke point until then.
+DECODE_MAX_EDGE_PX = 4096
+DECODE_ALLOC_LIMIT_MIB = DECODE_MAX_EDGE_PX * DECODE_MAX_EDGE_PX * 4 // (1024 * 1024)
+
+
+def load_bounded_image(source: "Path | bytes"):
+    """Decode an untrusted image with dimension and allocation caps.
+
+    Returns a ``QImage``, or ``None`` when the source is undecodable, exceeds
+    the pixel bound, or the Qt runtime is unavailable (headless)."""
+    try:
+        from PySide6.QtCore import QBuffer, QByteArray
+        from PySide6.QtGui import QImageReader
+    except ImportError:
+        logger.warning("Qt GUI runtime unavailable; skipping image decode")
+        return None
+
+    if isinstance(source, bytes):
+        buffer = QBuffer()
+        buffer.setData(QByteArray(source))
+        buffer.open(QBuffer.OpenModeFlag.ReadOnly)
+        reader = QImageReader(buffer)
+    else:
+        reader = QImageReader(str(source))
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if size.isValid() and (
+        size.width() > DECODE_MAX_EDGE_PX or size.height() > DECODE_MAX_EDGE_PX
+    ):
+        return None
+    previous_limit = QImageReader.allocationLimit()
+    QImageReader.setAllocationLimit(DECODE_ALLOC_LIMIT_MIB)
+    try:
+        image = reader.read()
+    finally:
+        QImageReader.setAllocationLimit(previous_limit)
+    return None if image.isNull() else image
+
 
 def is_image_attachment(filetype: "str | None", basename: str) -> bool:
     """Whether an attachment should be rendered as an inline thumbnail.
@@ -63,20 +106,10 @@ def spill_image_thumbnail(
     ``attachments/{conversation_id}/`` so it shares the lifecycle and
     permissions of the full file spilled by
     :func:`network._spill_attachment`."""
-    try:
-        from PySide6.QtCore import Qt, QBuffer
-        from PySide6.QtGui import QImage
-    except ImportError:
-        logger.warning("Qt GUI runtime unavailable; skipping thumbnail")
+    image = load_bounded_image(source)
+    if image is None:
         return None
-
-    image = QImage()
-    if isinstance(source, bytes):
-        loaded = image.loadFromData(source)
-    else:
-        loaded = image.load(str(source))
-    if not loaded or image.isNull():
-        return None
+    from PySide6.QtCore import Qt, QBuffer
 
     # Only downscale: a source already within the box is stored as-is so
     # small images are not blurrily upscaled.
