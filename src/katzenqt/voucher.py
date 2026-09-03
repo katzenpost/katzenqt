@@ -24,6 +24,7 @@ from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
 )
+from sqlalchemy import func
 from sqlmodel import select
 
 from . import models, persistent
@@ -259,6 +260,23 @@ def _sanitize_peer_name(name: str) -> str:
     return cleaned or "unnamed"
 
 
+async def _active_member_count(
+    sess: persistent.AsyncSession, conversation_id: int,
+) -> int:
+    """Count active member streams without loading relationships."""
+    statement = (
+        select(func.count())
+        .select_from(persistent.ConversationPeer)
+        .join(persistent.ConversationPeerLink)
+        .where(
+            persistent.ConversationPeerLink.conversation_id == conversation_id,
+            persistent.ConversationPeer.active.is_(True),
+            ~persistent.ConversationPeer.name.startswith(_SUBSTREAM_NAME_PREFIX),
+        )
+    )
+    return (await sess.exec(statement)).one()
+
+
 def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
     if not read_cap or len(read_cap) != _INDEX_LEN + 32:
         # 136 bytes total: a 32-byte public key plus the 104-byte index. A
@@ -385,11 +403,14 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         wcw.next_index = opened.mutated_message_write_cap[-_INDEX_LEN:]
         sess.add(wcw)
         added = []
-        please_adds = reply_who.please_adds[:MAX_GROUP_MEMBERS]
-        if len(reply_who.please_adds) > MAX_GROUP_MEMBERS:
+        remaining = max(0, MAX_GROUP_MEMBERS - await _active_member_count(
+            sess, conversation_id,
+        ))
+        please_adds = reply_who.please_adds[:remaining]
+        if len(reply_who.please_adds) > remaining:
             logger.warning(
                 "voucher reply named %d members; capping intake at %d",
-                len(reply_who.please_adds), MAX_GROUP_MEMBERS,
+                len(reply_who.please_adds), remaining,
             )
         for please_add in please_adds:
             if await persistent.peer_has_read_cap(
@@ -421,7 +442,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
         version=0, membership_hash=b"TODO" * 8,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(
-            display_name=display_name, read_cap=read_cap,
+            display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,
         ),
     )
     async with persistent.conversation_log_order_lock(conversation_id):
