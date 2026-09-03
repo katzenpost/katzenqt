@@ -176,8 +176,8 @@ logger.info("sql url: %s", _sql_url)
 # asyncio.to_thread sessions plus the io loop's own) that pool-level queue,
 # not sqlite's lock, becomes the thing that stalls the Qt GUI thread's own
 # settings writes for tens of seconds instead of a bounded couple of ticks.
-_engine = create_async_engine(_sql_url, future=True, pool_size=1000)
-_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), pool_size=1000)
+_engine = create_async_engine(_sql_url, echo=False, future=True, pool_size=1000)
+_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=False, pool_size=1000)
 
 
 def _set_sqlite_pragmas(dbapi_connection, connection_record):
