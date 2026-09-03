@@ -25,8 +25,12 @@ from sqlmodel import select
 
 from katzenpost_thinclient import (
     BACAPDecryptionFailedError,
+    BoxIDNotFoundError,
+    CourierInvalidEpochError,
+    DatabaseFailureError,
     StartResendingCancelledError,
     ThinClientOfflineError,
+    TombstoneError,
 )
 from katzenpost_thinclient.core import MKEMDecryptionFailedError
 
@@ -174,22 +178,6 @@ class TestFakeThinClientSurface:
         # Queue exhausted; the next call succeeds.
         kp = await fake_thinclient.new_keypair(b"\x00" * 32)
         assert kp.write_cap
-
-
-# ---------------------------------------------------------------------------
-# courier_destination_exists with the fake's PKI
-# ---------------------------------------------------------------------------
-
-
-class TestCourierDestinationExistsFakeBacked:
-    def test_default_courier_is_present(self, fake_thinclient):
-        dest = fake_thinclient.couriers[0][0]
-        assert network.courier_destination_exists(fake_thinclient, dest) is True
-
-    def test_missing_after_removal(self, fake_thinclient):
-        dest = fake_thinclient.couriers[0][0]
-        fake_thinclient.remove_courier(dest)
-        assert network.courier_destination_exists(fake_thinclient, dest) is False
 
 
 # ---------------------------------------------------------------------------
@@ -565,24 +553,6 @@ class TestDrainMixwalReadSingle:
             assert log == []  # no append on stale ACK
 
     @pytest.mark.asyncio
-    async def test_courier_gone_pauses_and_gives_up(self, fake_thinclient):
-        setup = await _set_up_read_flow(fake_thinclient)
-        # Remove the courier so courier_destination_exists returns False.
-        fake_thinclient.remove_courier(fake_thinclient.couriers[0][0])
-        async with persistent.asession() as sess:
-            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
-        draining: set = {setup["bacap_stream"]}
-        await network.drain_mixwal_read_single(
-            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
-            mw=mw, draining_right_now=draining,
-        )
-        # MW still present (we did not even try); start_resending never called.
-        async with persistent.asession() as sess:
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
-        assert fake_thinclient.call_count("start_resending_encrypted_message") == 0
-        assert setup["bacap_stream"] not in draining
-
-    @pytest.mark.asyncio
     async def test_bacap_decryption_failure_gives_up(self, fake_thinclient):
         setup = await _set_up_read_flow(fake_thinclient)
         fake_thinclient.inject_error(
@@ -628,6 +598,75 @@ class TestDrainMixwalReadSingle:
         )
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+
+    @pytest.mark.asyncio
+    async def test_database_failure_reschedules(self, fake_thinclient):
+        """A transient replica database failure must back off and retry: the
+        MixWAL row survives (the stream is not advanced) and the stream is
+        released from draining_right_now so it can be picked up again. This is
+        the only replica error code that reaches a read; ReplicationFailed and
+        InternalError are served by the courier as ACKs and never surface."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", DatabaseFailureError("database failure"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_courier_error_reschedules(self, fake_thinclient):
+        """A courier-side rejection (e.g. stale epoch) is distinct from a replica
+        error and must not wedge the stream: it leaves the MixWAL for retry and
+        releases the stream from draining_right_now. Guards against the former
+        collision where a stale epoch arrived as a replica database failure."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            CourierInvalidEpochError("courier rejected envelope: replica epoch outside tolerance window"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.parametrize("benign", [
+        BoxIDNotFoundError("box ID not found"),
+        TombstoneError("tombstone"),
+    ])
+    @pytest.mark.asyncio
+    async def test_benign_replica_outcome_does_not_wedge(self, fake_thinclient, benign):
+        """A benign replica read outcome (no data yet, or a tombstone) must not
+        be treated as a failure: it must not crash, must leave the MixWAL for a
+        later retry, and must release the stream from draining_right_now so it
+        is not stranded (an uncaught one would wedge the stream)."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", benign,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +824,14 @@ class TestProvisionReadCaps:
 # ---------------------------------------------------------------------------
 
 
+# The genuine asyncio.sleep, captured before the autouse fast_asyncio_sleep
+# fixture rebinds asyncio.sleep to an instant stub. The poll loop below needs
+# a real sleep, not the stub: a zero-delay busy-spin never lets the event loop
+# idle in epoll, so it starves the aiosqlite worker thread of GIL time and the
+# detached DB work in start_resending crawls, racing the deadline (flaky).
+_REAL_SLEEP = asyncio.sleep
+
+
 async def _run_loop_until(loop_coro, condition_callable, *, timeout: float = 5.0):
     """Run a long-running coroutine and shut it down once
     `condition_callable()` returns truthy or the wall-clock deadline
@@ -800,7 +847,7 @@ async def _run_loop_until(loop_coro, condition_callable, *, timeout: float = 5.0
     loop_task = asyncio.create_task(loop_coro)
     try:
         while True:
-            await asyncio.sleep(0)
+            await _REAL_SLEEP(0.002)
             result = await condition_callable() if is_async else condition_callable()
             if result:
                 break
@@ -871,42 +918,6 @@ class TestDrainMixwal2:
         async with persistent.asession() as sess:
             log = (await sess.exec(select(persistent.ConversationLog))).all()
             assert len(log) == 1
-
-    @pytest.mark.asyncio
-    async def test_skips_write_mw_for_missing_courier(self, fake_thinclient):
-        setup = await _set_up_write_flow(fake_thinclient)
-        # Change the mw.destination to a courier that doesn't exist.
-        async with persistent.asession() as sess:
-            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
-            mw.destination = b"\x99" * 32
-            sess.add(mw)
-            await sess.commit()
-        getattr(network, "__resend_queue_populated").set()
-        getattr(network, "__mixwal_updated").set()
-        getattr(network, "__mixnet_connected").set()
-
-        async def loop_idle():
-            # Give the loop a chance to process and skip.
-            return network.drain_mixwal2 is not None  # always truthy
-
-        # Run a short tick: shutdown after a few yields.
-        async def quitter():
-            for _ in range(40):
-                await asyncio.sleep(0)
-            network.shutdown()
-
-        asyncio.create_task(quitter())
-        try:
-            await asyncio.wait_for(
-                network.drain_mixwal2(fake_thinclient), timeout=3.0,
-            )
-        except asyncio.TimeoutError:
-            pass
-        # MW still present (skipped, not drained).
-        async with persistent.asession() as sess:
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
-        assert fake_thinclient.call_count("start_resending_encrypted_message") == 0
-
 
 # ---------------------------------------------------------------------------
 # readables_to_mixwal
