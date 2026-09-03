@@ -20,12 +20,19 @@ class _Fake:
     def make(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [MAKE, "-f", str(ROOT / "Makefile"), "apt-install", *args],
-            env=self.env, text=True, capture_output=True, timeout=15,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=15,
         )
 
     def recorded(self, name: str) -> list[str]:
         path = self.calls / name
-        return path.read_text(encoding="ascii").splitlines() if path.is_file() else []
+        return (
+            path.read_text(encoding="ascii").splitlines()
+            if path.is_file()
+            else []
+        )
 
 
 @pytest.fixture
@@ -36,17 +43,20 @@ def fake(tmp_path: Path) -> Iterator[_Fake]:
         source = shutil.which(name)
         assert source is not None
         (binary / name).symlink_to(source)
-    (binary / "id").write_text('printf "%s\\n" "$FAKE_UID"\n', encoding="ascii")
+    (binary / "id").write_text(
+        'printf "%s\\n" "$FAKE_UID"\n', encoding="ascii"
+    )
     (binary / "apt").write_text(
-        'printf "%s\\n" "$*" >> "$CALLS/apt"\n', encoding="ascii",
+        'printf "%s\\n" "$*" >> "$CALLS/apt"\n',
+        encoding="ascii",
     )
     (binary / "sudo").write_text(
         'printf "%s\\n" "$*" >> "$CALLS/sudo"\n'
         'if [[ "$FAKE_SUDO" == ok ]]; then\n'
         '  if [[ "$1" == -v ]]; then exit 0; fi\n'
         '  exec "$@"\n'
-        'fi\n'
-        'exit 1\n',
+        "fi\n"
+        "exit 1\n",
         encoding="ascii",
     )
     for name in ("id", "apt", "sudo"):
@@ -54,15 +64,18 @@ def fake(tmp_path: Path) -> Iterator[_Fake]:
     calls = tmp_path / "calls"
     calls.mkdir()
     env = {
-        "PATH": str(binary), "CALLS": str(calls), "FAKE_UID": "1000",
-        "FAKE_SUDO": "no", "HOME": str(tmp_path),
+        "PATH": str(binary),
+        "CALLS": str(calls),
+        "FAKE_UID": "1000",
+        "FAKE_SUDO": "no",
+        "HOME": str(tmp_path),
     }
     yield _Fake(calls, env)
 
 
 def test_root_installs_without_sudo(fake: _Fake) -> None:
     fake.env["FAKE_UID"] = "0"
-    result = fake.make('APT_PACKAGES=git make')
+    result = fake.make("APT_PACKAGES=git make")
     assert result.returncode == 0, result.stderr
     assert fake.recorded("apt") == ["install -y git make"]
     assert fake.recorded("sudo") == []
@@ -70,14 +83,14 @@ def test_root_installs_without_sudo(fake: _Fake) -> None:
 
 def test_a_sudoer_installs_through_sudo(fake: _Fake) -> None:
     fake.env["FAKE_SUDO"] = "ok"
-    result = fake.make('APT_PACKAGES=git make')
+    result = fake.make("APT_PACKAGES=git make")
     assert result.returncode == 0, result.stderr
     assert fake.recorded("sudo") == ["-v", "apt install -y git make"]
     assert fake.recorded("apt") == ["install -y git make"]
 
 
 def test_a_user_without_sudo_is_told_how_to_run_as_root(fake: _Fake) -> None:
-    result = fake.make('APT_PACKAGES=git make')
+    result = fake.make("APT_PACKAGES=git make")
     assert result.returncode != 0
     assert "su -c 'apt install -y git make'" in result.stderr
     assert fake.recorded("apt") == []
