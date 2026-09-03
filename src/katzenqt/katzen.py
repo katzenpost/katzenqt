@@ -53,7 +53,7 @@ from .katzen_util import create_task
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
-# qt_models.py — also re-exports ConversationUIState (moved here so the
+# qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
 from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
@@ -116,7 +116,7 @@ class AsyncioThread(threading.Thread):
 # https://www.datacamp.com/tutorial/introduction-to-pyside6-for-building-gui-applications-with-python
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtQml/QQmlEngine.html
-# offlineStoragePathᅟ - The directory for storing offline user data
+# offlineStoragePath - The directory for storing offline user data
 # clearComponentCache()
 
 def todo_unicode():
@@ -1085,7 +1085,7 @@ class MainWindow(QMainWindow):
 
         voice_note_drafts = []
         audio = getattr(self, "_ptt_audio", None)
-        # One SendOperation per file — unserialize() only decodes one GCM.
+        # One SendOperation per file; unserialize() only decodes one GCM.
         for fn in sorted(convo.attached_files):
             f_path = Path(fn)
             is_draft = bool(audio and audio.is_draft_path(f_path))

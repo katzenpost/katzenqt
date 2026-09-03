@@ -291,7 +291,7 @@ TreeView {
               onClicked: chatController.openAttachment(model.message_id)
             }
             Button {
-              text: "Save as…"
+              text: "Save as..."
               onClicked: chatController.saveAttachment(model.message_id)
             }
           } // Row attachmentActions

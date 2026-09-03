@@ -1,4 +1,4 @@
-# KatzenQT — Run
+# KatzenQT Run
 
 Instructions for starting the client after [BUILD.md](BUILD.md) is complete.
 

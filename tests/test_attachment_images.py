@@ -1,4 +1,4 @@
-"""Tests for ``attachment_images`` — image detection and the on-disk
+"""Tests for ``attachment_images``: image detection and the on-disk
 thumbnail spill shared by the receive, send, and render paths."""
 import os
 import uuid

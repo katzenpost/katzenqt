@@ -1,4 +1,4 @@
-"""Tests for ``MainWindow._resolve_attachment`` — the on-demand rehydration
+"""Tests for ``MainWindow._resolve_attachment``: the on-demand rehydration
 of a ConversationLog payload into a concrete on-disk path used by the QML
 play/open/save slots.
 

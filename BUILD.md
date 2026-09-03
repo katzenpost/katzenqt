@@ -1,4 +1,4 @@
-# KatzenQT — Build
+# KatzenQT Build
 
 Instructions for compiling dependencies, installing the Python environment, and
 preparing `kpclientd`. Do this once on a new machine (or after `make clean`).

@@ -14,8 +14,8 @@ from pathlib import Path
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
-# importer of this module — including the headless integration runner
-# and pytest collection — to load PySide6 and the Qt runtime libraries.
+# importer of this module, including the headless integration runner
+# and pytest collection, to load PySide6 and the Qt runtime libraries.
 # It now lives in ``katzenqt.qt_models``; import it from there if you
 # need it.
 
@@ -283,10 +283,10 @@ def unserialize(chunks) -> "GroupChatMessage | None":
     ordered by BACAP index. ``chunk_type`` is the single-byte framing
     marker emitted by :meth:`SendOperation.serialize`:
 
-    * ``b'C'`` — continuation; carries an interior slice of the
+    * ``b'C'``: continuation; carries an interior slice of the
       CBOR-encoded message,
-    * ``b'F'`` — final; carries the last slice, terminating the chain,
-    * ``b'I'`` — indirection; reserved for the network-layer coalescer
+    * ``b'F'``: final; carries the last slice, terminating the chain,
+    * ``b'I'``: indirection; reserved for the network-layer coalescer
       which follows the embedded read cap and feeds the substream's
       chunks back in. The data layer refuses to treat it as payload.
 
@@ -328,5 +328,5 @@ def unserialize(chunks) -> "GroupChatMessage | None":
     return None
 
 
-# ConversationUIState moved to katzenqt.qt_models — see banner near the
+# ConversationUIState moved to katzenqt.qt_models; see banner near the
 # top of this file for rationale.

@@ -50,9 +50,9 @@ ROLE_CHAT_MESSAGE_ID = 0x102
 ROLE_CHAT_ATTACHMENT_BASENAME = 0x103
 ROLE_CHAT_ATTACHMENT_FILETYPE = 0x104
 ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
-ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind — drives Play/Open/Save visibility
-ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path — spilled file (received only)
-ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path — thumbnail rel_path for image attachments
+ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save visibility
+ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
+ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
 
 
 class AttachmentDisplay(NamedTuple):
