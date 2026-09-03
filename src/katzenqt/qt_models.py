@@ -130,7 +130,14 @@ def _attachment_display_for_marker(decoded: dict) -> AttachmentDisplay:
     )
 
 
-@lru_cache(maxsize=10000)
+# Cache decoded rows so scrolling does not re-parse CBOR on every repaint.
+# Keyed on payload bytes: modern rows carry a small marker (well under a KiB),
+# so 512 entries is roughly half a MiB; only deprecated inline rows hold a full
+# image, and those are no longer produced.
+_DECODE_CACHE_SIZE = 512
+
+
+@lru_cache(maxsize=_DECODE_CACHE_SIZE)
 def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
     # Keep ConversationLog as the source of truth and derive renderer-friendly
     # roles lazily so audio rows can share the same persistence format as text.
