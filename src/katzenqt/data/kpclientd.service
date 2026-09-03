@@ -1,0 +1,18 @@
+[Unit]
+Description=Katzenpost thin client daemon (user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+RuntimeDirectory=katzenpost
+RuntimeDirectoryMode=0700
+
+ExecStartPre=/bin/sh -ec 'umask 077; sed "s|[$]XDG_RUNTIME_DIR|%t|g" "%h/.local/katzenpost/client.toml" > "%t/katzenpost/client.toml"'
+ExecStart=%h/.local/bin/kpclientd -c %t/katzenpost/client.toml
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
