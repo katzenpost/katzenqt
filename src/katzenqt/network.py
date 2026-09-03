@@ -4,7 +4,7 @@ from katzenpost_thinclient import (
     ThinClient, ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
     DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
-    CourierError,
+    CourierError, CourierInvalidEpochError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -104,6 +104,61 @@ async def drain_mixwal(connection: ThinClient):
         traceback.print_exc()
 
 
+async def _remint_mixwal(mw: persistent.MixWAL, fresh) -> bool:
+    """Persist a freshly minted envelope onto an existing MixWAL row.
+
+    fresh is an EncryptReadResult or EncryptWriteResult. Returns False
+    if the row no longer exists (a concurrent path deleted it). The mw
+    we were handed is detached from the scheduler's closed session, so
+    re-fetch by primary key rather than sess.add()ing the stale object.
+    """
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.MixWAL, mw.id)
+        if row is None:
+            return False
+        row.envelope_hash = fresh.envelope_hash
+        row.encrypted_payload = fresh.message_ciphertext
+        row.envelope_descriptor = fresh.envelope_descriptor
+        row.next_message_index = fresh.next_message_box_index
+        sess.add(row)
+        await sess.commit()
+    return True
+
+
+async def _remint_read_envelope(connection: ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL) -> bool:
+    """Re-encrypt a stale read envelope at the same index."""
+    try:
+        fresh = await connection.encrypt_read(
+            read_cap=rcw_read_cap, message_box_index=mw.current_message_index)
+    except Exception as e:
+        logger.warning("re-mint encrypt_read failed, will retry: %s", e)
+        return False
+    return await _remint_mixwal(mw, fresh)
+
+
+async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, wcw: persistent.WriteCapWAL) -> bool:
+    """Re-encrypt a stale write envelope at the same index, from the
+    PlaintextWAL payload that is retained until the write is ACK'ed."""
+    pwal = None
+    if mw.plaintextwal is not None:
+        async with persistent.asession() as sess:
+            pwal = await sess.get(persistent.PlaintextWAL, mw.plaintextwal)
+    if pwal is None:
+        logger.critical(
+            "cannot re-mint write for stream %s: PlaintextWAL %s missing",
+            mw.bacap_stream, mw.plaintextwal)
+        return False
+    try:
+        fresh = await connection.encrypt_write(
+            plaintext=pwal.bacap_payload,
+            write_cap=wcw.write_cap,
+            message_box_index=mw.current_message_index)
+    except Exception as e:
+        logger.warning("re-mint encrypt_write failed, will retry: %s", e)
+        return False
+    return await _remint_mixwal(mw, fresh)
+
+
 async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]") -> None:
     """Resend a write until it is ACK'ed by courier.
 
@@ -123,7 +178,31 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
 
       )
     except (ThinClientOfflineError, BrokenPipeError, StartResendingCancelledError):
+      # Release the stream so the scheduler re-picks the row once the
+      # connection is back; drain_mixwal2 gates each iteration on
+      # __mixnet_connected, so this cannot busy-loop while offline.
       logger.warning("thin client is offline or resend cancelled, can't drain mixwal.")
+      draining_right_now.discard(mw.bacap_stream)
+      return
+    except CourierInvalidEpochError as e:
+      # Permanent for the stored blob (rotated replica keys); re-mint from
+      # the retained plaintext and let the scheduler resend. Sleep even on
+      # success so a daemon holding a stale PKI document cannot hot-loop.
+      logger.warning(
+          "drain_mixwal_write_single: stale replica epoch (%s); re-minting envelope", e,
+      )
+      reminted = await _remint_write_envelope(connection, mw, wcw)
+      await asyncio.sleep(5)
+      draining_right_now.discard(mw.bacap_stream)
+      if reminted:
+        __mixwal_updated.set()
+      return
+    except CourierError as e:
+      logger.warning(
+          "drain_mixwal_write_single: courier rejected envelope (%s); will retry", e,
+      )
+      await asyncio.sleep(5)
+      draining_right_now.discard(mw.bacap_stream)
       return
 
     logger.info(f"drain_mixwal_write_single got resp: {resp}")
@@ -363,11 +442,27 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     await asyncio.sleep(5)
     give_up()
     return
+  except CourierInvalidEpochError as e:
+    # The envelope's MKEM encryption targets replica keys from a replica
+    # epoch the courier no longer accepts; resending the stored blob can
+    # never succeed. Re-encrypt at the same index and let the scheduler
+    # resend the fresh envelope. Sleep even on success so a daemon holding
+    # a stale PKI document cannot hot-loop re-mints, and release the
+    # stream before signalling so the scheduler sees it immediately.
+    logger.warning(
+        "drain_mixwal_read_single: stale replica epoch (%s); re-minting envelope", e,
+    )
+    reminted = await _remint_read_envelope(connection, rcw_read_cap, mw)
+    await asyncio.sleep(5)
+    give_up()
+    if reminted:
+      __mixwal_updated.set()
+    return
   except CourierError as e:
-    # A courier-side rejection of the read envelope (e.g. a stale replica epoch,
-    # or a malformed/uncacheable envelope), distinct from any replica error and
-    # from our local SQLite. The daemon remaps these out of the replica code
-    # range precisely so we can tell them apart. Treat as transient and retry.
+    # A courier-side rejection of the read envelope (e.g. a malformed or
+    # uncacheable envelope), distinct from any replica error and from our
+    # local SQLite. The daemon remaps these out of the replica code range
+    # precisely so we can tell them apart. Treat as transient and retry.
     logger.warning(
         "drain_mixwal_read_single: the courier rejected the read envelope (%s); "
         "will retry", e,
