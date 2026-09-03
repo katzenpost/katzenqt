@@ -189,3 +189,19 @@ def test_is_previewable_attachment(tmp_path: Path) -> None:
     assert call(ns, txt) is False
     assert call(ns, tmp_path / "missing.opus") is False
     assert call(ns, None) is False
+
+
+def test_file_marker_rejects_path_traversal() -> None:
+    payload = b"F" + cbor2.dumps({
+        "v": 0,
+        "kind": "file_marker",
+        "basename": "evil",
+        "filetype": "arbitrary",
+        "size": 1,
+        "rel_path": "../../etc/passwd",
+        "sha256": b"\x00" * 32,
+        "membership_hash": b"TODO" * 8,
+    })
+    message_id = _insert_payload(payload)
+    with pytest.raises(_AttachmentError):
+        _resolve(message_id)

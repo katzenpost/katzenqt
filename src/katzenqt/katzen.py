@@ -434,6 +434,12 @@ class MainWindow(QMainWindow):
                 if not rel_path:
                     raise _AttachmentError(f"{basename} has no stored location.")
                 abs_path = state_root / rel_path
+                try:
+                    abs_path.resolve().relative_to(state_root.resolve())
+                except ValueError:
+                    raise _AttachmentError(
+                        f"{basename} has an invalid stored location."
+                    ) from None
                 if not abs_path.is_file():
                     raise _AttachmentError(
                         f"The received file for {basename} is missing on disk."
