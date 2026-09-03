@@ -13,3 +13,5 @@ katzenpost/
 .system-setup.stamp
 .coverage
 .hypothesis/
+.go-cache/
+dist/

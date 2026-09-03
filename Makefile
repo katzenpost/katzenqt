@@ -7,6 +7,7 @@ MAKEFLAGS += --no-print-directory
 
 export PATH:=$(PATH):~/.local/bin/
 export UV_VENV_CLEAR:=1
+export GOCACHE:=$(CURDIR)/.go-cache
 # override uv with:
 #   make setup-uv UV=$$HOME/.local/bin/uv
 UV ?= uv
@@ -21,6 +22,8 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
+KATZENPOST_REV := 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+KPCLIENTD_BIN := $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
@@ -255,19 +258,25 @@ docker-integration: setup
 
 $(KATZENPOST_DIR):
 	@git clone $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
 
 katzenpost-update: $(KATZENPOST_DIR)
-	@cd $(KATZENPOST_DIR) && git pull --ff-only >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) fetch origin $(KATZENPOST_REV) >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
+	@rm -f $(KPCLIENTD_BIN)
 
-kpclientd: $(KATZENPOST_DIR)
+$(KPCLIENTD_BIN): | $(KATZENPOST_DIR)
+	@test -z "$$(git -C $(KATZENPOST_DIR) status --porcelain)" || { printf '%s\n' 'error: katzenpost checkout is dirty; run make katzenpost-update'; exit 1; }
 	@set +e; \
-	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1 ) ; \
+	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v ) ; \
 	rc=$$?; \
 	set -e; \
 	if [[ $$rc -ne 0 ]]; then \
 		printf '%s\n' "warn: native kpclientd build failed; falling back to kpclientd-podman"; \
 		$(MAKE) kpclientd-podman; \
 	fi
+
+kpclientd: $(KPCLIENTD_BIN)
 
 kpclientd-podman:
 	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=bookworm \
@@ -278,12 +287,12 @@ kpclientd-podman:
 # the namenlos mixnet and a thin client config that reaches the daemon over
 # the @katzenpost abstract socket. The integration tests do not read these,
 # dialing kpclientd directly via --address instead.
-install-kpclient: kpclientd
+install-kpclient: $(KPCLIENTD_BIN)
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
 	@install -m 0600 config/client.toml ~/.local/katzenpost/client.toml
 	@install -m 0600 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
-	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
+	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
 	@install -d -m 0700 ~/.config/systemd/user
