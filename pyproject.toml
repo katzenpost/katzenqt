@@ -23,7 +23,8 @@ dependencies = [
 # a release carrying it lands on PyPI, when this reverts to a version pin. Keep
 # in lockstep with the katzenpost daemon ref in
 # .github/workflows/test-integration-docker.yml.
-"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@55946e588903d777288aa462973fdb7222cf2286"
+"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client@55946e588903d777288aa462973fdb7222cf2286",
+"rustic-audio-tool",
 ]
 
 [dependency-groups]
@@ -66,6 +67,9 @@ build-backend = "flit_core.buildapi"
 
 [tool.flit.module]
 name = "katzenqt"
+
+[tool.uv.sources]
+rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "2158e2a5cc5e58f430b4c0bf2f5603d8909becc6" }
 
 [tool.mypy]
 python_version = "3.11"

@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-import importlib.machinery
-import importlib.util
 from pathlib import Path
-import sys
-import sysconfig
 from typing import Any
 
 from . import persistent
@@ -138,76 +134,29 @@ class PttAudioBridge:
 
 
 def _load_backend_module() -> Any:
-    module_name = "rustic_audio_tool"
-    # Prefer src/katzenqt/audio/rustic_audio_tool.so over any older site-packages
-    # wheel. Cargo builds librustic_audio_tool.so; make rust-audio renames on install.
-    direct_extension = _load_direct_backend_extension(module_name)
-    if direct_extension is not None and _supports_playback_error_polling(direct_extension):
-        return direct_extension
+    """Import the installed rustic_audio_tool extension, or raise.
 
+    The extension is a maturin-built dependency installed by ``uv sync``;
+    a missing or too-old build raises :class:`AudioEngineUnavailable` with a
+    fix hint instead of failing deeper in capture or playback."""
     try:
-        backend_module = importlib.import_module(module_name)
-    except ImportError as exc:  # pragma: no cover - depends on local build env
-        if direct_extension is not None:
-            return direct_extension
-
+        backend_module = importlib.import_module("rustic_audio_tool")
+    except ImportError as exc:
         raise AudioEngineUnavailable(
-            "Rust audio extension is unavailable. Build rustic_audio_tool.so "
-            f"separately and place it at {_package_audio_extension_path(module_name)}."
+            "The rustic-audio-tool extension is not installed. Run uv sync to "
+            "build it with maturin (a Rust toolchain is required)."
         ) from exc
-
-    if _supports_playback_error_polling(backend_module):
-        return backend_module
-
-    if direct_extension is not None:
-        return direct_extension
-
+    if not _supports_playback_error_polling(backend_module):
+        raise AudioEngineUnavailable(
+            "The installed rustic_audio_tool is too old; PttAudioEngine has no "
+            "take_playback_error. Rebuild it with uv sync."
+        )
     return backend_module
 
 
 def _supports_playback_error_polling(module: Any) -> bool:
     engine_type = getattr(module, "PttAudioEngine", None)
     return engine_type is not None and hasattr(engine_type, "take_playback_error")
-
-
-def _load_direct_backend_extension(module_name: str) -> Any | None:
-    extension_path = next(
-        (candidate for candidate in _backend_extension_candidates(module_name) if candidate.exists()),
-        None,
-    )
-    if extension_path is None:
-        return None
-
-    loader = importlib.machinery.ExtensionFileLoader(module_name, str(extension_path))
-    spec = importlib.util.spec_from_file_location(module_name, extension_path, loader=loader)
-    if spec is None:
-        return None
-
-    existing_module = sys.modules.pop(module_name, None)
-    try:
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        loader.exec_module(module)
-        return module
-    except ImportError:
-        return None
-    finally:
-        sys.modules.pop(module_name, None)
-        if existing_module is not None:
-            sys.modules[module_name] = existing_module
-
-
-def _package_audio_extension_path(module_name: str) -> Path:
-    """Path to the PyO3 shared library inside the package audio/ directory."""
-    return Path(__file__).resolve().parent / "audio" / f"{module_name}.so"
-
-
-def _backend_extension_candidates(module_name: str) -> tuple[Path, ...]:
-    audio_dir = Path(__file__).resolve().parent / "audio"
-    return (
-        audio_dir / f"{module_name}.so",
-        Path(sysconfig.get_path("platlib")) / f"{module_name}.so",
-    )
 
 
 def _safe_component(value: str) -> str:

@@ -5,9 +5,7 @@ import pytest
 
 from katzenqt import audio_ptt
 from katzenqt.audio_ptt import (
-    _backend_extension_candidates,
     _load_backend_module,
-    _package_audio_extension_path,
     AudioEngineUnavailable,
     PttAudioBridge,
 )
@@ -108,29 +106,24 @@ def test_take_playback_error_clears_cached_backend_failure(tmp_path):
     assert bridge.take_playback_error() is None
 
 
-def test_backend_extension_candidates_prefer_package_local_path():
-    candidates = _backend_extension_candidates("rustic_audio_tool")
-
-    assert candidates[0] == _package_audio_extension_path("rustic_audio_tool")
-    assert candidates[0].name == "rustic_audio_tool.so"
-    assert candidates[0].parent.name == "audio"
+def test_load_backend_module_returns_installed_extension():
+    with patch.object(audio_ptt.importlib, "import_module", return_value=_FakeModule):
+        assert _load_backend_module() is _FakeModule
 
 
-def test_load_backend_module_prefers_package_local_extension():
-    installed_module = object()
-    with patch.object(audio_ptt, "_load_direct_backend_extension", return_value=_FakeModule):
-        with patch.object(audio_ptt.importlib, "import_module", return_value=installed_module):
-            assert _load_backend_module() is _FakeModule
+def test_load_backend_module_reports_missing_extension():
+    with patch.object(
+        audio_ptt.importlib, "import_module", side_effect=ImportError("missing")
+    ):
+        with pytest.raises(AudioEngineUnavailable, match="not installed"):
+            _load_backend_module()
 
 
-def test_load_backend_module_falls_back_to_direct_extension():
-    with patch.object(audio_ptt, "_load_direct_backend_extension", return_value=_FakeModule):
-        with patch.object(audio_ptt.importlib, "import_module", side_effect=ImportError("missing")):
-            assert _load_backend_module() is _FakeModule
+def test_load_backend_module_rejects_extension_without_error_polling():
+    class _OldModule:
+        class PttAudioEngine:
+            pass
 
-
-def test_load_backend_module_reports_missing_extension_path():
-    with patch.object(audio_ptt, "_load_direct_backend_extension", return_value=None):
-        with patch.object(audio_ptt.importlib, "import_module", side_effect=ImportError("missing")):
-            with pytest.raises(AudioEngineUnavailable, match="audio/rustic_audio_tool.so"):
-                _load_backend_module()
+    with patch.object(audio_ptt.importlib, "import_module", return_value=_OldModule):
+        with pytest.raises(AudioEngineUnavailable, match="too old"):
+            _load_backend_module()
