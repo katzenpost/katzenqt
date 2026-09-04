@@ -270,7 +270,15 @@ class PendingVouchersDialog(QDialog):
         self.list_widget.takeItem(self.list_widget.row(item))
 
 
+def mixnet_status_text(connected: bool) -> "tuple[str, str]":
+    if connected:
+        return ("Mixnet: connected", "#268bd2")
+    return ("Mixnet: offline", "#dc322f")
+
+
 class MainWindow(QMainWindow):
+    mixnet_status_changed = Signal(bool)
+
     def X_keyPressEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key pressed", key)
@@ -1029,6 +1037,22 @@ class MainWindow(QMainWindow):
         #self.ui.contacts_treeWidget.keyboardSearch.connect(lambda: print("KB search")) # TODO not a signal, but when user starts typing here we want to set the focus to contactFilterLineEdit instead
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
+
+        self.mixnet_status_label = QLabel()
+        self.ui.statusbar.addPermanentWidget(self.mixnet_status_label)
+        self.mixnet_status_changed.connect(self.render_mixnet_status)
+        network.add_status_listener(self.mixnet_status_changed.emit)
+        self.render_mixnet_status(network.mixnet_connected())
+
+    def render_mixnet_status(self, connected: bool) -> None:
+        text, color = mixnet_status_text(connected)
+        self.mixnet_status_label.setText(text)
+        self.mixnet_status_label.setStyleSheet(f"color: {color};")
+        menu = self.ui.menuMixnetStatus
+        menu.setEnabled(True)
+        menu.clear()
+        current = menu.addAction(text)
+        current.setEnabled(False)
 
     async def _enqueue_outgoing_gcm(
         self,

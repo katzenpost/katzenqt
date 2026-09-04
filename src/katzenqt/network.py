@@ -132,6 +132,21 @@ def _is_transient_sqlite_busy(exc: OperationalError) -> bool:
     stay loud instead of retrying forever."""
     return "database is locked" in str(exc.orig).lower()
 
+__status_listeners: "list" = []
+
+
+def mixnet_connected() -> bool:
+    return __mixnet_connected.is_set()
+
+
+def add_status_listener(callback) -> None:
+    __status_listeners.append(callback)
+
+
+def _notify_status(connected: bool) -> None:
+    for callback in __status_listeners:
+        callback(connected)
+
 __on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
 
 __should_quit = asyncio.Event()
@@ -1289,6 +1304,7 @@ async def on_connection_status(status:"Dict[str,Any]"):
             # instead of logging the same single event twice.
             logger.warning("daemon reports disconnected from mixnet; ARQ rides out and retries")
     _last_connected = connected
+    _notify_status(connected)
     if err:
         logger.error("ON_CONNECTION_STATUS err: %s", status)
         #ON_CONNECTION_STATUS err: {'is_connected': False, 'err': {'Op': 'read', 'Net': 'tcp', 'Source': {'IP': b'\x7f\x00\x00\x01', 'Port': 51718, 'Zone': ''}, 'Addr': {'IP': b'\x7f\x00\x00\x01', 'Port': 30004, 'Zone': ''}, 'Err': {}}}
