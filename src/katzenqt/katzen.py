@@ -1210,7 +1210,8 @@ class MainWindow(QMainWindow):
         if not self.app.focusWidget():
             self.app.alert(self)
             # self.app.beep()
-        self.systray.has_new_messages() # TODO move this into block above
+        if self.systray:
+            self.systray.has_new_messages() # TODO move this into block above
 
     async def peer_added_listener(self):
         """Append members announced via INTRODUCTION to the contacts tree in
@@ -1548,7 +1549,8 @@ class MainWindow(QMainWindow):
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
 
-        self.systray.has_read_messages()
+        if self.systray:
+            self.systray.has_read_messages()
 
     def do_we_even_have_unread_messages(self) -> bool:
         """
