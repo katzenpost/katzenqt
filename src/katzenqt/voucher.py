@@ -16,13 +16,14 @@ raw boxes on pre-derived caps. Durable state lives in persistent.PendingVoucher,
 advanced before each network step so a crash mid-handshake resumes rather than
 restarts. All cap and key material is opaque bytes; the daemon does the crypto.
 """
+import asyncio
 import logging
 import uuid
 
 from sqlmodel import select
 
 from . import models, persistent
-from .network import _SUBSTREAM_NAME_PREFIX
+from .network import _SUBSTREAM_NAME_PREFIX, check_for_new
 
 logger = logging.getLogger("katzen.voucher")
 
@@ -240,6 +241,68 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
     return added
 
 
+async def send_introduction_message(conversation_id: int, display_name: str, read_cap: bytes) -> None:
+    """Write an INTRODUCTION message onto this conversation's own BACAP stream.
+
+    The announcement carries ``read_cap`` for the just-inducted member's
+    stream (their salt-mutated read cap), so every peer that reads this
+    stream can add the member and start reading their messages without any
+    further coordination. It is sent after the induction has committed and is
+    fire-and-forget: a delivery failure is logged, not raised, so the
+    induction result stands.
+
+    A pending ConversationLog row is also written for the sender's own peer,
+    so the local UI shows the announcement (e.g. 'bob added carol') at the
+    right place in the stream even though the sender never reads its own
+    stream.
+    """
+    gcm = models.GroupChatMessage(
+        version=0, membership_hash=b"TODO" * 8,
+        msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+        introduction=models.GroupChatPleaseAdd(
+            display_name=display_name, read_cap=read_cap,
+        ),
+    )
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
+        new_write_caps, db_entries = send_op.serialize(
+            chunk_size=1530, conversation_id=conversation_id,
+        )
+        final_pwal_id = db_entries[-1].id
+        for cap_uuid in new_write_caps:
+            sess.add(persistent.WriteCapWAL(id=cap_uuid))
+        for obj in db_entries:
+            sess.add(obj)
+        sess.add(persistent.ConversationLog(
+            conversation_id=conversation_id,
+            conversation_peer_id=conv.own_peer_id,
+            conversation_order=select(persistent.count())
+            .select_from(persistent.ConversationLog)
+            .where(persistent.ConversationLog.conversation_id == conversation_id)
+            .scalar_subquery(),
+            payload=b"F" + gcm.to_cbor(),
+            network_status=1,
+            outgoing_pwal=final_pwal_id,
+        ))
+        await sess.commit()
+
+    await check_for_new()
+    deadline = asyncio.get_event_loop().time() + 180.0
+    while asyncio.get_event_loop().time() < deadline:
+        async with persistent.asession() as sess:
+            hit = (await sess.exec(
+                select(persistent.SentLog).where(persistent.SentLog.id == final_pwal_id)
+            )).first()
+        if hit is not None:
+            return
+        await asyncio.sleep(0.25)
+    logger.error(
+        "introduction for %r not acked within 180s (conversation %d)",
+        display_name, conversation_id,
+    )
+
+
 async def derive_read_and_induct(connection, conversation_id: int, peer_name: str, voucher: bytes) -> str:
     """Inductor: derive the VoucherStream from the Voucher, read the joiner's
     payload from box 0, seal a reply carrying the group's read caps, write it to
@@ -278,6 +341,10 @@ async def derive_read_and_induct(connection, conversation_id: int, peer_name: st
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
+
+    await send_introduction_message(
+        conversation_id, joiner_name, induct.mutated_message_read_cap,
+    )
     return joiner_name
 
 
