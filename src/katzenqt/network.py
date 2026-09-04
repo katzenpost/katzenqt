@@ -1349,10 +1349,9 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
       2. ``$KATZENQT_THINCLIENT_CONFIG``,
       3. ``$XDG_CONFIG_HOME/katzenqt/thinclient.toml`` (default
          ``~/.config/katzenqt/thinclient.toml``),
-      4. the bundled copy shipped under ``katzenqt/data/thinclient.toml``
-         (resolved via ``importlib.resources``),
-      5. the development-tree fallback at
-         ``<repo>/config/thinclient.toml``.
+      4. the copy shipped as package data under
+         ``katzenqt/data/thinclient.toml`` (resolved via
+         ``importlib.resources``, independent of the repo location).
     """
     if explicit is not None:
         explicit_path = Path(explicit)
@@ -1368,14 +1367,8 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
         candidates.append(Path(env))
     xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     candidates.append(Path(xdg) / "katzenqt" / "thinclient.toml")
-    try:
-        bundled = importlib.resources.files("katzenqt") / "data" / "thinclient.toml"
-        candidates.append(Path(str(bundled)))
-    except (ModuleNotFoundError, FileNotFoundError):
-        pass
-    candidates.append(
-        Path(__file__).resolve().parent.parent.parent / "config" / "thinclient.toml"
-    )
+    bundled = importlib.resources.files("katzenqt") / "data" / "thinclient.toml"
+    candidates.append(Path(str(bundled)))
 
     for c in candidates:
         if c.is_file():

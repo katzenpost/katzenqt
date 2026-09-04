@@ -33,6 +33,4 @@ jobs:
           uv sync --all-extras --dev --locked
 
       - name: Run alembic check
-        run: |
-          uv run alembic -c config/alembic.ini upgrade head
-          uv run alembic -c config/alembic.ini check
+        run: make alembic-check-uv

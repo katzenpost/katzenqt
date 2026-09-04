@@ -139,27 +139,17 @@ async def append_outbound_chat(
 
 
 def _resolve_alembic_ini() -> Path:
-    """Locate the ``alembic.ini`` shipped with the package.
+    """Locate the ``alembic.ini`` shipped as package data.
 
-    Tries the package-data copy first (works for both editable and
-    copy installs), then falls back to the development-tree
-    ``<repo>/config/alembic.ini`` (so ``uv run alembic -c
-    config/alembic.ini ...`` from the source tree keeps working
-    without touching the package data file).
+    Resolved through ``importlib.resources`` so it works the same for
+    editable and copy installs, independent of the repository location.
     """
-    try:
-        bundled = importlib.resources.files("katzenqt") / "data" / "alembic.ini"
-        p = Path(str(bundled))
-        if p.is_file():
-            return p
-    except (ModuleNotFoundError, FileNotFoundError):
-        pass
-    return Path(__file__).parent.parent.parent / "config" / "alembic.ini"
+    return Path(str(importlib.resources.files("katzenqt") / "data" / "alembic.ini"))
 
 
 _alembic_cfg = alembic.config.Config(_resolve_alembic_ini())
 
-xdg_data_home = (Path().home()/".local"/"share")
+xdg_data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home()/".local"/"share")
 xdg_data_home.mkdir(parents=True,exist_ok=True)
 app_data = xdg_data_home / "katzenqt"
 app_data.mkdir(exist_ok=True, mode=0o700)

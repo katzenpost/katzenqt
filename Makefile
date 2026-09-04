@@ -290,35 +290,41 @@ kpclientd-podman:
 install-kpclient: $(KPCLIENTD_BIN)
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
-	@install -m 0600 config/client.toml ~/.local/katzenpost/client.toml
-	@install -m 0600 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
+	@install -m 0600 src/katzenqt/data/client.toml ~/.local/katzenpost/client.toml
+	@install -m 0600 src/katzenqt/data/thinclient.toml ~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
 	@install -d -m 0700 ~/.config/systemd/user
-	@install -m 0644 config/kpclientd.service ~/.config/systemd/user/kpclientd.service
+	@install -m 0644 src/katzenqt/data/kpclientd.service ~/.config/systemd/user/kpclientd.service
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now kpclientd >/dev/null 2>&1
 
 alembic-check-uv:
-	@$(UV) run alembic -c config/alembic.ini check
+	@state=$$(mktemp -d); \
+	trap 'rm -rf "$$state"' EXIT; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c src/katzenqt/data/alembic.ini upgrade head; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c src/katzenqt/data/alembic.ini check
 
 alembic-check-pip:
-	@$(VENV)/bin/alembic -c config/alembic.ini check
+	@state=$$(mktemp -d); \
+	trap 'rm -rf "$$state"' EXIT; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini upgrade head; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini check
 
 alembic-revision-uv:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(UV) run alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(UV) run alembic -c src/katzenqt/data/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
 
 alembic-revision-pip:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(VENV)/bin/alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
 
 clean-venv:
 	@rm -r $(VENV)
