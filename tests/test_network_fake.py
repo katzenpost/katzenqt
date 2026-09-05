@@ -396,6 +396,46 @@ class TestDrainMixwalWriteSingle:
             assert len((await sess.exec(select(persistent.SentLog))).all()) == 1
 
     @pytest.mark.asyncio
+    async def test_stale_ack_finalizes_delivered_message(self, fake_thinclient):
+        """A write drain that died mid-commit leaves no later MW, so a
+        stale ACK (wcw.next_index already past this MW's next index) must
+        still finalize the message it delivered: PWAL to SentLog, log row
+        to sent, both WALs reaped."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        async with persistent.asession() as sess:
+            # Simulate a later, already-ACKed message having advanced the
+            # writer to (at least) this MW's next index.
+            wcw = await sess.get(persistent.WriteCapWAL, setup["bacap_stream"])
+            wcw.next_index = setup["wcr"].next_message_box_index
+            sess.add(wcw)
+            cl = persistent.ConversationLog(
+                conversation_id=setup["conversation_id"],
+                conversation_peer_id=setup["peer_id"],
+                conversation_order=0,
+                payload=b"Fhello",
+                network_status=1,
+                outgoing_pwal=setup["pwal_id"],
+            )
+            sess.add(cl)
+            await sess.commit()
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            # MW and PWAL reaped, SentLog row written, convlog flipped to sent.
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            assert await sess.get(persistent.PlaintextWAL, setup["pwal_id"]) is None
+            sent = sess.get(persistent.SentLog, setup["pwal_id"])
+            assert sent is not None
+            cl = (await sess.exec(select(persistent.ConversationLog))).one()
+            assert cl.network_status == 2
+            # The writer index must NOT be regressed.
+            wcw = await sess.get(persistent.WriteCapWAL, setup["bacap_stream"])
+            assert wcw.next_index == setup["wcr"].next_message_box_index
+
+    @pytest.mark.asyncio
     async def test_conv_id_propagates_when_pwal_has_convlog(self, fake_thinclient):
         setup = await _set_up_write_flow(fake_thinclient, plaintext=b"Fhi")
         # Add a ConversationLog row tied to the outgoing pwal so

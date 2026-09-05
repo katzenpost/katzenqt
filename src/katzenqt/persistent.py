@@ -303,16 +303,31 @@ class SentLog(SQLModel, table=True):
                     "(db next=%d >= our next=%d); not regressing index",
                     mw.bacap_stream, real_next, our_next,
                 )
-                # Clean up the stray MW so we don't re-drain it; leave the
-                # PWAL alone if it still exists — a later MW with a fresh
-                # next_message_index will mark it sent.
+                # Clean up the stray MW so we don't re-drain it, and finish
+                # the job for this message: the writer has already advanced
+                # past our_next, so the boxes this envelope sealed were
+                # written and we just got their ACK — the PWAL is proven
+                # delivered. Finalize it here rather than trusting a later
+                # MW to do it: in the crash-then-relaunch case (write drain
+                # died mid-commit) no later MW exists, and without this the
+                # message resends forever.
                 with Session(_engine_sync) as sess:
                     stale_mw = sess.get(MixWAL, mw.id)
                     if stale_mw is not None:
                         sess.delete(stale_mw)
-                        sess.commit()
+                    pwal = sess.get(PlaintextWAL, mw.plaintextwal)
+                    if pwal is not None:
+                        if sess.get(SentLog, pwal.id) is None:
+                            sess.add(cls(id=pwal.id))
+                        if pwal.bacap_payload[:1] in (b"F", b"I"):
+                            if convlog := sess.exec(select(ConversationLog).where(ConversationLog.outgoing_pwal == pwal.id)).first():
+                                conversation_id = convlog.conversation_id
+                                convlog.network_status = 2
+                                sess.add(convlog)
+                        sess.delete(pwal)
+                    sess.commit()
                 resend_queue.discard(mw.bacap_stream)
-                return
+                return conversation_id
         # Resolve the diagnostic counters once so the commit-time print is
         # as cheap as a tuple format rather than two more thinclient calls.
         new_idx = our_next if precheck_next_blob is not None else (

@@ -2,7 +2,7 @@
 
 ## Next
 
-- [ ] 3. Finish marking a message sent when its ACK arrives after the stream index advanced (persistent.py `mark_sent` stale-ACK path), with stale-ACK test
+No open items — this branch is complete. See "Future work" below.
 
 ## Future work
 
