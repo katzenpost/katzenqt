@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 
-from . import persistent
+from sqlmodel import select
+
+from . import models, persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
 from .tally import controller as tally_controller
 
@@ -26,8 +28,58 @@ async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[in
     be poked for, and, if a newcomer peer was added, their
     ``(conversation_id, display_name)`` for the caller to announce to the UI
     *after* its commit succeeds (see _handle_introduction)."""
+    await _verify_membership_advisory(sess, peer, gcm)
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
+
+
+async def _conversation_peers(sess, conv_id):
+    rows = (await sess.exec(
+        select(persistent.ConversationPeer)
+        .where(
+            persistent.ConversationPeer.id
+            == persistent.ConversationPeerLink.conversation_peer_id
+        )
+        .where(persistent.ConversationPeerLink.conversation_id == conv_id)
+    )).all()
+    return list(rows)
+
+
+async def local_membership_hash(sess, conv) -> bytes:
+    """Our own view of the conversation membership as the canonical hash
+    (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
+    plus ourself as ``write_cap[32:]`` rather than the possibly stale own-peer
+    read cap."""
+    peers = await _conversation_peers(sess, conv.id)
+    caps: "set[bytes]" = set()
+    for p in peers:
+        if p.id == conv.own_peer_id:
+            continue
+        if not p.active or p.name.startswith(models.SUBSTREAM_NAME_PREFIX):
+            continue
+        rcw = await sess.get(persistent.ReadCapWAL, p.read_cap_id)
+        if rcw is not None and rcw.read_cap is not None:
+            caps.add(rcw.read_cap)
+    wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
+    if wcw is not None and wcw.write_cap is not None:
+        caps.add(wcw.write_cap[32:])
+    return models.canonical_membership_hash(caps)
+
+
+async def _verify_membership_advisory(sess, peer, gcm) -> None:
+    """Advisory membership check: a sender that computed a real hash and
+    disagrees with our view is logged, never dropped. Every shipping client
+    still sends a sentinel, so this does no work until a real hash appears."""
+    got = gcm.membership_hash
+    if models.is_membership_sentinel(got):
+        return
+    local = await local_membership_hash(sess, peer.conversation)
+    if got != local:
+        logger.info(
+            "membership_hash mismatch on conversation %s (advisory): peer "
+            "sent %s, local view %s", peer.conversation.id, got.hex()[:16],
+            local.hex()[:16],
+        )
 
 
 async def _handle_chat(sess, peer, gcm, full_payload) -> "tuple[bool, bool, None]":
