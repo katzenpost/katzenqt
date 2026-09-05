@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import struct
 
 import pytest
@@ -133,6 +134,12 @@ class TestOnConnectionStatus:
         ev.set()
         await on_connection_status({"is_connected": False, "err": None})
         assert not ev.is_set()
+
+    @pytest.mark.asyncio
+    async def test_disconnected_warns(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({"is_connected": False, "err": None})
+        assert any("disconnected" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_err_payload_does_not_raise(self):
