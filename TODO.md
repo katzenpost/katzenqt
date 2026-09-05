@@ -45,28 +45,50 @@
 
 ## Future work (carried over from prior fix branches)
 
-- [ ] **SQLite engine hygiene.** `src/katzenqt/persistent.py:89-90` still uses
-      `echo=True` (SQL echoed to stdout — noisy, slows the hot path) and
-      `pool_size=1000` on both the async engine
-      (`create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)`)
-      and the sync engine. Nip both down: drop `echo=True`, shrink the pool to
-      something sane (single-connection aiosqlite needs no pool at all). Verify
-      the unit suite stays green after.
+- [ ] **SQLite engine hygiene.** `src/katzenqt/persistent.py:89-90` uses
+      `echo=True` (SQL stringified on every statement; currently muted only by
+      the suppression workarounds at `katzen.py:1346` and
+      `headless/__init__.py:152`) and `pool_size=1000` (a real
+      `QueuePool(size=1000, overflow=10)` that can retain up to 1000 idle
+      aiosqlite connections/threads forever once peaked). Plan: drop both
+      kwargs so both engines use SQLAlchemy's default small QueuePool
+      (size 5); delete the echo-suppression line at `katzen.py:1346`; KEEP
+      `headless/__init__.py:152` (it also quiets benign async-pool "Exception
+      during reset" teardown noise, independent of echo). Verify with the unit
+      suite and the docker integration restart suite (pool-size change could
+      reintroduce `database is locked` under multi-send).
 
-- [ ] **`conversation_log_order_lock` is a `threading.Lock` held across
-      `await`s on the io loop — latent same-thread deadlock.**
-      `src/katzenqt/persistent.py:40-52` keys a `threading.Lock` per
-      conversation id. Two io-loop coroutines contending for the same
-      conversation's lock would deadlock the whole loop: the second one blocks
-      the thread in `Lock.acquire()` while the first can never resume — this is
-      real today, not merely latent, because the receive/completion path spans
-      awaits while holding it (`src/katzenqt/network.py:466` , with `await`s at
-      lines 484, 488, 491, 498, 500) and so does the voucher close path
-      (`src/katzenqt/voucher.py:366`). If/when two coroutines ever contend for
-      one conversation (e.g. a message arriving mid-commit), the loop freezes.
-      Convert to `asyncio.Lock` (keyed per conversation, kept in the same
-      guard-protected dict) and re-run the unit suite; the GUI-side use at
-      `src/katzenqt/katzen.py:496` (sync context) must be reconciled.
+- [ ] **`conversation_log_order_lock` cross-loop deadlock — fix in two phases.**
+      Current state, verified: `src/katzenqt/persistent.py:40-52` keys a
+      `threading.Lock` per conversation id, and the three sites that hold it
+      run on **two different event loops** — the GUI/QtAsyncio loop
+      (`src/katzenqt/katzen.py:496`, outbound chat send) and the io thread
+      loop (`src/katzenqt/network.py:466`, receive/completion; and
+      `src/katzenqt/voucher.py:366`, voucher close). The `threading.Lock` is
+      therefore doing genuine cross-loop mutual exclusion, so the TODO's old
+      suggestion "convert to `asyncio.Lock`" is wrong as a flat swap —
+      `asyncio.Lock` is not thread-safe and would not serialize across loops.
+      The real bug is same-loop contention: a second coroutine on the same loop
+      targeting the same conversation blocks the loop thread in the sync
+      `with` while the first is awaiting (the receive path holds it across
+      awaits at network.py:484, 488, 491, 498, 500 and so does voucher.py:366)
+      — a latent but real freeze (rapid double-send; voucher close racing a
+      receive completion). Phase (a): keep `threading.Lock` for cross-loop
+      atomicity, convert `conversation_log_order_lock` to an async context
+      manager that acquires via `asyncio.to_thread` so no loop thread ever
+      blocks, switch the 3 sites to `async with`. Phase (b): single-writer —
+      move the GUI send-path append (`katzen.py:496-516`) into the io loop via
+      `self.iothread.run_in_io(...)`, so ALL ConversationLog appends run on one
+      loop; then replace the threading lock with a per-conversation
+      `asyncio.Lock` and update the stale "two different threads" comment at
+      persistent.py:31-39. Note: `send_file` (katzen.py:616) appends
+      WriteCapWAL/PlaintextWAL on the GUI loop WITHOUT the lock and no
+      ConversationLog row — outside lock scope but worth revisiting with (b).
+      Tests: new `tests/test_concurrent_write_orders.py` — N concurrent
+      send-path appends to one conversation on a single loop, inside
+      `asyncio.wait_for`, asserting completion, no exceptions, and gathered
+      `conversation_order`s exactly {0..N-1} (reproduces today's same-loop
+      deadlock as a timeout).
 
 - [ ] **Daemon read ride-out epoch staleness (separate bug).** The queued-read
       fallback in `_read_box` goes stale across PKI epochs:
