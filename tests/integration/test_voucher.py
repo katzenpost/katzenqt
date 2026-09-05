@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -37,15 +38,32 @@ _KP_ADDR = "{}:{}".format(
 _CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
 
 
-def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
-    env = os.environ.copy()
-    env["KQT_STATE"] = str(role_state)
+def _role_command(role_state: Path, *cli_args: str) -> list[str]:
     # ``info`` inspects the state file only and accepts no connection flags.
     conn_args = () if cli_args and cli_args[0] == "info" else _CONN_ARGS
-    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *conn_args]
+    return [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *conn_args]
+
+
+def _role_env(role_state: Path) -> dict:
+    env = os.environ.copy()
+    env["KQT_STATE"] = str(role_state)
+    return env
+
+
+def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
     return subprocess.run(
-        cmd, env=env, cwd=str(_REPO_ROOT),
-        capture_output=True, text=True, timeout=timeout,
+        _role_command(role_state, *cli_args), env=_role_env(role_state),
+        cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _spawn_role(role_state: Path, *cli_args: str) -> subprocess.Popen:
+    """Launch a role subprocess without waiting for it to finish. Used to keep
+    a joiner's ``voucher-await`` poll alive while the inductor writes box 1."""
+    return subprocess.Popen(
+        _role_command(role_state, *cli_args), env=_role_env(role_state),
+        cwd=str(_REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
     )
 
 
@@ -157,6 +175,48 @@ def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory)
     joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
     _assert_ok(joined, "bob voucher-await (resumed)")
     assert "JOINED" in _output(joined)
+
+
+@pytest.mark.integration
+def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
+    """The GUI interleaving: the joiner's poll of box 1 is already in flight
+    (riding out BoxIDNotFound) before the inductor writes the reply, rather
+    than starting after it like the other tests. A poll that precedes the
+    write must still collect the reply the moment it exists.
+
+    Every other test awaits only after the inductor has replied, so a stale
+    ride-out read would silently miss the late-written box; this ordering is
+    what carol's GUI hit (await started ~2min before alice inducted) and it
+    never returned."""
+    alice_state = tmp_path_factory.mktemp("alice_olap") / "state"
+    carol_state = tmp_path_factory.mktemp("carol_olap") / "state"
+
+    _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
+    _assert_ok(_run_role(carol_state, "create-conv", "demo", "carol"), "carol create-conv")
+
+    mint = _run_role(carol_state, "voucher-mint", "demo", "carol", timeout=300.0)
+    _assert_ok(mint, "carol voucher-mint")
+    voucher = _expect_token(mint, "VOUCHER=")
+    assert voucher, "empty voucher"
+
+    # Start the joiner's poll first; it rides out an unwritten box 1.
+    await_proc = _spawn_role(carol_state, "voucher-await", "demo")
+    try:
+        # Give the poll time to reach the daemon before the reply appears.
+        time.sleep(250)
+        induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=300.0)
+        _assert_ok(induct, "alice voucher-induct carol")
+        out, err = await_proc.communicate(timeout=300.0)
+    finally:
+        if await_proc.poll() is None:
+            await_proc.kill()
+            await_proc.communicate()
+
+    output = out + err
+    assert await_proc.returncode == 0, (
+        f"overlapping await failed (rc={await_proc.returncode}):\n{output}"
+    )
+    assert "JOINED" in output, output
 
 
 @pytest.mark.integration

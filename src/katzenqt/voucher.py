@@ -20,6 +20,9 @@ import asyncio
 import logging
 import uuid
 
+from katzenpost_thinclient import (
+    BoxIDNotFoundError, CourierInvalidEpochError, InvalidEpochError,
+)
 from sqlmodel import select
 
 from . import models, persistent
@@ -33,6 +36,14 @@ STEP_INDUCTING = "inducting"
 STEP_DONE = "done"
 
 _INDEX_LEN = 104
+_READ_RETRY_GAP_S = 15.0  # bounded round gap, well inside a ~60s PKI epoch window
+
+
+def _brief(b: "bytes | None") -> str:
+    """Short first/last hex of a cap or box index for log lines."""
+    if not b:
+        return "None"
+    return b[:8].hex() + ".." + b[-8:].hex()
 
 
 class AlreadyJoinedError(Exception):
@@ -102,25 +113,63 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
         message_ciphertext=wcr.message_ciphertext,
         envelope_hash=wcr.envelope_hash,
     )
+    logger.debug(
+        "publish_box: wrote box %s on write_cap %s; next box index %s",
+        _brief(message_box_index), _brief(write_cap), _brief(wcr.next_message_box_index),
+    )
     return wcr.next_message_box_index
 
 
-async def _read_box(connection, read_cap: bytes, message_box_index: bytes) -> "tuple[bytes, bytes]":
+async def _read_box(
+    connection, read_cap: bytes, message_box_index: bytes, *, stage: str = "read_box",
+) -> "tuple[bytes, bytes]":
     """Read one box, blocking until it exists, and return (plaintext, next index).
 
-    no_retry_on_box_id_not_found is left False so kpclientd rides out replication
-    lag and an unwritten box: the joiner's poll of box 1 is simply this call,
-    which returns once the inductor has written the reply.
+    The daemon's default ride-out (``no_retry_on_box_id_not_found=False``) is a
+    single long-lived request that is meant to wait out an unwritten box, but a
+    wait lasting multiple PKI epochs goes stale and never reunites with a box
+    written minutes later (the GUI join stall: the joiner mints long before the
+    inductor replies). Each round here is therefore a *fresh* request with
+    ``no_retry_on_box_id_not_found=True``: a missing box errors out immediately,
+    we sleep a bounded gap (well under an epoch) and re-issue, so the wait
+    always speaks in the current epoch and replication state.
     """
-    rcr = await connection.encrypt_read(read_cap=read_cap, message_box_index=message_box_index)
-    resp = await connection.start_resending_encrypted_message(
-        read_cap=read_cap, write_cap=None, message_box_index=message_box_index, reply_index=None,
-        envelope_descriptor=rcr.envelope_descriptor,
-        message_ciphertext=rcr.message_ciphertext,
-        envelope_hash=rcr.envelope_hash,
-        no_retry_on_box_id_not_found=False,
-    )
-    return resp.plaintext, rcr.next_message_box_index
+    started = asyncio.get_event_loop().time()
+    rounds = 0
+    while True:
+        rounds += 1
+        try:
+            rcr = await connection.encrypt_read(
+                read_cap=read_cap, message_box_index=message_box_index,
+            )
+            resp = await connection.start_resending_encrypted_message(
+                read_cap=read_cap, write_cap=None,
+                message_box_index=message_box_index, reply_index=None,
+                envelope_descriptor=rcr.envelope_descriptor,
+                message_ciphertext=rcr.message_ciphertext,
+                envelope_hash=rcr.envelope_hash,
+                no_retry_on_box_id_not_found=True,
+            )
+            logger.debug(
+                "%s: box %s on read_cap %s returned after %.1fs "
+                "(round %d, next=%s)",
+                stage, _brief(message_box_index), _brief(read_cap),
+                asyncio.get_event_loop().time() - started, rounds,
+                _brief(rcr.next_message_box_index),
+            )
+            return resp.plaintext, rcr.next_message_box_index
+        except (BoxIDNotFoundError, InvalidEpochError, CourierInvalidEpochError):
+            # Box not written/replicated yet, or the request reached a stale
+            # epoch: both are expected mid-handshake and cured by a fresh round.
+            if rounds == 1 or rounds % 4 == 0:
+                logger.debug(
+                    "%s: box %s on read_cap %s not present yet after %.1fs "
+                    "(round %d); retrying in %.0fs",
+                    stage, _brief(message_box_index), _brief(read_cap),
+                    asyncio.get_event_loop().time() - started, rounds,
+                    _READ_RETRY_GAP_S,
+                )
+            await asyncio.sleep(_READ_RETRY_GAP_S)
 
 
 async def _conversation_write_cap(sess, conversation_id: int) -> persistent.WriteCapWAL:
@@ -192,6 +241,10 @@ async def mint_and_publish(connection, conversation_id: int, display_name: str) 
         row.step = STEP_AWAITING
         sess.add(row)
         await sess.commit()
+    logger.debug(
+        "mint_and_publish: published box0 on voucher write_cap %s; poll of box 1 at %s",
+        _brief(mint.voucher_write_cap), _brief(box1_index),
+    )
     return mint.voucher
 
 
@@ -213,7 +266,13 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
             pv.id, pv.voucher_read_cap, pv.box1_index, pv.voucher_secret_key,
         )
 
-    sealed_reply, _ = await _read_box(connection, voucher_read_cap, box1_index)
+    sealed_reply, _ = await _read_box(
+        connection, voucher_read_cap, box1_index, stage="await_and_open(box1)",
+    )
+    logger.debug(
+        "await_and_open: received box1 sealed reply on voucher read_cap %s",
+        _brief(voucher_read_cap),
+    )
 
     async with persistent.asession() as sess:
         wcw = await _conversation_write_cap(sess, conversation_id)
@@ -325,6 +384,12 @@ async def derive_read_and_induct(connection, conversation_id: int, peer_name: st
 
     voucher_payload, box1_index = await _read_box(
         connection, derived.voucher_read_cap, derived.voucher_read_cap[-_INDEX_LEN:],
+        stage="derive_read_and_induct(box0)",
+    )
+    logger.debug(
+        "derive_read_and_induct: read box0 payload on derived read_cap %s; "
+        "box1 write index %s",
+        _brief(derived.voucher_read_cap), _brief(box1_index),
     )
 
     who_reply = await _build_who_reply(conversation_id)
