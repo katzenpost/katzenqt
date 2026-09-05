@@ -29,6 +29,7 @@ from .katzen_util import create_task
 from pydantic.dataclasses import dataclass
 from . import conversation_handlers, models, persistent
 from sqlmodel import select
+from sqlalchemy.exc import OperationalError
 
 logger = logging.getLogger("katzen.network")
 
@@ -117,6 +118,11 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     mw_current_idx = await connection.get_message_box_index_counter(mw.current_message_index)
     logger.info(f"TX_SINGLE idx:{mw_current_idx} ")
     from sqlmodel import select
+
+    def give_up() -> None:
+        """Release the stream so the drain loop can schedule it again."""
+        draining_right_now.discard(mw.bacap_stream)
+        # leave it in __resend_queue so we don't skip ahead in the stream.
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
     try:
@@ -129,6 +135,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       )
     except (ThinClientOfflineError, BrokenPipeError, StartResendingCancelledError):
       logger.warning("thin client is offline or resend cancelled, can't drain mixwal.")
+      give_up()
       return
 
     logger.info(f"drain_mixwal_write_single got resp: {resp}")
@@ -140,7 +147,20 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     - bump send_resendable,
     - bump drain_mixwal
     """
-    conv_id = await asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue))
+    try:
+      conv_id = await asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue))
+    except OperationalError:
+      # sqlite write lock contention (e.g. a concurrent GUI-send commit on
+      # the same file): the MW was not consumed, only mark_sent failed.
+      # Hand the stream back so the drain loop's sweep re-sends it and
+      # finalizes the ACK; wrapping only OperationalError keeps invariant
+      # bugs (IntegrityError and friends) loud.
+      logger.warning(
+          "drain_mixwal_write_single: sqlite busy committing ACK for "
+          "bacap_stream=%s; leaving MW for next drain pass", mw.bacap_stream,
+      )
+      give_up()
+      return
     draining_right_now.discard(mw.bacap_stream)  # ready to send
     resendable_event.set()  # signal send_resendable_plaintexts
     __mixwal_updated.set()  # ought to be set
@@ -442,7 +462,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         )
         notify_conv_id = parent_peer.conversation.id
 
-    with persistent.conversation_log_order_lock(notify_conv_id):
+    try:
+      with persistent.conversation_log_order_lock(notify_conv_id):
         if assembled is not None and assembled[0] == "F":
             _, chunks, chain, gcm = assembled
             if gcm.file_upload is not None:
@@ -508,6 +529,20 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
         await sess.commit()
+    except OperationalError:
+      # sqlite write lock contention committing a received message (e.g. a
+      # concurrent GUI-send commit on the same file). Discard the uncommitted
+      # transaction by giving up: the enclosing asession() unwinds on return
+      # and rolls back the rcw advance / ReceivedPiece adds / MW delete, so
+      # the next pass re-reads from the same index with no duplicate or gap.
+      # Only wrapping OperationalError keeps invariant bugs (IntegrityError
+      # on conversation_order, etc.) loud.
+      logger.warning(
+          "drain_mixwal_read_single: sqlite busy committing received message "
+          "for bacap_stream=%s; leaving MW for next drain pass", bacap_uuid,
+      )
+      give_up()
+      return
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))

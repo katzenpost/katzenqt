@@ -322,10 +322,9 @@ class TestDrainMixwalWriteSingle:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
             sent = (await sess.exec(select(persistent.SentLog))).all()
             assert len(sent) == 0
-        # draining_right_now intentionally NOT released — the docstring
-        # admits this is rough, but the test pins the current behaviour
-        # so a future cleanup is observable.
-        assert setup["bacap_stream"] in draining
+        # The stream is released instead of stranded in draining_right_now
+        # so the drain loop re-schedules it after the connection returns.
+        assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
     async def test_broken_pipe_is_swallowed(self, fake_thinclient):
@@ -354,6 +353,47 @@ class TestDrainMixwalWriteSingle:
         )
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+
+    @pytest.mark.asyncio
+    async def test_transient_sqlite_busy_on_ack_mark_is_retried(
+        self, fake_thinclient, monkeypatch,
+    ):
+        from sqlalchemy.exc import OperationalError
+
+        setup = await _set_up_write_flow(fake_thinclient)
+        orig_mark_sent = persistent.SentLog.mark_sent
+        fail = {"armed": True}
+
+        async def flaky_mark_sent(connection, mw, resend_queue):
+            if fail["armed"]:
+                fail["armed"] = False
+                raise OperationalError(
+                    "INSERT INTO sentlog", {}, Exception("database is locked"),
+                )
+            return await orig_mark_sent(connection, mw, resend_queue)
+
+        monkeypatch.setattr(persistent.SentLog, "mark_sent", flaky_mark_sent)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, draining,
+        )
+        # The ACK was not consumed: MW and no SentLog yet, and the stream
+        # is handed back so the drain loop's next pass retries.
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            assert (await sess.exec(select(persistent.SentLog))).all() == []
+        assert setup["bacap_stream"] not in draining
+        # A fresh pass (unpatched) finalizes the ACK.
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, set(),
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            assert len((await sess.exec(select(persistent.SentLog))).all()) == 1
 
     @pytest.mark.asyncio
     async def test_conv_id_propagates_when_pwal_has_convlog(self, fake_thinclient):
@@ -430,6 +470,62 @@ class TestDrainMixwalReadSingle:
             rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
             assert rcw.next_index == setup["rcr"].next_message_box_index
         assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_transient_sqlite_busy_on_read_commit_is_retried(
+        self, fake_thinclient, monkeypatch,
+    ):
+        from sqlalchemy.exc import OperationalError
+        from sqlmodel.ext.asyncio.session import AsyncSession
+
+        payload = _make_F_payload("retry me")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        orig_commit = AsyncSession.commit
+        fail = {"armed": True}
+
+        async def flaky_commit(self):
+            if fail["armed"]:
+                fail["armed"] = False
+                raise OperationalError(
+                    "INSERT", {}, Exception("database is locked"),
+                )
+            return await orig_commit(self)
+
+        monkeypatch.setattr(AsyncSession, "commit", flaky_commit)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=draining,
+        )
+        # The failed transaction rolled back wholesale: no MW deletion, no
+        # index advance, no log row, no stray piece — and the stream is
+        # released rather than stranded in draining_right_now.
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.next_index == setup["first_message_index"]
+            assert (await sess.exec(select(persistent.ReceivedPiece))).all() == []
+            assert (await sess.exec(select(persistent.ConversationLog))).all() == []
+        assert setup["bacap_stream"] not in draining
+        # A later pass (unpatched) commits the message normally.
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=set(),
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert len(log) == 1 and log[0].payload == payload
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.next_index == setup["rcr"].next_message_box_index
 
     @pytest.mark.asyncio
     async def test_single_box_file_upload_spills_to_disk(self, fake_thinclient):
