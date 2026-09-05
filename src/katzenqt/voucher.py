@@ -363,29 +363,30 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
             display_name=display_name, read_cap=read_cap,
         ),
     )
-    async with persistent.asession() as sess:
-        conv = await sess.get(persistent.Conversation, conversation_id)
-        send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
-        new_write_caps, db_entries = send_op.serialize(
-            chunk_size=1530, conversation_id=conversation_id,
-        )
-        final_pwal_id = db_entries[-1].id
-        for cap_uuid in new_write_caps:
-            sess.add(persistent.WriteCapWAL(id=cap_uuid))
-        for obj in db_entries:
-            sess.add(obj)
-        sess.add(persistent.ConversationLog(
-            conversation_id=conversation_id,
-            conversation_peer_id=conv.own_peer_id,
-            conversation_order=select(persistent.count())
-            .select_from(persistent.ConversationLog)
-            .where(persistent.ConversationLog.conversation_id == conversation_id)
-            .scalar_subquery(),
-            payload=b"F" + gcm.to_cbor(),
-            network_status=1,
-            outgoing_pwal=final_pwal_id,
-        ))
-        await sess.commit()
+    with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            conv = await sess.get(persistent.Conversation, conversation_id)
+            send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
+            new_write_caps, db_entries = send_op.serialize(
+                chunk_size=1530, conversation_id=conversation_id,
+            )
+            final_pwal_id = db_entries[-1].id
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            sess.add(persistent.ConversationLog(
+                conversation_id=conversation_id,
+                conversation_peer_id=conv.own_peer_id,
+                conversation_order=select(persistent.count())
+                .select_from(persistent.ConversationLog)
+                .where(persistent.ConversationLog.conversation_id == conversation_id)
+                .scalar_subquery(),
+                payload=b"F" + gcm.to_cbor(),
+                network_status=1,
+                outgoing_pwal=final_pwal_id,
+            ))
+            await sess.commit()
 
     # The UI's ConversationLogModel maps index_row 1:1 to conversation_order
     # and grows row_count by one per `False` event. Every other path that

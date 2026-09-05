@@ -7,12 +7,13 @@ layer that the GUI relies on to prevent that.
 """
 from __future__ import annotations
 
+import threading
 import uuid
 
 import pytest
 
 from katzenqt import network, persistent, voucher
-from sqlmodel import select
+from sqlmodel import Session, select
 
 
 async def _make_conversation(name: str = "demo", own: str = "me") -> int:
@@ -188,3 +189,70 @@ async def test_intro_announcement_emits_increment(monkeypatch):
     assert rows[0].conversation_peer_id == conv.own_peer_id
     assert rows[0].conversation_order == 0
     assert rows[0].payload.startswith(b"F")
+
+
+def _append_log_row_sync(
+    conversation_id: int, tag: bytes, start_barrier: threading.Barrier,
+) -> int:
+    """Append one ConversationLog row the way a GUI send does (order via a
+    count subquery at commit), inside the per-conversation writer lock, from
+    a worker thread. Mirrors the Qt send loop contending with the io thread's
+    receive/voucher appends."""
+    start_barrier.wait()
+    with Session(persistent._engine_sync) as sess:
+        with persistent.conversation_log_order_lock(conversation_id):
+            order = sess.exec(
+                select(persistent.count())
+                .select_from(persistent.ConversationLog)
+                .where(persistent.ConversationLog.conversation_id == conversation_id)
+            ).first()
+            conv = sess.get(persistent.Conversation, conversation_id)
+            sess.add(persistent.ConversationLog(
+                conversation_id=conversation_id,
+                conversation_peer_id=conv.own_peer_id,
+                conversation_order=order,
+                payload=b"F" + tag,
+            ))
+            sess.commit()
+            return order
+
+
+@pytest.mark.asyncio
+async def test_concurrent_append_orders_are_unique():
+    """Two threads appending to the same conversation must never stamp the
+    same conversation_order.
+
+    conversation_order is a count() subquery evaluated by each transaction at
+    INSERT time, and GUI sends run on the Qt event loop while receive/voucher
+    rows are appended on the io loop. Without the per-conversation writer lock
+    both transactions can read the same count and trip
+    UniqueConstraint(conversation_id, conversation_order), dropping a message
+    (or failing an induction that already succeeded on the wire).
+    """
+    conversation_id = await _make_conversation()
+    n_threads = 2
+    per_thread = 10
+    start = threading.Barrier(n_threads)
+    seen: list[list[int]] = [[] for _ in range(n_threads)]
+    failures: list[Exception] = []
+
+    def runner(thread_idx: int) -> None:
+        try:
+            for i in range(per_thread):
+                seen[thread_idx].append(_append_log_row_sync(
+                    conversation_id, f"{thread_idx}.{i}".encode(), start,
+                ))
+        except Exception as e:  # noqa: BLE001 - surface any append error
+            failures.append(e)
+
+    threads = [
+        threading.Thread(target=runner, args=(i,)) for i in range(n_threads)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not failures, failures
+    orders = sorted(o for bucket in seen for o in bucket)
+    assert orders == list(range(n_threads * per_thread))
