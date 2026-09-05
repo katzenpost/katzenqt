@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 from katzenqt import network, persistent, voucher
+from sqlmodel import select
 
 
 async def _make_conversation(name: str = "demo", own: str = "me") -> int:
@@ -146,3 +147,44 @@ async def test_resume_picks_awaiting_joiner_only():
 async def test_resume_empty_when_no_join_in_flight():
     await _make_conversation()
     assert await voucher.pending_joiner_join_conversation_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_intro_announcement_emits_increment(monkeypatch):
+    """The sender's own 'alice added bob' row must signal the UI tally.
+
+    ConversationLogModel grows ``row_count`` by one per ``False`` update
+    event and fetches rows by ``conversation_order == index_row``. Every
+    other path that appends a ConversationLog row emits the event; the own
+    announcement row was the only one that didn't, leaving the sender's view
+    permanently short by one message per announcement.
+    """
+    conversation_id = await _make_conversation()
+
+    async def _noop():
+        return None
+
+    monkeypatch.setattr(voucher, "check_for_new", _noop)
+    monkeypatch.setattr(voucher, "_wait_intro_acked", lambda *a, **k: _noop())
+
+    while not network.conversation_update_queue.empty():
+        network.conversation_update_queue.get_nowait()
+
+    await voucher.send_introduction_message(conversation_id, "bob", b"\x02" * 136)
+
+    events = []
+    while not network.conversation_update_queue.empty():
+        events.append(network.conversation_update_queue.get_nowait())
+    assert events == [(conversation_id, False)]
+
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        rows = (await sess.exec(
+            select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == conversation_id,
+            )
+        )).all()
+    assert len(rows) == 1
+    assert rows[0].conversation_peer_id == conv.own_peer_id
+    assert rows[0].conversation_order == 0
+    assert rows[0].payload.startswith(b"F")
