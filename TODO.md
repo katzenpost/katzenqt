@@ -1,6 +1,6 @@
 # TODO
 
-## fix-daemon-keepalive follow-ups
+## deckard-wip follow-ups
 
 - [x] **Run the docker integration suite against the live mixnet and fix any
       regressions.** DONE 2026-09-05 against the running mixnet with the patched
@@ -42,6 +42,39 @@
       build/venv resolves the git-branch pin (or still installs PyPI 0.0.23)
       has not been checked; verify after the container is next rebuilt so the
       GUI actually benefits from the fix.
+
+## Future work (carried over from prior fix branches)
+
+- [ ] **SQLite engine hygiene.** `src/katzenqt/persistent.py:89-90` still uses
+      `echo=True` (SQL echoed to stdout — noisy, slows the hot path) and
+      `pool_size=1000` on both the async engine
+      (`create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)`)
+      and the sync engine. Nip both down: drop `echo=True`, shrink the pool to
+      something sane (single-connection aiosqlite needs no pool at all). Verify
+      the unit suite stays green after.
+
+- [ ] **`conversation_log_order_lock` is a `threading.Lock` held across
+      `await`s on the io loop — latent same-thread deadlock.**
+      `src/katzenqt/persistent.py:40-52` keys a `threading.Lock` per
+      conversation id. Two io-loop coroutines contending for the same
+      conversation's lock would deadlock the whole loop: the second one blocks
+      the thread in `Lock.acquire()` while the first can never resume — this is
+      real today, not merely latent, because the receive/completion path spans
+      awaits while holding it (`src/katzenqt/network.py:466` , with `await`s at
+      lines 484, 488, 491, 498, 500) and so does the voucher close path
+      (`src/katzenqt/voucher.py:366`). If/when two coroutines ever contend for
+      one conversation (e.g. a message arriving mid-commit), the loop freezes.
+      Convert to `asyncio.Lock` (keyed per conversation, kept in the same
+      guard-protected dict) and re-run the unit suite; the GUI-side use at
+      `src/katzenqt/katzen.py:496` (sync context) must be reconciled.
+
+- [ ] **Daemon read ride-out epoch staleness (separate bug).** The queued-read
+      fallback in `_read_box` goes stale across PKI epochs:
+      `src/katzenqt/voucher.py:147` has `TODO(workaround) — the daemon read
+      ride-out goes stale across PKI epochs`, and `DRAFT.md` tracks it as "Join
+      stall under long waits". Symptom: after an epoch rollover, a pending
+      read/join can stall instead of riding out. Needs its own repro and fix,
+      independent of the thinclient reconnect work.
 
 ## kpclientd port discovery (dependencies)
 
