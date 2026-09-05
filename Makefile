@@ -269,7 +269,15 @@ katzenpost-update: $(KATZENPOST_DIR)
 	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
 	@rm -f $(KPCLIENTD_BIN)
 
-$(KPCLIENTD_BIN): | $(KATZENPOST_DIR)
+.PHONY: FORCE
+FORCE:
+
+.kpclientd-build-revision: FORCE | $(KATZENPOST_DIR)
+	@test "$$(git -C $(KATZENPOST_DIR) rev-parse HEAD)" = "$(KATZENPOST_REV)" || { printf '%s\n' 'error: daemon checkout differs from the pin; run make katzenpost-update'; exit 1; }
+	@test -z "$$(git -C $(KATZENPOST_DIR) status --porcelain)" || { printf '%s\n' 'error: daemon checkout is dirty'; exit 1; }
+	@if [[ ! -f "$@" ]] || [[ "$$(cat "$@")" != "$(KATZENPOST_REV)" ]]; then printf '%s\n' "$(KATZENPOST_REV)" > "$@"; fi
+
+$(KPCLIENTD_BIN): .kpclientd-build-revision | $(KATZENPOST_DIR)
 	@test -z "$$(git -C $(KATZENPOST_DIR) status --porcelain)" || { printf '%s\n' 'error: katzenpost checkout is dirty; run make katzenpost-update'; exit 1; }
 	@set +e; \
 	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v ) ; \

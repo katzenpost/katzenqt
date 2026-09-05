@@ -17,6 +17,7 @@ import secrets
 import random
 import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
+from collections.abc import Callable
 import asyncio
 import traceback
 import uuid
@@ -132,20 +133,30 @@ def _is_transient_sqlite_busy(exc: OperationalError) -> bool:
     stay loud instead of retrying forever."""
     return "database is locked" in str(exc.orig).lower()
 
-__status_listeners: "list" = []
+__status_listeners: list[Callable[[bool], None]] = []
 
 
 def mixnet_connected() -> bool:
     return __mixnet_connected.is_set()
 
 
-def add_status_listener(callback) -> None:
+def add_status_listener(callback: Callable[[bool], None]) -> None:
+    """Subscribe to daemon connection status updates."""
     __status_listeners.append(callback)
 
 
+def remove_status_listener(callback: Callable[[bool], None]) -> None:
+    """Remove a subscription if it is still registered."""
+    if callback in __status_listeners:
+        __status_listeners.remove(callback)
+
+
 def _notify_status(connected: bool) -> None:
-    for callback in __status_listeners:
-        callback(connected)
+    for callback in tuple(__status_listeners):
+        try:
+            callback(connected)
+        except Exception:
+            logger.exception("connection status listener failed")
 
 __on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
 

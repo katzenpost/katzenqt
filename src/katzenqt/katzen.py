@@ -1041,9 +1041,14 @@ class MainWindow(QMainWindow):
         self.mixnet_status_label = QLabel()
         self.ui.statusbar.addPermanentWidget(self.mixnet_status_label)
         self.mixnet_status_changed.connect(self.render_mixnet_status)
-        network.add_status_listener(self.mixnet_status_changed.emit)
+        status_listener = self.mixnet_status_changed.emit
+        network.add_status_listener(status_listener)
+        self.destroyed.connect(
+            lambda *_: network.remove_status_listener(status_listener)
+        )
         self.render_mixnet_status(network.mixnet_connected())
 
+    @Slot(bool)
     def render_mixnet_status(self, connected: bool) -> None:
         text, color = mixnet_status_text(connected)
         self.mixnet_status_label.setText(text)
