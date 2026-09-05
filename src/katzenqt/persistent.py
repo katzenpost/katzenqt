@@ -800,6 +800,12 @@ class Conversation(SQLModel, table=True):
     #first_unread: uuid.UUID = Field(foreign_key="conversationlog.id", nullable=True, index=False, description="pointer to latest read ConversationLog entry")
     # to keep track of the read state "split buffer"
 
+    voucher_used: bool = Field(
+        default=False, nullable=False,
+        sa_column_kwargs={"server_default": sa.text("0")},
+        description="a Contact Voucher handshake completed successfully for this conversation",
+    )
+
 class ConversationLog(SQLModel, table=True):
     """CBOR messages in a conversation.
 

@@ -465,3 +465,42 @@ class TestAlreadyInductedGuard:
             b"\x05" * 136, b"\x06" * 136,
         ])
         assert sorted(peer.name for peer in peers) == ["alice", "bob"]
+
+
+async def _finish(conversation_id: int, pv_id: uuid.UUID) -> None:
+    """Drive the same completion step await_and_open/derive_read_and_induct run:
+    mark the conversation's voucher used and delete the pending row in one
+    commit."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        row = await sess.get(persistent.PendingVoucher, pv_id)
+        await voucher._finish_pending_voucher(sess, conv, row)
+        await sess.commit()
+
+
+@pytest.mark.asyncio
+async def test_fresh_conversation_voucher_not_used():
+    conv_id = await _make_conversation()
+    assert await voucher.voucher_used_for(conv_id) is False
+    assert await voucher.list_used_vouchers() == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_conversation_voucher_not_used():
+    assert await voucher.voucher_used_for(9999) is False
+
+
+@pytest.mark.asyncio
+async def test_pending_transitions_to_used_on_finish():
+    conv_id = await _make_conversation()
+    other_id = await _make_conversation(name="other")
+    pv_id = await _add_pending(conv_id)
+
+    assert await voucher.voucher_used_for(conv_id) is False
+    await _finish(conv_id, pv_id)
+
+    assert await voucher.pending_voucher_for(conv_id) is None
+    assert await voucher.voucher_used_for(conv_id) is True
+    assert (conv_id, "demo") in await voucher.list_used_vouchers()
+
+    assert await voucher.voucher_used_for(other_id) is False
