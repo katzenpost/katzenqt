@@ -54,7 +54,8 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
         if own_cap != intro.read_cap and not await _already_has(sess, conv.id, intro):
             from .voucher import _add_peer
             _add_peer(sess, conv, intro.display_name, intro.read_cap)
-            from .network import readables_to_mixwal_event
+            from .network import peer_added_queue, readables_to_mixwal_event
+            peer_added_queue.put_nowait((conv.id, intro.display_name))
             readables_to_mixwal_event.set()
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
     return True, False

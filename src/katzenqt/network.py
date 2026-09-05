@@ -34,6 +34,11 @@ logger = logging.getLogger("katzen.network")
 
 conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
 
+# Peers the local client learned of via an INTRODUCTION announcement, as
+# ``(conversation_id, display_name)``. Announced on the io loop by the receive
+# path; the GUI appends the name to the contacts tree in its own listener.
+peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
+
 __resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
 

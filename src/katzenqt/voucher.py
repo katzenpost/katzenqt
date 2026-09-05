@@ -102,6 +102,25 @@ async def cancel_pending_voucher(pending_id) -> None:
             await sess.commit()
 
 
+async def pending_joiner_join_conversation_ids() -> "list[int]":
+    """Conversation ids whose joiner handshake a restart should resume.
+
+    The joiner is net-promised a reply on the rendezvous stream only after the
+    inductor acts, which may be after a crash/relaunch (or the reply may arrive
+    while the app is down). Such vouchers are stuck in the DB precisely so a
+    restart can pick them back up. ``awaiting`` is the only step with a persisted
+    box-1 index we can poll yet; ``minted`` lacks it and is abandoned (the minted
+    box 0 would duplicate if re-run)."""
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(
+            select(persistent.PendingVoucher).where(
+                persistent.PendingVoucher.role == "joiner",
+                persistent.PendingVoucher.step == STEP_AWAITING,
+            )
+        )).all()
+        return [r.conversation_id for r in rows]
+
+
 async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, payload: bytes) -> bytes:
     """Write payload to one box and return the next box index."""
     wcr = await connection.encrypt_write(
@@ -252,7 +271,12 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
     """Joiner: poll VoucherStream box 1 for the inductor's reply, open it, move
     this conversation's write cap onto the salt-mutated sequence, and add the
     members named in the reply as peers. Returns the display names added, so a
-    caller (the GUI) can reflect them without re-querying."""
+    caller (the GUI) can reflect them without re-querying.
+
+    The poll only needs the persisted box-1 index, so a fresh connection (e.g.
+    after a restart, or on the very first ``voucher-await``) resumes an
+    unfinished handshake from its current point; see
+    ``pending_joiner_join_conversation_ids``."""
     async with persistent.asession() as sess:
         pv = (await sess.exec(
             select(persistent.PendingVoucher).where(

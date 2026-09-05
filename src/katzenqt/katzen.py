@@ -41,10 +41,11 @@ from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
 from base64 import b64decode, b64encode
+from katzenpost_thinclient import ThinClientOfflineError
 from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
-                     pending_voucher_for)
+                     pending_joiner_join_conversation_ids, pending_voucher_for)
 from .katzen_util import create_task
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
@@ -561,6 +562,28 @@ class MainWindow(QMainWindow):
                 # self.app.beep()
             self.systray.has_new_messages() # TODO move this into block above
 
+    async def peer_added_listener(self):
+        """Append members announced via INTRODUCTION to the contacts tree in
+        real time. The receive path persists the peer but stays Qt-free; this
+        listener turns that into a visible row (deduplicated by name), so a
+        joining member shows up on every live client's contact list without a
+        restart."""
+        while True:
+            (conversation_id, name) = await self.iothread.run_in_io(network.peer_added_queue.get())
+            while conversation_id not in self.conversation_state_by_id:
+                logger.debug(f"peer_added for conversation {conversation_id} before UI loaded; waiting")
+                await asyncio.sleep(1)
+            convo_state = self.conversation_state_by_id[conversation_id]
+            item = convo_state.contacts_standard_item
+            already = any(
+                row is not None and row.text() == name
+                for row in (item.child(r) for r in range(item.rowCount()))
+            )
+            if already:
+                continue
+            item.appendRow(QStandardItem(name))
+            logger.debug("added announced contact %r to conversation %d", name, conversation_id)
+
     def convo_state(self) -> ConversationUIState:
         convo = self.convo_state_or_none()
         if convo is None:
@@ -929,10 +952,14 @@ class MainWindow(QMainWindow):
         ensure_future(self._await_voucher_join(convo))
 
     async def _await_voucher_join(self, convo):
+        # A fresh GUI start may still be dialling the daemon on the io thread
+        # (kp_client only becomes set once reconnect() returns), and transient
+        # daemon dropouts mid-wait ride out the _read_box rounds in voucher.py.
+        # Wait for the connection to exist, then retry short-lived failures a
+        # few times with backoff before surfacing an error, so a restart
+        # reliably resumes a pending join.
         try:
-            added = await self.iothread.run_in_io(
-                await_and_open(self.iothread.kp_client, convo.conversation_id)
-            )
+            added = await self._wait_and_open_with_retries(convo.conversation_id)
         except Exception as e:
             logging.warning("voucher await failed: %s", e)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
@@ -946,6 +973,20 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: QMessageBox.information(
             self, f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
+
+    async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
+        for attempt in range(5):
+            while self.iothread.kp_client is None:
+                await asyncio.sleep(1)
+            try:
+                return await self.iothread.run_in_io(
+                    await_and_open(self.iothread.kp_client, conversation_id)
+                )
+            except (ThinClientOfflineError, ConnectionError, BrokenPipeError, OSError):
+                logging.warning("voucher join attempt %d failed (daemon transient); retrying", attempt + 1)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
+        raise ConnectionError("voucher join could not reach the daemon after retries")
 
     @async_cb
     async def induct_via_voucher(self):
@@ -1203,6 +1244,16 @@ async def main(window: MainWindow):
 
     window.show()
     create_task(window.receive_msg_listener())
+    create_task(window.peer_added_listener())
+
+    # Resume any joiner handshake a previous run left in flight: the inductor
+    # may reply over the rendezvous stream while this app is down, and the
+    # pending voucher rows persist exactly so a restart can pick them up again.
+    for conv_id in await pending_joiner_join_conversation_ids():
+        convo_state = window.conversation_state_by_id.get(conv_id)
+        if convo_state is not None:
+            logger.warning("resuming pending voucher join for conversation %d", conv_id)
+            create_task(window._await_voucher_join(convo_state))
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html

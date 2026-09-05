@@ -919,6 +919,78 @@ class TestDrainMixwal2:
             log = (await sess.exec(select(persistent.ConversationLog))).all()
             assert len(log) == 1
 
+    @pytest.mark.asyncio
+    async def test_introduction_adds_peer_and_emits_peer_added(self, fake_thinclient):
+        """Receiving an INTRODUCTION for a genuinely new member must both
+        persist the peer (so their stream gets read) and put a
+        (conversation_id, name) on ``peer_added_queue`` so the GUI can show
+        the newcomer on every live client without a restart."""
+        announced = models.GroupChatPleaseAdd(
+            display_name="carol", read_cap=b"\xaa" * 136,
+        )
+        intro = models.GroupChatMessage(
+            version=0, membership_hash=b"X" * 32,
+            msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+            introduction=announced,
+        )
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=b"F" + intro.to_cbor(),
+        )
+        # Drain the queue of anything a previous test left behind (the
+        # module-level queue is shared across the suite).
+        queue = network.peer_added_queue
+        while not queue.empty():
+            queue.get_nowait()
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            peers = (await sess.exec(select(persistent.ConversationPeer))).all()
+            names = {p.name for p in peers}
+            assert "carol" in names
+            for peer in peers:
+                if peer.name == "carol":
+                    assert peer.active is True
+        assert not queue.empty()
+        conv_id, name = queue.get_nowait()
+        assert (conv_id, name) == (setup["conversation_id"], "carol")
+
+    @pytest.mark.asyncio
+    async def test_introduction_own_announcement_does_not_emit(self, fake_thinclient):
+        """An INTRODUCTION about ourselves (own salt-mutated read cap) is
+        stored as history but must not add a peer or emit a peer_added event."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        own_cap = setup["write_cap"][32:]
+        intro = models.GroupChatMessage(
+            version=0, membership_hash=b"X" * 32,
+            msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+            introduction=models.GroupChatPleaseAdd(
+                display_name="self", read_cap=own_cap,
+            ),
+        )
+        queue = network.peer_added_queue
+        while not queue.empty():
+            queue.get_nowait()
+        # Place the announcement in the box we are about to read.
+        fake_thinclient.pre_store(
+            write_cap=setup["write_cap"],
+            message_box_index=setup["first_message_index"],
+            plaintext=b"F" + intro.to_cbor(),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            peers = (await sess.exec(select(persistent.ConversationPeer))).all()
+            assert [p.name for p in peers] == ["self"]
+        assert queue.empty()
+
 # ---------------------------------------------------------------------------
 # readables_to_mixwal
 # ---------------------------------------------------------------------------

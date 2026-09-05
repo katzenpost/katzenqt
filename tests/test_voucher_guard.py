@@ -108,3 +108,41 @@ async def test_pending_lookup_list_and_cancel():
     assert any(row[0] == pv_id for row in await voucher.list_pending_vouchers())
     await voucher.cancel_pending_voucher(pv_id)
     assert await voucher.pending_voucher_for(conv_id) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_picks_awaiting_joiner_only():
+    """A restart resumes precisely the joiner handshakes the DB can still
+    continue: ``awaiting`` ones (box-1 index persisted). A ``minted`` one has
+    no box-1 index yet (and its box 0 is already written, so re-minting would
+    duplicate it) and an ``inducting`` one is the *inductor*'s row, whose
+    joiner-side partner is someone else's problem."""
+    awaiting = await _make_conversation("awaiting")
+    minted = await _make_conversation("minted")
+    inducting = await _make_conversation("inducting")
+    done = await _make_conversation("done")
+    for conv_id in (awaiting, minted, done):
+        async with persistent.asession() as sess:
+            pv = persistent.PendingVoucher(
+                role="joiner", conversation_id=conv_id,
+                step="awaiting" if conv_id == awaiting else (
+                    "minted" if conv_id == minted else "done"
+                ),
+                voucher=b"v" * 32,
+                box1_index=b"\x00" * 104 if conv_id in (awaiting, done) else None,
+            )
+            sess.add(pv)
+            await sess.commit()
+    async with persistent.asession() as sess:
+        sess.add(persistent.PendingVoucher(
+            role="inductor", conversation_id=inducting,
+            step="inducting", voucher=b"w" * 32,
+        ))
+        await sess.commit()
+    assert await voucher.pending_joiner_join_conversation_ids() == [awaiting]
+
+
+@pytest.mark.asyncio
+async def test_resume_empty_when_no_join_in_flight():
+    await _make_conversation()
+    assert await voucher.pending_joiner_join_conversation_ids() == []
