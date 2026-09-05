@@ -21,7 +21,7 @@ dependencies = [
 "pycrdt~=0.13.1",
 # Keep in lockstep with the katzenpost daemon ref in
 # .github/workflows/test-integration-docker.yml.
-"katzenpost_thinclient==0.0.23"
+"katzenpost_thinclient @ git+https://github.com/katzenpost/thin_client.git@fix-unconditional-replay-keepalive"
 ]
 
 [dependency-groups]

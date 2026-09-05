@@ -3,9 +3,9 @@ revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15' and platform_python_implementation != 'PyPy'",
+    "python_full_version >= '3.15' and platform_python_implementation == 'PyPy'",
     "python_full_version == '3.14.*' and platform_python_implementation != 'PyPy'",
     "python_full_version < '3.14' and platform_python_implementation != 'PyPy'",
-    "python_full_version >= '3.15' and platform_python_implementation == 'PyPy'",
     "python_full_version < '3.15' and platform_python_implementation == 'PyPy'",
 ]
 
@@ -141,7 +141,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -448,17 +448,13 @@ wheels = [
 [[package]]
 name = "katzenpost-thinclient"
 version = "0.0.23"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/katzenpost/thin_client.git?rev=fix-unconditional-replay-keepalive#465b006caed0f3931fee520f493c7e546f7b209d" }
 dependencies = [
     { name = "asyncio" },
     { name = "cbor2" },
     { name = "coloredlogs" },
     { name = "pprintpp" },
     { name = "toml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/41/df3bae4138028b135b762d73c35a5ed26e0c99a425cbe9b54115ec25aebe/katzenpost_thinclient-0.0.23.tar.gz", hash = "sha256:2268a6f44afdedaf5e01309ea40d0da46af45873c16b812f2d11e0d274f13e7f", size = 143747, upload-time = "2026-07-08T12:40:38.327Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/45/d2/57eaa14e83364f91c1144ab95cd2038558392f011fada1f2e8eb50280a32/katzenpost_thinclient-0.0.23-py3-none-any.whl", hash = "sha256:c9c9aeab68c3fcdef15a46894e8d556dcdcbc7bcc70f29e8f7171fba38e0f176", size = 48555, upload-time = "2026-07-08T12:40:36.879Z" },
 ]
 
 [[package]]
@@ -494,7 +490,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = "~=0.21.0" },
     { name = "alembic", specifier = "~=1.16.5" },
     { name = "cbor2", specifier = "~=5.6.5" },
-    { name = "katzenpost-thinclient", specifier = "==0.0.23" },
+    { name = "katzenpost-thinclient", git = "https://github.com/katzenpost/thin_client.git?rev=fix-unconditional-replay-keepalive" },
     { name = "pycrdt", specifier = "~=0.13.1" },
     { name = "pydantic", specifier = "~=2.11.7" },
     { name = "pynacl", specifier = "==1.6.0" },
