@@ -144,14 +144,31 @@ async def _read_box(
 ) -> "tuple[bytes, bytes]":
     """Read one box, blocking until it exists, and return (plaintext, next index).
 
-    The daemon's default ride-out (``no_retry_on_box_id_not_found=False``) is a
-    single long-lived request that is meant to wait out an unwritten box, but a
-    wait lasting multiple PKI epochs goes stale and never reunites with a box
-    written minutes later (the GUI join stall: the joiner mints long before the
-    inductor replies). Each round here is therefore a *fresh* request with
-    ``no_retry_on_box_id_not_found=True``: a missing box errors out immediately,
-    we sleep a bounded gap (well under an epoch) and re-issue, so the wait
-    always speaks in the current epoch and replication state.
+    TODO(workaround) — the daemon read ride-out goes stale across PKI epochs.
+    ``start_resending_encrypted_message`` (no_retry_on_box_id_not_found=False)
+    retransmits a single *epoch-bound* envelope — the ciphertext/descriptor pair
+    built by one ``encrypt_read`` — with uncapped BoxIDNotFound retries, and never
+    re-encrypts it. As the network rolls PKI epochs (~60s), the courier replica
+    moves outside the envelope's tolerance window and rejects it (CourierInvalid-
+    EpochError: "replica epoch outside tolerance window"), but the ride-out swallows
+    the rejection into more retries on the same envelope, so the caller blocks
+    forever with no error. pigeonhole.py:60 documents the need to watch the PKI doc
+    and cancel+re-encrypt, so building a fresh envelope is conventionally the
+    *caller's* job — yet the ride-out gives the caller no signal it has gone stale.
+
+    The GUI join stall is this defect at minute scale: the joiner mints and polls
+    its box-1 reply long before the inductor reads box 0 and writes that reply, so
+    the wait spans several epochs and the box arrives at an index the stale read can
+    never collect (instrumented logs: the joiner polled across epochs 2436105 →
+    2436108, then a writer created that identical box — not an index mismatch).
+
+    Until the upstream fix lands (re-encrypt per epoch inside the ride-out, or
+    surface InvalidEpoch/CourierInvalidEpoch so clients can re-issue), each round
+    here is a *fresh* request with ``no_retry_on_box_id_not_found=True``: a missing
+    box errors out immediately, we sleep a bounded gap (well under an epoch,
+    _READ_RETRY_GAP_S) and re-issue, so the wait always speaks the current epoch and
+    replication state. When the upstream fix lands this loop collapses back to a
+    single ride-out call.
     """
     started = asyncio.get_event_loop().time()
     rounds = 0
