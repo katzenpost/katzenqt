@@ -2,7 +2,6 @@
 
 ## Next
 
-- [ ] 1. Add sqlite WAL + busy_timeout to both engines (persistent.py), with a pragma test
 - [ ] 2. Unwedge the write and read drain tasks on transient `OperationalError` (network.py), with drain tests
 - [ ] 3. Finish marking a message sent when its ACK arrives after the stream index advanced (persistent.py `mark_sent` stale-ACK path), with stale-ACK test
 

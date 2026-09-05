@@ -90,6 +90,27 @@ _engine = create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)
 _engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True, pool_size=1000)
 
 
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    """Enable WAL and a busy timeout on every pooled connection.
+
+    Without busy_timeout, any write that finds another writer holding the
+    sqlite write lock fails immediately with ``database is locked``; the
+    GUI send and io receive threads contend on the same file, so a burst
+    wedges whatever drain task happened to be committing. WAL keeps readers
+    out of the writers' way, and the timeout turns the rest into waits
+    instead of errors. WAL is file-persistent; busy_timeout is per
+    connection, hence the connect event rather than engine-level setup.
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=60000")
+    cursor.close()
+
+
+sa.event.listens_for(_engine.sync_engine, "connect")(_set_sqlite_pragmas)
+sa.event.listens_for(_engine_sync, "connect")(_set_sqlite_pragmas)
+
+
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
