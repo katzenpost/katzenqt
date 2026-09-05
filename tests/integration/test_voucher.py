@@ -40,7 +40,9 @@ _CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
 def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
-    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
+    # ``info`` inspects the state file only and accepts no connection flags.
+    conn_args = () if cli_args and cli_args[0] == "info" else _CONN_ARGS
+    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *conn_args]
     return subprocess.run(
         cmd, env=env, cwd=str(_REPO_ROOT),
         capture_output=True, text=True, timeout=timeout,

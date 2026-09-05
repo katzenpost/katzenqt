@@ -634,6 +634,7 @@ async def _action_read(args):
     try:
         await network.signal_readables_to_mixwal()
         deadline = asyncio.get_event_loop().time() + args.timeout_s
+        surfaced: set = set()
         while asyncio.get_event_loop().time() < deadline:
             async with persistent.asession() as sess:
                 rows = (await sess.exec(
@@ -652,6 +653,19 @@ async def _action_read(args):
                     try:
                         gcm = models.GroupChatMessage.from_cbor(cl.payload[1:])
                     except Exception:
+                        continue
+                    if (gcm.msg_type == models.GroupChatTypeEnum.INTRODUCTION
+                            and gcm.introduction is not None):
+                        # A membership announcement, e.g. "bob added carol".
+                        # Surface it once per row even when the caller is
+                        # waiting for a specific text message, then keep
+                        # polling for the text.
+                        if cl.id not in surfaced:
+                            surfaced.add(cl.id)
+                            logger.info(
+                                "RECV_ADD=%s added %s",
+                                cl.conversation_peer.name, gcm.introduction.display_name,
+                            )
                         continue
                     if not gcm.text:
                         continue
