@@ -2,14 +2,13 @@
 
 ## fix-daemon-keepalive follow-ups
 
-- [ ] **Run the docker integration suite against the live mixnet and fix any
-      regressions.** The branch is currently validated unit-only
-      (169 passed / 10 skipped). The integration tests are opt-in and need a
-      running mixnet plus a live kpclientd:
-      `KATZENQT_DOCKER_INTEGRATION=1 KATZENQT_KPCLIENTD_PORT=44977 uv run pytest
-      -x tests/integration/`. This is also where the patched thinclient gets
-      exercised end-to-end against a real daemon (restart / multi-send /
-      bidirectional scenarios).
+- [x] **Run the docker integration suite against the live mixnet and fix any
+      regressions.** DONE 2026-09-05 against the running mixnet with the patched
+      thinclient (git pin): 10/10 passed in 28:09 (file roundtrip, all four
+      restart scenarios, tally convergence, all four voucher scenarios);
+      command was `KATZENQT_DOCKER_INTEGRATION=1 KATZENQT_KPCLIENTD_PORT=44977
+      uv run pytest -x tests/integration/` (no `--no-sync` needed anymore —
+      venv is synced to the git-pinned thinclient).
 
 - [ ] **Re-test the original wedge scenario end-to-end against the patched
       client.** This session started from the GUI run where carol's
