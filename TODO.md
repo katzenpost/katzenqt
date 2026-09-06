@@ -36,12 +36,51 @@
          (one known-flaky `test_read_latency_after_continuous_peer_sends`
          m2-read-timeout on the first run, green in isolation and on the
          re-run). Unit suite 172 passed / 11 skipped; ruff no new findings.
-      Follow-ups worth a look (NOT part of this item): `network.on_error`
-      (`network.py:763`) re-raises the task exception from its done callback,
-      so asyncio prints a spurious "Exception in callback" traceback when a
-      resendable plaintext hits the dead link during a bounce — cosmetic but
-      noisy; and `test_read_latency_after_continuous_peer_sends` flaked 2x in
-      full-restart-suite context this session (always green in isolation).
+Follow-ups (now separate items below): `network.on_error` re-raise
+       noise; and the flaky `test_read_latency_after_continuous_peer_sends`.
+
+- [ ] **`network.on_error` re-raises in its done callback (noise).**
+      `on_error`/`on_error_done` (`src/katzenqt/network.py:759-772`) calls
+      `task.result()` and then `raise`s from inside the asyncio
+      done-callback. Nothing observes that raise — it only surfaces as
+      asyncio's "Exception in callback" traceback (seen in the kpclientd-
+      restart integration test's stderr when a resendable plaintext hit the
+      dead link during the bounce: `OSError: [Errno 9] Bad file descriptor`).
+      The sole usage (`network.py:837`, discard from `__resend_queue` on
+      failure so the plaintext is re-swept) needs the callback to fire, not
+      the raise. Plan: drop the `raise`, log the swallowed transient at
+      debug, keep `task.result()` consumption (avoids the "Task exception
+      was never retrieved" warning), fix the stale docstring (`on_error`
+      signature is `(task, func, *args, **kwargs)`), and add a unit test
+      that installs a stub `loop.set_exception_handler` and asserts the
+      handler is NOT invoked when a wrapped task fails. Validate: unit
+      suite, ruff, one live bounce run to confirm the role stderr stays
+      clean.
+
+- [ ] **Make `test_read_latency_after_continuous_peer_sends` reliable
+      (find out why it flakes).** Bob ACKs all 3 sends (courier accepted)
+      but alice's read never commits the LAST message (m2) within her read
+      deadline, and `STEP_POLL` row_count stays 2 for the whole window.
+      Reproduces only in full-restart-suite context under load — green
+      every isolated run. Diagnostic-first plan:
+      1. **Snapshot on failure**: read-only `sqlite3` dump of each role's
+         `<KQT_STATE>.sqlite3` (path built in `persistent.py:125-132`) from
+         the test's failure path — ConversationLog count, ReadCapWAL
+         `next_index`, leftover read-`MixWAL` rows, SentLog count,
+         PlaintextWAL rows. Prints consistently (also on success for
+         baseline).
+      2. **Reproduce**: loop the restart suite until failures are captured
+         (user approved spending hours). Classify:
+         (a) leftover read-`MixWAL` for m2 in alice's DB → read-drain
+         strand/dispatch bug (read tasks are fire-and-forget without a
+         give-up-on-crash callback, and `assert idx_new == idx_old + 1` at
+         `network.py:422` can still kill a read task);
+         (b) `ReadCapWAL.next_index` advanced past m2 → index-skip race;
+         (c) neither → mixnet-side nondelivery, flag evidence to the user
+         before masking with a harness workaround.
+      3. **Fix + validate**: mirror the write-fix conventions (deterministic
+         fake-based unit test first), then full unit suite, restart suite
+         x3 green, bounce test re-run green.
 
 - [ ] **thclient 0.0.24 release + pin migration.** The
       `fix-unconditional-replay-keepalive` branch is pushed to GitHub but not
