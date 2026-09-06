@@ -123,6 +123,9 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         """Release the stream so the drain loop can schedule it again."""
         draining_right_now.discard(mw.bacap_stream)
         # leave it in __resend_queue so we don't skip ahead in the stream.
+        # __mixwal_updated.set() makes the retry prompt instead of waiting
+        # the drain loop's 15s sweep.
+        __mixwal_updated.set()
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
     try:
@@ -577,6 +580,32 @@ async def _wait_for_connection_or_shutdown() -> bool:
     return __mixnet_connected.is_set() and not __should_quit.is_set()
 
 
+def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
+                   draining_right_now):
+    """Done-callback for the fire-and-forget write drains in drain_mixwal2.
+
+    The drain loop never awaits write_task, so an exception that escapes
+    drain_mixwal_write_single (anything that is not OperationalError — e.g. a
+    duplicate-ACK IntegrityError escaping mark_sent) would otherwise leave the
+    stream in draining_right_now forever, silently starving every MW on it.
+    Discard the stream (the MixWAL row survives, so get_new picks it up on the
+    next pass), keep the failure loud in the error logs rather than dead, and
+    poke __mixwal_updated so the retry is prompt.
+    """
+    if task.cancelled():
+        draining_right_now.discard(stream)
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "drain_mixwal_write_single crashed for bacap_stream=%s; "
+            "releasing stream for another drain pass",
+            stream, exc_info=exc,
+        )
+        draining_right_now.discard(stream)
+        __mixwal_updated.set()
+
+
 async def drain_mixwal2(connection: ThinClient):
     """Read from MixWAL and put the messages on the network."""
     """"Send messages to mixnet from MixWAL.
@@ -636,6 +665,8 @@ async def drain_mixwal2(connection: ThinClient):
             draining_right_now.add(mw.bacap_stream) # this is the uuid PK
             __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
             write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
+            write_task.add_done_callback(
+                lambda task, b=mw.bacap_stream: _on_write_done(task, b, draining_right_now))
 
 
 async def provision_read_caps(connection: ThinClient):
