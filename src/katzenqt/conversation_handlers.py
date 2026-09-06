@@ -51,6 +51,14 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
         conv = peer.conversation
         wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
         own_cap = wcw.write_cap[32:] if wcw is not None and wcw.write_cap is not None else None
+        if own_cap is None:
+            # Own write cap not provisioned yet (a background loop fills it
+            # in shortly after conversation creation); fall back to the
+            # unmutated read cap, same as _build_who_reply does for the
+            # symmetric case, so a self-announcement heard early isn't
+            # misclassified as a stranger and added as our own peer.
+            own_rcw = await sess.get(persistent.ReadCapWAL, conv.own_peer.read_cap_id)
+            own_cap = own_rcw.read_cap if own_rcw is not None else None
         if own_cap != intro.read_cap and not await _already_has(sess, conv.id, intro):
             from .voucher import _add_peer
             _add_peer(sess, conv, intro.display_name, intro.read_cap)
@@ -62,32 +70,33 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
 
 
 async def _already_has(sess, conv_id: int, intro: "GroupChatPleaseAdd") -> bool:
-    """True if the conversation already has a peer that this announcement
-    addresses: the same name (a duplicate under a different read cap) or the
-    same read cap (a re-announcement under a different name).
+    """True if the conversation already has a peer with this exact read cap.
 
-    Uses explicit queries rather than relationship traversal: the receive path
+    The read cap is the newcomer's unique cryptographic identity; matching
+    on it alone (rather than also treating a display_name match as "already
+    known") avoids silently and permanently hiding a genuinely distinct
+    member who happens to share a display name with someone already
+    present, including ourselves — there is no uniqueness enforced on
+    display names anywhere in the mint/induct flow.
+
+    Uses an explicit query rather than relationship traversal: the receive path
     runs in SQLAlchemy's async session, where touching a ``conv.peers`` lazy
     relationship raises ``MissingGreenlet``.
     """
-    rows = (await sess.exec(
-        select(persistent.ConversationPeer, persistent.ReadCapWAL)
+    read_caps = (await sess.exec(
+        select(persistent.ReadCapWAL.read_cap)
+        .join(
+            persistent.ConversationPeer,
+            persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id,
+        )
         .join(
             persistent.ConversationPeerLink,
             persistent.ConversationPeerLink.conversation_peer_id
             == persistent.ConversationPeer.id,
         )
-        .join(
-            persistent.ReadCapWAL,
-            persistent.ReadCapWAL.id == persistent.ConversationPeer.read_cap_id,
-        )
         .where(persistent.ConversationPeerLink.conversation_id == conv_id)
     )).all()
-    return any(
-        peer.name == intro.display_name
-        or (rcw is not None and rcw.read_cap == intro.read_cap)
-        for peer, rcw in rows
-    )
+    return intro.read_cap in read_caps
 
 
 async def _handle_tally(sess, peer, gcm, full_payload) -> "tuple[bool, bool]":
