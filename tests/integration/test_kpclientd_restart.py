@@ -4,7 +4,10 @@ comes back.
 
 Deterministic shape, no mid-flight race timing required:
 
-- Alice runs a long-lived chat-session that READs ``m1``.
+- Alice runs a long-lived chat-session that SLEEPs through the bounce and
+  then READs ``m1`` (the sleep decouples her read window from the reconnect
+  delay; the READ then has its full budget to observe the message that rode
+  out the outage).
 - Bob runs a chat-session with steps ``SEND:m0`` (baseline, proves the pair
   is connected and working), ``SLEEP:120``, ``SEND:m1``.
 - Once Bob's ``m0`` STEP_OK is observed, the test stops the kpclientd
@@ -152,7 +155,7 @@ def test_write_survives_kpclientd_restart(kpclientd_endpoint, tmp_path_factory):
     bob_err = log_dir / "bob.err"
 
     alice_proc = _spawn_role(
-        alice_state, "chat-session", "demo", "READ:m1",
+        alice_state, "chat-session", "demo", "SLEEP:300", "READ:m1",
         stdout_path=alice_out, stderr_path=alice_err,
     )
     # Bob proves the pair is connected and working (m0), then idles long
@@ -221,7 +224,7 @@ def test_write_survives_kpclientd_restart(kpclientd_endpoint, tmp_path_factory):
         f"bob's SEND:m1 did not complete (ARQ did not ride out the restart)\n"
         f"bob stderr:\n{bob_err.read_text()[-6000:]}"
     )
-    assert "STEP_OK:0:READ:m1" in alice_all, (
+    assert "STEP_OK:1:READ:m1" in alice_all, (
         f"alice never read m1 after the restart\n"
         f"alice stderr:\n{alice_err.read_text()[-6000:]}"
     )
