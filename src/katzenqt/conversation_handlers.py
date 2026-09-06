@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import models, persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
@@ -33,7 +34,9 @@ async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[in
     return await handler(sess, peer, gcm, full_payload)
 
 
-async def _conversation_peers(sess, conv_id):
+async def _conversation_peers(
+    sess: AsyncSession, conv_id: int
+) -> "list[persistent.ConversationPeer]":
     rows = (await sess.exec(
         select(persistent.ConversationPeer)
         .where(
@@ -45,7 +48,9 @@ async def _conversation_peers(sess, conv_id):
     return list(rows)
 
 
-async def local_membership_hash(sess, conv) -> bytes:
+async def local_membership_hash(
+    sess: AsyncSession, conv: persistent.Conversation
+) -> bytes:
     """Our own view of the conversation membership as the canonical hash
     (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
     plus ourself as ``write_cap[32:]`` rather than the possibly stale own-peer
@@ -66,7 +71,20 @@ async def local_membership_hash(sess, conv) -> bytes:
     return models.canonical_membership_hash(caps)
 
 
-async def _verify_membership_advisory(sess, peer, gcm) -> None:
+async def membership_hash_for(conversation_id: int) -> bytes:
+    """Convenience for the send choke points: open a session (on the io loop,
+    reached via ``iothread.run_in_io`` -- never the Qt loop), load the
+    conversation, and return its current local membership hash."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        return await local_membership_hash(sess, conv)
+
+
+async def _verify_membership_advisory(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+) -> None:
     """Advisory membership check: a sender that computed a real hash and
     disagrees with our view is logged, never dropped. Every shipping client
     still sends a sentinel, so this does no work until a real hash appears."""
