@@ -29,56 +29,71 @@ logger = logging.getLogger("katzen.persistent")
 
 
 # conversation_order is assigned by a scalar subquery evaluated at INSERT time
-# (autoflush, right before COMMIT), and ConversationLog rows are appended from
-# two different threads: the Qt event loop for outbound sends, the io loop for
-# received and voucher rows. Without serialising the whole "count, insert,
-# commit" critical section per conversation, two in-flight inserts can read the
-# same count and trip UniqueConstraint(conversation_id, conversation_order),
-# silently dropping a message (or failing an induction that already succeeded
-# on the wire). These per-conversation writer locks make the assignment both
-# deterministic and, on SQLite, free of "database is locked" write collisions.
-__conversation_log_order_locks: dict[int, Lock] = {}
+# (autoflush, right before COMMIT). Every ConversationLog append site funnels
+# through the single writer coroutine on the io loop — the GUI send path hops
+# in via run_in_io (append_outbound_chat) and the receive/voucher paths already
+# run on the io loop — so these per-conversation asyncio.Locks are only ever
+# contended by coroutines on one loop. They serialise the "count, insert,
+# commit" critical section so two in-flight appends to the same conversation
+# cannot read the same count and trip UniqueConstraint(conversation_id,
+# conversation_order), silently dropping a message (or failing an induction
+# that already succeeded on the wire).
+__conversation_log_order_locks: dict[int, asyncio.Lock] = {}
 __conversation_log_order_locks_guard = Lock()
 
 
-class _ConversationLogOrderLock:
-    """Per-conversation writer lock usable from a coroutine or a plain thread.
-
-    The append sites that stamp ``conversation_order`` run on two different
-    event loops (the GUI/QtAsyncio loop for outbound sends, the io loop for
-    received and voucher rows), so the underlying primitive stays a real
-    cross-thread ``threading.Lock``. Coroutines acquire it via
-    ``asyncio.to_thread`` so a contended acquisition parks a worker thread
-    instead of blocking the caller's event loop; plain threads just take the
-    lock directly.
-    """
-
-    def __init__(self, lock: Lock) -> None:
-        self._lock = lock
-
-    def __enter__(self) -> None:
-        self._lock.acquire()
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._lock.release()
-
-    async def __aenter__(self) -> None:
-        await asyncio.to_thread(self._lock.acquire)
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        self._lock.release()
-
-
-def conversation_log_order_lock(conversation_id: int) -> _ConversationLogOrderLock:
-    """Hold the write lock for a conversation's log-append critical section.
+def conversation_log_order_lock(conversation_id: int) -> asyncio.Lock:
+    """Return the write lock for a conversation's log-append critical section.
 
     Use it around the ``sess.add(ConversationLog(...))`` .. ``sess.commit()``
-    window at every site that assigns ``conversation_order``. Works as either
-    ``with conversation_log_order_lock(...)`` or ``async with ...``.
+    window at every site that assigns ``conversation_order``:
+    ``async with conversation_log_order_lock(...)``. asyncio.Lock grants in
+    first-come-first-served order, so repeated same-conversation appends are
+    deterministic.
     """
     with __conversation_log_order_locks_guard:
-        lock = __conversation_log_order_locks.setdefault(conversation_id, Lock())
-    return _ConversationLogOrderLock(lock)
+        return __conversation_log_order_locks.setdefault(
+            conversation_id, asyncio.Lock())
+
+
+async def append_outbound_chat(
+    *,
+    conversation_id: int,
+    conversation_peer_id: int,
+    new_write_caps: list[uuid.UUID],
+    db_entries: list[SQLModel],
+    payload: bytes,
+    final_pwal_id: uuid.UUID | None = None,
+) -> None:
+    """Append one outbound chat message's WAL rows and its ConversationLog entry.
+
+    This is the GUI send path's writer: it ran inline on the QtAsyncio loop
+    until aiosqlite connections and the log lock were shared across two loops;
+    it now runs on the io loop (invoked via ``MainWindow.iothread.run_in_io``)
+    under the per-conversation writer lock, so the ``conversation_order``
+    count-subquery (evaluated at COMMIT) is stamped atomically with respect to
+    the receive/voucher appends.
+    """
+    async with conversation_log_order_lock(conversation_id):
+        async with asession() as sess:
+            for cap_uuid in new_write_caps:
+                sess.add(WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            sess.add(ConversationLog(
+                conversation_id=conversation_id,
+                conversation_peer_id=conversation_peer_id,
+                conversation_order=(
+                    select(count())
+                    .select_from(ConversationLog)
+                    .where(ConversationLog.conversation_id == conversation_id)
+                    .scalar_subquery()
+                ),
+                payload=payload,
+                network_status=1,
+                outgoing_pwal=final_pwal_id,
+            ))
+            await sess.commit()
 
 
 def _resolve_alembic_ini() -> Path:

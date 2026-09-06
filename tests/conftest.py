@@ -63,6 +63,11 @@ def _reset_network_module_state():
             setattr(network, name, asyncio.Event())
         getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
+        # Per-conversation log-order locks are asyncio.Locks, and the test
+        # session's conversation ids restart at 1 after each `_fresh_tables`
+        # wipe; drop them so a lock created on a previous test's (now dead)
+        # loop can never be handed to a later test.
+        persistent.__conversation_log_order_locks = {}
 
     restore()
     yield

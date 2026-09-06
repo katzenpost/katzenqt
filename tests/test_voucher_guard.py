@@ -7,13 +7,13 @@ layer that the GUI relies on to prevent that.
 """
 from __future__ import annotations
 
-import threading
+import asyncio
 import uuid
 
 import pytest
 
 from katzenqt import network, persistent, voucher
-from sqlmodel import Session, select
+from sqlmodel import select
 
 
 async def _make_conversation(name: str = "demo", own: str = "me") -> int:
@@ -191,68 +191,62 @@ async def test_intro_announcement_emits_increment(monkeypatch):
     assert rows[0].payload.startswith(b"F")
 
 
-def _append_log_row_sync(
-    conversation_id: int, tag: bytes, start_barrier: threading.Barrier,
+async def _append_log_row(
+    conversation_id: int, tag: bytes, start_barrier: asyncio.Barrier,
 ) -> int:
-    """Append one ConversationLog row the way a GUI send does (order via a
-    count subquery at commit), inside the per-conversation writer lock, from
-    a worker thread. Mirrors the Qt send loop contending with the io thread's
-    receive/voucher appends."""
-    start_barrier.wait()
-    with Session(persistent._engine_sync) as sess:
-        with persistent.conversation_log_order_lock(conversation_id):
-            order = sess.exec(
+    """Append one ConversationLog row the way a sender does, inside the
+    per-conversation writer lock, running as a coroutine on the io-loop side.
+    """
+    await start_barrier.wait()
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            order = (await sess.exec(
                 select(persistent.count())
                 .select_from(persistent.ConversationLog)
                 .where(persistent.ConversationLog.conversation_id == conversation_id)
-            ).first()
-            conv = sess.get(persistent.Conversation, conversation_id)
+            )).first()
+            conv = await sess.get(persistent.Conversation, conversation_id)
             sess.add(persistent.ConversationLog(
                 conversation_id=conversation_id,
                 conversation_peer_id=conv.own_peer_id,
                 conversation_order=order,
                 payload=b"F" + tag,
             ))
-            sess.commit()
+            await sess.commit()
             return order
 
 
 @pytest.mark.asyncio
 async def test_concurrent_append_orders_are_unique():
-    """Two threads appending to the same conversation must never stamp the
-    same conversation_order.
+    """Concurrent appends to the same conversation must never stamp the same
+    conversation_order.
 
     conversation_order is a count() subquery evaluated by each transaction at
-    INSERT time, and GUI sends run on the Qt event loop while receive/voucher
-    rows are appended on the io loop. Without the per-conversation writer lock
-    both transactions can read the same count and trip
-    UniqueConstraint(conversation_id, conversation_order), dropping a message
-    (or failing an induction that already succeeded on the wire).
+    INSERT time. All ConversationLog appends now funnel through the single
+    writer coroutine on the io loop (the GUI send path hops in via run_in_io),
+    and the per-conversation asyncio.Lock serialises the "count, insert,
+    commit" critical section; without it two appends can read the same count
+    and trip UniqueConstraint(conversation_id, conversation_order), dropping a
+    message (or failing an induction that already succeeded on the wire).
     """
     conversation_id = await _make_conversation()
-    n_threads = 2
-    per_thread = 10
-    start = threading.Barrier(n_threads)
-    seen: list[list[int]] = [[] for _ in range(n_threads)]
-    failures: list[Exception] = []
+    n_tasks = 4
+    per_task = 10
+    start = asyncio.Barrier(n_tasks)
+    seen: list[list[int]] = [[] for _ in range(n_tasks)]
 
-    def runner(thread_idx: int) -> None:
-        try:
-            for i in range(per_thread):
-                seen[thread_idx].append(_append_log_row_sync(
-                    conversation_id, f"{thread_idx}.{i}".encode(), start,
-                ))
-        except Exception as e:  # noqa: BLE001 - surface any append error
-            failures.append(e)
+    async def runner(task_idx: int) -> None:
+        for i in range(per_task):
+            seen[task_idx].append(await _append_log_row(
+                conversation_id, f"{task_idx}.{i}".encode(), start,
+            ))
 
-    threads = [
-        threading.Thread(target=runner, args=(i,)) for i in range(n_threads)
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
+    results = await asyncio.wait_for(
+        asyncio.gather(*(runner(i) for i in range(n_tasks)),
+                       return_exceptions=True),
+        timeout=30,
+    )
+    failures = [r for r in results if isinstance(r, BaseException)]
     assert not failures, failures
     orders = sorted(o for bucket in seen for o in bucket)
-    assert orders == list(range(n_threads * per_thread))
+    assert orders == list(range(n_tasks * per_task))

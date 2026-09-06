@@ -488,32 +488,22 @@ class MainWindow(QMainWindow):
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo_state.conversation_id)
 
-        # conversation_order is a count subquery evaluated at commit, and the
-        # receive/voucher paths append from the io thread concurrently with GUI
-        # sends here; the per-conversation writer lock serialises the append
-        # so two transactions can't stamp the same order and trip the unique
-        # constraint.
-        async with persistent.conversation_log_order_lock(convo_state.conversation_id):
-            async with persistent.asession() as sess:
-                for cap_uuid in new_write_caps:
-                    sess.add(persistent.WriteCapWAL(id=cap_uuid))
-                for obj in db_entries:
-                    sess.add(obj)
-                final_pwal_id = db_entries[-1].id  # relying on this being a plaintextwal is a little bit of an assumption about the internal of .serialize() ....
-
-                # Then we pretend that we have received it:
-                sess.add(persistent.ConversationLog(
-                    conversation_id=convo_state.conversation_id,
-                    conversation_peer_id=convo_state.own_peer_id,
-                    conversation_order=select(func.count())
-                    .select_from(persistent.ConversationLog)
-                    .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
-                    .scalar_subquery(),
-                    payload=b"F"+group_chat_message.to_cbor(), # TODO massive hack here because we don't reassemble sendops yet
-                    network_status=1,
-                    outgoing_pwal=final_pwal_id,
-                ))
-                await sess.commit()
+        # conversation_order is a count subquery evaluated at commit. The
+        # receive/voucher paths append on the io loop; the send path funnels
+        # its append through the same single writer loop (via run_in_io) under
+        # the per-conversation lock, so two transactions can never stamp the
+        # same order and trip the unique constraint.
+        await self.iothread.run_in_io(
+            persistent.append_outbound_chat(
+                conversation_id=convo_state.conversation_id,
+                conversation_peer_id=convo_state.own_peer_id,
+                new_write_caps=new_write_caps,
+                db_entries=db_entries,
+                payload=b"F" + group_chat_message.to_cbor(),
+                # TODO massive hack here because we don't reassemble sendops yet
+                final_pwal_id=db_entries[-1].id,
+            )
+        )
 
         # signal self.receive_msg_listener() that we have news for it:
         await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id,False)))
