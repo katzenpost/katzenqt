@@ -100,10 +100,11 @@ class TestHandleIntroductionSelfRecognition:
                     display_name="self", read_cap=own_read_cap,
                 ),
             )
-            added, _signal = await conversation_handlers._handle_introduction(
+            added, _signal, peer_added = await conversation_handlers._handle_introduction(
                 sess, own_peer, gcm, b"F" + gcm.to_cbor(),
             )
             assert added is True  # the message itself is still logged
+            assert peer_added is None  # no self-add happened
             links = (await sess.exec(
                 persistent.select(persistent.ConversationPeerLink).where(
                     persistent.ConversationPeerLink.conversation_id == conv_id
@@ -111,3 +112,25 @@ class TestHandleIntroductionSelfRecognition:
             )).all()
             # Still just the one (own) peer link: no self-add happened.
             assert len(links) == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_peer_added_for_the_caller_to_announce(self):
+        # peer_added must be returned (not fired as a notification here):
+        # the caller only announces it after its own commit succeeds, so a
+        # retried transaction can't duplicate the notification.
+        async with persistent.asession() as sess:
+            conv_id, own_peer_id, _own_rc = await _make_conversation(sess)
+            own_peer = await sess.get(persistent.ConversationPeer, own_peer_id)
+            newcomer_rc = _read_cap()
+            gcm = models.GroupChatMessage(
+                version=0, membership_hash=b"m" * 32,
+                msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+                introduction=models.GroupChatPleaseAdd(
+                    display_name="carol", read_cap=newcomer_rc,
+                ),
+            )
+            added, _signal, peer_added = await conversation_handlers._handle_introduction(
+                sess, own_peer, gcm, b"F" + gcm.to_cbor(),
+            )
+            assert added is True
+            assert peer_added == (conv_id, "carol")
