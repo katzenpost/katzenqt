@@ -413,8 +413,9 @@ class TestAlreadyInductedGuard:
         assert len(sent_announcements) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("reply_size", [32, 4000])
     async def test_await_and_open_rerun_does_not_duplicate_members(
-        self, monkeypatch,
+        self, monkeypatch, reply_size: int,
     ):
         conversation_id = await _make_conversation()
         await _add_pending(conversation_id)
@@ -424,8 +425,11 @@ class TestAlreadyInductedGuard:
             models.GroupChatPleaseAdd(display_name="bob", read_cap=b"\x06" * 136),
         ])
 
+        sealed = b"r" * reply_size
+        frames = iter(voucher._chunk_sealed_reply(sealed) * 2)
+
         async def fake_read_box(*_a, **_k):
-            return (b"sealed reply", b"\x00" * 104)
+            return (next(frames), b"\x00" * 104)
 
         monkeypatch.setattr(voucher, "_read_box", fake_read_box)
         monkeypatch.setattr(
@@ -438,6 +442,7 @@ class TestAlreadyInductedGuard:
 
         class Connection:
             async def voucher_open(self, *, voucher_secret_key, sealed_reply, message_write_cap):
+                assert sealed_reply == sealed
                 return Opened()
 
         conn = Connection()

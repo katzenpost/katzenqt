@@ -472,8 +472,8 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
             pv.id, pv.voucher_read_cap, pv.box1_index, pv.voucher_secret_key,
         )
 
-    sealed_reply, _ = await _read_box(
-        connection, voucher_read_cap, box1_index, stage="await_and_open(box1)",
+    sealed_reply = await _read_sealed_reply(
+        connection, voucher_read_cap, box1_index,
     )
     logger.debug(
         "await_and_open: received box1 sealed reply on voucher read_cap %s",
