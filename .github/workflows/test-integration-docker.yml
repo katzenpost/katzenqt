@@ -43,7 +43,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: d5a6349a34c4a2d4bca587f4be86ce92f2873b12 # v0.0.90: Pigeonhole docstring rewrites (lockstep with thin_client 0.0.23 CI)
+          ref: a25e9a7656b6c5a90c3551de39e37138c04c6faa # tip of main as of 2026-09-06
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
