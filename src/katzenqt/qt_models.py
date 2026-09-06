@@ -158,13 +158,12 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 elif role == 0:
                     if cl.payload.startswith(b'F'):                        
                         try:
-                            from .models import GroupChatMessage, GroupChatTypeEnum
+                            from .models import GroupChatMessage
                             cm = GroupChatMessage.from_cbor(cl.payload[1:])
-                            if (cm.msg_type == GroupChatTypeEnum.INTRODUCTION
-                                    and cm.introduction is not None):
+                            if intro := cm.as_introduction:
                                 return (
                                     f"{cl.conversation_peer.name} added "
-                                    f"{cm.introduction.display_name}"
+                                    f"{intro.display_name}"
                                 )
                             return cm.text
                         except Exception as e:

@@ -58,8 +58,7 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
     succeeded.
     """
     peer_added = None
-    intro = gcm.introduction
-    if intro is not None:
+    if intro := gcm.as_introduction:
         conv = peer.conversation
         wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
         own_cap = wcw.write_cap[32:] if wcw is not None and wcw.write_cap is not None else None

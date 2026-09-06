@@ -232,6 +232,16 @@ class GroupChatMessage(BaseModel):
     def _serialize_msg_type(self, value: GroupChatTypeEnum, _info):
         return value.value
 
+    @property
+    def as_introduction(self) -> "GroupChatPleaseAdd | None":
+        """The announcement payload if this is a well-formed INTRODUCTION
+        message, else None. Centralizes the (msg_type, introduction-present)
+        check otherwise duplicated across the row-rendering and headless
+        read-matching code paths."""
+        if self.msg_type == GroupChatTypeEnum.INTRODUCTION and self.introduction is not None:
+            return self.introduction
+        return None
+
     def to_cbor(self):
         """A group chat message consists of one CBOR messages potentially
         serialized over one or more BACAP boxes.

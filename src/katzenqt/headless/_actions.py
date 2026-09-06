@@ -693,8 +693,7 @@ async def _action_read(args):
                         gcm = models.GroupChatMessage.from_cbor(cl.payload[1:])
                     except Exception:
                         continue
-                    if (gcm.msg_type == models.GroupChatTypeEnum.INTRODUCTION
-                            and gcm.introduction is not None):
+                    if intro := gcm.as_introduction:
                         # A membership announcement, e.g. "bob added carol".
                         # Surface it once per row even when the caller is
                         # waiting for a specific text message, then keep
@@ -703,7 +702,7 @@ async def _action_read(args):
                             surfaced.add(cl.id)
                             logger.info(
                                 "RECV_ADD=%s added %s",
-                                cl.conversation_peer.name, gcm.introduction.display_name,
+                                cl.conversation_peer.name, intro.display_name,
                             )
                         continue
                     if not gcm.text:
