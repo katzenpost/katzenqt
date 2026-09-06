@@ -52,6 +52,9 @@ def _reset_network_module_state():
         "__should_quit",
         "__mixnet_connected",
         "__resend_queue_populated",
+        # _await_read_reply() waits on this while every drain is in flight,
+        # so it must be a fresh, unset Event per test just like the rest.
+        "_reconnect_event",
     )
 
     def restore() -> None:
@@ -72,6 +75,11 @@ def _reset_network_module_state():
         # which would then poll forever waiting for a release that will
         # never come.
         persistent.__conversation_log_order_locks = {}
+        # The reconnect-watchdog's module state must also start from "no
+        # prior connection report" each test: _reconnect_event is handled by
+        # the loop above; this is the flag that suppresses transition-only
+        # logging across tests.
+        setattr(network, "_last_connected", None)
 
     restore()
     yield

@@ -126,6 +126,9 @@ class TestOnConnectionStatus:
         # on_connection_status tracks the previous report so it can log
         # transitions only once; reset it so each test starts from "no
         # prior report" rather than leaking state from test run order.
+        # Redundant with conftest._reset_network_module_state (which now
+        # nulls _last_connected module-wide before every test); kept as
+        # harmless defence-in-depth.
         network._last_connected = None
         yield
         network._last_connected = None

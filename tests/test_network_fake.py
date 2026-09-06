@@ -627,6 +627,9 @@ class TestDrainMixwalReadSingle:
         # query_id whose original listener already gave up); the watchdog
         # should give up promptly after observing one, well before the
         # (much larger, and here never reached) flat backstop.
+        # Redundant with conftest._reset_network_module_state (which now
+        # nulls _last_connected before every test); kept defensively: it
+        # makes this test's precondition locally obvious.
         network._last_connected = None
         payload = _make_F_payload("hang then reconnect")
         setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
