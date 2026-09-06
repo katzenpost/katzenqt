@@ -72,6 +72,7 @@ async def _orders(conversation_id: int) -> list[int]:
     return sorted(rows)
 
 
+@pytest.mark.real_sleeps
 @pytest.mark.asyncio
 async def test_concurrent_appends_same_conversation_do_not_deadlock():
     conversation_id, peer_id = await _make_conversation()
