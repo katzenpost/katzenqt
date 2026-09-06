@@ -10,51 +10,38 @@
       uv run pytest -x tests/integration/` (no `--no-sync` needed anymore —
       venv is synced to the git-pinned thinclient).
 
-- [ ] **Re-test the original wedge scenario end-to-end against the patched
-      client.** This session started from the GUI run where carol's
-      doug-introduction write silently vanished (drain hung, no exception).
-      The sqlite wedge was proven self-healing headlessly, and the thinclient
-      fixes (unconditional in-flight replay + TCP keepalive/user-timeout)
-      address the lost-connection hang — but the exact pattern
-      (write into a dying kpclientd link; observe the ARQ ride out and the
-      message land) has not been replayed against the new client. The closest
-      proxy today is the integration restart tests.
-
-      Plan:
-      1. **Defensive fix in the drain loop** (read of `network.py` found the
-         wedge can still resurface when kpclientd dies mid-drain):
-         - `drain_mixwal_write_single` awaits
-           `connection.get_message_box_index_counter(...)` at `network.py:118`
-           BEFORE the offline try/except that calls `give_up()`; an
-           offline/broken-pipe raise there kills the fire-and-forget
-           `write_task` (`network.py:638`, never awaited/reaped) and strands
-           the stream in `draining_right_now` forever — the "silently
-           vanished write" again. Move the counter call inside the try so a
-           dying link hits `give_up()`.
-         - `drain_mixwal2` evaluates `logger.debug(...)` f-string args eagerly,
-           so the `await connection.get_message_box_index_counter(...)` at
-           `network.py:634` is a hidden network call in the loop body; an
-           offline raise there propagates out of `drain_mixwal2`, and
-           `drain_mixwal` (`:104-110`) catches it ONCE, logs critical, and
-           returns — permanently killing ALL draining for the process.
-           Make the counter log offline-safe.
-         - Attach a `done_callback` to `write_task` that releases
-           `draining_right_now` on exception/cancel (mirror the `on_error`
-           pattern at `network.py:818`) so a failed write is re-swept.
-      2. **Deterministic unit test** using `tests/fakes/thinclient.py`
-         (it already injects per-method `ThinClientOfflineError`): a dead
-         `get_message_box_index_counter`/`start_resending` must NOT kill the
-         drain loop, and the stream must be released for a later sweep.
-      3. **End-to-end integration test** `tests/integration/test_kpclientd_restart.py`
-         (self-contained, bounces the SHARED daemon so it must run serial,
-         not concurrently with the other integration files):
-         voucher-pair alice+bob; alice `chat-session` READs; `podman stop
-         mixnet-alpine-kpclientd-1`; wait for unreachable; bob `chat-session`
-         SEND:m1 (drain gate waits on `__mixnet_connected`, `network.py:602`);
-         `podman start`; poll reachable; assert bob SEND STEP_OK (SentLog
-         appears = ARQ rode out) and alice READ STEP_OK, both rc 0.
-      4. Validate: unit suite, ruff (125 baseline), bounce test green, restart
-         suite 4/4 re-run.
+- [x] **Re-test the original wedge scenario end-to-end against the patched
+      client.** DONE 2026-09-06.
+      The exact pattern (write into a dying kpclientd link; observe the ARQ
+      ride out and the message land) is now covered three ways:
+      1. **Defensive drain-loop fixes** (committed): `drain_mixwal_write_single`
+         probed `get_message_box_index_counter` before the offline try/except,
+         so a link drop mid-drain raised into the fire-and-forget `write_task`
+         and stranded the stream in `draining_right_now` forever (the
+         silently-vanished write); `drain_mixwal2` also awaited that counter
+         inside an eagerly-evaluated `logger.debug` f-string, so a single
+         offline raise escaped and `drain_mixwal`'s one-shot catch left ALL
+         draining dead. Both are offline-safe now, and `write_task` releases
+         the stream on exception/cancel (mirrors the resendable `on_error`
+         pattern).
+      2. **Unit tests** (`test_network_fake.py`): probe-offline is swallowed
+         with the MW left for the next pass, and `drain_mixwal2` survives the
+         injection and re-sweeps to a successful ACK.
+      3. **New integration test** `tests/integration/test_kpclientd_restart.py`
+         (serial-only; bounces the SHARED kpclientd): alice READ + bob
+         SEND:m0→SLEEP:120→SEND:m1; the container is stopped and held down past
+         the SLEEP so m1 is committed while the link is DOWN; after `start`,
+         bob's SentLog ACK (`STEP_OK:2:SEND:m1`) and alice's READ land.
+         Verified green on the docker mixnet (~6 min); restart suite re-run 4/4
+         (one known-flaky `test_read_latency_after_continuous_peer_sends`
+         m2-read-timeout on the first run, green in isolation and on the
+         re-run). Unit suite 172 passed / 11 skipped; ruff no new findings.
+      Follow-ups worth a look (NOT part of this item): `network.on_error`
+      (`network.py:763`) re-raises the task exception from its done callback,
+      so asyncio prints a spurious "Exception in callback" traceback when a
+      resendable plaintext hits the dead link during a bounce — cosmetic but
+      noisy; and `test_read_latency_after_continuous_peer_sends` flaked 2x in
+      full-restart-suite context this session (always green in isolation).
 
 - [ ] **thclient 0.0.24 release + pin migration.** The
       `fix-unconditional-replay-keepalive` branch is pushed to GitHub but not
