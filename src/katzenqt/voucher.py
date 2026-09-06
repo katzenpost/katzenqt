@@ -399,10 +399,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
             sess.add(persistent.ConversationLog(
                 conversation_id=conversation_id,
                 conversation_peer_id=conv.own_peer_id,
-                conversation_order=select(persistent.count())
-                .select_from(persistent.ConversationLog)
-                .where(persistent.ConversationLog.conversation_id == conversation_id)
-                .scalar_subquery(),
+                conversation_order=persistent.next_conversation_order(conversation_id),
                 payload=b"F" + gcm.to_cbor(),
                 network_status=1,
                 outgoing_pwal=final_pwal_id,

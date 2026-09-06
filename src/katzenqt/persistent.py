@@ -86,6 +86,19 @@ async def conversation_log_order_lock(conversation_id: int) -> AsyncIterator[Non
         lock.release()
 
 
+def next_conversation_order(conversation_id: int):
+    """Scalar subquery for the next ``conversation_order`` value: a live
+    COUNT evaluated at INSERT/COMMIT time. Shared by every ConversationLog
+    append site so a future change to how the order is derived only needs
+    to be made once."""
+    return (
+        select(count())
+        .select_from(ConversationLog)
+        .where(ConversationLog.conversation_id == conversation_id)
+        .scalar_subquery()
+    )
+
+
 async def append_outbound_chat(
     *,
     conversation_id: int,
@@ -112,12 +125,7 @@ async def append_outbound_chat(
             sess.add(ConversationLog(
                 conversation_id=conversation_id,
                 conversation_peer_id=conversation_peer_id,
-                conversation_order=(
-                    select(count())
-                    .select_from(ConversationLog)
-                    .where(ConversationLog.conversation_id == conversation_id)
-                    .scalar_subquery()
-                ),
+                conversation_order=next_conversation_order(conversation_id),
                 payload=payload,
                 network_status=1,
                 outgoing_pwal=final_pwal_id,
@@ -750,11 +758,7 @@ class ConversationLog(SQLModel, table=True):
             conversation_id=conversation_peer.conversation.id,
             conversation_peer=conversation_peer,
             payload=payload,
-            conversation_order=(
-                select(count())
-                .select_from(cls)
-                .where(cls.conversation_id == conversation_peer.conversation.id)
-                .scalar_subquery()),
+            conversation_order=next_conversation_order(conversation_peer.conversation.id),
         )
 
 
