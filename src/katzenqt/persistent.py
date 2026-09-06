@@ -8,14 +8,14 @@ import alembic.config
 import alembic.command
 import alembic.context
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, UniqueConstraint, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, AsyncIterator
 from .katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
@@ -40,18 +40,43 @@ logger = logging.getLogger("katzen.persistent")
 __conversation_log_order_locks: dict[int, Lock] = {}
 __conversation_log_order_locks_guard = Lock()
 
+# Poll interval for conversation_log_order_lock's non-blocking acquire loop.
+# Small relative to a human-paced chat send, so contention adds no
+# perceptible latency; large enough that an uncontended waiter isn't
+# spinning the loop needlessly.
+_CONVERSATION_LOG_ORDER_LOCK_POLL_S = 0.005
 
-@contextmanager
-def conversation_log_order_lock(conversation_id: int) -> Iterator[None]:
+
+@asynccontextmanager
+async def conversation_log_order_lock(conversation_id: int) -> AsyncIterator[None]:
     """Hold the write lock for a conversation's log-append critical section.
 
-    Use it around the ``sess.add(ConversationLog(...))`` .. ``sess.commit()``
-    window at every site that assigns ``conversation_order``.
+    Use it around the ``sess.add(ConversationLog(...))`` .. ``await
+    sess.commit()`` window at every site that assigns ``conversation_order``.
+
+    This has to be an async context manager, not a blocking one: two of the
+    three call sites run as asyncio tasks that can share an event loop with
+    another task appending to the *same* conversation (drain_mixwal2 fans
+    out one create_task() per readable MixWAL row with no await between
+    calls, so two peers of one conversation routinely land on the same
+    io-thread loop in the same pass). A blocking threading.Lock.acquire()
+    here would let one task's genuine await (e.g. sess.commit()) while
+    holding the lock stall a second task's acquire() call on the *same* OS
+    thread -- and a blocked acquire() never lets that thread's loop run the
+    first task's continuation, which is what would release the lock: a
+    permanent same-thread deadlock. Polling with a non-blocking acquire()
+    and sleeping between attempts keeps every wait cooperative, whether the
+    other holder is on this loop or, via the shared threading.Lock, a
+    different loop's thread entirely.
     """
     with __conversation_log_order_locks_guard:
         lock = __conversation_log_order_locks.setdefault(conversation_id, Lock())
-    with lock:
+    try:
+        while not lock.acquire(blocking=False):
+            await asyncio.sleep(_CONVERSATION_LOG_ORDER_LOCK_POLL_S)
         yield
+    finally:
+        lock.release()
 
 
 def _resolve_alembic_ini() -> Path:
