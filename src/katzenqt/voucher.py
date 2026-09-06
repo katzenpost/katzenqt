@@ -455,19 +455,11 @@ async def _wait_intro_acked(final_pwal_id, display_name: str, conversation_id: i
     Fire-and-forget: a timeout is logged, never raised, so the induction
     result stands even if the announcement never gets delivered.
     """
-    deadline = asyncio.get_event_loop().time() + 180.0
-    while asyncio.get_event_loop().time() < deadline:
-        async with persistent.asession() as sess:
-            hit = (await sess.exec(
-                select(persistent.SentLog).where(persistent.SentLog.id == final_pwal_id)
-            )).first()
-        if hit is not None:
-            return
-        await asyncio.sleep(0.25)
-    logger.error(
-        "introduction for %r not acked within 180s (conversation %d)",
-        display_name, conversation_id,
-    )
+    if not await persistent.wait_for_sent(final_pwal_id, deadline_s=180.0):
+        logger.error(
+            "introduction for %r not acked within 180s (conversation %d)",
+            display_name, conversation_id,
+        )
 
 
 async def derive_read_and_induct(connection, conversation_id: int, peer_name: str, voucher: bytes) -> str:

@@ -442,6 +442,26 @@ class SentLog(SQLModel, table=True):
         return conversation_id
 
 
+async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25) -> bool:
+    """Poll SentLog for ``pwal_id`` until it appears or ``deadline_s``
+    elapses. Returns True if acked in time, False on timeout.
+
+    Shared by every caller that needs to block until an outbound
+    plaintext's ACK lands (voucher.py's introduction wait, the headless
+    SEND step); each decides for itself what a timeout means (log and
+    move on, vs. fail the whole action)."""
+    deadline = asyncio.get_event_loop().time() + deadline_s
+    while asyncio.get_event_loop().time() < deadline:
+        async with asession() as sess:
+            hit = (await sess.exec(
+                select(SentLog).where(SentLog.id == pwal_id)
+            )).first()
+        if hit is not None:
+            return True
+        await asyncio.sleep(poll_s)
+    return False
+
+
 def _read_wcw_precheck(bacap_stream) -> "bytes | None":
     """Return wcw.next_index for the stream (worker-thread helper for mark_sent)."""
     with Session(_engine_sync) as sess:
