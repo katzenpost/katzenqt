@@ -138,3 +138,56 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
     assert recv_path.is_file(), f"reported path {recv_path} does not exist"
     assert _sha256(recv_path) == expected_sha
     print(f"[file] received in {time.monotonic()-t0:.1f}s -> {recv_path}")
+
+
+def _make_wav(path: Path, n_samples: int = 1_000) -> None:
+    import struct
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8_000)
+        w.writeframes(
+            b"".join(
+                struct.pack("<h", ((i * 137) % 4_000) - 2_000)
+                for i in range(n_samples)
+            )
+        )
+
+
+@pytest.mark.integration
+def test_audio_file_roundtrip(
+    kpclientd_endpoint: tuple[str, int], tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Round-trip a WAV attachment over the mixnet."""
+    alice_state = tmp_path_factory.mktemp("alice_audio") / "state"
+    bob_state = tmp_path_factory.mktemp("bob_audio") / "state"
+    src_dir = tmp_path_factory.mktemp("alice_audio_outbox")
+    dst_dir = tmp_path_factory.mktemp("bob_audio_inbox")
+
+    src = src_dir / "clip.wav"
+    _make_wav(src)
+    assert src.read_bytes()[:4] == b"RIFF"
+    assert src.stat().st_size > 2_000
+    expected_sha = _sha256(src)
+
+    _bootstrap_voucher(alice_state, bob_state)
+
+    send = _run_role(alice_state, "send-file", "demo", str(src), timeout=900.0)
+    assert send.returncode == 0 and "SENT" in _output(send), (
+        f"send-file failed:\nstdout:\n{send.stdout}\nstderr:\n{send.stderr}"
+    )
+
+    read = _run_role(
+        bob_state, "read-file", "demo",
+        "--to-dir", str(dst_dir), "--timeout", "600",
+        timeout=700.0,
+    )
+    assert read.returncode == 0, (
+        f"read-file failed:\nstderr tail:\n{read.stderr[-2000:]}"
+    )
+    recv_path = Path(_expect_token(read, "RECV_FILE="))
+    assert recv_path.is_file()
+    assert recv_path.read_bytes()[:4] == b"RIFF"
+    assert _sha256(recv_path) == expected_sha
