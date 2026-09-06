@@ -376,15 +376,20 @@ class TestDrainMixwalWriteSingle:
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         draining: set = {setup["bacap_stream"]}
+        mixwal_updated = getattr(network, "__mixwal_updated")
+        mixwal_updated.clear()
         await network.drain_mixwal_write_single(
             fake_thinclient, mw, draining,
         )
         # The ACK was not consumed: MW and no SentLog yet, and the stream
-        # is handed back so the drain loop's next pass retries.
+        # is handed back so the drain loop's next pass retries. give_up also
+        # pokes __mixwal_updated so the retry is prompt rather than waiting
+        # the drain loop's 15s sweep.
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
             assert (await sess.exec(select(persistent.SentLog))).all() == []
         assert setup["bacap_stream"] not in draining
+        assert mixwal_updated.is_set()
         # A fresh pass (unpatched) finalizes the ACK.
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
@@ -427,13 +432,68 @@ class TestDrainMixwalWriteSingle:
             # MW and PWAL reaped, SentLog row written, convlog flipped to sent.
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
             assert await sess.get(persistent.PlaintextWAL, setup["pwal_id"]) is None
-            sent = sess.get(persistent.SentLog, setup["pwal_id"])
+            sent = await sess.get(persistent.SentLog, setup["pwal_id"])
             assert sent is not None
             cl = (await sess.exec(select(persistent.ConversationLog))).one()
             assert cl.network_status == 2
             # The writer index must NOT be regressed.
             wcw = await sess.get(persistent.WriteCapWAL, setup["bacap_stream"])
             assert wcw.next_index == setup["wcr"].next_message_box_index
+
+    @pytest.mark.asyncio
+    async def test_duplicate_ack_is_idempotent(self, fake_thinclient):
+        """A duplicate ACK — SentLog row already written while the PWAL is
+        still present — must not wedge the drain: mark_sent reuses the row
+        instead of re-inserting it (no IntegrityError on the SentLog primary
+        key, which the branch's OperationalError-only handler would not
+        catch), and the drain still finalizes the stream."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        async with persistent.asession() as sess:
+            sess.add(persistent.SentLog(id=setup["pwal_id"]))
+            await sess.commit()
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, draining,
+        )
+        async with persistent.asession() as sess:
+            sent = (await sess.exec(select(persistent.SentLog))).all()
+            assert len(sent) == 1 and sent[0].id == setup["pwal_id"]
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            assert await sess.get(persistent.PlaintextWAL, setup["pwal_id"]) is None
+            wcw = await sess.get(persistent.WriteCapWAL, setup["bacap_stream"])
+            assert wcw.next_index == setup["wcr"].next_message_box_index
+        assert setup["bacap_stream"] not in draining
+
+    def test_write_done_callback_releases_stream_on_failure(self):
+        """The fire-and-forget write drain's done-callback must release a
+        stranded stream when the task dies with an exception (anything that
+        is not the swallowed OperationalError) and poke the drain loop so
+        the MixWAL is re-dispatched promptly."""
+
+        class _FailedTask:
+            def cancelled(self):
+                return False
+
+            def exception(self):
+                return RuntimeError("boom")
+
+        class _CancelledTask:
+            def cancelled(self):
+                return True
+
+            def exception(self):
+                return None
+
+        draining: set = {"stream-1", "stream-2"}
+        mixwal_updated = getattr(network, "__mixwal_updated")
+        mixwal_updated.clear()
+        network._on_write_done(_FailedTask(), "stream-1", draining)
+        assert "stream-1" not in draining
+        assert mixwal_updated.is_set()
+        network._on_write_done(_CancelledTask(), "stream-2", draining)
+        assert "stream-2" not in draining
 
     @pytest.mark.asyncio
     async def test_conv_id_propagates_when_pwal_has_convlog(self, fake_thinclient):

@@ -8,12 +8,13 @@ layer that the GUI relies on to prevent that.
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 
 import pytest
 
 from katzenqt import network, persistent, voucher
-from sqlmodel import select
+from sqlmodel import Session, select
 
 
 async def _make_conversation(name: str = "demo", own: str = "me") -> int:
@@ -191,62 +192,119 @@ async def test_intro_announcement_emits_increment(monkeypatch):
     assert rows[0].payload.startswith(b"F")
 
 
-async def _append_log_row(
-    conversation_id: int, tag: bytes, start_barrier: asyncio.Barrier,
-) -> int:
-    """Append one ConversationLog row the way a sender does, inside the
-    per-conversation writer lock, running as a coroutine on the io-loop side.
-    """
-    await start_barrier.wait()
-    async with persistent.conversation_log_order_lock(conversation_id):
-        async with persistent.asession() as sess:
-            order = (await sess.exec(
+async def _append_log_row_async(conversation_id: int, tag: bytes) -> int:
+    """Append one ConversationLog row the way a GUI send does (order via a
+    count subquery at commit), inside the per-conversation writer lock.
+    Mirrors the Qt send loop contending with the io thread's receive/voucher
+    appends -- one event loop per OS thread, as in production."""
+    with Session(persistent._engine_sync) as sess:
+        async with persistent.conversation_log_order_lock(conversation_id):
+            order = sess.exec(
                 select(persistent.count())
                 .select_from(persistent.ConversationLog)
                 .where(persistent.ConversationLog.conversation_id == conversation_id)
-            )).first()
-            conv = await sess.get(persistent.Conversation, conversation_id)
+            ).first()
+            conv = sess.get(persistent.Conversation, conversation_id)
             sess.add(persistent.ConversationLog(
                 conversation_id=conversation_id,
                 conversation_peer_id=conv.own_peer_id,
                 conversation_order=order,
                 payload=b"F" + tag,
             ))
-            await sess.commit()
+            sess.commit()
             return order
 
 
 @pytest.mark.asyncio
 async def test_concurrent_append_orders_are_unique():
-    """Concurrent appends to the same conversation must never stamp the same
+    """Two threads (each with its own event loop, as GUI vs. io really are)
+    appending to the same conversation must never stamp the same
     conversation_order.
 
     conversation_order is a count() subquery evaluated by each transaction at
-    INSERT time. All ConversationLog appends now funnel through the single
-    writer coroutine on the io loop (the GUI send path hops in via run_in_io),
-    and the per-conversation asyncio.Lock serialises the "count, insert,
-    commit" critical section; without it two appends can read the same count
-    and trip UniqueConstraint(conversation_id, conversation_order), dropping a
-    message (or failing an induction that already succeeded on the wire).
+    INSERT time, and GUI sends run on the Qt event loop while receive/voucher
+    rows are appended on the io loop. Without the per-conversation writer lock
+    both transactions can read the same count and trip
+    UniqueConstraint(conversation_id, conversation_order), dropping a message
+    (or failing an induction that already succeeded on the wire).
     """
     conversation_id = await _make_conversation()
-    n_tasks = 4
-    per_task = 10
-    start = asyncio.Barrier(n_tasks)
-    seen: list[list[int]] = [[] for _ in range(n_tasks)]
+    n_threads = 2
+    per_thread = 10
+    start = threading.Barrier(n_threads)
+    seen: list[list[int]] = [[] for _ in range(n_threads)]
+    failures: list[Exception] = []
 
-    async def runner(task_idx: int) -> None:
-        for i in range(per_task):
-            seen[task_idx].append(await _append_log_row(
-                conversation_id, f"{task_idx}.{i}".encode(), start,
-            ))
+    def runner(thread_idx: int) -> None:
+        async def body() -> None:
+            for i in range(per_thread):
+                start.wait()
+                seen[thread_idx].append(await _append_log_row_async(
+                    conversation_id, f"{thread_idx}.{i}".encode(),
+                ))
+        try:
+            asyncio.run(body())
+        except Exception as e:  # noqa: BLE001 - surface any append error
+            failures.append(e)
 
-    results = await asyncio.wait_for(
-        asyncio.gather(*(runner(i) for i in range(n_tasks)),
-                       return_exceptions=True),
-        timeout=30,
-    )
-    failures = [r for r in results if isinstance(r, BaseException)]
+    threads = [
+        threading.Thread(target=runner, args=(i,)) for i in range(n_threads)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
     assert not failures, failures
     orders = sorted(o for bucket in seen for o in bucket)
-    assert orders == list(range(n_tasks * per_task))
+    assert orders == list(range(n_threads * per_thread))
+
+
+@pytest.mark.asyncio
+async def test_same_loop_contention_does_not_deadlock():
+    """Two tasks on the same event loop appending to the same conversation
+    must not deadlock, even when the lock holder suspends at a genuine await
+    (standing in for `await sess.commit()`) before releasing.
+
+    Regression test for the same-thread hazard: drain_mixwal2 create_task()s
+    one drain_mixwal_read_single per readable MixWAL row with no await
+    between calls, so two tasks for the *same* conversation can land on the
+    *same* io-thread event loop. If conversation_log_order_lock ever
+    reverts to a plain blocking `with lock:` inside a coroutine, the second
+    task's lock.acquire() would hard-block the only OS thread driving this
+    loop while the first task is suspended mid-critical-section holding the
+    lock, and that thread could then never run the first task's
+    continuation to release it -- a permanent deadlock of the whole loop,
+    not just these two tasks. asyncio.wait_for below bounds the test so a
+    regression fails clearly instead of hanging quietly.
+    """
+    conversation_id = await _make_conversation()
+    acquired_order: list[str] = []
+    results: dict[str, int] = {}
+
+    async def append(name: str, hold_s: float) -> None:
+        async with persistent.conversation_log_order_lock(conversation_id):
+            acquired_order.append(name)
+            await asyncio.sleep(hold_s)  # stand-in for `await sess.commit()`
+            async with persistent.asession() as sess:
+                conv = await sess.get(persistent.Conversation, conversation_id)
+                order = (await sess.exec(
+                    select(persistent.count())
+                    .select_from(persistent.ConversationLog)
+                    .where(persistent.ConversationLog.conversation_id == conversation_id)
+                )).first()
+                sess.add(persistent.ConversationLog(
+                    conversation_id=conversation_id,
+                    conversation_peer_id=conv.own_peer_id,
+                    conversation_order=order,
+                    payload=b"F" + name.encode(),
+                ))
+                await sess.commit()
+                results[name] = order
+
+    task_a = asyncio.create_task(append("a", hold_s=0.05))
+    task_b = asyncio.create_task(append("b", hold_s=0.0))
+    await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=5.0)
+
+    assert acquired_order == ["a", "b"]
+    assert sorted(results.values()) == [0, 1]
