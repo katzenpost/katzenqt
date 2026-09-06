@@ -558,13 +558,20 @@ async def _action_chat_session(args):
             elif kind == "READ":
                 # Nudge the read loop in case no event is outstanding.
                 await network.signal_readables_to_mixwal()
-                # Six minutes: enough for the loaded CI mixnet's
+                payload, _, _extra = payload.partition(":")
+                try:
+                    deadline_s = float(_extra)
+                    if not (60.0 <= deadline_s <= 7200.0):
+                        raise ValueError
+                except ValueError:
+                    deadline_s = 360.0
+                # Six minutes by default: enough for the loaded CI mixnet's
                 # propagation-and-poll round trip without giving up
                 # on a session that is otherwise progressing. The
                 # outer chat-session subprocess timeout in
                 # tests/integration/test_restart.py is the harder
                 # bound.
-                deadline = asyncio.get_event_loop().time() + 360.0
+                deadline = asyncio.get_event_loop().time() + deadline_s
                 ok = False
                 poll_n = 0
                 last_count = -1
