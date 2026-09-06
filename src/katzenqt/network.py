@@ -172,6 +172,13 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
 
 _SUBSTREAM_NAME_PREFIX = ":substream:"
 
+# Bound on how long a single read's stop-and-wait ARQ may block before we
+# abort it at the daemon and re-cast the box on the next sweep. A lost read
+# reply can otherwise strand `_send_and_wait` indefinitely (see
+# drain_mixwal_read_single); 120 s is far above the ~30 s worst observed
+# read latency so it only trips on a genuinely stuck reply.
+READ_WATCHDOG_SECONDS = 120.0
+
 # Cap on attachment size after reassembly. Anything larger is
 # logged at WARNING, the bytes are discarded, and a
 # ``file_oversized`` marker is committed in place of a real
@@ -323,7 +330,7 @@ async def _try_assemble(sess, rcw_id: "uuid.UUID", terminal_idx_8b: bytes):
     return ("F", chunks, chain, gcm)
 
 
-async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]"):
+async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS):
   """Given a single persisten.MixWAL with is_read==True:
     - Send it to the network.
     - If we get a response:
@@ -344,16 +351,44 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     return
 
   try:
-    resp = await connection.start_resending_encrypted_message(
-        read_cap=rcw_read_cap,
-        write_cap=None,
-        message_box_index=mw.current_message_index,
-        reply_index=None,
-        envelope_descriptor=mw.envelope_descriptor,
-        envelope_hash=mw.envelope_hash,
-        message_ciphertext=mw.encrypted_payload,
-        no_retry_on_box_id_not_found=False,
-   )
+    resp = await asyncio.wait_for(
+        connection.start_resending_encrypted_message(
+            read_cap=rcw_read_cap,
+            write_cap=None,
+            message_box_index=mw.current_message_index,
+            reply_index=None,
+            envelope_descriptor=mw.envelope_descriptor,
+            envelope_hash=mw.envelope_hash,
+            message_ciphertext=mw.encrypted_payload,
+            no_retry_on_box_id_not_found=False,
+        ),
+        timeout=read_watchdog_s,
+    )
+  except asyncio.TimeoutError:
+    # A lost read reply can strand `_send_and_wait` forever: the thinclient's
+    # reconnect-replay may deliver the courier's reply to a query_id with no
+    # listener left (dropped), and the awaiting coroutine never sees an
+    # exception or cancel. The courier keeps the box and re-serves it, so
+    # abort the in-flight ARQ at the daemon and let the drain loop re-cast
+    # the same box with a fresh query id.
+    logger.warning(
+        "drain_mixwal_read_single: read for bacap_stream=%s exceeded watchdog"
+        " (%s s); cancelling the in-flight ARQ and re-scheduling",
+        bacap_uuid, read_watchdog_s,
+    )
+    try:
+        await asyncio.wait_for(
+            connection.cancel_resending_encrypted_message(mw.envelope_hash),
+            timeout=10,
+        )
+        logger.debug("drain_mixwal_read_single: cancelled in-flight ARQ for %s", bacap_uuid)
+    except asyncio.TimeoutError:
+        logger.warning("drain_mixwal_read_single: cancel ARQ did not answer for %s", bacap_uuid)
+    except Exception as _cancele:  # pragma: no cover - defensive best-effort
+        logger.debug("drain_mixwal_read_single: cancel ARQ best-effort: %s", _cancele)
+    await asyncio.sleep(1)
+    give_up()
+    return
   except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
           BACAPDecryptionFailedError, StartResendingCancelledError,
           ThinClientOfflineError, BrokenPipeError) as e:

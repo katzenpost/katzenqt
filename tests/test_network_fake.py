@@ -512,6 +512,49 @@ class TestDrainMixwalReadSingle:
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
+    async def test_lost_read_reply_is_recovered_by_watchdog(self, fake_thinclient):
+        # A lost read reply (thinclient query-id no-listener drop, e.g. after a
+        # daemon reconnect/replay) must not strand the read forever: the
+        # watchdog aborts the in-flight ARQ and releases the stream so the
+        # drain loop re-casts the same box with a fresh query id.
+        payload = _make_F_payload("hang then recover")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        fake_thinclient.hold_ack(setup["rcr"].envelope_hash)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=draining,
+            read_watchdog_s=0.05,
+        )
+        fake_thinclient.last_call("cancel_resending_encrypted_message")
+        # Watchdog path is non-destructive: the box is left for a re-cast.
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.next_index == setup["first_message_index"]
+            assert (await sess.exec(select(persistent.ConversationLog))).all() == []
+        assert setup["bacap_stream"] not in draining
+        # A later pass (un-stuck) completes the read normally.
+        fake_thinclient.release_ack(setup["rcr"].envelope_hash)
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert len(log) == 1 and log[0].payload == payload
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.next_index == setup["rcr"].next_message_box_index
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
     async def test_transient_sqlite_busy_on_read_commit_is_retried(
         self, fake_thinclient, monkeypatch,
     ):

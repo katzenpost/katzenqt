@@ -318,6 +318,15 @@ class FakeThinClient:
             courier_queue_id=courier[1],
         )
 
+    async def cancel_resending_encrypted_message(
+        self, envelope_hash: bytes,
+    ) -> None:
+        self._record(
+            "cancel_resending_encrypted_message",
+            envelope_hash=envelope_hash,
+        )
+        self.pending_acks.discard(envelope_hash)
+
     async def get_message_box_index_counter(
         self, message_box_index: bytes,
     ) -> int:
