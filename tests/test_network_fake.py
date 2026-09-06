@@ -779,6 +779,63 @@ class TestDrainMixwalReadSingle:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
 
     @pytest.mark.asyncio
+    async def test_os_error_gives_up(self, fake_thinclient):
+        """An OS-level send failure (``[Errno 9] Bad file descriptor`` after a
+        daemon reconnect closes the socket) is transient, not fatal: the box
+        must be left for a re-cast and the stream released instead of stranded
+        in draining_right_now (which silently starves every later box)."""
+        payload = _make_F_payload("os error then retry")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", OSError(9, "Bad file descriptor"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.next_index == setup["first_message_index"]
+        assert setup["bacap_stream"] not in draining
+        # The injected error popped on the first call, so the same box is
+        # re-cast (un-injected) and completes normally.
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert len(log) == 1 and log[0].payload == payload
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_unhandled_read_exception_leaves_mw_for_retry(self, fake_thinclient):
+        """An exception not in the give-up list propagates (the drain loop's
+        done-callback is what releases the stream in that case), but it must
+        never advance the read cursor or delete the box."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", RuntimeError("boom"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        with pytest.raises(RuntimeError):
+            await network.drain_mixwal_read_single(
+                connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now={setup["bacap_stream"]},
+            )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.next_index == setup["first_message_index"]
+            assert (await sess.exec(select(persistent.ConversationLog))).all() == []
+
+    @pytest.mark.asyncio
     async def test_database_failure_reschedules(self, fake_thinclient):
         """A transient replica database failure must back off and retry: the
         MixWAL row survives (the stream is not advanced) and the stream is

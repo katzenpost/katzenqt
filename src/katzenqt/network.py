@@ -391,7 +391,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     return
   except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
           BACAPDecryptionFailedError, StartResendingCancelledError,
-          ThinClientOfflineError, BrokenPipeError) as e:
+          ThinClientOfflineError, BrokenPipeError, OSError) as e:
     logger.warning("drain_mixwal_read_single giving up: %s", e)
     await asyncio.sleep(5)
     give_up()
@@ -665,7 +665,19 @@ async def drain_mixwal2(connection: ThinClient):
                     if len(rcw.read_cap) != 136:
                       raise Exception(f"ReadCapWAL.rcw from persistent has incorrect size: len(rcw.read_cap) {repr(rcw)} (from {mw.bacap_stream}")
                     read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
-                    read_task.add_done_callback(lambda task: readables_to_mixwal_event.set())
+
+                    def _on_read_done(task, stream=mw.bacap_stream) -> None:
+                        # The drain loop never awaits read_task, so without
+                        # this an unhandled exception (e.g. an OS-level send
+                        # failure mid-bounce) would strand the stream in
+                        # draining_right_now forever, silently starving
+                        # every later box on it. give_up() already discards
+                        # on the handled paths; discard is idempotent.
+                        if task.cancelled() or task.exception() is not None:
+                            draining_right_now.discard(stream)
+                        readables_to_mixwal_event.set()
+
+                    read_task.add_done_callback(_on_read_done)
                 elif connected:
                     new_write_mws.append(mw)
                 else:
