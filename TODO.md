@@ -53,37 +53,39 @@
       suite 4/4 passed (no `database is locked` regression from the smaller
       pool).
 
-- [ ] **`conversation_log_order_lock` cross-loop deadlock — fix in two phases.**
-      Current state, verified: `src/katzenqt/persistent.py:40-52` keys a
+- [x] **`conversation_log_order_lock` cross-loop deadlock — phase (a): don't
+      block loops.** DONE 2026-09-06. The old TODO's "convert to `asyncio.Lock`"
+      was wrong as a flat swap: `src/katzenqt/persistent.py:40-52` keys a
       `threading.Lock` per conversation id, and the three sites that hold it
       run on **two different event loops** — the GUI/QtAsyncio loop
       (`src/katzenqt/katzen.py:496`, outbound chat send) and the io thread
       loop (`src/katzenqt/network.py:466`, receive/completion; and
       `src/katzenqt/voucher.py:366`, voucher close). The `threading.Lock` is
-      therefore doing genuine cross-loop mutual exclusion, so the TODO's old
-      suggestion "convert to `asyncio.Lock`" is wrong as a flat swap —
-      `asyncio.Lock` is not thread-safe and would not serialize across loops.
-      The real bug is same-loop contention: a second coroutine on the same loop
-      targeting the same conversation blocks the loop thread in the sync
-      `with` while the first is awaiting (the receive path holds it across
-      awaits at network.py:484, 488, 491, 498, 500 and so does voucher.py:366)
-      — a latent but real freeze (rapid double-send; voucher close racing a
-      receive completion). Phase (a): keep `threading.Lock` for cross-loop
-      atomicity, convert `conversation_log_order_lock` to an async context
-      manager that acquires via `asyncio.to_thread` so no loop thread ever
-      blocks, switch the 3 sites to `async with`. Phase (b): single-writer —
-      move the GUI send-path append (`katzen.py:496-516`) into the io loop via
+      therefore doing genuine cross-loop mutual exclusion, and `asyncio.Lock`
+      is not thread-safe and would not serialize across loops. The real bug is
+      same-loop contention: a second coroutine on the same loop targeting the
+      same conversation froze the loop (the sync `with` blocked in
+      `Lock.acquire()` while the first coroutine was awaiting — receive path
+      spans awaits at network.py:484, 488, 491, 498, 500; so does
+      voucher.py:366). Fix landed: `conversation_log_order_lock` is now a dual
+      sync/async context manager — coroutines acquire via `asyncio.to_thread`
+      (no loop thread ever blocks), plain threads acquire directly (kept for
+      `test_voucher_guard.py:221`'s sync-thread append); all three sites
+      switched to `async with`. Regression test
+      `tests/test_concurrent_write_orders.py` (8 concurrent send-path appends
+      to one conversation on a single loop, inside `asyncio.wait_for`, unique
+      `conversation_order`s {0..N-1}): unit suite 170 passed / 10 skipped,
+      ruff clean relative to baseline.
+
+- [ ] **`conversation_log_order_lock` — phase (b): single-writer funnel.**
+      Move the GUI send-path append (`katzen.py:496-516`) into the io loop via
       `self.iothread.run_in_io(...)`, so ALL ConversationLog appends run on one
       loop; then replace the threading lock with a per-conversation
-      `asyncio.Lock` and update the stale "two different threads" comment at
-      persistent.py:31-39. Note: `send_file` (katzen.py:616) appends
-      WriteCapWAL/PlaintextWAL on the GUI loop WITHOUT the lock and no
-      ConversationLog row — outside lock scope but worth revisiting with (b).
-      Tests: new `tests/test_concurrent_write_orders.py` — N concurrent
-      send-path appends to one conversation on a single loop, inside
-      `asyncio.wait_for`, asserting completion, no exceptions, and gathered
-      `conversation_order`s exactly {0..N-1} (reproduces today's same-loop
-      deadlock as a timeout).
+      `asyncio.Lock` (deterministic FIFO) and update the stale "two different
+      threads" comment at persistent.py:31-39. Note: `send_file`
+      (katzen.py:616) appends WriteCapWAL/PlaintextWAL on the GUI loop WITHOUT
+      the lock and no ConversationLog row — outside lock scope but worth
+      revisiting with (b).
 
 - [ ] **Daemon read ride-out epoch staleness (separate bug).** The queued-read
       fallback in `_read_box` goes stale across PKI epochs:
