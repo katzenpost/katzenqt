@@ -7,6 +7,7 @@ layer that the GUI relies on to prevent that.
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 import uuid
 
@@ -191,16 +192,13 @@ async def test_intro_announcement_emits_increment(monkeypatch):
     assert rows[0].payload.startswith(b"F")
 
 
-def _append_log_row_sync(
-    conversation_id: int, tag: bytes, start_barrier: threading.Barrier,
-) -> int:
+async def _append_log_row_async(conversation_id: int, tag: bytes) -> int:
     """Append one ConversationLog row the way a GUI send does (order via a
-    count subquery at commit), inside the per-conversation writer lock, from
-    a worker thread. Mirrors the Qt send loop contending with the io thread's
-    receive/voucher appends."""
-    start_barrier.wait()
+    count subquery at commit), inside the per-conversation writer lock.
+    Mirrors the Qt send loop contending with the io thread's receive/voucher
+    appends -- one event loop per OS thread, as in production."""
     with Session(persistent._engine_sync) as sess:
-        with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.conversation_log_order_lock(conversation_id):
             order = sess.exec(
                 select(persistent.count())
                 .select_from(persistent.ConversationLog)
@@ -219,8 +217,9 @@ def _append_log_row_sync(
 
 @pytest.mark.asyncio
 async def test_concurrent_append_orders_are_unique():
-    """Two threads appending to the same conversation must never stamp the
-    same conversation_order.
+    """Two threads (each with its own event loop, as GUI vs. io really are)
+    appending to the same conversation must never stamp the same
+    conversation_order.
 
     conversation_order is a count() subquery evaluated by each transaction at
     INSERT time, and GUI sends run on the Qt event loop while receive/voucher
@@ -237,11 +236,14 @@ async def test_concurrent_append_orders_are_unique():
     failures: list[Exception] = []
 
     def runner(thread_idx: int) -> None:
-        try:
+        async def body() -> None:
             for i in range(per_thread):
-                seen[thread_idx].append(_append_log_row_sync(
-                    conversation_id, f"{thread_idx}.{i}".encode(), start,
+                start.wait()
+                seen[thread_idx].append(await _append_log_row_async(
+                    conversation_id, f"{thread_idx}.{i}".encode(),
                 ))
+        try:
+            asyncio.run(body())
         except Exception as e:  # noqa: BLE001 - surface any append error
             failures.append(e)
 
