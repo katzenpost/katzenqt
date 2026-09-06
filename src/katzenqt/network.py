@@ -113,10 +113,10 @@ async def drain_mixwal(connection: ThinClient):
 async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]") -> None:
     """Resend a write until it is ACK'ed by courier.
 
-    TODO: we do not handle losing the connection to the thin client very gracefully at all here.
+    A link drop mid-attempt surfaces as ThinClientOfflineError and is handed
+    back to the surrounding drain loop (give_up) rather than killing this
+    task; the loop re-sweeps once the connection is back.
     """
-    mw_current_idx = await connection.get_message_box_index_counter(mw.current_message_index)
-    logger.info(f"TX_SINGLE idx:{mw_current_idx} ")
     from sqlmodel import select
 
     def give_up() -> None:
@@ -126,6 +126,8 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
     try:
+      mw_current_idx = await connection.get_message_box_index_counter(mw.current_message_index)
+      logger.info(f"TX_SINGLE idx:{mw_current_idx} ")
       resp = await connection.start_resending_encrypted_message(
       write_cap=wcw.write_cap,
       envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
@@ -630,12 +632,29 @@ async def drain_mixwal2(connection: ThinClient):
                 else:
                     new_write_mws.append(mw)
         for mw in new_write_mws:
-            logger.debug("drain_mixwal: NEW (write) MIXWAL idx=%s is_read=%s bacap_stream=%s",
-                         await connection.get_message_box_index_counter(mw.current_message_index),
+            logger.debug("drain_mixwal: NEW (write) MIXWAL is_read=%s bacap_stream=%s",
                          mw.is_read, mw.bacap_stream)
             draining_right_now.add(mw.bacap_stream) # this is the uuid PK
             __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
+
+            def _on_write_done(task, stream=mw.bacap_stream) -> None:
+                # The drain loop never awaits write_task, so without this a
+                # daemon-drop crash would strand the stream in
+                # draining_right_now forever (the silently-vanished write).
+                if task.cancelled():
+                    draining_right_now.discard(stream)
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    logger.error(
+                        "drain_mixwal_write_single crashed for bacap_stream=%s; "
+                        "releasing stream for another drain pass",
+                        stream, exc_info=exc,
+                    )
+                    draining_right_now.discard(stream)
+
             write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
+            write_task.add_done_callback(_on_write_done)
 
 
 async def provision_read_caps(connection: ThinClient):

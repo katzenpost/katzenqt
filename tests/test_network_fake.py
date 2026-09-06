@@ -1464,6 +1464,66 @@ class TestDisconnectPauseAndResume:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
 
     @pytest.mark.asyncio
+    async def test_drain_mixwal_write_single_swallows_counter_offline_mid_call(
+        self, fake_thinclient,
+    ):
+        """Same as the offline mid-call test, but the socket drop lands
+        on the `get_message_box_index_counter` probe rather than the
+        resend call. This pin used to kill the fire-and-forget write task
+        (the probe ran before the offline try/except), stranding the stream
+        in draining_right_now forever — the silently-vanished write."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "get_message_box_index_counter", ThinClientOfflineError(),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+
+    @pytest.mark.real_sleeps
+    @pytest.mark.asyncio
+    async def test_drain_mixwal2_survives_counter_offline_and_retries(
+        self, fake_thinclient,
+    ):
+        """A transient link drop when the drain loop picks up a fresh
+        write must not kill the loop (the old debug-log probe ran an
+        awaited counter call in the loop body, so one offline raise killed
+        ALL draining) and must not strand the stream: the next pass
+        re-sweeps it to a successful ACK."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "get_message_box_index_counter", ThinClientOfflineError(),
+        )
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "__mixwal_updated").set()
+        getattr(network, "__mixnet_connected").set()
+
+        async def mw_drained():
+            async with persistent.asession() as sess:
+                return await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+
+        loop_task = asyncio.create_task(network.drain_mixwal2(fake_thinclient))
+        try:
+            for _ in range(1000):
+                await asyncio.sleep(0.02)
+                if await mw_drained():
+                    break
+            assert await mw_drained()
+            # Failed probe originally, then a successful re-probe + ACK.
+            assert fake_thinclient.call_count("get_message_box_index_counter") >= 2
+            assert fake_thinclient.call_count("start_resending_encrypted_message") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
     async def test_drain_mixwal_read_single_swallows_offline_mid_call(
         self, fake_thinclient,
     ):
