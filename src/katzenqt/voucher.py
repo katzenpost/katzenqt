@@ -21,11 +21,13 @@ import logging
 import uuid
 
 from katzenpost_thinclient import (
-    BoxIDNotFoundError, CourierInvalidEpochError, InvalidEpochError,
+    BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
+    DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
 )
 from sqlmodel import select
 
 from . import models, persistent
+from .katzen_util import create_task
 from .network import _SUBSTREAM_NAME_PREFIX, check_for_new, conversation_update_queue
 
 logger = logging.getLogger("katzen.voucher")
@@ -37,6 +39,7 @@ STEP_DONE = "done"
 
 _INDEX_LEN = 104
 _READ_RETRY_GAP_S = 15.0  # bounded round gap, well inside a ~60s PKI epoch window
+_STALL_WARN_ROUNDS = 40  # ~10 minutes of continuous errors before escalating to WARNING
 
 
 def _brief(b: "bytes | None") -> str:
@@ -194,16 +197,35 @@ async def _read_box(
                 _brief(rcr.next_message_box_index),
             )
             return resp.plaintext, rcr.next_message_box_index
-        except (BoxIDNotFoundError, InvalidEpochError, CourierInvalidEpochError):
+        except (BoxIDNotFoundError, InvalidEpochError, CourierInvalidEpochError,
+                DatabaseFailureError, CourierError, ThinClientOfflineError) as e:
             # Box not written/replicated yet, or the request reached a stale
-            # epoch: both are expected mid-handshake and cured by a fresh round.
+            # epoch: both are expected mid-handshake and cured by a fresh
+            # round. A storage replica or courier hiccup (DatabaseFailureError
+            # / CourierError), or a momentary daemon disconnect
+            # (ThinClientOfflineError), are the same "transient, retry" cases
+            # drain_mixwal_read_single already treats as recoverable, so
+            # treat them the same way here rather than aborting the whole
+            # induction on one blip.
             if rounds == 1 or rounds % 4 == 0:
                 logger.debug(
                     "%s: box %s on read_cap %s not present yet after %.1fs "
-                    "(round %d); retrying in %.0fs",
+                    "(round %d, %s); retrying in %.0fs",
                     stage, _brief(message_box_index), _brief(read_cap),
                     asyncio.get_event_loop().time() - started, rounds,
-                    _READ_RETRY_GAP_S,
+                    type(e).__name__, _READ_RETRY_GAP_S,
+                )
+            if rounds == _STALL_WARN_ROUNDS or rounds % _STALL_WARN_ROUNDS == 0:
+                # This wait is intentionally unbounded (it may legitimately
+                # be waiting on a human to act), but a source of errors that
+                # never clears deserves to be surfaced somewhere a user
+                # could notice, not just another debug line every ~60s.
+                logger.warning(
+                    "%s: box %s on read_cap %s still not present after "
+                    "%.0f minutes (round %d, latest: %s); still retrying",
+                    stage, _brief(message_box_index), _brief(read_cap),
+                    (asyncio.get_event_loop().time() - started) / 60.0,
+                    rounds, type(e).__name__,
                 )
             await asyncio.sleep(_READ_RETRY_GAP_S)
 
@@ -218,7 +240,18 @@ async def _conversation_write_cap(sess, conversation_id: int) -> persistent.Writ
     return wcw
 
 
-def _add_peer(sess, conversation, name: str, read_cap: bytes) -> None:
+def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
+    if not read_cap or len(read_cap) != _INDEX_LEN + 32:
+        # 136 bytes total: a 32-byte public key plus the 104-byte index. A
+        # None or malformed read_cap (e.g. a who-reply entry sent before its
+        # sender's own cap was provisioned, see _build_who_reply) must not
+        # crash the caller on the slice below; the peer just isn't added and
+        # will need a later announcement to catch up.
+        logger.warning(
+            "_add_peer: refusing to add %r with malformed read_cap (%d bytes)",
+            name, len(read_cap) if read_cap else 0,
+        )
+        return
     rcw = persistent.ReadCapWAL(
         id=uuid.uuid4(), read_cap=read_cap, next_index=read_cap[-_INDEX_LEN:],
     )
@@ -341,21 +374,9 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
     return added
 
 
-async def send_introduction_message(conversation_id: int, display_name: str, read_cap: bytes) -> None:
-    """Write an INTRODUCTION message onto this conversation's own BACAP stream.
-
-    The announcement carries ``read_cap`` for the just-inducted member's
-    stream (their salt-mutated read cap), so every peer that reads this
-    stream can add the member and start reading their messages without any
-    further coordination. It is sent after the induction has committed and is
-    fire-and-forget: a delivery failure is logged, not raised, so the
-    induction result stands.
-
-    A pending ConversationLog row is also written for the sender's own peer,
-    so the local UI shows the announcement (e.g. 'bob added carol') at the
-    right place in the stream even though the sender never reads its own
-    stream.
-    """
+async def _write_introduction_log(conversation_id: int, display_name: str, read_cap: bytes) -> "uuid.UUID":
+    """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
+    final PlaintextWAL id, for the caller to wait on the ack."""
     gcm = models.GroupChatMessage(
         version=0, membership_hash=b"TODO" * 8,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
@@ -387,6 +408,33 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
                 outgoing_pwal=final_pwal_id,
             ))
             await sess.commit()
+    return final_pwal_id
+
+
+async def send_introduction_message(conversation_id: int, display_name: str, read_cap: bytes) -> None:
+    """Write an INTRODUCTION message onto this conversation's own BACAP stream.
+
+    The announcement carries ``read_cap`` for the just-inducted member's
+    stream (their salt-mutated read cap), so every peer that reads this
+    stream can add the member and start reading their messages without any
+    further coordination. It is sent after the induction has committed and is
+    genuinely fire-and-forget: a failure (writing the announcement, or its
+    eventual delivery) is logged, never raised, so the induction result
+    (already durable by the time this is called) always stands.
+
+    A pending ConversationLog row is also written for the sender's own peer,
+    so the local UI shows the announcement (e.g. 'bob added carol') at the
+    right place in the stream even though the sender never reads its own
+    stream.
+    """
+    try:
+        final_pwal_id = await _write_introduction_log(conversation_id, display_name, read_cap)
+    except Exception as e:
+        logger.error(
+            "send_introduction_message: failed to write INTRODUCTION for "
+            "%r in conversation %d: %s", display_name, conversation_id, e,
+        )
+        return
 
     # The UI's ConversationLogModel maps index_row 1:1 to conversation_order
     # and grows row_count by one per `False` event. Every other path that
@@ -397,7 +445,11 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     await conversation_update_queue.put((conversation_id, False))
 
     await check_for_new()
-    await _wait_intro_acked(final_pwal_id, display_name, conversation_id)
+    # Background, not awaited: this function's own contract is
+    # fire-and-forget, so a caller (e.g. derive_read_and_induct, right after
+    # durably committing the induction) must not be made to wait up to 180s
+    # -- or see an exception from -- confirming delivery of the announcement.
+    create_task(_wait_intro_acked(final_pwal_id, display_name, conversation_id))
 
 
 async def _wait_intro_acked(final_pwal_id, display_name: str, conversation_id: int) -> None:
@@ -483,9 +535,21 @@ async def _build_who_reply(conversation_id: int) -> models.GroupChatReplyWho:
             wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
             if wcw is not None and wcw.write_cap is not None:
                 own_read_cap = wcw.write_cap[32:]
-        please_adds = [models.GroupChatPleaseAdd(
-            display_name=conv.own_peer.name, read_cap=own_read_cap,
-        )]
+        please_adds = []
+        if own_read_cap is not None:
+            please_adds.append(models.GroupChatPleaseAdd(
+                display_name=conv.own_peer.name, read_cap=own_read_cap,
+            ))
+        else:
+            # Neither own_rcw.read_cap nor a provisioned write cap exists
+            # yet (the background provisioning loop hasn't caught up).
+            # Sending a broken entry would crash the joiner's _add_peer on
+            # the read_cap slice; omit ourselves instead of risking that.
+            logger.warning(
+                "_build_who_reply: own read cap for conversation %d is not "
+                "provisioned yet; omitting self from the who-reply",
+                conversation_id,
+            )
         for peer in conv.peers:
             if not peer.active or peer.id == conv.own_peer_id:
                 continue
