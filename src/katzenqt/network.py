@@ -426,74 +426,88 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     convlog_added = False
     signal_send = False
     notify_conv_id = cp.conversation.id
+    parent_peer = None
 
-    if assembled is not None and assembled[0] == "F":
-      _, chunks, chain, gcm = assembled
-      if gcm.file_upload is not None:
-        target_conv_id = (
-            (await sess.get(persistent.ConversationPeer, int(cp.name.split(":")[2]))).conversation.id
-            if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
-            else cp.conversation.id
+    # Resolve where an assembled message's log row will land *before* the
+    # writer lock, so the conversation_order assignment below is serialised
+    # against concurrent GUI sends (which append on the Qt thread) and other
+    # drains of this conversation. Only the F branch appends a log row, but
+    # the lock can cheaply cover the whole commit.
+    if (
+        assembled is not None and assembled[0] == "F"
+        and cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+    ):
+        parent_peer = await sess.get(
+            persistent.ConversationPeer, int(cp.name.split(":")[2]),
         )
-        full_payload = _spill_attachment(
-            gcm.file_upload, gcm.membership_hash, target_conv_id,
-        )
-      else:
-        full_payload = b"F" + b"".join(body for _kind, body in chunks)
-      if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
-        # Substream's terminal F: commit the assembled message into the
-        # parent peer's ConversationLog, prune the parent's indirection
-        # piece, and retire this synthetic peer.
-        parent_id = int(cp.name.split(":")[2])
-        parent_peer = await sess.get(persistent.ConversationPeer, parent_id)
-        added, sig = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
-        signal_send = signal_send or sig
-        parent_i = (await sess.exec(
-            select(persistent.ReceivedPiece).where(
-                persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
-                persistent.ReceivedPiece.chunk_type == b"I",
-                persistent.ReceivedPiece.chunk == rcw.read_cap,
-            )
-        )).first()
-        if parent_i is not None:
-          await sess.delete(parent_i)
-        cp.active = False
-        sess.add(cp)
         notify_conv_id = parent_peer.conversation.id
-        convlog_added = added
-      else:
-        # Top-level F (single-box or contiguous on the parent stream): route
-        # by message type, chat into the log, tally into the controller.
-        convlog_added, sig = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
-        signal_send = signal_send or sig
-      for rp in chain:
-        await sess.delete(rp)
 
-    elif assembled is not None and assembled[0] == "I":
-      _, substream_read_cap, _ = assembled
-      if len(substream_read_cap) == 136:
-        new_rcw = persistent.ReadCapWAL(
-            id=uuid.uuid4(),
-            read_cap=substream_read_cap,
-            next_index=substream_read_cap[-104:],
-        )
-        sess.add(new_rcw)
-        substream_peer = persistent.ConversationPeer(
-            name=f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:{secrets.token_hex(2)}",
-            read_cap_id=new_rcw.id,
-            active=True,
-            conversation=cp.conversation,
-        )
-        sess.add(substream_peer)
-      else:
-        logger.warning(
-            "ignoring indirection with malformed read cap length %d",
-            len(substream_read_cap),
-        )
+    with persistent.conversation_log_order_lock(notify_conv_id):
+        if assembled is not None and assembled[0] == "F":
+            _, chunks, chain, gcm = assembled
+            if gcm.file_upload is not None:
+                target_conv_id = (
+                    parent_peer.conversation.id
+                    if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+                    else cp.conversation.id
+                )
+                full_payload = _spill_attachment(
+                    gcm.file_upload, gcm.membership_hash, target_conv_id,
+                )
+            else:
+                full_payload = b"F" + b"".join(body for _kind, body in chunks)
+            if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+                # Substream's terminal F: commit the assembled message into the
+                # parent peer's ConversationLog, prune the parent's indirection
+                # piece, and retire this synthetic peer.
+                added, sig = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
+                signal_send = signal_send or sig
+                parent_i = (await sess.exec(
+                    select(persistent.ReceivedPiece).where(
+                        persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
+                        persistent.ReceivedPiece.chunk_type == b"I",
+                        persistent.ReceivedPiece.chunk == rcw.read_cap,
+                    )
+                )).first()
+                if parent_i is not None:
+                    await sess.delete(parent_i)
+                cp.active = False
+                sess.add(cp)
+                convlog_added = added
+            else:
+                # Top-level F (single-box or contiguous on the parent stream):
+                # route by message type, chat into the log, tally into the
+                # controller.
+                convlog_added, sig = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
+                signal_send = signal_send or sig
+            for rp in chain:
+                await sess.delete(rp)
 
-    await sess.delete(mw)
-    bacap_uuid = mw.bacap_stream
-    await sess.commit()
+        elif assembled is not None and assembled[0] == "I":
+            _, substream_read_cap, _ = assembled
+            if len(substream_read_cap) == 136:
+                new_rcw = persistent.ReadCapWAL(
+                    id=uuid.uuid4(),
+                    read_cap=substream_read_cap,
+                    next_index=substream_read_cap[-104:],
+                )
+                sess.add(new_rcw)
+                substream_peer = persistent.ConversationPeer(
+                    name=f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:{secrets.token_hex(2)}",
+                    read_cap_id=new_rcw.id,
+                    active=True,
+                    conversation=cp.conversation,
+                )
+                sess.add(substream_peer)
+            else:
+                logger.warning(
+                    "ignoring indirection with malformed read cap length %d",
+                    len(substream_read_cap),
+                )
+
+        await sess.delete(mw)
+        bacap_uuid = mw.bacap_stream
+        await sess.commit()
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))

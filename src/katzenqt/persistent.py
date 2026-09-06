@@ -8,14 +8,14 @@ import alembic.config
 import alembic.command
 import alembic.context
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, UniqueConstraint, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 from .katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
@@ -23,8 +23,35 @@ if TYPE_CHECKING:
 from alembic import context
 import logging
 import os
+from threading import Lock
 
 logger = logging.getLogger("katzen.persistent")
+
+
+# conversation_order is assigned by a scalar subquery evaluated at INSERT time
+# (autoflush, right before COMMIT), and ConversationLog rows are appended from
+# two different threads: the Qt event loop for outbound sends, the io loop for
+# received and voucher rows. Without serialising the whole "count, insert,
+# commit" critical section per conversation, two in-flight inserts can read the
+# same count and trip UniqueConstraint(conversation_id, conversation_order),
+# silently dropping a message (or failing an induction that already succeeded
+# on the wire). These per-conversation writer locks make the assignment both
+# deterministic and, on SQLite, free of "database is locked" write collisions.
+__conversation_log_order_locks: dict[int, Lock] = {}
+__conversation_log_order_locks_guard = Lock()
+
+
+@contextmanager
+def conversation_log_order_lock(conversation_id: int) -> Iterator[None]:
+    """Hold the write lock for a conversation's log-append critical section.
+
+    Use it around the ``sess.add(ConversationLog(...))`` .. ``sess.commit()``
+    window at every site that assigns ``conversation_order``.
+    """
+    with __conversation_log_order_locks_guard:
+        lock = __conversation_log_order_locks.setdefault(conversation_id, Lock())
+    with lock:
+        yield
 
 
 def _resolve_alembic_ini() -> Path:
