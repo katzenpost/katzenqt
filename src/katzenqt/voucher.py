@@ -363,7 +363,7 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
             display_name=display_name, read_cap=read_cap,
         ),
     )
-    with persistent.conversation_log_order_lock(conversation_id):
+    async with persistent.conversation_log_order_lock(conversation_id):
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
             send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])

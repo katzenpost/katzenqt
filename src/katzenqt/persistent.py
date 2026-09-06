@@ -8,14 +8,14 @@ import alembic.config
 import alembic.command
 import alembic.context
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, UniqueConstraint, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 from .katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
@@ -41,17 +41,44 @@ __conversation_log_order_locks: dict[int, Lock] = {}
 __conversation_log_order_locks_guard = Lock()
 
 
-@contextmanager
-def conversation_log_order_lock(conversation_id: int) -> Iterator[None]:
+class _ConversationLogOrderLock:
+    """Per-conversation writer lock usable from a coroutine or a plain thread.
+
+    The append sites that stamp ``conversation_order`` run on two different
+    event loops (the GUI/QtAsyncio loop for outbound sends, the io loop for
+    received and voucher rows), so the underlying primitive stays a real
+    cross-thread ``threading.Lock``. Coroutines acquire it via
+    ``asyncio.to_thread`` so a contended acquisition parks a worker thread
+    instead of blocking the caller's event loop; plain threads just take the
+    lock directly.
+    """
+
+    def __init__(self, lock: Lock) -> None:
+        self._lock = lock
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+    async def __aenter__(self) -> None:
+        await asyncio.to_thread(self._lock.acquire)
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+
+def conversation_log_order_lock(conversation_id: int) -> _ConversationLogOrderLock:
     """Hold the write lock for a conversation's log-append critical section.
 
     Use it around the ``sess.add(ConversationLog(...))`` .. ``sess.commit()``
-    window at every site that assigns ``conversation_order``.
+    window at every site that assigns ``conversation_order``. Works as either
+    ``with conversation_log_order_lock(...)`` or ``async with ...``.
     """
     with __conversation_log_order_locks_guard:
         lock = __conversation_log_order_locks.setdefault(conversation_id, Lock())
-    with lock:
-        yield
+    return _ConversationLogOrderLock(lock)
 
 
 def _resolve_alembic_ini() -> Path:

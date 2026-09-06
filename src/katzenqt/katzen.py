@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
         # sends here; the per-conversation writer lock serialises the append
         # so two transactions can't stamp the same order and trip the unique
         # constraint.
-        with persistent.conversation_log_order_lock(convo_state.conversation_id):
+        async with persistent.conversation_log_order_lock(convo_state.conversation_id):
             async with persistent.asession() as sess:
                 for cap_uuid in new_write_caps:
                     sess.add(persistent.WriteCapWAL(id=cap_uuid))

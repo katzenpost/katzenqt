@@ -463,7 +463,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         notify_conv_id = parent_peer.conversation.id
 
     try:
-      with persistent.conversation_log_order_lock(notify_conv_id):
+      async with persistent.conversation_log_order_lock(notify_conv_id):
         if assembled is not None and assembled[0] == "F":
             _, chunks, chain, gcm = assembled
             if gcm.file_upload is not None:
