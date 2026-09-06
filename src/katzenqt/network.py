@@ -599,9 +599,9 @@ async def _wait_for_connection_or_shutdown() -> bool:
     """Block until either __mixnet_connected is set or __should_quit fires.
 
     Returns True if the mixnet is reportedly connected, False if shutdown
-    happened first. Drain loops use this at the top of each iteration so
-    they pause cleanly during outages instead of burning cycles against
-    a daemon that will only raise ThinClientOfflineError back at them.
+    happened first. Loops use this at the top of each iteration so they
+    pause cleanly during outages instead of burning cycles against a
+    daemon that will only raise ThinClientOfflineError back at them.
     """
     if __should_quit.is_set():
         return False
@@ -633,16 +633,12 @@ async def drain_mixwal2(connection: ThinClient):
     await __resend_queue_populated.wait()
     shutdown = create_task(__should_quit.wait())
     while not __should_quit.is_set():
-        # Pause while the mixnet is unreachable. on_connection_status
-        # toggles __mixnet_connected so a kpclientd reconnect (or an
-        # outage and recovery on the wire) resumes us cleanly.
-        if not await _wait_for_connection_or_shutdown():
-            continue
         # asyncio.wait defaults to ALL_COMPLETED, which would force this
         # loop to wait the full timeout (or for shutdown) regardless of
         # __mixwal_updated being set, effectively turning it into a
         # 15-second poller. FIRST_COMPLETED restores the event-driven
         # behaviour the caller of __mixwal_updated.set() expects.
+        connected = __mixnet_connected.is_set()
         _, _ = await asyncio.wait((
                  create_task(__mixwal_updated.wait()),
                  shutdown,
@@ -657,6 +653,12 @@ async def drain_mixwal2(connection: ThinClient):
             new_mixwals = (await sess.exec(persistent.MixWAL.get_new(draining_right_now))).all()
             for mw in new_mixwals:
                 if mw.is_read:
+                    # Reads are cast even while on_connection_status reports
+                    # the daemon offline: kpclientd's own ARQ holds the
+                    # request and rides out gateway-link flaps, delivering
+                    # when the link recovers. Gating reads on
+                    # __mixnet_connected strands them forever if the
+                    # re-enabled status notification is ever lost.
                     draining_right_now.add(mw.bacap_stream)
                     __resend_queue.add(mw.bacap_stream)
                     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
@@ -664,8 +666,13 @@ async def drain_mixwal2(connection: ThinClient):
                       raise Exception(f"ReadCapWAL.rcw from persistent has incorrect size: len(rcw.read_cap) {repr(rcw)} (from {mw.bacap_stream}")
                     read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
                     read_task.add_done_callback(lambda task: readables_to_mixwal_event.set())
-                else:
+                elif connected:
                     new_write_mws.append(mw)
+                else:
+                    # Defer the write dispatch until the daemon reports
+                    # connected again; the daemon-side ARQ ride-out for
+                    # writes depends on the gate (see test_kpclientd_restart).
+                    logger.debug("drain_mixwal: deferring (write) MIXWAL is_read=%s bacap_stream=%s until connected", mw.is_read, mw.bacap_stream)
         for mw in new_write_mws:
             logger.debug("drain_mixwal: NEW (write) MIXWAL is_read=%s bacap_stream=%s",
                          mw.is_read, mw.bacap_stream)

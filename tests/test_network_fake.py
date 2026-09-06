@@ -1372,10 +1372,12 @@ class TestSendResendablePlaintexts:
 
 
 class TestDisconnectPauseAndResume:
-    """The drain loops gate every iteration on __mixnet_connected so a
+    """The staging loops gate every iteration on __mixnet_connected so a
     kpclientd reconnect or a transient mixnet outage cleanly pauses
-    and resumes them. These tests flip the connection status mid-flight
-    and assert that the loops respect the gate."""
+    and resumes them. (drain_mixwal2 is the exception: it casts reads
+    regardless so the daemon's own ARQ can ride out a link flap, while
+    writes keep waiting for the gate.) These tests flip the connection
+    status mid-flight and assert that the staging loops respect the gate."""
 
     @pytest.mark.asyncio
     async def test_send_resendable_does_not_dispatch_while_disconnected(
