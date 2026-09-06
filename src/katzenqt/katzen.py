@@ -1343,7 +1343,6 @@ def cli():
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
 
-    logging.getLogger('sqlalchemy.engine.Engine').disabled=True
     if args.level:
         for logger_name, level in args.level:
             log_level = getattr(logging, level.upper(), None)

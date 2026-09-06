@@ -907,9 +907,10 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
 
 async def on_connection_status(status:"Dict[str,Any]"):
     if status["is_connected"]:
-      __mixnet_connected.set()
+        __mixnet_connected.set()
     else:
-      __mixnet_connected.clear()
+        __mixnet_connected.clear()
+        logger.warning("daemon reports disconnected from mixnet; ARQ rides out and retries")
     if status["err"] or status.get("Err", None):
         logger.error("ON_CONNECTION_STATUS err: %s", status)
         #ON_CONNECTION_STATUS err: {'is_connected': False, 'err': {'Op': 'read', 'Net': 'tcp', 'Source': {'IP': b'\x7f\x00\x00\x01', 'Port': 51718, 'Zone': ''}, 'Addr': {'IP': b'\x7f\x00\x00\x01', 'Port': 30004, 'Zone': ''}, 'Err': {}}}

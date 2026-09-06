@@ -111,8 +111,8 @@ state_file += ".sqlite3"
 state_file = app_data / state_file
 _sql_url = f"sqlite+aiosqlite:///{ state_file }"
 logger.info("sql url: %s", _sql_url)
-_engine = create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)
-_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True, pool_size=1000)
+_engine = create_async_engine(_sql_url, future=True)
+_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'))
 
 
 def _set_sqlite_pragmas(dbapi_connection, connection_record):
