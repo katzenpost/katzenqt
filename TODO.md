@@ -77,15 +77,25 @@
       `conversation_order`s {0..N-1}): unit suite 170 passed / 10 skipped,
       ruff clean relative to baseline.
 
-- [ ] **`conversation_log_order_lock` — phase (b): single-writer funnel.**
-      Move the GUI send-path append (`katzen.py:496-516`) into the io loop via
-      `self.iothread.run_in_io(...)`, so ALL ConversationLog appends run on one
-      loop; then replace the threading lock with a per-conversation
-      `asyncio.Lock` (deterministic FIFO) and update the stale "two different
-      threads" comment at persistent.py:31-39. Note: `send_file`
-      (katzen.py:616) appends WriteCapWAL/PlaintextWAL on the GUI loop WITHOUT
-      the lock and no ConversationLog row — outside lock scope but worth
-      revisiting with (b).
+- [x] **`conversation_log_order_lock` — phase (b): single-writer funnel.**
+      DONE 2026-09-06. The GUI send-path append (`katzen.py`) now hops into
+      the io loop via `self.iothread.run_in_io(persistent.append_outbound_chat(
+      ...))` instead of appending inline on the QtAsyncio loop, so ALL
+      ConversationLog appends run on one loop and aiosqlite sessions + the
+      log-order lock are no longer shared across two loops.
+      `conversation_log_order_lock` now returns a per-conversation
+      `asyncio.Lock` (FIFO, deterministic ordering); the stale "two different
+      threads" comment at persistent.py:31-39 is rewritten. `tests/conftest.py`
+      resets the lock dict per test (conversation ids restart at 1 after each
+      `_fresh_tables` wipe, and asyncio.Lock is loop-affine);
+      `test_voucher_guard.py`'s concurrency test was reworked from sync worker
+      threads to concurrent coroutines on one loop. Note (still open):
+      `send_file` (katzen.py) appends WriteCapWAL/PlaintextWAL on the GUI loop
+      WITHOUT the lock and no ConversationLog row — outside lock scope but a
+      natural follow-up to funnel through the io loop too. Verified: unit suite
+      170 passed / 10 skipped; docker integration restart 4/4 (one
+      timing-sensitive latency flake on the first phase-(b) run, green in
+      isolation and on the clean re-run).
 
 - [ ] **Daemon read ride-out epoch staleness (separate bug).** The queued-read
       fallback in `_read_box` goes stale across PKI epochs:
