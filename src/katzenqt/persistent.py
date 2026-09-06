@@ -29,19 +29,22 @@ logger = logging.getLogger("katzen.persistent")
 
 
 # conversation_order is assigned by a scalar subquery evaluated at INSERT time
-# (autoflush, right before COMMIT). Every ConversationLog append site funnels
-# through the single writer coroutine on the io loop — the GUI send path hops
-# in via run_in_io (append_outbound_chat) and the receive/voucher paths already
-# run on the io loop — so the aiosqlite session is never shared across two
-# loops. The appends still serialise their "count, insert, commit" critical
-# section with the per-conversation async poll lock below: two in-flight
-# appends to the same conversation cannot read the same count and trip
-# UniqueConstraint(conversation_id, conversation_order), silently dropping a
-# message (or failing an induction that already succeeded on the wire). The
-# lock is a non-blocking acquire-and-poll so a same-conversation waiter on the
-# *same* loop can never deadlock the loop thread that holds the lock mid-await
-# — and, being cross-loop capable, it stays correct even if a future caller
-# skips the funnel.
+# (autoflush, right before COMMIT). Every ConversationLog append site that
+# uses the async engine (_engine) funnels through the single writer coroutine
+# on the io loop — the GUI send path hops in via run_in_io
+# (append_outbound_chat) and the receive/voucher paths already run on the io
+# loop — so the aiosqlite session is never shared across two loops. (A GUI-
+# thread site that only needs a one-shot commit, e.g. new_conversation, uses
+# the separate sync engine (_engine_sync) instead, which has no event-loop
+# affinity and so needs no funnel.) The appends still serialise their "count,
+# insert, commit" critical section with the per-conversation async poll lock
+# below: two in-flight appends to the same conversation cannot read the same
+# count and trip UniqueConstraint(conversation_id, conversation_order),
+# silently dropping a message (or failing an induction that already
+# succeeded on the wire). The lock is a non-blocking acquire-and-poll so a
+# same-conversation waiter on the *same* loop can never deadlock the loop
+# thread that holds the lock mid-await — and, being cross-loop capable, it
+# stays correct even if a future caller skips the funnel.
 __conversation_log_order_locks: dict[int, Lock] = {}
 __conversation_log_order_locks_guard = Lock()
 
@@ -154,8 +157,16 @@ state_file += ".sqlite3"
 state_file = app_data / state_file
 _sql_url = f"sqlite+aiosqlite:///{ state_file }"
 logger.info("sql url: %s", _sql_url)
-_engine = create_async_engine(_sql_url, future=True)
-_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'))
+# pool_size is generous on purpose: sqlite itself serialises actual writes
+# (via WAL + busy_timeout above), so this pool isn't adding write throughput.
+# What it avoids is SQLAlchemy's own default QueuePool (size 5 + overflow 10)
+# queuing a checkout behind its 30s pool_timeout before a caller ever reaches
+# sqlite's much shorter busy wait — under a write burst (many concurrent
+# asyncio.to_thread sessions plus the io loop's own) that pool-level queue,
+# not sqlite's lock, becomes the thing that stalls the Qt GUI thread's own
+# settings writes for tens of seconds instead of a bounded couple of ticks.
+_engine = create_async_engine(_sql_url, future=True, pool_size=1000)
+_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), pool_size=1000)
 
 
 def _set_sqlite_pragmas(dbapi_connection, connection_record):
@@ -166,10 +177,11 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
     GUI send and io receive threads contend on the same file, so a burst
     wedges whatever drain task happened to be committing. WAL keeps readers
     out of the writers' way and turns most of that contention into waits.
-    The timeout must stay SMALL: the sync engine is deliberately awaited on
-    the event-loop thread (mark_sent) and used from the Qt GUI thread
-    (settings writes), so a large value freezes those threads for its full
-    duration on every contended write. 250ms absorbs ordinary micro-
+    The timeout must stay SMALL: the sync engine is used both from worker
+    threads (mark_sent's asyncio.to_thread calls) and directly from the Qt
+    GUI thread (settings writes), so a large value freezes whichever of
+    those threads is waiting for its full duration on every contended
+    write. 250ms absorbs ordinary micro-
     contention yet bounds any loop/GUI stall to a couple of timer ticks;
     sustained contention degrades to the drains' give_up-and-retry path
     instead of a blocking stall. WAL is file-persistent; busy_timeout is per
@@ -342,6 +354,16 @@ class PendingVoucher(SQLModel, table=True):
     display_name: str | None = Field(None, description="joiner's own name, for the mint")
     peer_name: str | None = Field(None, description="inductor's name for the joining peer")
 
+# Caps how many of mark_sent's asyncio.to_thread calls (below) run at once.
+# Each can block a worker thread for up to busy_timeout (250ms) waiting on
+# sqlite's write lock; unbounded, a burst of simultaneously-resendable writes
+# (e.g. right after a reconnect) can saturate Python's shared default
+# ThreadPoolExecutor and start queuing unrelated asyncio.to_thread callers
+# elsewhere in the app behind these DB commits. Semaphore-over-worker-pool is
+# this project's usual pattern for bounding a variable-throughput stream.
+_MARK_SENT_THREAD_SEM = asyncio.Semaphore(8)
+
+
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
@@ -369,9 +391,10 @@ class SentLog(SQLModel, table=True):
         # the event-loop task that owns the write drain, so blocking sqlite
         # I/O here (with its fsync commits) would stall every other task on
         # the loop regardless of the busy timeout's size.
-        precheck_next_blob = await asyncio.to_thread(
-            _read_wcw_precheck, mw.bacap_stream,
-        )
+        async with _MARK_SENT_THREAD_SEM:
+            precheck_next_blob = await asyncio.to_thread(
+                _read_wcw_precheck, mw.bacap_stream,
+            )
         if precheck_next_blob is not None:
             real_next = await connection.get_message_box_index_counter(precheck_next_blob)
             our_next = await connection.get_message_box_index_counter(mw.next_message_index)
@@ -389,9 +412,10 @@ class SentLog(SQLModel, table=True):
                 # MW to do it: in the crash-then-relaunch case (write drain
                 # died mid-commit) no later MW exists, and without this the
                 # message resends forever.
-                conversation_id = await asyncio.to_thread(
-                    _finalize_stale_ack, mw.id, mw.plaintextwal,
-                )
+                async with _MARK_SENT_THREAD_SEM:
+                    conversation_id = await asyncio.to_thread(
+                        _finalize_stale_ack, mw.id, mw.plaintextwal,
+                    )
                 resend_queue.discard(mw.bacap_stream)
                 return conversation_id
         # Resolve the diagnostic counters once so the commit-time print is
@@ -399,12 +423,13 @@ class SentLog(SQLModel, table=True):
         new_idx = our_next if precheck_next_blob is not None else (
             await connection.get_message_box_index_counter(mw.next_message_index)
         )
-        conversation_id = await asyncio.to_thread(
-            _mark_sent_txn,
-            mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
-            mw.next_message_index, new_idx,
-            real_next if precheck_next_blob is not None else None,
-        )
+        async with _MARK_SENT_THREAD_SEM:
+            conversation_id = await asyncio.to_thread(
+                _mark_sent_txn,
+                mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
+                mw.next_message_index, new_idx,
+                real_next if precheck_next_blob is not None else None,
+            )
         resend_queue.discard(mw.bacap_stream)
         return conversation_id
 
@@ -414,6 +439,30 @@ def _read_wcw_precheck(bacap_stream) -> "bytes | None":
     with Session(_engine_sync) as sess:
         wcw = sess.get(WriteCapWAL, bacap_stream)
         return wcw.next_index if wcw else None
+
+
+def _ensure_sent_log_and_flip_status(sess, pwal: "PlaintextWAL") -> "int | None":
+    """Idempotent-insert pwal's SentLog row, and flip its ConversationLog
+    entry (if any) to sent. Shared by both mark_sent finalize paths.
+
+    A pre-existing SentLog row (a prior ACK commit won, its PWAL deletion
+    racing) is reused instead of re-inserted, so this never raises
+    IntegrityError on the SentLog primary key.
+    """
+    if sess.get(SentLog, pwal.id) is None:
+        sess.add(SentLog(id=pwal.id))
+    conversation_id = None
+    if pwal.bacap_payload[:1] in (b"F", b"I"):
+        # This is either:
+        #   I: an Indirection release pointing to something else
+        #   F: a Final message
+        # If it's at a top level, we would have a local ConversationLog entry already,
+        # and we can update that to reflect that message has been sent.
+        if convlog := sess.exec(select(ConversationLog).where(ConversationLog.outgoing_pwal == pwal.id)).first():
+            conversation_id = convlog.conversation_id
+            convlog.network_status = 2
+            sess.add(convlog)
+    return conversation_id
 
 
 def _finalize_stale_ack(mw_id, plaintextwal_id) -> "int | None":
@@ -431,13 +480,7 @@ def _finalize_stale_ack(mw_id, plaintextwal_id) -> "int | None":
             sess.delete(stale_mw)
         pwal = sess.get(PlaintextWAL, plaintextwal_id)
         if pwal is not None:
-            if sess.get(SentLog, pwal.id) is None:
-                sess.add(SentLog(id=pwal.id))
-            if pwal.bacap_payload[:1] in (b"F", b"I"):
-                if convlog := sess.exec(select(ConversationLog).where(ConversationLog.outgoing_pwal == pwal.id)).first():
-                    conversation_id = convlog.conversation_id
-                    convlog.network_status = 2
-                    sess.add(convlog)
+            conversation_id = _ensure_sent_log_and_flip_status(sess, pwal)
             sess.delete(pwal)
         sess.commit()
     return conversation_id
@@ -463,24 +506,20 @@ def _mark_sent_txn(mw_id, bacap_stream, plaintextwal_id, is_read,
                 "whose PWAL was already reaped",
                 plaintextwal_id, is_read,
             )
+            if mw_row := sess.get(MixWAL, mw_id):
+                sess.delete(mw_row)
+                sess.commit()
             return None
-        if sess.get(SentLog, pwal.id) is None:
-            sess.add(SentLog(id=pwal.id))  # SentLog entry for the pwal id
-        wcw = sess.get(WriteCapWAL, bacap_stream)
-        logger.debug("updating wcw: old=%s new=%s", real_next, new_idx)
-        wcw.next_index = next_index
-        conversation_id = None
-        if pwal.bacap_payload[:1] in (b'F',b'I'):
-            # This is either:
-            #   I: an Indirection release pointing to something else
-            #   F: a Final message
-            # If it's at a top level, we would have a local ConversationLog entry already,
-            # and we can update that to reflect that message has been sent.
-            if convlog := sess.exec(select(ConversationLog).where(ConversationLog.outgoing_pwal == pwal.id)).first():
-                conversation_id = convlog.conversation_id
-                convlog.network_status = 2
-                sess.add(convlog)
-        sess.add(wcw)
+        conversation_id = _ensure_sent_log_and_flip_status(sess, pwal)
+        if wcw := sess.get(WriteCapWAL, bacap_stream):
+            logger.debug("updating wcw: old=%s new=%s", real_next, new_idx)
+            wcw.next_index = next_index
+            sess.add(wcw)
+        else:
+            logger.error(
+                "mark_sent: no WriteCapWAL for bacap_stream=%s; "
+                "next_index not advanced", bacap_stream,
+            )
         if bacap_stream != pwal.bacap_stream:
             logger.error("mw.bacap_stream doesn't match pwal.bacap_stream")
         if mw_row := sess.get(MixWAL, mw_id):
