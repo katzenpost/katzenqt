@@ -1058,6 +1058,18 @@ def resolve_connection_config(args) -> "tuple[str, str | None]":
     return path, path
 
 
+async def _action_membership_hash(args: argparse.Namespace) -> int:
+    """Print the conversation's locally computed membership hash. Offline;
+    needs no daemon. Prints one ``MEMBERSHIP_HASH=<hex>`` line."""
+    conv_id = await _conv_id_by_name(args.conv_name)
+    if conv_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    digest = await conversation_handlers.membership_hash_for(conv_id)
+    logger.info("MEMBERSHIP_HASH=%s", digest.hex())
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="katzenqt-headless",
@@ -1183,5 +1195,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tally_list = sub.add_parser("tally-list")
     p_tally_list.add_argument("conv_name")
     p_tally_list.set_defaults(func=_action_tally_list)
+
+    p_mhash = sub.add_parser("membership-hash")
+    p_mhash.add_argument("conv_name")
+    p_mhash.set_defaults(func=_action_membership_hash)
 
     return parser
