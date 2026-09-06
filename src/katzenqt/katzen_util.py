@@ -9,9 +9,12 @@ def create_task(coro):
         try:
             task.result()
         except Exception:
+            # Log the failure but do NOT re-raise: a done-callback's raise
+            # only surfaces as a spurious asyncio "Exception in callback"
+            # traceback (seen on transient kpclientd link drops during a
+            # bounce). The traceback below already preserves visibility.
             print(f"create_task {task.exception()}")
             traceback.print_exc()
-            raise
     task = asyncio.create_task(coro)
     task.add_done_callback(throw_if_needed)
     return task

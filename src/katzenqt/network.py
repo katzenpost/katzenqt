@@ -757,17 +757,24 @@ async def readables_to_mixwal(connection):
             logger.debug("__mixwal_updated.set() from readables_to_mixwal")
 
 def on_error(task, func, *args, **kwargs):
-    """calls func(*args,**kwargs) if task has an exception.
-    Usage: task.add_done_callback(on_error(lambda: foo.bar()))
+    """Attach ``func(*args, **kwargs)`` to ``task``'s completion, firing only
+    when the task raised.
+
+    The exception is consumed (no "Task exception was never retrieved"
+    warning) but NOT re-raised: a done-callback's raise can only be observed
+    by asyncio's exception handler, which logs a spurious "Exception in
+    callback" traceback for transient link drops (e.g. a resendable
+    plaintext hitting the dead link during a kpclientd bounce). The caller
+    reschedules the work on its next sweep.
     """
     def on_error_done(task):
         if task.cancelled():
             return  # cancellation is expected on shutdown, not an error
         try:
             task.result()
-        except Exception:
+        except Exception as e:
+            logger.debug("on_error: task failed (transient expected): %s", e)
             func(*args, **kwargs)
-            raise
     task.add_done_callback(on_error_done)
     return task
 

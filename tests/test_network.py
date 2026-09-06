@@ -286,3 +286,35 @@ class TestOnError:
         with pytest.raises(ValueError):
             await task
         assert captured == [((1, 2), {"key": "value"})]
+
+    @pytest.mark.asyncio
+    async def test_failed_task_does_not_noise_the_event_loop(self):
+        # The done callback must NOT re-raise the task's exception: a
+        # callback raise only surfaces as a spurious "Exception in
+        # callback" traceback via the loop's exception handler (seen in
+        # the kpclientd-restart integration test when a resendable
+        # plaintext hit the dead link during a bounce).
+        loop = asyncio.get_running_loop()
+        fired = []
+        handler_calls = []
+        prev_handler = loop.get_exception_handler()
+
+        def stub_handler(loop_, context):
+            handler_calls.append(context)
+
+        loop.set_exception_handler(stub_handler)
+        try:
+            async def boom():
+                raise RuntimeError("nope")
+
+            task = asyncio.create_task(boom())
+            on_error(task, lambda: fired.append("fired"))
+            with pytest.raises(RuntimeError):
+                await task
+            # Let the done_callback run.
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(prev_handler)
+
+        assert fired == ["fired"]
+        assert handler_calls == []
