@@ -315,6 +315,12 @@ def _spill_attachment(
     ``file_oversized`` marker is returned instead, so the
     conversation log still records that something arrived without
     consuming the disk.
+
+    The spill happens before the caller's commit, which can still be
+    retried (e.g. sqlite lock contention): the filename is derived from the
+    content hash, not a fresh random id, so a retry that calls this again
+    with the same bytes reuses the same file instead of writing (and
+    orphaning) a second copy.
     """
     safe = _safe_basename(file_upload.basename)
     blob = file_upload.payload
@@ -332,24 +338,26 @@ def _spill_attachment(
             "membership_hash": membership_hash,
         })
 
+    sha = hashlib.sha256(blob).digest()
     conv_dir = _attachments_root() / str(conversation_id)
     conv_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    msg_uuid = uuid.uuid4()
-    filename = f"{msg_uuid}-{safe}"
+    filename = f"{sha.hex()}-{safe}"
     rel_path = f"attachments/{conversation_id}/{filename}"
     abs_path = persistent.state_file.parent / rel_path
 
-    fd = os.open(
-        str(abs_path),
-        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-        0o600,
-    )
-    try:
-        os.write(fd, blob)
-    finally:
-        os.close(fd)
+    if not abs_path.exists():
+        fd = os.open(
+            str(abs_path),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        try:
+            os.write(fd, blob)
+        finally:
+            os.close(fd)
+    # else: already spilled by an earlier, retried attempt with this same
+    # content; reuse it rather than writing (and leaking) another copy.
 
-    sha = hashlib.sha256(blob).digest()
     marker = cbor2.dumps({
         "v": 0,
         "kind": "file_marker",

@@ -743,6 +743,25 @@ class TestDrainMixwalReadSingle:
         assert spilled.is_file()
         assert spilled.read_bytes() == blob
 
+    def test_spill_attachment_is_idempotent_across_retries(self):
+        # A retried commit (sqlite lock contention) calls _spill_attachment
+        # again with the same content; it must reuse the same file rather
+        # than writing (and leaking) a second copy under a fresh name.
+        from katzenqt import models
+
+        blob = b"same content, spilled twice" * 3
+        file_upload = models.GroupChatFileUpload(
+            basename="dup.bin", filetype="arbitrary", payload=blob,
+        )
+        marker1 = network._spill_attachment(file_upload, b"m" * 32, 4242)
+        marker2 = network._spill_attachment(file_upload, b"m" * 32, 4242)
+        import cbor2
+        m1 = cbor2.loads(marker1[1:])
+        m2 = cbor2.loads(marker2[1:])
+        assert m1["rel_path"] == m2["rel_path"]
+        conv_dir = network._attachments_root() / "4242"
+        assert len(list(conv_dir.iterdir())) == 1
+
     @pytest.mark.asyncio
     async def test_oversized_file_yields_oversized_marker(self, fake_thinclient, monkeypatch):
         """An assembled attachment larger than the hard cap must be
