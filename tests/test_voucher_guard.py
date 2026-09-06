@@ -258,3 +258,53 @@ async def test_concurrent_append_orders_are_unique():
     assert not failures, failures
     orders = sorted(o for bucket in seen for o in bucket)
     assert orders == list(range(n_threads * per_thread))
+
+
+@pytest.mark.asyncio
+async def test_same_loop_contention_does_not_deadlock():
+    """Two tasks on the same event loop appending to the same conversation
+    must not deadlock, even when the lock holder suspends at a genuine await
+    (standing in for `await sess.commit()`) before releasing.
+
+    Regression test for the same-thread hazard: drain_mixwal2 create_task()s
+    one drain_mixwal_read_single per readable MixWAL row with no await
+    between calls, so two tasks for the *same* conversation can land on the
+    *same* io-thread event loop. If conversation_log_order_lock ever
+    reverts to a plain blocking `with lock:` inside a coroutine, the second
+    task's lock.acquire() would hard-block the only OS thread driving this
+    loop while the first task is suspended mid-critical-section holding the
+    lock, and that thread could then never run the first task's
+    continuation to release it -- a permanent deadlock of the whole loop,
+    not just these two tasks. asyncio.wait_for below bounds the test so a
+    regression fails clearly instead of hanging quietly.
+    """
+    conversation_id = await _make_conversation()
+    acquired_order: list[str] = []
+    results: dict[str, int] = {}
+
+    async def append(name: str, hold_s: float) -> None:
+        async with persistent.conversation_log_order_lock(conversation_id):
+            acquired_order.append(name)
+            await asyncio.sleep(hold_s)  # stand-in for `await sess.commit()`
+            async with persistent.asession() as sess:
+                conv = await sess.get(persistent.Conversation, conversation_id)
+                order = (await sess.exec(
+                    select(persistent.count())
+                    .select_from(persistent.ConversationLog)
+                    .where(persistent.ConversationLog.conversation_id == conversation_id)
+                )).first()
+                sess.add(persistent.ConversationLog(
+                    conversation_id=conversation_id,
+                    conversation_peer_id=conv.own_peer_id,
+                    conversation_order=order,
+                    payload=b"F" + name.encode(),
+                ))
+                await sess.commit()
+                results[name] = order
+
+    task_a = asyncio.create_task(append("a", hold_s=0.05))
+    task_b = asyncio.create_task(append("b", hold_s=0.0))
+    await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=5.0)
+
+    assert acquired_order == ["a", "b"]
+    assert sorted(results.values()) == [0, 1]
