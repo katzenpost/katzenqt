@@ -63,10 +63,14 @@ def _reset_network_module_state():
             setattr(network, name, asyncio.Event())
         getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
-        # Per-conversation log-order locks are asyncio.Locks, and the test
-        # session's conversation ids restart at 1 after each `_fresh_tables`
-        # wipe; drop them so a lock created on a previous test's (now dead)
-        # loop can never be handed to a later test.
+        # Per-conversation log-order locks are plain threading.Locks keyed
+        # by conversation_id, and the test session's conversation ids
+        # restart at 1 after each `_fresh_tables` wipe. Without this reset,
+        # a lock object left over from a previous test (e.g. still held
+        # because that test's critical section was interrupted) would be
+        # handed straight back out to a later test's conversation_id=1,
+        # which would then poll forever waiting for a release that will
+        # never come.
         persistent.__conversation_log_order_locks = {}
 
     restore()

@@ -598,7 +598,13 @@ class TestDrainMixwalReadSingle:
             assert rcw.next_index == setup["first_message_index"]
             assert (await sess.exec(select(persistent.ConversationLog))).all() == []
         assert setup["bacap_stream"] not in draining
-        # A later pass (un-stuck) completes the read normally.
+        # A later pass (un-stuck) completes the read normally. The real
+        # drain loop re-adds the stream to draining_right_now before
+        # dispatching a new read task; do the same here so the closing
+        # assertion actually exercises the success path's own discard,
+        # rather than trivially passing because give_up() already emptied
+        # the set above.
+        draining.add(setup["bacap_stream"])
         fake_thinclient.release_ack(setup["rcr"].envelope_hash)
         await network.drain_mixwal_read_single(
             connection=fake_thinclient,

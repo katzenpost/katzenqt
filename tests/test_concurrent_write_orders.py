@@ -13,10 +13,10 @@ appends complete and stamp strictly unique orders.
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 
 import pytest
-from sqlalchemy import func
 from sqlmodel import select
 
 from katzenqt import persistent
@@ -48,25 +48,17 @@ async def _make_conversation() -> tuple[int, int]:
 
 
 async def _append_log(conversation_id: int, peer_id: int, payload: bytes) -> None:
-    """The send-path append pattern from katzen.py chat_msg_single_line."""
-    async with persistent.conversation_log_order_lock(conversation_id):
-        async with persistent.asession() as sess:
-            sess.add(persistent.ConversationLog(
-                conversation_id=conversation_id,
-                conversation_peer_id=peer_id,
-                conversation_order=(
-                    select(func.count())
-                    .select_from(persistent.ConversationLog)
-                    .where(
-                        persistent.ConversationLog.conversation_id
-                        == conversation_id
-                    )
-                    .scalar_subquery()
-                ),
-                payload=payload,
-                network_status=1,
-            ))
-            await sess.commit()
+    """The actual send-path writer, not a hand-rolled copy of its
+    lock/count-subquery/commit sequence: a bug specific to
+    append_outbound_chat's own argument handling or lock/session ordering
+    should be caught here."""
+    await persistent.append_outbound_chat(
+        conversation_id=conversation_id,
+        conversation_peer_id=peer_id,
+        new_write_caps=[],
+        db_entries=[],
+        payload=payload,
+    )
 
 
 async def _orders(conversation_id: int) -> list[int]:
@@ -95,3 +87,44 @@ async def test_concurrent_appends_same_conversation_do_not_deadlock():
     failures = [r for r in results if isinstance(r, BaseException)]
     assert not failures, f"concurrent appends failed: {failures!r}"
     assert await _orders(conversation_id) == list(range(n))
+
+
+def test_lock_blocks_a_genuinely_different_thread():
+    # The single-loop test above only exercises the same-thread deadlock
+    # this lock was fixed to avoid; it says nothing about the cross-thread
+    # case (GUI loop vs. io loop) the lock's own docstring claims to
+    # handle. Exercise that directly, on the lock alone (no DB/aiosqlite
+    # involved, which has its own cross-loop hazards orthogonal to this
+    # lock) by holding it from one real OS thread while a second contends
+    # for the same conversation_id.
+    conversation_id = 999999
+    main_holds_it = threading.Event()
+    other_acquired = threading.Event()
+    other_thread_done = threading.Event()
+
+    def other_thread_body():
+        async def acquire_once():
+            # Deterministic ordering: never even try until the main thread
+            # has confirmed it holds the lock, so this is never a race.
+            main_holds_it.wait(timeout=5)
+            async with persistent.conversation_log_order_lock(conversation_id):
+                other_acquired.set()
+        asyncio.run(acquire_once())
+        other_thread_done.set()
+
+    async def hold_it():
+        async with persistent.conversation_log_order_lock(conversation_id):
+            main_holds_it.set()
+            await asyncio.sleep(0.2)
+            assert not other_acquired.is_set(), (
+                "other thread acquired the lock while this thread still held it"
+            )
+
+    t = threading.Thread(target=other_thread_body)
+    t.start()
+    try:
+        asyncio.run(hold_it())
+    finally:
+        t.join(timeout=5)
+    assert other_thread_done.is_set(), "other thread never finished"
+    assert other_acquired.is_set(), "other thread never acquired the lock at all"
