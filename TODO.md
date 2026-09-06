@@ -45,18 +45,13 @@
 
 ## Future work (carried over from prior fix branches)
 
-- [ ] **SQLite engine hygiene.** `src/katzenqt/persistent.py:89-90` uses
-      `echo=True` (SQL stringified on every statement; currently muted only by
-      the suppression workarounds at `katzen.py:1346` and
-      `headless/__init__.py:152`) and `pool_size=1000` (a real
-      `QueuePool(size=1000, overflow=10)` that can retain up to 1000 idle
-      aiosqlite connections/threads forever once peaked). Plan: drop both
-      kwargs so both engines use SQLAlchemy's default small QueuePool
-      (size 5); delete the echo-suppression line at `katzen.py:1346`; KEEP
-      `headless/__init__.py:152` (it also quiets benign async-pool "Exception
-      during reset" teardown noise, independent of echo). Verify with the unit
-      suite and the docker integration restart suite (pool-size change could
-      reintroduce `database is locked` under multi-send).
+- [x] **SQLite engine hygiene.** DONE 2026-09-06: both engines now use the
+      default QueuePool (size 5); `echo=True` dropped (`persistent.py:89-90`),
+      echo-suppression line removed from `katzen.py:1346`; kept
+      `headless/__init__.py:152` (also quiets async-pool teardown noise).
+      Verified: unit suite 169 passed/10 skipped; docker integration restart
+      suite 4/4 passed (no `database is locked` regression from the smaller
+      pool).
 
 - [ ] **`conversation_log_order_lock` cross-loop deadlock — fix in two phases.**
       Current state, verified: `src/katzenqt/persistent.py:40-52` keys a
