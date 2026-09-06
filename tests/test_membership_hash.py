@@ -91,3 +91,16 @@ async def test_send_stamps_the_real_membership_hash():
     assert sent.text == "hello"
     assert not models.is_membership_sentinel(sent.membership_hash)
     assert sent.membership_hash == expected
+
+
+def test_shared_membership_vectors() -> None:
+    import json
+    from pathlib import Path
+
+    corpus = json.loads(
+        (Path(__file__).parent / "vectors/membership_vectors.json")
+        .read_text(encoding="utf-8")
+    )
+    for case in corpus["cases"]:
+        caps = [bytes.fromhex(value) for value in case["caps"]]
+        assert models.canonical_membership_hash(caps).hex() == case["expected"]

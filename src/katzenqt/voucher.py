@@ -21,7 +21,7 @@ import logging
 import uuid
 
 from katzenpost_thinclient import (
-    BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
+    ThinClient, BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
 )
 from sqlalchemy import func
@@ -50,6 +50,69 @@ def _brief(b: "bytes | None") -> str:
     return b[:8].hex() + ".." + b[-8:].hex()
 
 MAX_GROUP_MEMBERS = 256
+
+
+MAX_BOX_PLAINTEXT = 1530
+WHO_REPLY_CHUNK_MAGIC = b"KPWR1"
+MAX_WHO_REPLY_CHUNKS = 64
+_CHUNK_HEADER_LEN = len(WHO_REPLY_CHUNK_MAGIC) + 2
+
+
+class WhoReplyTooLargeError(ValueError):
+    """A sealed voucher reply exceeds the shared multi-box wire limit."""
+
+
+def _chunk_sealed_reply(
+    sealed: bytes, limit: int = MAX_BOX_PLAINTEXT,
+) -> list[bytes]:
+    """Encode raw or manifest-prefixed reply boxes in O(len(sealed)) time."""
+    if not _CHUNK_HEADER_LEN <= limit <= MAX_BOX_PLAINTEXT:
+        raise ValueError("invalid voucher box size")
+    if len(sealed) <= limit:
+        return [sealed]
+    count = (len(sealed) + limit - 1) // limit
+    if count > MAX_WHO_REPLY_CHUNKS:
+        raise WhoReplyTooLargeError("sealed voucher reply exceeds 64 boxes")
+    header = WHO_REPLY_CHUNK_MAGIC + count.to_bytes(2, "big", signed=False)
+    return [header, *(sealed[i:i + limit] for i in range(0, len(sealed), limit))]
+
+
+def _who_reply_chunk_count(box0: bytes) -> int | None:
+    """Recognize the exact seven-byte voucher reply manifest."""
+    if len(box0) == _CHUNK_HEADER_LEN and box0.startswith(WHO_REPLY_CHUNK_MAGIC):
+        count = int.from_bytes(box0[len(WHO_REPLY_CHUNK_MAGIC):], "big", signed=False)
+        if not 2 <= count <= MAX_WHO_REPLY_CHUNKS:
+            raise ValueError("invalid voucher reply chunk count")
+        return count
+    return None
+
+
+async def _publish_sealed_reply(
+    connection: ThinClient, write_cap: bytes, box1_index: bytes, sealed: bytes,
+) -> None:
+    """Publish a bounded reply, validating its size before writing any box."""
+    index = box1_index
+    for payload in _chunk_sealed_reply(sealed):
+        index = await _publish_box(connection, write_cap, index, payload)
+
+
+async def _read_sealed_reply(
+    connection: ThinClient, read_cap: bytes, box1_index: bytes,
+) -> bytes:
+    """Read a raw reply or bounded sequential chunks in O(reply size) time."""
+    box0, index = await _read_box(connection, read_cap, box1_index)
+    count = _who_reply_chunk_count(box0)
+    if count is None:
+        if len(box0) > MAX_BOX_PLAINTEXT:
+            raise WhoReplyTooLargeError("voucher reply box exceeds the wire limit")
+        return box0
+    parts: list[bytes] = []
+    for _ in range(count):
+        part, index = await _read_box(connection, read_cap, index)
+        if not 0 < len(part) <= MAX_BOX_PLAINTEXT:
+            raise ValueError("invalid voucher reply chunk size")
+        parts.append(part)
+    return b"".join(parts)
 
 
 class AlreadyJoinedError(Exception):
@@ -593,7 +656,17 @@ async def derive_read_and_induct(
         voucher=voucher, voucher_payload=voucher_payload, who_reply=who_reply.to_cbor(),
     )
 
-    await _publish_box(connection, derived.voucher_write_cap, box1_index, induct.sealed_reply)
+    try:
+        await _publish_sealed_reply(
+            connection, derived.voucher_write_cap, box1_index, induct.sealed_reply,
+        )
+    except WhoReplyTooLargeError:
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.PendingVoucher, pv_id)
+            if row is not None:
+                await sess.delete(row)
+                await sess.commit()
+        raise
 
     joiner_name = induct.display_name or peer_name
     already_inducted = False
