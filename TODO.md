@@ -71,12 +71,44 @@ Follow-ups (now separate items below): `network.on_error` re-raise
       suite, ruff, one live bounce run to confirm the role stderr stays
       clean.
 
-- [ ] **Make `test_read_latency_after_continuous_peer_sends` reliable
-      (find out why it flakes).** Bob ACKs all 3 sends (courier accepted)
-      but alice's read never commits the LAST message (m2) within her read
-      deadline, and `STEP_POLL` row_count stays 2 for the whole window.
-      Reproduces only in full-restart-suite context under load — green
-      every isolated run. Diagnostic-first plan:
+- [x] **Make `test_read_latency_after_continuous_peer_sends` reliable
+      (find out why it flakes).** DONE 2026-09-06.
+      Three read-path defects, each responsible for a distinct strand:
+      1. **Lost read reply strands the task forever** (the m2 pattern:
+         Bob's 3 sends courier-ACK, but alice's read of the last box hangs).
+         kpclientd's ARQ can re-serve an already-delivered reply whose
+         query-id no longer has a listener, which thinclient then drops
+         silently; `_send_and_wait`'s unbounded `queue.get()` never sees the
+         miss, so the read coroutine blocks for good while the box keeps
+         being re-served. Fix: watchdog (`asyncio.wait_for`, 120s default)
+         in `drain_mixwal_read_single` — on timeout, best-effort
+         `cancel_resending_encrypted_message` and re-schedule the box for a
+         fresh-cast. `d5d00bb`.
+      2. **OS-level send failure strands the stream in `draining_right_now`**
+         (bounce pattern). A `[Errno 9] Bad file descriptor` from a daemon
+         reconnect raced a re-cast; it wasn't in the give-up list, the read
+         task died unhandled, and reads had no done-callback — so the stream
+         stayed in `draining_right_now` forever and every later box on it was
+         silently starved. Fix: give up (keep box, release stream) on
+         `OSError`, and add a read done-callback mirroring the write path
+         that releases the stream on any task failure/cancel. `7b25602`.
+      3. **Reads gated by `__mixnet_connected` wedge on a flap.** kpclientd
+         never re-notifies an existing session that its gateway link
+         recovered (observed: 4-minute EOF flaps; daemon reconnects ~2 s
+         later): alice's drain loop sat gated forever, zero reads reached the
+         daemon for 12+ min. Fix: reads are cast unconditionally every sweep
+         (daemon ARQ rides the flap out exactly like the write path), writes
+         still wait for the gate. `945ab1a`.
+      Validation: 3 new unit tests (`tests/test_network_fake.py`:
+      watchdog re-cast, OSError give-up, unhandled-exception safety); unit
+      suite 177 passed / 11 skipped; full live integration suite 11/11 in
+      33:19 including the once-flaky latency test and the bounce test — the
+      bounce run passing DURING active gateway flapping (OSError give-ups +
+      a watchdog re-cast + m1 delivered). The bounce test also got a
+      per-step READ deadline
+      (`READ:m1:1500`, default 360, clamp 60–7200) so an unusually cold
+      daemon re-attach no longer burns the read budget. `29ee4f2`.
+      Diagnostic-first plan was:
       1. **Snapshot on failure**: read-only `sqlite3` dump of each role's
          `<KQT_STATE>.sqlite3` (path built in `persistent.py:125-132`) from
          the test's failure path — ConversationLog count, ReadCapWAL
