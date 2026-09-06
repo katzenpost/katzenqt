@@ -57,6 +57,26 @@ async def check_for_new():
 __mixwal_updated = asyncio.Event()
 __mixwal_updated.set()
 __mixnet_connected = asyncio.Event()
+_last_connected: "bool | None" = None  # tracks the previous on_connection_status
+                                        # report, so transition-only logging
+                                        # doesn't warn on every failed retry.
+
+# Set (and replaced with a fresh instance) each time the daemon reconnects
+# after having been seen disconnected. A read that captures the current
+# instance before waiting can tell whether a reconnect happened *during*
+# its wait by checking whether its captured instance later fires, without
+# racing a new waiter that starts after the transition (see
+# drain_mixwal_read_single's watchdog).
+_reconnect_event = asyncio.Event()
+
+
+def _is_transient_sqlite_busy(exc: OperationalError) -> bool:
+    """True for sqlite's own lock-contention error, false for anything else
+    (schema drift, a malformed database, a readonly filesystem) that also
+    happens to raise sqlalchemy.exc.OperationalError. Only the former should
+    be treated as "retry later"; the latter is an invariant bug and ought to
+    stay loud instead of retrying forever."""
+    return "database is locked" in str(exc.orig).lower()
 
 __on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
 
@@ -138,8 +158,14 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       read_cap=None, message_box_index=None, reply_index=None
 
       )
-    except (ThinClientOfflineError, BrokenPipeError, StartResendingCancelledError):
-      logger.warning("thin client is offline or resend cancelled, can't drain mixwal.")
+    except (ThinClientOfflineError, BrokenPipeError, StartResendingCancelledError, OSError) as e:
+      # OSError (e.g. a stale socket's "Bad file descriptor" right after a
+      # daemon reconnect) is included here to match the equivalent read-path
+      # except clause; the sleep before give_up() matches it too, so a
+      # persistent (non-transient) failure of this kind backs off instead of
+      # retrying in a tight loop.
+      logger.warning("thin client is offline or resend cancelled, can't drain mixwal: %s", e)
+      await asyncio.sleep(5)
       give_up()
       return
 
@@ -154,7 +180,9 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     """
     try:
       conv_id = await asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue))
-    except OperationalError:
+    except OperationalError as e:
+      if not _is_transient_sqlite_busy(e):
+          raise
       # sqlite write lock contention (e.g. a concurrent GUI-send commit on
       # the same file): the MW was not consumed, only mark_sent failed.
       # Hand the stream back so the drain loop's sweep re-sends it and
@@ -175,12 +203,61 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
 
 _SUBSTREAM_NAME_PREFIX = ":substream:"
 
-# Bound on how long a single read's stop-and-wait ARQ may block before we
-# abort it at the daemon and re-cast the box on the next sweep. A lost read
-# reply can otherwise strand `_send_and_wait` indefinitely (see
-# drain_mixwal_read_single); 120 s is far above the ~30 s worst observed
-# read latency so it only trips on a genuinely stuck reply.
-READ_WATCHDOG_SECONDS = 120.0
+# Backstop bound on how long a single read's stop-and-wait ARQ may block with
+# NO other signal before we abort it at the daemon and re-cast the box. This
+# is deliberately generous: kpclientd's own BoxIDNotFound ride-out is
+# uncapped by design (a conversation can sit idle, waiting for the peer to
+# write anything, for a long time — that is not a hang), so a short flat
+# timeout here would fire on every ordinary quiet conversation instead of
+# only on a genuinely stuck reply. The reconnect-triggered path below is the
+# primary defence and fires much sooner; this is only the last resort if a
+# read never gets a reply AND never observes a reconnect either.
+READ_WATCHDOG_SECONDS = 1200.0
+
+# How long to give an in-flight read's reply after the daemon reconnects mid-
+# wait, before treating it as lost. A reconnect is the one concrete signal we
+# have that a reply could have been orphaned: kpclientd's reconnect-replay
+# can deliver the courier's reply to a query_id whose original listener (this
+# call) already gave up waiting on the old connection.
+_RECONNECT_GRACE_SECONDS = 30.0
+
+
+async def _await_read_reply(connection, *, read_watchdog_s: float,
+                             reconnect_grace_s: float, bacap_uuid, **kwargs):
+    """Await start_resending_encrypted_message, racing it against a daemon
+    reconnect rather than a flat clock.
+
+    Returns the reply, or raises whatever the call itself raised, or raises
+    asyncio.TimeoutError (for the caller's existing recovery path) if either
+    the reconnect-grace period or the backstop elapses first.
+    """
+    reconnect_marker = _reconnect_event
+    task = asyncio.ensure_future(
+        connection.start_resending_encrypted_message(**kwargs)
+    )
+    reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {task, reconnect_wait}, timeout=read_watchdog_s,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if task in done:
+            return task.result()
+        if reconnect_wait in done:
+            logger.warning(
+                "drain_mixwal_read_single: daemon reconnected mid-wait for "
+                "bacap_stream=%s; giving the in-flight ARQ %s s to answer "
+                "before treating the reply as orphaned",
+                bacap_uuid, reconnect_grace_s,
+            )
+            return await asyncio.wait_for(task, timeout=reconnect_grace_s)
+        # Backstop: read_watchdog_s elapsed with no reply and no observed
+        # reconnect. Should be rare; treat it the same as a reconnect-grace
+        # timeout so the caller's single recovery path handles both.
+        task.cancel()
+        raise asyncio.TimeoutError()
+    finally:
+        reconnect_wait.cancel()
 
 # Cap on attachment size after reassembly. Anything larger is
 # logged at WARNING, the bytes are discarded, and a
@@ -333,7 +410,7 @@ async def _try_assemble(sess, rcw_id: "uuid.UUID", terminal_idx_8b: bytes):
     return ("F", chunks, chain, gcm)
 
 
-async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS):
+async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS, reconnect_grace_s: float = _RECONNECT_GRACE_SECONDS):
   """Given a single persisten.MixWAL with is_read==True:
     - Send it to the network.
     - If we get a response:
@@ -350,22 +427,30 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     draining_right_now.discard(bacap_uuid)
     # we don't clear it from __resend_queue because we don't want to skip
     # ahead in the stream.
+    #
+    # readables_to_mixwal_event only wakes readables_to_mixwal(), whose query
+    # excludes any ReadCapWAL that still has a MixWAL row -- exactly this
+    # row's state after a give_up(), so it alone is a no-op for retrying THIS
+    # mw. __mixwal_updated is what actually makes drain_mixwal2 re-scan
+    # MixWAL.get_new() promptly instead of waiting out its ~15s poll.
     readables_to_mixwal_event.set()
+    __mixwal_updated.set()
     return
 
   try:
-    resp = await asyncio.wait_for(
-        connection.start_resending_encrypted_message(
-            read_cap=rcw_read_cap,
-            write_cap=None,
-            message_box_index=mw.current_message_index,
-            reply_index=None,
-            envelope_descriptor=mw.envelope_descriptor,
-            envelope_hash=mw.envelope_hash,
-            message_ciphertext=mw.encrypted_payload,
-            no_retry_on_box_id_not_found=False,
-        ),
-        timeout=read_watchdog_s,
+    resp = await _await_read_reply(
+        connection,
+        read_watchdog_s=read_watchdog_s,
+        reconnect_grace_s=reconnect_grace_s,
+        bacap_uuid=bacap_uuid,
+        read_cap=rcw_read_cap,
+        write_cap=None,
+        message_box_index=mw.current_message_index,
+        reply_index=None,
+        envelope_descriptor=mw.envelope_descriptor,
+        envelope_hash=mw.envelope_hash,
+        message_ciphertext=mw.encrypted_payload,
+        no_retry_on_box_id_not_found=False,
     )
   except asyncio.TimeoutError:
     # A lost read reply can strand `_send_and_wait` forever: the thinclient's
@@ -454,6 +539,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         await sess.commit()
       except Exception as e:  # pragma: no cover - defensive: commit-of-delete should never fail
         logger.critical("error committing deletion of stray MW: %s", e)
+      draining_right_now.discard(bacap_uuid)  # otherwise this stream is wedged forever with no exception needed
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
     logger.info(f"advancing read to idx {idx_new}")
@@ -469,6 +555,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       sess.add(cp)
       await sess.delete(mw)
       await sess.commit()
+      draining_right_now.discard(bacap_uuid)  # otherwise this stream is wedged forever with no exception needed
       __mixwal_updated.set()
       return
 
@@ -569,7 +656,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
         await sess.commit()
-    except OperationalError:
+    except OperationalError as e:
+      if not _is_transient_sqlite_busy(e):
+          raise
       # sqlite write lock contention committing a received message (e.g. a
       # concurrent GUI-send commit on the same file). Discard the uncommitted
       # transaction by giving up: the enclosing asession() unwinds on return
@@ -667,7 +756,6 @@ async def drain_mixwal2(connection: ThinClient):
         # __mixwal_updated being set, effectively turning it into a
         # 15-second poller. FIRST_COMPLETED restores the event-driven
         # behaviour the caller of __mixwal_updated.set() expects.
-        connected = __mixnet_connected.is_set()
         _, _ = await asyncio.wait((
                  create_task(__mixwal_updated.wait()),
                  shutdown,
@@ -675,6 +763,12 @@ async def drain_mixwal2(connection: ThinClient):
         if __should_quit.is_set():
           continue
         __mixwal_updated.clear()
+        # Read fresh, after the wait: a reconnect that happens *during* the
+        # wait (on_connection_status also pokes __mixwal_updated on one, so
+        # this pass runs promptly) must not be judged by a connectedness
+        # snapshot taken up to 15s earlier, or a pending write sits deferred
+        # for a further sweep instead of going out immediately.
+        connected = __mixnet_connected.is_set()
         logger.debug("DRAIN_MIXWAL draining_right_now:%s __resend_queue:%s", draining_right_now, __resend_queue)
         # TODO drain new from mixwal, this should NOT be a long-running session like it currently is
         new_write_mws = []
@@ -702,7 +796,14 @@ async def drain_mixwal2(connection: ThinClient):
                         # draining_right_now forever, silently starving
                         # every later box on it. give_up() already discards
                         # on the handled paths; discard is idempotent.
-                        if task.cancelled() or task.exception() is not None:
+                        if task.cancelled():
+                            draining_right_now.discard(stream)
+                        elif (exc := task.exception()) is not None:
+                            logger.error(
+                                "drain_mixwal_read_single crashed for bacap_stream=%s; "
+                                "releasing stream for another drain pass",
+                                stream, exc_info=exc,
+                            )
                             draining_right_now.discard(stream)
                         readables_to_mixwal_event.set()
 
@@ -841,7 +942,7 @@ def on_error(task, func, *args, **kwargs):
         try:
             task.result()
         except Exception as e:
-            logger.debug("on_error: task failed (transient expected): %s", e)
+            logger.error("on_error: task failed: %s", e, exc_info=e)
             func(*args, **kwargs)
     task.add_done_callback(on_error_done)
     return task
@@ -969,12 +1070,33 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     __mixwal_updated.set()
 
 async def on_connection_status(status:"Dict[str,Any]"):
-    if status["is_connected"]:
+    global _last_connected, _reconnect_event
+    connected = bool(status["is_connected"])
+    transitioned = _last_connected is not None and _last_connected != connected
+    err = status.get("err") or status.get("Err")
+    if connected:
         __mixnet_connected.set()
+        if transitioned:
+            logger.info("daemon reports reconnected to mixnet")
+            # Replace (not just re-set) the event: a read that started
+            # waiting before this transition sees ITS captured instance
+            # fire; a read that starts waiting after this point captures the
+            # new instance and correctly waits for the NEXT reconnect only.
+            old_event, _reconnect_event = _reconnect_event, asyncio.Event()
+            old_event.set()
+            __mixwal_updated.set()  # a deferred write need not wait out the next sweep
     else:
         __mixnet_connected.clear()
-        logger.warning("daemon reports disconnected from mixnet; ARQ rides out and retries")
-    if status["err"] or status.get("Err", None):
+        if (transitioned or _last_connected is None) and not err:
+            # Warn only on the transition (or the first report ever), not on
+            # every failed reconnect attempt the daemon retries in the
+            # background: those repeat every ~15-30s during an outage and
+            # would otherwise log this line just as often. A disconnect that
+            # also carries an err payload is left to the ERROR log below
+            # instead of logging the same single event twice.
+            logger.warning("daemon reports disconnected from mixnet; ARQ rides out and retries")
+    _last_connected = connected
+    if err:
         logger.error("ON_CONNECTION_STATUS err: %s", status)
         #ON_CONNECTION_STATUS err: {'is_connected': False, 'err': {'Op': 'read', 'Net': 'tcp', 'Source': {'IP': b'\x7f\x00\x00\x01', 'Port': 51718, 'Zone': ''}, 'Addr': {'IP': b'\x7f\x00\x00\x01', 'Port': 30004, 'Zone': ''}, 'Err': {}}}
         # why is clientd telling us about the IP addresses its trying to connect to?

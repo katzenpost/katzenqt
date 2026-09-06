@@ -121,6 +121,15 @@ class TestEventSignals:
 
 
 class TestOnConnectionStatus:
+    @pytest.fixture(autouse=True)
+    def _reset_transition_state(self):
+        # on_connection_status tracks the previous report so it can log
+        # transitions only once; reset it so each test starts from "no
+        # prior report" rather than leaking state from test run order.
+        network._last_connected = None
+        yield
+        network._last_connected = None
+
     @pytest.mark.asyncio
     async def test_connected_sets_mixnet_connected(self):
         ev = getattr(network, "__mixnet_connected")
@@ -140,6 +149,30 @@ class TestOnConnectionStatus:
         with caplog.at_level(logging.WARNING, logger="katzen.network"):
             await on_connection_status({"is_connected": False, "err": None})
         assert any("disconnected" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_disconnected_warns_once_per_transition(self, caplog):
+        # A daemon retry loop reports the same disconnected state every
+        # ~15-30s during an outage; the warning must fire once, on the
+        # transition, not on every repeated report.
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({"is_connected": True, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+        warnings = [r for r in caplog.records if "disconnected" in r.message]
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_with_err_does_not_also_warn(self, caplog):
+        # A disconnect that also carries an err payload is fully captured by
+        # the ERROR log below; it must not also emit the plain WARNING for
+        # what is a single event.
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({
+                "is_connected": False, "err": {"Op": "read"},
+            })
+        assert not any("disconnected" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_err_payload_does_not_raise(self):

@@ -615,6 +615,39 @@ class TestDrainMixwalReadSingle:
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
+    async def test_lost_read_reply_is_recovered_after_reconnect(self, fake_thinclient):
+        # A reconnect mid-wait is the one concrete signal that a reply could
+        # have been orphaned (kpclientd's reconnect-replay delivering to a
+        # query_id whose original listener already gave up); the watchdog
+        # should give up promptly after observing one, well before the
+        # (much larger, and here never reached) flat backstop.
+        network._last_connected = None
+        payload = _make_F_payload("hang then reconnect")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        fake_thinclient.hold_ack(setup["rcr"].envelope_hash)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+
+        async def simulate_reconnect():
+            await asyncio.sleep(0.02)
+            await network.on_connection_status({"is_connected": False, "err": None})
+            await network.on_connection_status({"is_connected": True, "err": None})
+
+        reconnector = asyncio.ensure_future(simulate_reconnect())
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=draining,
+            read_watchdog_s=60.0,
+            reconnect_grace_s=0.05,
+        )
+        await reconnector
+        fake_thinclient.last_call("cancel_resending_encrypted_message")
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
     async def test_transient_sqlite_busy_on_read_commit_is_retried(
         self, fake_thinclient, monkeypatch,
     ):
