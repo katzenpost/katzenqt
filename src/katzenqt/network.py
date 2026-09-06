@@ -54,6 +54,28 @@ resendable_event.set()
 async def check_for_new():
     resendable_event.set()
 
+
+async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
+                                     new_write_caps, db_entries, payload,
+                                     final_pwal_id=None):
+    """Append an outbound chat message's WAL rows/log entry and wake the
+    receive-side listeners, all in one io-loop hop.
+
+    Combines what would otherwise be three separate run_in_io round trips
+    from the GUI thread (append, queue-put, check_for_new) into one; each
+    hop is a real cross-thread future wait.
+    """
+    await persistent.append_outbound_chat(
+        conversation_id=conversation_id,
+        conversation_peer_id=conversation_peer_id,
+        new_write_caps=new_write_caps,
+        db_entries=db_entries,
+        payload=payload,
+        final_pwal_id=final_pwal_id,
+    )
+    await conversation_update_queue.put((conversation_id, False))
+    await check_for_new()
+
 __mixwal_updated = asyncio.Event()
 __mixwal_updated.set()
 __mixnet_connected = asyncio.Event()

@@ -63,6 +63,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
 
+# Bound on how long receive_msg_listener/peer_added_listener wait for a
+# conversation_id to appear in conversation_state_by_id before giving up on
+# that one queue item. The UI can briefly lag the io thread at startup, but a
+# stale or deleted conversation_id must not starve every later item forever.
+_CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
+
 class AsyncioThread(threading.Thread):
     def run(self):
         self.loop = asyncio.new_event_loop()
@@ -308,14 +314,19 @@ class MainWindow(QMainWindow):
               f"{option}.font.pointSize": font.pointSize(),
             }
             self.settings = {**self.settings, **new}
-            with persistent.Session(persistent._engine_sync) as sess:
-                for n,v in new.items():
-                  if not (ex := sess.get(persistent.AppSetting, n)):
-                      ex = persistent.AppSetting(id=n)
-                  ex.type = 'int' if isinstance(v,int) else 'str'
-                  ex.value = v
-                  sess.add(ex)
-                sess.commit()
+            try:
+                with persistent.Session(persistent._engine_sync) as sess:
+                    for n,v in new.items():
+                      if not (ex := sess.get(persistent.AppSetting, n)):
+                          ex = persistent.AppSetting(id=n)
+                      ex.type = 'int' if isinstance(v,int) else 'str'
+                      ex.value = v
+                      sess.add(ex)
+                    sess.commit()
+            except Exception as e:
+                # self.settings already reflects the new font in memory; a
+                # failure here only means it won't survive a restart.
+                logger.warning("could not persist font setting: %s", e)
             # In theory we could now redraw the conversation QML, but we don't have
             # a way to trigger a full redraw. We should have something similar to
             # "on another conversation selected", but which we could force-redraw with.
@@ -493,8 +504,12 @@ class MainWindow(QMainWindow):
         # its append through the same single writer loop (via run_in_io) under
         # the per-conversation lock, so two transactions can never stamp the
         # same order and trip the unique constraint.
+        #
+        # One run_in_io hop, not three: append, the queue-put that wakes
+        # receive_msg_listener, and check_for_new all happen inside the same
+        # io-loop coroutine instead of three separate cross-thread round trips.
         await self.iothread.run_in_io(
-            persistent.append_outbound_chat(
+            network.notify_outbound_chat_sent(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
                 new_write_caps=new_write_caps,
@@ -505,22 +520,34 @@ class MainWindow(QMainWindow):
             )
         )
 
-        # signal self.receive_msg_listener() that we have news for it:
-        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id,False)))
+    async def _wait_for_conversation_state(self, conversation_id, *, what: str) -> bool:
+        """Wait for conversation_id to appear in conversation_state_by_id.
 
-        # Signal the network module that we have a new outgoing message:
-        await self.iothread.run_in_io(
-            network.check_for_new()
-        )
+        Bounded: the UI can briefly lag the io thread at startup, but a
+        conversation_id that never appears (stale or deleted) must not
+        starve every later queue item forever. Returns False (log and skip)
+        if it never shows up within the timeout."""
+        waited = 0
+        while conversation_id not in self.conversation_state_by_id:
+            if waited >= _CONVERSATION_STATE_WAIT_TIMEOUT_S:
+                logger.error(
+                    "%s: conversation_id %s never appeared in "
+                    "conversation_state_by_id after %ds; dropping",
+                    what, conversation_id, waited,
+                )
+                return False
+            logger.debug(f"{what}: conversation_id {conversation_id} not in conversation_state_by_id yet")
+            await asyncio.sleep(1)
+            waited += 1
+        return True
 
     async def receive_msg_listener(self):
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
         while True:
             (conversation_id, redraw_only) = await self.iothread.run_in_io(network.conversation_update_queue.get())
-            while conversation_id not in self.conversation_state_by_id:
-                logger.debug(f"conversation_id {conversation_id} not in conversation_state_by_id yet")
-                await asyncio.sleep(1)  # encountered a race here once, where the UI hadn't loaded. not sure if still there.
+            if not await self._wait_for_conversation_state(conversation_id, what="receive_msg_listener"):
+                continue
             convo_state = self.conversation_state_by_id[conversation_id]
             if redraw_only:
                 convo_state.conversation_log_model.redraw_network_status()
@@ -566,9 +593,8 @@ class MainWindow(QMainWindow):
         restart."""
         while True:
             (conversation_id, name) = await self.iothread.run_in_io(network.peer_added_queue.get())
-            while conversation_id not in self.conversation_state_by_id:
-                logger.debug(f"peer_added for conversation {conversation_id} before UI loaded; waiting")
-                await asyncio.sleep(1)
+            if not await self._wait_for_conversation_state(conversation_id, what="peer_added_listener"):
+                continue
             convo_state = self.conversation_state_by_id[conversation_id]
             item = convo_state.contacts_standard_item
             already = any(
@@ -647,13 +673,17 @@ class MainWindow(QMainWindow):
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo.conversation_id)
 
-        # open a new transaction: TODO: need to only READ COMMITTED, we do not want dirty reads here
-        async with persistent.asession() as sess:
+        # The sync engine (_engine_sync), not asession()/the async engine:
+        # this runs on the Qt thread's own event loop, and aiosqlite
+        # connections from the async engine's pool are not safe to use from
+        # a loop other than the one that created them.
+        # TODO: need to only READ COMMITTED, we do not want dirty reads here
+        with persistent.Session(persistent._engine_sync) as sess:
             for cap_uuid in new_write_caps:
                 sess.add(persistent.WriteCapWAL(id=cap_uuid))  # the network writer needs to create these before it can process plaintextwals
             for db_obj in db_entries:
                 sess.add(db_obj)  # These are PlaintextWAL and ReadCapWal entries
-            await sess.commit()
+            sess.commit()
 
         # Signal network.py that we have written a new SendOperation to PlaintextWAL
         await self.iothread.run_in_io(
@@ -862,18 +892,24 @@ class MainWindow(QMainWindow):
             conversation_order=0,
             payload=b"Your name in this conversation is " + own_peer.name.encode(),
         )
-        async with persistent.asession() as sess:
+        # The sync engine (_engine_sync), not asession()/the async engine:
+        # this runs on the Qt thread's own event loop, and aiosqlite
+        # connections from the async engine's pool are not safe to use from
+        # a loop other than the one that created them (see persistent.py's
+        # comment on the io-loop funnel). The sync engine has no such
+        # affinity.
+        with persistent.Session(persistent._engine_sync) as sess:
             sess.add(wcapwal)
             sess.add(rcapwal)
             sess.add(convo)
             sess.add(own_peer)
             sess.add(first_post)
-            await sess.commit()
-            await sess.refresh(first_post)
-            await sess.refresh(own_peer)
-            await sess.refresh(convo)
-            await sess.refresh(rcapwal)
-            await sess.refresh(wcapwal)
+            sess.commit()
+            sess.refresh(first_post)
+            sess.refresh(own_peer)
+            sess.refresh(convo)
+            sess.refresh(rcapwal)
+            sess.refresh(wcapwal)
         await add_conversation(self, convo)
 
     @async_cb
@@ -972,9 +1008,13 @@ class MainWindow(QMainWindow):
 
     async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
         for attempt in range(5):
-            while self.iothread.kp_client is None:
-                await asyncio.sleep(1)
             try:
+                # getattr, not a direct attribute access: AsyncioThread sets
+                # kp_client as the first line of async_main(), so a call
+                # made before that thread has even started running would
+                # otherwise raise AttributeError here instead of waiting.
+                while getattr(self.iothread, "kp_client", None) is None:
+                    await asyncio.sleep(1)
                 return await self.iothread.run_in_io(
                     await_and_open(self.iothread.kp_client, conversation_id)
                 )
