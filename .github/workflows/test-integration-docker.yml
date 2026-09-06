@@ -83,7 +83,7 @@ jobs:
       # Makefile. `make wait` blocks until the dirauths reach consensus.
       - name: Build and start the docker mixnet
         working-directory: katzenqt/katzenpost/docker
-        run: make start wait
+        run: make base_port=62331 start wait
 
       - name: Brief pause so the mixnet is fully ready
         run: sleep 30
