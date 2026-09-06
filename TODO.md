@@ -20,6 +20,42 @@
       message land) has not been replayed against the new client. The closest
       proxy today is the integration restart tests.
 
+      Plan:
+      1. **Defensive fix in the drain loop** (read of `network.py` found the
+         wedge can still resurface when kpclientd dies mid-drain):
+         - `drain_mixwal_write_single` awaits
+           `connection.get_message_box_index_counter(...)` at `network.py:118`
+           BEFORE the offline try/except that calls `give_up()`; an
+           offline/broken-pipe raise there kills the fire-and-forget
+           `write_task` (`network.py:638`, never awaited/reaped) and strands
+           the stream in `draining_right_now` forever — the "silently
+           vanished write" again. Move the counter call inside the try so a
+           dying link hits `give_up()`.
+         - `drain_mixwal2` evaluates `logger.debug(...)` f-string args eagerly,
+           so the `await connection.get_message_box_index_counter(...)` at
+           `network.py:634` is a hidden network call in the loop body; an
+           offline raise there propagates out of `drain_mixwal2`, and
+           `drain_mixwal` (`:104-110`) catches it ONCE, logs critical, and
+           returns — permanently killing ALL draining for the process.
+           Make the counter log offline-safe.
+         - Attach a `done_callback` to `write_task` that releases
+           `draining_right_now` on exception/cancel (mirror the `on_error`
+           pattern at `network.py:818`) so a failed write is re-swept.
+      2. **Deterministic unit test** using `tests/fakes/thinclient.py`
+         (it already injects per-method `ThinClientOfflineError`): a dead
+         `get_message_box_index_counter`/`start_resending` must NOT kill the
+         drain loop, and the stream must be released for a later sweep.
+      3. **End-to-end integration test** `tests/integration/test_kpclientd_restart.py`
+         (self-contained, bounces the SHARED daemon so it must run serial,
+         not concurrently with the other integration files):
+         voucher-pair alice+bob; alice `chat-session` READs; `podman stop
+         mixnet-alpine-kpclientd-1`; wait for unreachable; bob `chat-session`
+         SEND:m1 (drain gate waits on `__mixnet_connected`, `network.py:602`);
+         `podman start`; poll reachable; assert bob SEND STEP_OK (SentLog
+         appears = ARQ rode out) and alice READ STEP_OK, both rc 0.
+      4. Validate: unit suite, ruff (125 baseline), bounce test green, restart
+         suite 4/4 re-run.
+
 - [ ] **thclient 0.0.24 release + pin migration.** The
       `fix-unconditional-replay-keepalive` branch is pushed to GitHub but not
       released: thin_client's `pyproject.toml` is still `0.0.23`, no `0.0.24`
