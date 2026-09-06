@@ -447,14 +447,18 @@ wheels = [
 
 [[package]]
 name = "katzenpost-thinclient"
-version = "0.0.23"
-source = { git = "https://github.com/katzenpost/thin_client.git?rev=fix-unconditional-replay-keepalive#465b006caed0f3931fee520f493c7e546f7b209d" }
+version = "0.0.24"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asyncio" },
     { name = "cbor2" },
     { name = "coloredlogs" },
     { name = "pprintpp" },
     { name = "toml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/b1/d25a38e6c4c993982f923df563ee6930760cf5b4cdf1a0551a7f873cd4f2/katzenpost_thinclient-0.0.24.tar.gz", hash = "sha256:a2ffcc13137a198c0a87b35b2ea0e918d16f8dd22f7a15129cb573a9de929705", size = 145727, upload-time = "2026-09-06T15:40:38.555Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b4/e3/739aca17b3a1428550f9f7d7d8dd9d8a60232cd39929c8cb276cbbd2b4ff/katzenpost_thinclient-0.0.24-py3-none-any.whl", hash = "sha256:5e542c3f1bb4c3c2c4814e67bd5f7d8f941d4f95d20f9244fda957f796510c60", size = 49047, upload-time = "2026-09-06T15:40:37.221Z" },
 ]
 
 [[package]]
@@ -490,7 +494,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = "~=0.21.0" },
     { name = "alembic", specifier = "~=1.16.5" },
     { name = "cbor2", specifier = "~=5.6.5" },
-    { name = "katzenpost-thinclient", git = "https://github.com/katzenpost/thin_client.git?rev=fix-unconditional-replay-keepalive" },
+    { name = "katzenpost-thinclient", specifier = "==0.0.24" },
     { name = "pycrdt", specifier = "~=0.13.1" },
     { name = "pydantic", specifier = "~=2.11.7" },
     { name = "pynacl", specifier = "==1.6.0" },
