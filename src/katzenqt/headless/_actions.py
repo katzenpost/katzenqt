@@ -485,6 +485,42 @@ async def _action_multi_send(args):
         await _shutdown(bg, connection)
 
 
+_READ_DEADLINE_DEFAULT_S = 360.0
+_READ_DEADLINE_MIN_S = 60.0
+_READ_DEADLINE_MAX_S = 7200.0
+
+
+def _parse_read_step(payload: str, *, step_idx: int) -> "tuple[str, float]":
+    """Split a READ step's payload into (target_text, deadline_s).
+
+    The optional "...:<deadline_s>" suffix is only recognised if the text
+    after the LAST colon actually parses as a float in range; otherwise the
+    whole payload (colons included) is the literal target text. Splitting
+    from the right, and only on a successful parse, means target text that
+    itself contains a colon is never truncated by mistake.
+    """
+    deadline_s = _READ_DEADLINE_DEFAULT_S
+    last_colon = payload.rfind(":")
+    if last_colon == -1:
+        return payload, deadline_s
+    candidate = payload[last_colon + 1:]
+    try:
+        parsed = float(candidate)
+    except ValueError:
+        return payload, deadline_s
+    target = payload[:last_colon]
+    if _READ_DEADLINE_MIN_S <= parsed <= _READ_DEADLINE_MAX_S:
+        deadline_s = parsed
+    else:
+        logger.warning(
+            "STEP:%d: READ deadline_s=%r out of range [%.0f,%.0f]; "
+            "using default %.0fs",
+            step_idx, candidate, _READ_DEADLINE_MIN_S, _READ_DEADLINE_MAX_S,
+            deadline_s,
+        )
+    return target, deadline_s
+
+
 async def _action_chat_session(args):
     """Long-lived session that runs multiple SEND / READ / SLEEP steps in
     ONE subprocess against a shared background-thread ThinClient, then
@@ -493,7 +529,9 @@ async def _action_chat_session(args):
     subprocess we know the last committed state on disk is the one that
     matters.
 
-    Timeouts (send=300s, read=180s) are shared across steps.
+    Timeouts (send=300s, read=180s) are shared across steps. A READ step's
+    target text may carry an optional "...:<deadline_s>" suffix (60-7200) to
+    override the default 360s wait for that one step, e.g. "READ:m1:1800".
     """
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -558,13 +596,7 @@ async def _action_chat_session(args):
             elif kind == "READ":
                 # Nudge the read loop in case no event is outstanding.
                 await network.signal_readables_to_mixwal()
-                payload, _, _extra = payload.partition(":")
-                try:
-                    deadline_s = float(_extra)
-                    if not (60.0 <= deadline_s <= 7200.0):
-                        raise ValueError
-                except ValueError:
-                    deadline_s = 360.0
+                payload, deadline_s = _parse_read_step(payload, step_idx=step_idx)
                 # Six minutes by default: enough for the loaded CI mixnet's
                 # propagation-and-poll round trip without giving up
                 # on a session that is otherwise progressing. The
