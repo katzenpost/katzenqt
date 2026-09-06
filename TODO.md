@@ -39,7 +39,21 @@
 Follow-ups (now separate items below): `network.on_error` re-raise
        noise; and the flaky `test_read_latency_after_continuous_peer_sends`.
 
-- [ ] **`network.on_error` re-raises in its done callback (noise).**
+- [x] **`network.on_error` re-raises in its done callback (noise).** DONE
+      2026-09-06.
+      The plan below is what was carried out, with two scope additions found
+      mid-flight: (1) `katzen_util.create_task`'s `throw_if_needed` had the
+      SAME re-raise pattern and was the actually-loud source during a bounce
+      (a thinclient `encrypt_write` task failing on the closed fd) — same
+      fix applied (keeps the printed traceback visibility, swallows the
+      loop-level callback exception), with a new `tests/test_katzen_util.py`;
+      (2) the bounce test's alice-READ window started at process launch, so
+      a slow reconnect could burn her budget before m1 existed — she now
+      SLEEPs 300s through the bounce and READs after (test-only reliability,
+      no product masking). Validation: unit suite 174 passed / 11 skipped;
+      ruff no new findings; live bounce run green (6:08) with zero
+      "Exception in callback" tracebacks (single intentional `create_task`
+      diagnostic print remains).
       `on_error`/`on_error_done` (`src/katzenqt/network.py:759-772`) calls
       `task.result()` and then `raise`s from inside the asyncio
       done-callback. Nothing observes that raise — it only surfaces as
