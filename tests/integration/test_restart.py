@@ -6,12 +6,18 @@ Skipped unless ``KATZENQT_DOCKER_INTEGRATION=1`` (see conftest.py).
 from __future__ import annotations
 
 import os
+import shutil
+import sqlite3
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import pytest
+
+from katzenqt import models
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -61,6 +67,80 @@ def _spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path
 
 def _combined(proc: subprocess.CompletedProcess) -> str:
     return proc.stdout + proc.stderr
+
+
+def _snapshot_role_state(state: Path, label: str) -> None:
+    """Dump a read-only forensic snapshot of a role's state DB to the pytest
+    log (``[snap][<label>]`` lines) so a failure can be classified against
+    the read-side hypotheses:
+      (a) leftover read-``MixWAL`` for the final message -> the read-drain
+          strand died before sweeping it;
+      (b) ``ReadCapWAL.next_index`` advanced past it -> an index-skip race;
+      (c) neither -> the mixnet never delivered it (nondelivery).
+
+    The DB file is copied first (with its ``-wal``/``-shm`` siblings) and
+    the copy opened read-only, so this never contends with or perturbs a
+    live process, and committed-but-uncheckpointed WAL data is still read.
+    """
+    src = Path(str(state) + ".sqlite3")
+    if not src.is_file():
+        print(f"[snap][{label}] no state db at {src}")
+        return
+    snap_dir = Path(tempfile.mkdtemp(prefix="kqt-snap-"))
+    dst = snap_dir / "state.sqlite3"
+    shutil.copy2(src, dst)
+    for suffix in ("-wal", "-shm"):
+        sibling = Path(str(src) + suffix)
+        if sibling.is_file():
+            shutil.copy2(sibling, f"{dst}{suffix}")
+    try:
+        conn = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT cl.conversation_order, cl.conversation_peer_id,"
+            " cl.network_status, cl.payload"
+            " FROM conversationlog cl ORDER BY cl.conversation_order"
+        )
+        for order, peer_id, net_status, payload in cur.fetchall():
+            text = ""
+            if payload[:1] == b"F":
+                try:
+                    gcm = models.GroupChatMessage.from_cbor(payload[1:])
+                    text = f" text={gcm.text!r} type={gcm.msg_type.name}"
+                except Exception:
+                    text = " (undecodable payload)"
+            print(
+                f"[snap][{label}] convlog order={order} peer={peer_id}"
+                f" net={net_status}{text}"
+            )
+
+        cur.execute("SELECT is_read, count(*) FROM mixwal GROUP BY is_read")
+        for is_read, n in cur.fetchall():
+            print(f"[snap][{label}] mixwal count is_read={is_read}: {n}")
+        cur.execute("SELECT id, bacap_stream FROM mixwal WHERE is_read=1")
+        for rid, stream in cur.fetchall():
+            print(f"[snap][{label}] leftover read-MixWAL id={rid} stream={stream}")
+
+        cur.execute("SELECT id, next_index FROM readcapwal")
+        for rid, ni in cur.fetchall():
+            head = 0
+            if ni:
+                head = struct.unpack("<Q", ni[:8])[0]
+            print(
+                f"[snap][{label}] readcapwal stream={rid}"
+                f" next_idx_head={head} len={len(ni) if ni else 0}"
+            )
+
+        for table in ("sentlog", "plaintextwal"):
+            try:
+                cur.execute(f"SELECT count(*) FROM {table}")
+                print(f"[snap][{label}] {table} count: {cur.fetchone()[0]}")
+            except sqlite3.OperationalError:
+                print(f"[snap][{label}] {table}: no table")
+        conn.close()
+    finally:
+        shutil.rmtree(snap_dir, ignore_errors=True)
 
 
 def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
@@ -293,6 +373,12 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
         bob_proc.kill()
         alice_proc.kill()
         raise
+
+    # Forensic snapshot AFTER both roles have exited so the WAL is settled:
+    # classifies a failure as (a) leftover read-MixWAL, (b) ReadCapWAL index
+    # skip, or (c) mixnet nondelivery.
+    _snapshot_role_state(alice_state, "alice")
+    _snapshot_role_state(bob_state, "bob")
 
     # STEP_OK tokens are logged to stderr (with a level/name prefix), so
     # combine both streams and match by search rather than anchored match.
