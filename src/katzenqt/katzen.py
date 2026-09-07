@@ -2027,7 +2027,8 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     window.conversation_state_by_id[convo.id] = convo_state
 
     for peer in convo.peers:
-        #ptwi = QTreeWidgetItem([peer.name])
+        if peer.name.startswith(network._SUBSTREAM_NAME_PREFIX):
+            continue
         ptwi = QStandardItem(peer.name)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
