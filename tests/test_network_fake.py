@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+import cbor2
 import pytest
 from sqlmodel import select
 
@@ -579,7 +580,7 @@ class TestDrainMixwalReadSingle:
         # drain loop re-casts the same box with a fresh query id.
         payload = _make_F_payload("hang then recover")
         setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
-        fake_thinclient.hold_ack(setup["rcr"].envelope_hash)
+        fake_thinclient.hold_ack_for_box(setup["read_cap"], setup["first_message_index"])
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         draining: set = {setup["bacap_stream"]}
@@ -605,7 +606,7 @@ class TestDrainMixwalReadSingle:
         # rather than trivially passing because give_up() already emptied
         # the set above.
         draining.add(setup["bacap_stream"])
-        fake_thinclient.release_ack(setup["rcr"].envelope_hash)
+        fake_thinclient.release_ack_for_box(setup["read_cap"], setup["first_message_index"])
         await network.drain_mixwal_read_single(
             connection=fake_thinclient,
             rcw_read_cap=setup["read_cap"],
@@ -630,7 +631,7 @@ class TestDrainMixwalReadSingle:
         network._last_connected = None
         payload = _make_F_payload("hang then reconnect")
         setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
-        fake_thinclient.hold_ack(setup["rcr"].envelope_hash)
+        fake_thinclient.hold_ack_for_box(setup["read_cap"], setup["first_message_index"])
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         draining: set = {setup["bacap_stream"]}
@@ -652,6 +653,59 @@ class TestDrainMixwalReadSingle:
         await reconnector
         fake_thinclient.last_call("cancel_resending_encrypted_message")
         assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_lost_read_reply_is_recovered_after_epoch_rollover(self, fake_thinclient):
+        # A PKI epoch rollover mid-wait makes start_resending_encrypted_message's
+        # envelope stale for the courier; the watchdog should notice via
+        # on_new_pki_document and give up promptly, same as a reconnect.
+        payload = _make_F_payload("hang then epoch roll")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        fake_thinclient.hold_ack_for_box(setup["read_cap"], setup["first_message_index"])
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+
+        def _pki_event(epoch: int) -> "dict":
+            return {"payload": cbor2.dumps({"Epoch": epoch})}
+
+        async def simulate_epoch_rollover():
+            await asyncio.sleep(0.02)
+            await network.on_new_pki_document(_pki_event(1))
+            await network.on_new_pki_document(_pki_event(2))
+
+        roller = asyncio.ensure_future(simulate_epoch_rollover())
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=draining,
+            read_watchdog_s=60.0,
+            reconnect_grace_s=0.05,
+        )
+        await roller
+        fake_thinclient.last_call("cancel_resending_encrypted_message")
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_read_re_encrypts_a_fresh_envelope_every_call(self, fake_thinclient):
+        # The epoch-rollover fix depends on this: a retried read must never
+        # reuse the persisted (potentially stale) envelope on the MixWAL
+        # row, or give_up()-then-retry after a rollover would just resend
+        # the same now-stale envelope forever.
+        payload = _make_F_payload("fresh envelope each time")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now={setup["bacap_stream"]},
+        )
+        assert fake_thinclient.call_count("start_resending_encrypted_message") == 1
+        used_envelope_hash = fake_thinclient.last_call("start_resending_encrypted_message")["envelope_hash"]
+        assert used_envelope_hash != setup["rcr"].envelope_hash
 
     @pytest.mark.asyncio
     async def test_transient_sqlite_busy_on_read_commit_is_retried(
