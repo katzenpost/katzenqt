@@ -185,19 +185,12 @@ TreeView {
 
         delegate: TreeViewDelegate {
 // https://doc.qt.io/qt-6/qml-qtquick-controls-treeviewdelegate-members.html
-// implicitWidth: padding + label.x + label.implicitWidth + padding
-// implicitHeight: label.implicitHeight * 1.5
 
-          //property TreeView treeView
-          //property bool isTreeNode
-          //anchors.fill: parent
+          id: msgDelegate
 
           implicitWidth: parent.parent.width || 1
 
-          // NB: without this, it looks like shit if you scroll up:
-          implicitHeight: Math.max(messageColumn.implicitHeight,
-	                    Math.max(contact_name.implicitHeight, (entry_picture.visible ? entry_picture.height : 0)
-			    )) // tallest element
+          implicitHeight: rowBody.implicitHeight + 6
 
           background: Rectangle {
             // Themed row background so contact names (sysPalette.text) are
@@ -205,10 +198,13 @@ TreeView {
             color: sysPalette.base
           }
 
-          contentItem: Row {  /// contentItem is the thing that gets displayed
+          contentItem: RowLayout {
+          id: rowBody
+          spacing: 8
 
           Text {
             id: contact_name
+            Layout.alignment: Qt.AlignTop
             textFormat: Text.PlainText
             text: (
               model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "    " : "")
@@ -218,26 +214,22 @@ TreeView {
 	    color: (model.network_status > 0 ? "red" : sysPalette.text)
           }
 
-	  RowLayout {
-	       spacing: 1
-	       id : entry_picture_row
-	       visible: model.picture_path ? model.picture_path : false
-	       Image {
-                 id: entry_picture
-                 source: "image://ChatImageProvider/" + model.picture_path
-                 // QQmlEngine.addImageProvider(QQuickImageProvider(def requestImage())
-                 // https://stackoverflow.com/a/20693161
-	         asynchronous: true
-	         fillMode: Image.PreserveAspectFit
-	     }
-	  }
-
-          // Text and attachment controls stack vertically so the action row
-          // is not clipped by the greedy TextArea width.
           Column {
             id: messageColumn
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignTop
             spacing: 2
-            width: parent.width - contact_name.width
+
+	  Image {
+             id: entry_picture
+             visible: model.picture_path ? true : false
+             source: model.picture_path ? "image://ChatImageProvider/" + model.picture_path : ""
+             // QQmlEngine.addImageProvider(QQuickImageProvider(def requestImage())
+             // https://stackoverflow.com/a/20693161
+             asynchronous: true
+             fillMode: Image.PreserveAspectFit
+             width: Math.min(implicitWidth, messageColumn.width)
+          }
 
           TextArea {
             id: itemMessageTextArea
@@ -246,15 +238,11 @@ TreeView {
             textFormat: Text.PlainText // https://doc.qt.io/qt-6/qml-qtquick-text.html#textFormat-prop
             readOnly: true
             wrapMode: Text.Wrap
-	    // hovered: when mouse is over
-            //Layout.fillWidth: parent
-            //property alias maxWidth: "chatTreeView"
-            width: parent.width
-            //implicitWidth: 100;
-            //anchors.fill: parent
-            //openExternalLinks: false
-            //textInteractionFlags: TextSelectableByMouse
-            //selectByMouse: true
+            width: messageColumn.width
+            leftPadding: 0
+            rightPadding: 0
+            topPadding: 0
+            bottomPadding: 0
             text: model.display
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
 	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
@@ -297,7 +285,7 @@ TreeView {
           } // Row attachmentActions
 
           } // Column messageColumn
-} // contentItem: Row
+}
         } // delegate: TreeViewDelegate
 
 } // TreeView

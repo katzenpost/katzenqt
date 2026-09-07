@@ -2026,10 +2026,17 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     )
     window.conversation_state_by_id[convo.id] = convo_state
 
+    seen_peer_names: dict[str, int] = {}
     for peer in convo.peers:
         if peer.name.startswith(network._SUBSTREAM_NAME_PREFIX):
             continue
-        ptwi = QStandardItem(peer.name)
+        if peer.id == convo.own_peer_id:
+            continue
+        label = peer.name
+        seen_peer_names[peer.name] = seen_peer_names.get(peer.name, 0) + 1
+        if seen_peer_names[peer.name] > 1:
+            label = "%s #%s" % (peer.name, str(peer.read_cap_id)[:6])
+        ptwi = QStandardItem(label)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
     async with persistent.asession() as sess:
