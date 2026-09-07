@@ -1,12 +1,23 @@
-"""Live confirmation of network.py's reconnect-triggered read watchdog.
+"""Live confirmation that a pending read survives a full kpclientd process
+restart (podman stop/start), not just a mixnet-level connectivity blip.
 
-This targets the one fix in the review-findings-fixes branch that could
-not be confidently verified against fakes alone: _await_read_reply races
-an in-flight read against on_connection_status's _reconnect_event swap,
-so a read stranded by a real kpclientd bounce should recover within the
-~30s reconnect grace period, not the old flat 120s scan (which falsely
-fired on ordinary idle waits) or the new, much larger 1200s backstop
-(which would mean the reconnect-detection path never engaged at all).
+This was originally written to confirm the reconnect-triggered read
+watchdog (_await_read_reply racing on_connection_status's
+_reconnect_event); empirically it does NOT exercise that path. A full
+daemon restart never fires on_connection_status at all here -- the
+thin_client library reconnects the client's local socket to the new
+daemon process below the callback layer, with no disconnected/reconnected
+transition surfaced to the app (only its own "Attempting to reconnect to
+daemon" debug line). See test_watchdog_mixnet_reconnect.py for the
+scenario that DOES exercise on_connection_status and the watchdog's
+grace-period path: pausing the gateway so the daemon process keeps
+running but loses its mixnet route, which is what on_connection_status's
+pre-existing "disconnected from mixnet" line is actually about.
+
+What this test still confirms, and is worth keeping for: the read-drain
+loop (give_up()/OSError handling/prompt-retry fixes in this branch) does
+not hang or crash across a full daemon restart, recovering via its
+pre-existing exception-handling paths.
 
 Bounces the SHARED kpclientd daemon; run serial, not concurrently with
 the other integration files. Skipped unless KATZENQT_DOCKER_INTEGRATION=1
@@ -25,7 +36,7 @@ from tests.integration._bounce_helpers import (
 
 
 @pytest.mark.integration
-def test_read_recovers_promptly_after_kpclientd_reconnect(kpclientd_endpoint, tmp_path_factory):
+def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path_factory):
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
     log_dir = tmp_path_factory.mktemp("watchdog_logs")
@@ -88,13 +99,13 @@ def test_read_recovers_promptly_after_kpclientd_reconnect(kpclientd_endpoint, tm
         f"alice chat-session failed rc={alice_proc.returncode}\n{alice_err.read_text()[-4000:]}"
     )
     assert "STEP_OK:0:READ:m1" in alice_all, (
-        f"alice never read m1 after the reconnect\n{alice_err.read_text()[-6000:]}"
+        f"alice never read m1 after the restart\n{alice_err.read_text()[-6000:]}"
     )
-    # The direct confirmation: the reconnect-generation detection in
-    # _await_read_reply actually fired for this read, not just that it
-    # eventually succeeded via some other path.
-    assert "daemon reconnected mid-wait for bacap_stream=" in alice_all, (
-        "the reconnect-triggered watchdog path never engaged for this read; "
-        "either it recovered some other way, or the fix regressed\n"
-        f"{alice_err.read_text()[-6000:]}"
+    assert "SESSION_DONE" in alice_all, (
+        f"clean-shutdown sentinel missing\n{alice_err.read_text()[-3000:]}"
     )
+    # NOT asserted here: "daemon reconnected mid-wait for bacap_stream=".
+    # A full daemon restart doesn't fire on_connection_status at all (see
+    # the module docstring), so the read recovers via the pre-existing
+    # exception-handling paths, not the reconnect watchdog. That path is
+    # confirmed separately in test_watchdog_mixnet_reconnect.py.

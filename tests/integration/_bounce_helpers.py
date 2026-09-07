@@ -144,6 +144,30 @@ def find_kpclientd_container() -> str:
     )
 
 
+def find_same_network_container(kpclientd_container: str, role: str) -> str:
+    """A sibling container (e.g. "gateway1") on the SAME compose network as
+    an already-identified kpclientd container.
+
+    Deriving the network prefix from a container we've already confirmed is
+    ours (rather than matching role names against the full `podman ps`
+    output again) means this can never resolve to a different session's
+    network, however many are running on the host.
+    """
+    if not kpclientd_container.endswith("-kpclientd-1"):
+        raise ValueError(f"not a kpclientd container name: {kpclientd_container!r}")
+    prefix = kpclientd_container[: -len("-kpclientd-1")]
+    name = f"{prefix}-{role}-1"
+    proc = subprocess.run(
+        ["podman", "ps", "--format", "{{.Names}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"podman ps failed: {proc.stderr}")
+    if name not in proc.stdout.split():
+        raise RuntimeError(f"expected sibling container {name!r} not found running")
+    return name
+
+
 def podman(args) -> None:
     proc = subprocess.run(
         ["podman", *args], capture_output=True, text=True, check=False,
