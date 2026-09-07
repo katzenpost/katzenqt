@@ -150,6 +150,8 @@ stub test is cheap.
 
 ## Item 3 — 47-R1: unify the three network done-callbacks (MEDIUM-LOW importance, maintainability)
 
+**done in 9f78e29.**
+
 **Motivation.** `network.py` has three near-identical bespoke asyncio
 done-callbacks that have already drifted (exc_info logging added piecemeal;
 cancellation handled differently: `on_error` ignores it, the drain handlers
