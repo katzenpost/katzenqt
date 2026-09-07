@@ -96,3 +96,34 @@ class TestSendIntroductionMessageNeverRaises:
         assert any(
             "failed to write INTRODUCTION" in r.message for r in caplog.records
         )
+
+
+class TestOwnReadCapDedupe:
+    """The single own-read-cap lookup now shared by _handle_introduction
+    and _build_who_reply: write-cap-derived once provisioned, else the
+    unmutated rcapwal.read_cap."""
+
+    @pytest.mark.asyncio
+    async def test_prefers_provisioned_write_cap(self):
+        conv_id = await _make_conversation(
+            own_write_cap=b"\xaa" * 168, own_read_cap=b"\xbb" * 136,
+        )
+        async with persistent.asession() as sess:
+            conv = await sess.get(persistent.Conversation, conv_id)
+            assert await persistent.own_read_cap(sess, conv) == b"\xaa" * 136
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_read_cap_when_write_cap_unprovisioned(self):
+        conv_id = await _make_conversation(
+            own_write_cap=None, own_read_cap=b"\xbb" * 136,
+        )
+        async with persistent.asession() as sess:
+            conv = await sess.get(persistent.Conversation, conv_id)
+            assert await persistent.own_read_cap(sess, conv) == b"\xbb" * 136
+
+    @pytest.mark.asyncio
+    async def test_none_when_neither_is_provisioned(self):
+        conv_id = await _make_conversation(own_write_cap=None, own_read_cap=None)
+        async with persistent.asession() as sess:
+            conv = await sess.get(persistent.Conversation, conv_id)
+            assert await persistent.own_read_cap(sess, conv) is None

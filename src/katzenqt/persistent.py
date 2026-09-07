@@ -478,6 +478,28 @@ async def peer_has_read_cap(
     return bool(rows)
 
 
+async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
+    """The conversation owner's salt-mutated read cap: the write cap's
+    [32:] suffix once that is provisioned, else the unmutated
+    ``rcapwal.read_cap``.
+
+    Two call sites hand-wrote this same lookup in slightly different
+    shapes (``_handle_introduction`` recognises an announcement about
+    ourselves with it; ``_build_who_reply`` announces ourselves to a
+    joiner with it), so a change to how the own cap is derived only needs
+    to be made once. A freshly created conversation's write cap is filled
+    in by the background provisioning loop shortly after creation, so None
+    here is a transient early-state, not an error.
+    """
+    own_rcw = await session.get(ReadCapWAL, conversation.own_peer.read_cap_id)
+    own_cap = own_rcw.read_cap if own_rcw is not None else None
+    if conversation.write_cap is not None:
+        wcw = await session.get(WriteCapWAL, conversation.write_cap)
+        if wcw is not None and wcw.write_cap is not None:
+            own_cap = wcw.write_cap[32:]
+    return own_cap
+
+
 async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25) -> bool:
     """Poll SentLog for ``pwal_id`` until it appears or ``deadline_s``
     elapses. Returns True if acked in time, False on timeout.

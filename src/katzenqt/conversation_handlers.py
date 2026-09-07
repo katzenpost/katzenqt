@@ -58,16 +58,7 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
     peer_added = None
     if intro := gcm.as_introduction:
         conv = peer.conversation
-        wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
-        own_cap = wcw.write_cap[32:] if wcw is not None and wcw.write_cap is not None else None
-        if own_cap is None:
-            # Own write cap not provisioned yet (a background loop fills it
-            # in shortly after conversation creation); fall back to the
-            # unmutated read cap, same as _build_who_reply does for the
-            # symmetric case, so a self-announcement heard early isn't
-            # misclassified as a stranger and added as our own peer.
-            own_rcw = await sess.get(persistent.ReadCapWAL, conv.own_peer.read_cap_id)
-            own_cap = own_rcw.read_cap if own_rcw is not None else None
+        own_cap = await persistent.own_read_cap(sess, conv)
         if own_cap != intro.read_cap and not await _already_has(sess, conv.id, intro):
             from .voucher import _add_peer
             _add_peer(sess, conv, intro.display_name, intro.read_cap)

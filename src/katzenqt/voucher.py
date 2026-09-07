@@ -545,12 +545,7 @@ async def _build_who_reply(conversation_id: int) -> models.GroupChatReplyWho:
     inductor's own stream plus any already-active peers."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
-        own_rcw = await sess.get(persistent.ReadCapWAL, conv.own_peer.read_cap_id)
-        own_read_cap = own_rcw.read_cap
-        if conv.write_cap is not None:
-            wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
-            if wcw is not None and wcw.write_cap is not None:
-                own_read_cap = wcw.write_cap[32:]
+        own_read_cap = await persistent.own_read_cap(sess, conv)
         please_adds = []
         if own_read_cap is not None:
             please_adds.append(models.GroupChatPleaseAdd(
