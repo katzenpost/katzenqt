@@ -1057,11 +1057,35 @@ class MainWindow(QMainWindow):
 
         group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
 
-        await self._enqueue_outgoing_gcm(
-            convo_state,
-            group_chat_message,
-            # TODO massive hack here because we don't reassemble sendops yet
-            local_payload=b"F" + group_chat_message.to_cbor(),
+        # TODO: this is general code that should live in a shared place:
+        send_op = SendOperation(
+            bacap_stream=convo_state.own_peer_bacap_uuid,
+            messages=[group_chat_message]
+        )
+        # TODO this code is duplicated in self.send_file
+        new_write_caps, db_entries = send_op.serialize(
+            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            conversation_id=convo_state.conversation_id)
+
+        # conversation_order is a count subquery evaluated at commit. The
+        # receive/voucher paths append on the io loop; the send path funnels
+        # its append through the same single writer loop (via run_in_io) under
+        # the per-conversation lock, so two transactions can never stamp the
+        # same order and trip the unique constraint.
+        #
+        # One run_in_io hop, not three: append, the queue-put that wakes
+        # receive_msg_listener, and check_for_new all happen inside the same
+        # io-loop coroutine instead of three separate cross-thread round trips.
+        await self.iothread.run_in_io(
+            network.notify_outbound_chat_sent(
+                conversation_id=convo_state.conversation_id,
+                conversation_peer_id=convo_state.own_peer_id,
+                new_write_caps=new_write_caps,
+                db_entries=db_entries,
+                payload=b"F" + group_chat_message.to_cbor(),
+                # TODO massive hack here because we don't reassemble sendops yet
+                final_pwal_id=db_entries[-1].id,
+            )
         )
 
     async def _wait_for_conversation_state(self, conversation_id, *, what: str) -> bool:
