@@ -197,12 +197,23 @@ no log; success -> neither hook. Existing `_on_write_done` and `on_error` tests
 
 ## Item 4 — 45-dup-note: duplication-count discrepancy (LOW importance, documentation only)
 
+**done in e561d24.**
+
 **Motivation.** REVIEW.md says there are "five duplication findings" but names
 only three: `persistent.wait_for_sent`, `voucher.as_introduction`, and
-`persistent.next_conversation_order`. REVIEW2.md flagged the count. **Decision
-(baked in): close as a review-text inconsistency; no audit for two unnamed
-findings.** Nothing to code. Record this decision in TODO.md only (i.e. this
-line).
+`persistent.next_conversation_order`. REVIEW2.md flagged the count.
+
+**Done — audit + dedupe (deviation from the original decision).** Instead of
+closing as a review-text inconsistency only, an audit was run for the
+"duplication REVIEW.md alluded to". Mapping of the "five" (three named +
+two from the PR#47 reuse block): all are accounted for —
+`next_conversation_order`, `wait_for_sent`, `as_introduction`,
+`_ensure_sent_log_and_flip_status` (finalize block), and the
+`_on_write_done`-reimplements-`on_error` reuse (now the `_done_callback`
+primitive, item 3 / commit 9f78e29). The one remaining genuine cross-file
+duplicate was the conversation owner's salt-mutated read-cap lookup, hand-written
+in two different shapes in `_handle_introduction` and `_build_who_reply`; it is
+now a single `persistent.own_read_cap` helper (commit e561d24).
 
 ---
 
