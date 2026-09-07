@@ -1117,12 +1117,18 @@ class MainWindow(QMainWindow):
         if conversation_id is None:
             return
         menu = QMenu(self)
+        mute_action = menu.addAction("Mute notifications")
+        mute_action.setCheckable(True)
+        mute_action.setChecked(persistent.is_muted(conversation_id))
         copy_action = menu.addAction("Copy voucher")
         show_action = menu.addAction("Show voucher...")
         chosen = menu.exec(
             self.ui.contacts_treeWidget.viewport().mapToGlobal(pos)
         )
         if chosen is None:
+            return
+        if chosen is mute_action:
+            persistent.set_muted(conversation_id, mute_action.isChecked())
             return
         ensure_future(
             self._voucher_menu_action(conversation_id, chosen is show_action)
@@ -1328,11 +1334,11 @@ class MainWindow(QMainWindow):
             # TODO we should bump "unread message" counter
 
         # if the main window is not in focus, we should issue a notification:
-        if not self.app.focusWidget():
-            self.app.alert(self)
-            # self.app.beep()
-        if self.systray:
-            self.systray.has_new_messages() # TODO move this into block above
+        if not persistent.is_muted(conversation_id):
+            if not self.app.focusWidget():
+                self.app.alert(self)
+            if self.systray:
+                self.systray.has_new_messages()
 
     async def peer_added_listener(self):
         """Append members announced via INTRODUCTION to the contacts tree in

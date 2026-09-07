@@ -276,6 +276,30 @@ class AppSetting(SQLModel, table=True):
     type: str = Field(nullable=False)  # "str" or "int", I guess
     value: str = Field(nullable=True)  # value or NULL
 
+MUTE_SETTING_PREFIX = "mute:"
+
+def _mute_key(conversation_id: int) -> str:
+    return f"{MUTE_SETTING_PREFIX}{conversation_id}"
+
+def set_muted(conversation_id: int, muted: bool) -> None:
+    key = _mute_key(conversation_id)
+    with Session(_engine_sync) as sess:
+        row = sess.get(AppSetting, key)
+        if muted:
+            if row is None:
+                row = AppSetting(id=key)
+            row.type = "str"
+            row.value = "1"
+            sess.add(row)
+        elif row is not None:
+            sess.delete(row)
+        sess.commit()
+
+def is_muted(conversation_id: int) -> bool:
+    with Session(_engine_sync) as sess:
+        row = sess.get(AppSetting, _mute_key(conversation_id))
+    return row is not None and row.value == "1"
+
 class MixWAL(SQLModel, table=True):
     """
     Stores EncryptWriteResult/EncryptReadResult from ThinClient.encrypt_read() and encrypt_write()
