@@ -381,7 +381,7 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
                 )
             else:
                 _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
-            added.append(please_add.display_name)
+                added.append(please_add.display_name)
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
@@ -476,11 +476,15 @@ async def _wait_intro_acked(final_pwal_id, display_name: str, conversation_id: i
         )
 
 
-async def derive_read_and_induct(connection, conversation_id: int, peer_name: str, voucher: bytes) -> str:
+async def derive_read_and_induct(
+    connection, conversation_id: int, peer_name: str, voucher: bytes,
+) -> "str | None":
     """Inductor: derive the VoucherStream from the Voucher, read the joiner's
     payload from box 0, seal a reply carrying the group's read caps, write it to
     box 1, and add the joiner (on their salt-mutated read cap) as a peer. Returns
-    the joiner's display name."""
+    the joiner's display name, or None if this joiner had already been
+    inducted (a retry of an already-committed handshake), so the caller does
+    not report a duplicate contact or a duplicate introduction announcement."""
     derived = await connection.voucher_derive_stream(voucher=voucher)
 
     pv = persistent.PendingVoucher(
@@ -514,6 +518,7 @@ async def derive_read_and_induct(connection, conversation_id: int, peer_name: st
     await _publish_box(connection, derived.voucher_write_cap, box1_index, induct.sealed_reply)
 
     joiner_name = induct.display_name or peer_name
+    already_inducted = False
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if not await persistent.peer_has_read_cap(
@@ -524,6 +529,7 @@ async def derive_read_and_induct(connection, conversation_id: int, peer_name: st
             # Already inducted (a failed post-commit ack made a naive retry
             # re-run the handshake); re-adding would duplicate the member
             # and read their stream twice.
+            already_inducted = True
             logger.warning(
                 "derive_read_and_induct: %r already holds read cap %s on "
                 "conversation %d; skipping duplicate induction",
@@ -533,6 +539,9 @@ async def derive_read_and_induct(connection, conversation_id: int, peer_name: st
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
+
+    if already_inducted:
+        return None
 
     await send_introduction_message(
         conversation_id, joiner_name, induct.mutated_message_read_cap,

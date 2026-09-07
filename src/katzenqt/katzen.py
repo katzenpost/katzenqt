@@ -1112,12 +1112,20 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        name = joiner_name or "contact"
-        convo.contacts_standard_item.appendRow(QStandardItem(name))
+        if joiner_name is None:
+            # Already inducted by an earlier run of this same handshake;
+            # voucher.py has already logged and skipped the duplicate add,
+            # so there is no new contact to reflect here.
+            QTimer.singleShot(0, lambda: QMessageBox.information(
+                self, f"Inducted: {APP_NAME}", "This contact was already inducted.",
+            ))
+            return
+
+        convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Inducted: {APP_NAME}", f"Inducted {name} into this conversation.",
+            self, f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
         ))
 
     @async_cb

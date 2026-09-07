@@ -352,8 +352,9 @@ class TestAlreadyInductedGuard:
     @pytest.mark.asyncio
     async def test_derive_rerun_does_not_duplicate_member(self, monkeypatch):
         """A re-run of the induction (naive retry after a failed post-commit
-        ack) must not add a second peer for the same read cap, and must still
-        re-send the INTRODUCTION announcement."""
+        ack) must not add a second peer for the same read cap, must not
+        re-send the INTRODUCTION announcement, and must report the retry to
+        the caller (via a None return) rather than a fresh joiner name."""
         conversation_id = await _make_conversation()
 
         class Induct:
@@ -392,7 +393,7 @@ class TestAlreadyInductedGuard:
         ) == "bob"
         assert await voucher.derive_read_and_induct(
             conn, conversation_id, "bob", b"v" * 32,
-        ) == "bob"
+        ) is None
 
         async with persistent.asession() as sess:
             caps = (await sess.exec(
@@ -407,7 +408,9 @@ class TestAlreadyInductedGuard:
             )).all()
         assert len(caps) == 1
         assert len(peers) == 1
-        assert len(sent_announcements) == 2
+        # Only the first, genuine induction announces; the retry's would-be
+        # duplicate is skipped along with the duplicate peer add.
+        assert len(sent_announcements) == 1
 
     @pytest.mark.asyncio
     async def test_await_and_open_rerun_does_not_duplicate_members(
@@ -438,9 +441,14 @@ class TestAlreadyInductedGuard:
                 return Opened()
 
         conn = Connection()
-        await voucher.await_and_open(conn, conversation_id)
+        first_added = await voucher.await_and_open(conn, conversation_id)
         await _add_pending(conversation_id)
-        await voucher.await_and_open(conn, conversation_id)
+        rerun_added = await voucher.await_and_open(conn, conversation_id)
+
+        assert sorted(first_added) == ["alice", "bob"]
+        # The rerun's members are all already-held read caps, so nothing new
+        # is reported back to the caller (no duplicate contact rows).
+        assert rerun_added == []
 
         async with persistent.asession() as sess:
             caps = (await sess.exec(
