@@ -3,7 +3,9 @@
 The integration tests are opt-in: they require a running Katzenpost docker
 mixnet and a live kpclientd reachable at 127.0.0.1:64331. Set the env var
 ``KATZENQT_DOCKER_INTEGRATION=1`` to enable them; otherwise all tests in
-this directory are skipped.
+this directory are skipped at collection. Once opted in, an unreachable
+kpclientd FAILS the run instead of skipping it, so a dead mixnet can never
+masquerade as a green session.
 """
 from __future__ import annotations
 
@@ -39,8 +41,9 @@ def pytest_collection_modifyitems(config, items):
 def kpclientd_endpoint():
     """Assert the docker mixnet's kpclientd is reachable before running."""
     if not _kpclientd_reachable(_KPCLIENTD_HOST, _KPCLIENTD_PORT):
-        pytest.skip(
-            f"kpclientd not reachable at {_KPCLIENTD_HOST}:{_KPCLIENTD_PORT}; "
-            "start the docker mixnet first (katzenpost/docker: make start wait)"
+        pytest.fail(
+            f"KATZENQT_DOCKER_INTEGRATION=1 is set but kpclientd is not "
+            f"reachable at {_KPCLIENTD_HOST}:{_KPCLIENTD_PORT}; start the "
+            f"docker mixnet first (katzenpost/docker: make start wait)"
         )
     return (_KPCLIENTD_HOST, _KPCLIENTD_PORT)
