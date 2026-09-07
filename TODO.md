@@ -109,6 +109,8 @@ corruption rather than a theoretical one.
 
 ## Item 2 — 48-2b: harden the two listener loops (MEDIUM-HIGH importance, availability)
 
+**done in 3ab93e5.**
+
 **Motivation.** `receive_msg_listener` and `peer_added_listener` are bare
 `while True:` bodies. Any unexpected exception kills the listener until a full
 restart, silently freezing UI refresh (new messages stop appearing, announced
