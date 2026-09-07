@@ -18,6 +18,7 @@ The high-level pattern of every test:
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 import pytest
@@ -1905,3 +1906,107 @@ class TestTestKeypairHelper:
         # has something to return; otherwise the box-id lookup would
         # raise BoxIDNotFoundError.
         await network.test_keypair(fake_thinclient, kp.write_cap, kp.read_cap)
+
+
+class TestDoneCallbackPrimitive:
+    """Direct tests of the shared fire-and-forget done-callback primitive
+    (`_done_callback`) that `_on_write_done` / `_on_read_done` / `on_error`
+    are now thin wrappers over: the exception is consumed and logged, never
+    re-raised (no asyncio "Exception in callback" spam), cancellation runs
+    `on_cancel`, success runs neither hook."""
+
+    class _Recorder:
+        def __init__(self):
+            self.cancelled = []
+            self.errors = []
+
+        def on_cancel(self):
+            self.cancelled.append("cancel")
+
+        def on_error(self, exc):
+            self.errors.append(exc)
+
+    @pytest.mark.asyncio
+    async def test_exception_fires_on_error_and_logs_with_exc_info(
+        self, caplog,
+    ):
+        rec = self._Recorder()
+        loop = asyncio.get_running_loop()
+        handler_calls = []
+        prev_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda l, c: handler_calls.append(c))
+        try:
+            async def boom():
+                raise RuntimeError("nope")
+
+            with caplog.at_level(logging.ERROR, logger="katzen.network"):
+                task = asyncio.create_task(boom())
+                network._done_callback(task, desc="test drain", on_error=rec.on_error)
+                with pytest.raises(RuntimeError):
+                    await task
+                await asyncio.sleep(0)  # let the done_callback run
+        finally:
+            loop.set_exception_handler(prev_handler)
+
+        assert len(rec.errors) == 1 and isinstance(rec.errors[0], RuntimeError)
+        assert handler_calls == []  # nothing re-raised into the loop
+        assert any(
+            r.exc_info and isinstance(r.exc_info[1], RuntimeError)
+            and "test drain" in r.message
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancellation_fires_on_cancel_only(self, caplog):
+        rec = self._Recorder()
+
+        async def sleeps():
+            await asyncio.Event().wait()
+
+        with caplog.at_level(logging.ERROR, logger="katzen.network"):
+            task = asyncio.create_task(sleeps())
+            network._done_callback(task, desc="test drain",
+                                   on_cancel=rec.on_cancel, on_error=rec.on_error)
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+
+        assert rec.cancelled == ["cancel"]
+        assert rec.errors == []
+        assert caplog.records == []
+
+    @pytest.mark.asyncio
+    async def test_success_runs_neither_hook(self, caplog):
+        rec = self._Recorder()
+
+        async def ok():
+            return 42
+
+        with caplog.at_level(logging.ERROR, logger="katzen.network"):
+            task = asyncio.create_task(ok())
+            network._done_callback(task, desc="test drain",
+                                   on_cancel=rec.on_cancel, on_error=rec.on_error)
+            assert await task == 42
+            await asyncio.sleep(0)
+
+        assert rec.cancelled == []
+        assert rec.errors == []
+        assert caplog.records == []
+
+    @pytest.mark.asyncio
+    async def test_exception_passes_exc_to_on_error_hook(self):
+        rec = self._Recorder()
+
+        async def boom():
+            raise RuntimeError("nope")
+
+        task = asyncio.create_task(boom())
+        network._done_callback(task, desc="test drain", on_error=rec.on_error)
+        with pytest.raises(RuntimeError):
+            await task
+        await asyncio.sleep(0)
+
+        assert isinstance(rec.errors[0], RuntimeError)
+        assert str(rec.errors[0]) == "nope"

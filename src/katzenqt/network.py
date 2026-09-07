@@ -746,6 +746,39 @@ async def _wait_for_connection_or_shutdown() -> bool:
     return __mixnet_connected.is_set() and not __should_quit.is_set()
 
 
+def _done_callback(task: "asyncio.Task", *, desc: str,
+                   on_cancel=None, on_error=None) -> None:
+    """Shared primitive for the fire-and-forget done-callbacks.
+
+    The drain loops and on_error never await the tasks they fire, so a
+    raised exception would otherwise be invisible (or, worse, only surface
+    as asyncio's "Exception in callback" spam if a callback re-raises it
+    -- same rationale as tests/test_katzen_util.py). Inspect the task
+    directly instead: on cancellation call ``on_cancel()``; on an
+    exception log ``desc`` with the exception and call ``on_error(exc)``;
+    on success do neither. The exception is consumed (no "Task exception
+    was never retrieved" warning) and NEVER re-raised.
+    """
+    def _done(task: "asyncio.Task") -> None:
+        if task.cancelled():
+            if on_cancel is not None:
+                on_cancel()
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.error(f"{desc}: %r", exc, exc_info=exc)
+        if on_error is not None:
+            on_error(exc)
+    if callable(getattr(task, "add_done_callback", None)):
+        task.add_done_callback(_done)
+    else:
+        # A unit-test fake task object (only cancelled()/exception()): run
+        # the inspection synchronously so direct calls like
+        # `_on_write_done(fake_task, ...)` keep working.
+        _done(task)
+
+
 def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
                    draining_right_now):
     """Done-callback for the fire-and-forget write drains in drain_mixwal2.
@@ -758,18 +791,17 @@ def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
     next pass), keep the failure loud in the error logs rather than dead, and
     poke __mixwal_updated so the retry is prompt.
     """
-    if task.cancelled():
-        draining_right_now.discard(stream)
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error(
-            "drain_mixwal_write_single crashed for bacap_stream=%s; "
-            "releasing stream for another drain pass",
-            stream, exc_info=exc,
-        )
-        draining_right_now.discard(stream)
-        __mixwal_updated.set()
+    _done_callback(
+        task,
+        desc=(
+            f"drain_mixwal_write_single crashed for bacap_stream={stream}; "
+            "releasing stream for another drain pass"
+        ),
+        on_cancel=lambda: (draining_right_now.discard(stream), None),
+        on_error=lambda _exc: (
+            draining_right_now.discard(stream), __mixwal_updated.set(),
+        ),
+    )
 
 
 async def drain_mixwal2(connection: ThinClient):
@@ -836,15 +868,20 @@ async def drain_mixwal2(connection: ThinClient):
                         # draining_right_now forever, silently starving
                         # every later box on it. give_up() already discards
                         # on the handled paths; discard is idempotent.
-                        if task.cancelled():
-                            draining_right_now.discard(stream)
-                        elif (exc := task.exception()) is not None:
-                            logger.error(
-                                "drain_mixwal_read_single crashed for bacap_stream=%s; "
-                                "releasing stream for another drain pass",
-                                stream, exc_info=exc,
-                            )
-                            draining_right_now.discard(stream)
+                        _done_callback(
+                            task,
+                            desc=(
+                                f"drain_mixwal_read_single crashed for "
+                                f"bacap_stream={stream}; releasing stream "
+                                "for another drain pass"
+                            ),
+                            on_cancel=(
+                                lambda: (draining_right_now.discard(stream), None)
+                            ),
+                            on_error=lambda _exc: (
+                                draining_right_now.discard(stream), None
+                            ),
+                        )
                         readables_to_mixwal_event.set()
 
                     read_task.add_done_callback(_on_read_done)
@@ -976,15 +1013,11 @@ def on_error(task, func, *args, **kwargs):
     plaintext hitting the dead link during a kpclientd bounce). The caller
     reschedules the work on its next sweep.
     """
-    def on_error_done(task):
-        if task.cancelled():
-            return  # cancellation is expected on shutdown, not an error
-        try:
-            task.result()
-        except Exception as e:
-            logger.error("on_error: task failed: %s", e, exc_info=e)
-            func(*args, **kwargs)
-    task.add_done_callback(on_error_done)
+    _done_callback(
+        task,
+        desc="on_error: task failed",
+        on_error=lambda exc, f=func, a=args, k=kwargs: f(*a, **k),
+    )
     return task
 
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
