@@ -48,8 +48,11 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
 
     # Alice waits for a message Bob hasn't sent yet: a genuine in-flight
     # read sitting in the daemon's stop-and-wait ARQ when we bounce it.
+    # 1500s, matching test_write_survives_kpclientd_restart: after a cold
+    # container restart the daemon takes up to ~9 min to re-attach to the
+    # mixnet gateway, well beyond the default 360s chat-session deadline.
     alice_proc = spawn_role(
-        alice_state, "chat-session", "demo", "READ:m1:600",
+        alice_state, "chat-session", "demo", "READ:m1:1500",
         stdout_path=alice_out, stderr_path=alice_err,
     )
 
@@ -77,10 +80,17 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         # task is still pending at reconnect time, so the reconnect_event
         # is guaranteed to fire before the read itself resolves, forcing
         # the grace-period branch rather than racing past it.
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=300.0)
+        #
+        # wait_reachable above only confirms the TCP port is listening
+        # again, not that the daemon has finished re-attaching to the
+        # mixnet gateway (also up to ~9 min); run_role's own timeout must
+        # stay comfortably above the chat-session SEND step's internal
+        # 600s deadline (see _action_chat_session), or the outer kill can
+        # fire before that inner retry ever gets a chance to succeed.
+        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=900.0)
         assert send.returncode == 0, send.stdout + send.stderr
 
-        alice_proc.wait(timeout=300.0)
+        alice_proc.wait(timeout=2100.0)
     except Exception:
         alice_proc.kill()
         if container_stopped:
