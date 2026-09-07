@@ -545,45 +545,53 @@ class MainWindow(QMainWindow):
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
         while True:
-            (conversation_id, redraw_only) = await self.iothread.run_in_io(network.conversation_update_queue.get())
-            if not await self._wait_for_conversation_state(conversation_id, what="receive_msg_listener"):
-                continue
-            convo_state = self.conversation_state_by_id[conversation_id]
-            if redraw_only:
-                convo_state.conversation_log_model.redraw_network_status()
-                continue
-            convo_state.conversation_log_model.increment_row_count()
-            # And then we can increment the row count to let the UI register it:
+            try:
+                (conversation_id, redraw_only) = await self.iothread.run_in_io(
+                    network.conversation_update_queue.get()
+                )
+                await self._process_conversation_update(conversation_id, redraw_only)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: one bad item must not
+                # take the whole refresh loop down (the known root causes were
+                # fixed separately; this is a safety net for a future unknown
+                # bug).
+                logger.error(
+                    "receive_msg_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
 
-            # x) Scrolling - two cases:
-            if convo_state is self.convo_state_or_none():
-                #   x.1) Scrolling: Conversation is in focus:
-                # TODO make which of these to do configurable:
-                convo_state.chat_lines_scroll_idx = 1.0
-                root = self.ui.qml_ChatLines.rootObject()
-                await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
-                root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
-                #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
-                #print(xx)
-                #import pdb;pdb.set_trace()
-                #print("current", self.ui.ChatLines.verticalScrollBar().value())
-                #print("next", min(
-                #    1 + self.ui.ChatLines.verticalScrollBar().value(),
-                #    conversation_order-3))
-                #self.ui.ChatLines.scrollToBottom()
-            else:
-                #   x.2) Scrolling: Conversation is NOT in focus:
-                print("NOT IN FOCUS")
-                convo_state.chat_lines_scroll_idx += 1.0
-                # convo_state.chat_lines_scroll_idx = conversation_order
-                # TODO we should flash the contact entry somehow
-                # TODO we should bump "unread message" counter
+    async def _process_conversation_update(self, conversation_id, redraw_only) -> None:
+        if not await self._wait_for_conversation_state(conversation_id, what="receive_msg_listener"):
+            return
+        convo_state = self.conversation_state_by_id[conversation_id]
+        if redraw_only:
+            convo_state.conversation_log_model.redraw_network_status()
+            return
+        convo_state.conversation_log_model.increment_row_count()
+        # And then we can increment the row count to let the UI register it:
 
-            # if the main window is not in focus, we should issue a notification:
-            if not self.app.focusWidget():
-                self.app.alert(self)
-                # self.app.beep()
-            self.systray.has_new_messages() # TODO move this into block above
+        # x) Scrolling - two cases:
+        if convo_state is self.convo_state_or_none():
+            #   x.1) Scrolling: Conversation is in focus:
+            # TODO make which of these to do configurable:
+            convo_state.chat_lines_scroll_idx = 1.0
+            root = self.ui.qml_ChatLines.rootObject()
+            await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
+            root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
+        else:
+            #   x.2) Scrolling: Conversation is NOT in focus:
+            print("NOT IN FOCUS")
+            convo_state.chat_lines_scroll_idx += 1.0
+            # TODO we should flash the contact entry somehow
+            # TODO we should bump "unread message" counter
+
+        # if the main window is not in focus, we should issue a notification:
+        if not self.app.focusWidget():
+            self.app.alert(self)
+            # self.app.beep()
+        self.systray.has_new_messages() # TODO move this into block above
 
     async def peer_added_listener(self):
         """Append members announced via INTRODUCTION to the contacts tree in
@@ -592,19 +600,34 @@ class MainWindow(QMainWindow):
         joining member shows up on every live client's contact list without a
         restart."""
         while True:
-            (conversation_id, name) = await self.iothread.run_in_io(network.peer_added_queue.get())
-            if not await self._wait_for_conversation_state(conversation_id, what="peer_added_listener"):
-                continue
-            convo_state = self.conversation_state_by_id[conversation_id]
-            item = convo_state.contacts_standard_item
-            already = any(
-                row is not None and row.text() == name
-                for row in (item.child(r) for r in range(item.rowCount()))
-            )
-            if already:
-                continue
-            item.appendRow(QStandardItem(name))
-            logger.debug("added announced contact %r to conversation %d", name, conversation_id)
+            try:
+                (conversation_id, name) = await self.iothread.run_in_io(
+                    network.peer_added_queue.get()
+                )
+                await self._process_peer_added(conversation_id, name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: a single malformed
+                # announcement must not kill the whole contact-tree listener.
+                logger.error(
+                    "peer_added_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
+
+    async def _process_peer_added(self, conversation_id, name) -> None:
+        if not await self._wait_for_conversation_state(conversation_id, what="peer_added_listener"):
+            return
+        convo_state = self.conversation_state_by_id[conversation_id]
+        item = convo_state.contacts_standard_item
+        already = any(
+            row is not None and row.text() == name
+            for row in (item.child(r) for r in range(item.rowCount()))
+        )
+        if already:
+            return
+        item.appendRow(QStandardItem(name))
+        logger.debug("added announced contact %r to conversation %d", name, conversation_id)
 
     def convo_state(self) -> ConversationUIState:
         convo = self.convo_state_or_none()
