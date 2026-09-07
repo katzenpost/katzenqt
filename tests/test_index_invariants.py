@@ -149,15 +149,30 @@ def test_mark_sent_refuses_regression_on_pwal_present_path():
     """If another drain has already advanced wcw.next_index past the MW's
     next_message_index, mark_sent must NOT clobber it back to the stale value.
 
-    Current behavior: the pwal-present branch unconditionally assigns
-    `wcw.next_index = mw.next_message_index`, which can regress the counter.
-    The pwal-absent branch at `persistent.py:165-169` already has the
-    regression check; it must cover the pwal-present path too.
+    The stamped boxes (through ``real_next-1``) are already written and their
+    ACK just arrived, so the stale path must ALSO finalize the message it
+    belongs to: delete the MW, turn the PWAL into a SentLog entry, flip the
+    conversation log row to sent, and drop the PWAL. Without this, a write
+    drain that died mid-commit (leaving no later MW) strands the message
+    forever.
     """
     bacap_stream = uuid.uuid4()
     # Another drain already advanced the writer two steps past what this
     # particular MW knows about: wcw.next_index == 44.
     wcw, pwal = _insert_write_stream(bacap_stream=bacap_stream, next_idx=44)
+
+    convlog = persistent.ConversationLog(
+        conversation_id=1,
+        conversation_peer_id=1,
+        conversation_order=0,
+        payload=pwal.bacap_payload,
+        network_status=1,
+        outgoing_pwal=pwal.id,
+    )
+    with Session(persistent._engine_sync, expire_on_commit=False) as sess:
+        sess.add(convlog)
+        sess.commit()
+        convlog_id = convlog.id
 
     # This MW was created when wcw was at idx 42; its next_message_index is 43.
     mw = _make_mw(
@@ -169,9 +184,9 @@ def test_mark_sent_refuses_regression_on_pwal_present_path():
     resend_queue: set = {bacap_stream}
 
     async def _do():
-        await persistent.SentLog.mark_sent(_FakeConnection(), mw, resend_queue)
+        return await persistent.SentLog.mark_sent(_FakeConnection(), mw, resend_queue)
 
-    asyncio.run(_do())
+    conv_id = asyncio.run(_do())
 
     with Session(persistent._engine_sync) as sess:
         reloaded = sess.get(persistent.WriteCapWAL, bacap_stream)
@@ -181,6 +196,15 @@ def test_mark_sent_refuses_regression_on_pwal_present_path():
             f"mark_sent must not regress wcw.next_index from 44 to 43; "
             f"got Idx64={got_idx}. Expected unconditional regression guard."
         )
+        # Finalized: MW gone, PWAL converted to SentLog, log row flipped.
+        assert sess.get(persistent.MixWAL, mw.id) is None
+        assert sess.get(persistent.PlaintextWAL, pwal.id) is None
+        sent = sess.get(persistent.SentLog, pwal.id)
+        assert sent is not None
+        reloaded_cl = sess.get(persistent.ConversationLog, convlog_id)
+        assert reloaded_cl.network_status == 2
+    assert conv_id == 1
+    assert bacap_stream not in resend_queue
 
 
 # ---------------------------------------------------------------------------

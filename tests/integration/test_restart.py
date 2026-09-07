@@ -5,92 +5,102 @@ Skipped unless ``KATZENQT_DOCKER_INTEGRATION=1`` (see conftest.py).
 """
 from __future__ import annotations
 
-import os
+import shutil
+import sqlite3
+import struct
 import subprocess
-import sys
+import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
-_PYTHON = os.environ.get(
-    "KATZENQT_INTEGRATION_PYTHON",
-    str(_VENV_PY) if _VENV_PY.exists() else sys.executable,
+from katzenqt import models
+from tests.integration._bounce_helpers import (
+    REPO_ROOT as _REPO_ROOT,
+    PYTHON as _PYTHON,
+    KP_ADDR as _KP_ADDR,
+    CONN_ARGS as _CONN_ARGS,
+    run_role as _run_role,
+    spawn_role as _spawn_role,
+    combined as _combined,
+    expect_token as _expect_token,
+    bootstrap_voucher as _bootstrap_voucher,
 )
 
-# Connecting verbs require an explicit kpclientd connection. The docker mixnet's
-# kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
-# / KATZENQT_KPCLIENTD_PORT, matching conftest).
-_KP_ADDR = "{}:{}".format(
-    os.environ.get("KATZENQT_KPCLIENTD_HOST", "127.0.0.1"),
-    os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331"),
-)
-_CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
 
+def _snapshot_role_state(state: Path, label: str) -> None:
+    """Dump a read-only forensic snapshot of a role's state DB to the pytest
+    log (``[snap][<label>]`` lines) so a failure can be classified against
+    the read-side hypotheses:
+      (a) leftover read-``MixWAL`` for the final message -> the read-drain
+          strand died before sweeping it;
+      (b) ``ReadCapWAL.next_index`` advanced past it -> an index-skip race;
+      (c) neither -> the mixnet never delivered it (nondelivery).
 
-def _run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
-    env = os.environ.copy()
-    env["KQT_STATE"] = str(role_state)
-    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
-    return subprocess.run(
-        cmd, env=env, cwd=str(_REPO_ROOT),
-        capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def _spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path) -> subprocess.Popen:
-    """Popen variant for long-running chat-session subprocesses that we
-    want running in parallel. We redirect stdout/stderr to files instead
-    of pipes to avoid the classic 64 KB pipe-buffer deadlock: when one
-    subprocess fills its stdout pipe, it blocks on write, and if the
-    parent is `communicate`-ing a different subprocess, the blocked one
-    can starve long enough for its background read loop to stall.
+    The DB file is copied first (with its ``-wal``/``-shm`` siblings) and
+    the copy opened read-only, so this never contends with or perturbs a
+    live process, and committed-but-uncheckpointed WAL data is still read.
     """
-    env = os.environ.copy()
-    env["KQT_STATE"] = str(role_state)
-    cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
-    return subprocess.Popen(
-        cmd, env=env, cwd=str(_REPO_ROOT),
-        stdout=open(stdout_path, "w"),
-        stderr=open(stderr_path, "w"),
-        text=True,
-    )
+    src = Path(str(state) + ".sqlite3")
+    if not src.is_file():
+        print(f"[snap][{label}] no state db at {src}")
+        return
+    snap_dir = Path(tempfile.mkdtemp(prefix="kqt-snap-"))
+    dst = snap_dir / "state.sqlite3"
+    shutil.copy2(src, dst)
+    for suffix in ("-wal", "-shm"):
+        sibling = Path(str(src) + suffix)
+        if sibling.is_file():
+            shutil.copy2(sibling, f"{dst}{suffix}")
+    try:
+        conn = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        cur = conn.cursor()
 
+        cur.execute(
+            "SELECT cl.conversation_order, cl.conversation_peer_id,"
+            " cl.network_status, cl.payload"
+            " FROM conversationlog cl ORDER BY cl.conversation_order"
+        )
+        for order, peer_id, net_status, payload in cur.fetchall():
+            text = ""
+            if payload[:1] == b"F":
+                try:
+                    gcm = models.GroupChatMessage.from_cbor(payload[1:])
+                    text = f" text={gcm.text!r} type={gcm.msg_type.name}"
+                except Exception:
+                    text = " (undecodable payload)"
+            print(
+                f"[snap][{label}] convlog order={order} peer={peer_id}"
+                f" net={net_status}{text}"
+            )
 
-def _combined(proc: subprocess.CompletedProcess) -> str:
-    return proc.stdout + proc.stderr
+        cur.execute("SELECT is_read, count(*) FROM mixwal GROUP BY is_read")
+        for is_read, n in cur.fetchall():
+            print(f"[snap][{label}] mixwal count is_read={is_read}: {n}")
+        cur.execute("SELECT id, bacap_stream FROM mixwal WHERE is_read=1")
+        for rid, stream in cur.fetchall():
+            print(f"[snap][{label}] leftover read-MixWAL id={rid} stream={stream}")
 
+        cur.execute("SELECT id, next_index FROM readcapwal")
+        for rid, ni in cur.fetchall():
+            head = 0
+            if ni:
+                head = struct.unpack("<Q", ni[:8])[0]
+            print(
+                f"[snap][{label}] readcapwal stream={rid}"
+                f" next_idx_head={head} len={len(ni) if ni else 0}"
+            )
 
-def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
-    """Find a logged line containing token; return the text after it. Results
-    go through logging (stderr) with a level/name prefix, so match by
-    substring."""
-    for line in _combined(proc).splitlines():
-        idx = line.find(token)
-        if idx != -1:
-            return line[idx + len(token):].strip()
-    raise AssertionError(
-        f"no line containing {token!r}:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-    )
-
-
-def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
-    """Establish mutual contact via the Contact Voucher handshake. Bob mints a
-    voucher over his stream, Alice inducts him (gaining his salt-mutated read
-    cap) and replies with her read cap, and Bob joins (gaining hers). Both can
-    then read each other, the bidirectional state the restart tests exercise."""
-    for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = _run_role(state, "create-conv", "demo", name, timeout=180.0)
-        assert create.returncode == 0, create.stdout + create.stderr
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
-    assert mint.returncode == 0, mint.stdout + mint.stderr
-    voucher = _expect_token(mint, "VOUCHER=")
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
-    assert induct.returncode == 0, induct.stdout + induct.stderr
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
-    assert joined.returncode == 0, joined.stdout + joined.stderr
+        for table in ("sentlog", "plaintextwal"):
+            try:
+                cur.execute(f"SELECT count(*) FROM {table}")
+                print(f"[snap][{label}] {table} count: {cur.fetchone()[0]}")
+            except sqlite3.OperationalError:
+                print(f"[snap][{label}] {table}: no table")
+        conn.close()
+    finally:
+        shutil.rmtree(snap_dir, ignore_errors=True)
 
 
 def _run_concurrent_session(
@@ -292,7 +302,18 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
     except subprocess.TimeoutExpired:
         bob_proc.kill()
         alice_proc.kill()
+        # Snapshot BEFORE re-raising: a timeout is exactly the "alice
+        # silently never reads" case this diagnostic exists for, so it must
+        # not be skipped on the one path it was written to classify.
+        _snapshot_role_state(alice_state, "alice")
+        _snapshot_role_state(bob_state, "bob")
         raise
+
+    # Forensic snapshot AFTER both roles have exited so the WAL is settled:
+    # classifies a failure as (a) leftover read-MixWAL, (b) ReadCapWAL index
+    # skip, or (c) mixnet nondelivery.
+    _snapshot_role_state(alice_state, "alice")
+    _snapshot_role_state(bob_state, "bob")
 
     # STEP_OK tokens are logged to stderr (with a level/name prefix), so
     # combine both streams and match by search rather than anchored match.
