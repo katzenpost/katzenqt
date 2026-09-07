@@ -2193,7 +2193,12 @@ def cli():
     # reliably everywhere; set QT_QUICK_BACKEND yourself to override. Must be
     # set before the QApplication is constructed.
     os.environ.setdefault("QT_QUICK_BACKEND", "software")
+    _res_root = Path(__file__).resolve().parent.parent.parent
+    if (_res_root / "resources").is_dir():
+        os.chdir(_res_root)
     app = QApplication(sys.argv)
+    if (_res_root / "resources" / "echomix_256.png").is_file():
+        app.setWindowIcon(QIcon("resources/echomix_256.png"))
     parser = argparse.ArgumentParser()
     add_log_args(parser)
     args = parser.parse_args()
