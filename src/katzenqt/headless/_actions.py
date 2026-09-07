@@ -569,6 +569,11 @@ async def _action_chat_session(args):
                     for obj in db_entries:
                         sess.add(obj)
                     await sess.commit()
+                # Marker for the reconnect integration test: the write is now
+                # committed to MixWAL but has not yet been handed to the
+                # drain, so a subprocess killed on this token is killed with
+                # the message unsent (or, at worst, sent-but-unacked).
+                logger.info(f"STEP_WAITING_ACK:{step_idx}:SEND:{payload}")
                 await network.check_for_new()
                 # Ten minutes: a chat-session shares its kpclientd
                 # connection with the test's other concurrent role and

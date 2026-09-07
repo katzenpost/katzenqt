@@ -1,10 +1,10 @@
-"""Shared subprocess/voucher helpers for the restart and kpclientd-bounce
+"""Shared subprocess/voucher helpers for the restart and client-reconnect
 integration tests.
 
 Previously duplicated verbatim between test_restart.py and
-test_kpclientd_restart.py, where the two copies had already started to
+test_client_reconnect.py, where the two copies had already started to
 drift (test_restart.py's _expect_token routed through a _combined()
-helper; test_kpclientd_restart.py's inlined `proc.stdout + proc.stderr`
+helper; test_client_reconnect.py's inlined `proc.stdout + proc.stderr`
 directly). One copy here so a fix to how these subprocesses are launched
 or their output parsed can't be applied to one file and missed in the
 other.
@@ -36,6 +36,7 @@ CONN_ARGS = ("--address", KP_ADDR, "--network", "tcp")
 def run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
+    env["PYTHONUNBUFFERED"] = "1"
     cmd = [PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *CONN_ARGS]
     return subprocess.run(
         cmd, env=env, cwd=str(REPO_ROOT),
@@ -53,6 +54,7 @@ def spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path:
     """
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
+    env["PYTHONUNBUFFERED"] = "1"
     cmd = [PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *CONN_ARGS]
     return subprocess.Popen(
         cmd, env=env, cwd=str(REPO_ROOT),

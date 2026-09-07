@@ -890,7 +890,7 @@ async def drain_mixwal2(connection: ThinClient):
                 else:
                     # Defer the write dispatch until the daemon reports
                     # connected again; the daemon-side ARQ ride-out for
-                    # writes depends on the gate (see test_kpclientd_restart).
+                    # writes depends on the gate (see test_client_reconnect).
                     logger.debug("drain_mixwal: deferring (write) MIXWAL is_read=%s bacap_stream=%s until connected", mw.is_read, mw.bacap_stream)
         for mw in new_write_mws:
             logger.debug("drain_mixwal: NEW (write) MIXWAL is_read=%s bacap_stream=%s",

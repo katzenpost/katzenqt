@@ -328,7 +328,7 @@ class TestOnError:
         # The done callback must NOT re-raise the task's exception: a
         # callback raise only surfaces as a spurious "Exception in
         # callback" traceback via the loop's exception handler (seen in
-        # the kpclientd-restart integration test when a resendable
+        # the client-reconnect integration test when a resendable
         # plaintext hit the dead link during a bounce).
         loop = asyncio.get_running_loop()
         fired = []
