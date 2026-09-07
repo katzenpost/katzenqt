@@ -1,7 +1,7 @@
 # TODO: remaining review-findings fixes for katzenqt
 
-Context for a fresh session. REVIEW.md (repo root, untracked) holds the review;
-REVIEW2.md (repo root, untracked) maps every item to the commit(s) on
+Context for a fresh session. REVIEW.md (repo root) holds the review; REVIEW2.md
+(repo root) maps every item to the commit(s) on
 `deckard-wip..review-findings-fixes` that address it, or to a TODO. This file
 lists the items that remain **TODO** in REVIEW2.md, plus the one extra item the
 maintainer opted into (48-5 funneling).
@@ -291,4 +291,6 @@ confirm the row set, roster, and that the Qt thread is not blocked. Keep existin
 ## Suggested order
 
 Implement 1 -> 2 -> 3 -> 4 -> 5 (independent; keep the unit suite green after
-each). No commit unless asked; this document is the hand-off for implementation.
+each). Commit after each item is done, and then commit an update to this
+TODO.md noting an item is done and which commit hash it was done in. This
+document is the hand-off for implementation.
