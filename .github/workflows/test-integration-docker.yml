@@ -22,7 +22,7 @@ jobs:
       contents: read
       packages: write
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout katzenqt
@@ -102,12 +102,17 @@ jobs:
         working-directory: katzenqt
         # CI runs roughly 2.5-3x slower than a local docker mixnet, and
         # the multi-box reassembly tests are the slowest, dominating the
-        # wall clock at around eight minutes apiece. With ten integration
-        # tests in the suite the previous thirty-minute ceiling is not
-        # enough; sixty minutes leaves comfortable headroom for the
-        # whole sequence without inviting per-test timeouts to mask
-        # protocol-level regressions.
-        timeout-minutes: 60
+        # wall clock at around eight minutes apiece. The watchdog
+        # regression tests (test_watchdog_*.py) add real-time-bounded
+        # waits of their own (an epoch-rollover confirmation deliberately
+        # sleeps past a full epoch_duration) that scale the same way. A
+        # run with 14 integration tests measured 49m for this step alone
+        # (job total ~60m including setup), right at the previous
+        # sixty-minute ceiling -- the job was killed by the timeout after
+        # every test had already passed. Ninety minutes leaves real
+        # headroom for the whole sequence without inviting per-test
+        # timeouts to mask protocol-level regressions.
+        timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: .venv/bin/pytest tests/integration -vv
