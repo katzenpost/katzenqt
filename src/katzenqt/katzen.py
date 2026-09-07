@@ -2197,6 +2197,7 @@ def cli():
     if (_res_root / "resources").is_dir():
         os.chdir(_res_root)
     app = QApplication(sys.argv)
+    app.setDesktopFileName("network.katzenpost.katzenqt")
     if (_res_root / "resources" / "echomix_256.png").is_file():
         app.setWindowIcon(QIcon("resources/echomix_256.png"))
     parser = argparse.ArgumentParser()
