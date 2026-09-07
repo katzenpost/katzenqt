@@ -28,9 +28,6 @@ concurrently with the other integration files. Skipped unless
 """
 from __future__ import annotations
 
-import os
-import socket
-import subprocess
 import time
 from pathlib import Path
 
@@ -40,54 +37,11 @@ from tests.integration._bounce_helpers import (
     run_role as _run_role,
     spawn_role as _spawn_role,
     bootstrap_voucher as _bootstrap_voucher,
+    kpclientd_reachable as _kpclientd_reachable,
+    find_kpclientd_container as _find_kpclientd_container,
+    podman as _podman,
+    wait_reachable as _wait_reachable,
 )
-
-
-def _kpclientd_reachable(timeout: float = 1.0) -> bool:
-    host = os.environ.get("KATZENQT_KPCLIENTD_HOST", "127.0.0.1")
-    port = int(os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331"))
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _find_kpclientd_container() -> str:
-    override = os.environ.get("KATZENQT_KPCLIENTD_CONTAINER")
-    if override:
-        return override
-    proc = subprocess.run(
-        ["podman", "ps", "--format", "{{.Names}}"],
-        capture_output=True, text=True, check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"podman ps failed: {proc.stderr}")
-    for name in proc.stdout.split():
-        if name.endswith("-kpclientd-1"):
-            return name
-    raise RuntimeError(
-        "no kpclientd container found via `podman ps --format {{.Names}}`; "
-        "set KATZENQT_KPCLIENTD_CONTAINER to the kpclientd container name"
-    )
-
-
-def _podman(args) -> None:
-    proc = subprocess.run(
-        ["podman", *args], capture_output=True, text=True, check=False,
-        timeout=120.0,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"podman {' '.join(args)} failed ({proc.returncode}): {proc.stderr}")
-
-
-def _wait_reachable(deadline_s: float) -> None:
-    deadline = time.time() + deadline_s
-    while time.time() < deadline:
-        if _kpclientd_reachable():
-            return
-        time.sleep(1.0)
-    raise AssertionError(f"kpclientd did not become reachable within {deadline_s:.0f}s")
 
 
 @pytest.mark.integration

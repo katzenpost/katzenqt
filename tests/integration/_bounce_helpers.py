@@ -12,8 +12,10 @@ other.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -94,3 +96,67 @@ def bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
     assert induct.returncode == 0, induct.stdout + induct.stderr
     joined = run_role(bob_state, "voucher-await", "demo", timeout=300.0)
     assert joined.returncode == 0, joined.stdout + joined.stderr
+
+
+def kpclientd_reachable(timeout: float = 1.0) -> bool:
+    host = os.environ.get("KATZENQT_KPCLIENTD_HOST", "127.0.0.1")
+    port = int(os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331"))
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def find_kpclientd_container() -> str:
+    """The kpclientd container actually publishing KATZENQT_KPCLIENTD_PORT.
+
+    Multiple mixnet networks (this host's other sessions/checkouts) can be
+    running at once, each with its own *-kpclientd-1 container on a
+    different published port; matching on name suffix alone picked
+    whichever one podman listed first, which could be a container this
+    test has no business touching. Correlate on the published port instead.
+    """
+    override = os.environ.get("KATZENQT_KPCLIENTD_CONTAINER")
+    if override:
+        return override
+    port = os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331")
+    proc = subprocess.run(
+        ["podman", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"podman ps failed: {proc.stderr}")
+    candidates = []
+    for line in proc.stdout.splitlines():
+        name, _, ports = line.partition("\t")
+        if not name.endswith("-kpclientd-1"):
+            continue
+        candidates.append(name)
+        if f":{port}->" in ports:
+            return name
+    if len(candidates) == 1:
+        return candidates[0]  # only one on the host: unambiguous even if the port string didn't match
+    raise RuntimeError(
+        f"could not find a kpclientd container publishing port {port} "
+        f"(candidates: {candidates or 'none'}); set KATZENQT_KPCLIENTD_CONTAINER "
+        "to disambiguate"
+    )
+
+
+def podman(args) -> None:
+    proc = subprocess.run(
+        ["podman", *args], capture_output=True, text=True, check=False,
+        timeout=120.0,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"podman {' '.join(args)} failed ({proc.returncode}): {proc.stderr}")
+
+
+def wait_reachable(deadline_s: float) -> None:
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        if kpclientd_reachable():
+            return
+        time.sleep(1.0)
+    raise AssertionError(f"kpclientd did not become reachable within {deadline_s:.0f}s")
