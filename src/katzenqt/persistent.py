@@ -490,8 +490,21 @@ async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
     to be made once. A freshly created conversation's write cap is filled
     in by the background provisioning loop shortly after creation, so None
     here is a transient early-state, not an error.
+
+    It resolves the owner through columns and explicit ``session.get``
+    alone — never through the ``conversation.own_peer`` relationship.
+    ``own_peer`` is a ``lazy="selectin"`` relationship and is NOT
+    eager-loaded when ``conversation`` is reached via ``peer.conversation``
+    (the link-model path used by ``drain_mixwal_read_single``), so reading
+    it here makes SQLAlchemy fall back to a synchronous lazy-load and
+    raise ``MissingGreenlet`` inside the aiosqlite session.
     """
-    own_rcw = await session.get(ReadCapWAL, conversation.own_peer.read_cap_id)
+    own_peer_id = conversation.own_peer_id
+    own_rcw = None
+    if own_peer_id is not None:
+        own_peer = await session.get(ConversationPeer, own_peer_id)
+        if own_peer is not None:
+            own_rcw = await session.get(ReadCapWAL, own_peer.read_cap_id)
     own_cap = own_rcw.read_cap if own_rcw is not None else None
     if conversation.write_cap is not None:
         wcw = await session.get(WriteCapWAL, conversation.write_cap)

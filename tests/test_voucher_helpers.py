@@ -127,3 +127,20 @@ class TestOwnReadCapDedupe:
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conv_id)
             assert await persistent.own_read_cap(sess, conv) is None
+
+    @pytest.mark.asyncio
+    async def test_reached_via_peer_no_lazy_relationship_access(self):
+        # Smoke test for the drain_mixwal_read_single shape of the bug: there
+        # the conversation arrives via the link-model peer path and own_read_cap
+        # must resolve the owner through columns/explicit session.get alone --
+        # reading conversation.own_peer can fall into a synchronous lazy-load
+        # (MissingGreenlet under aiosqlite in the integration subprocess).
+        # Expire the relationship here so the resolver cannot lean on a
+        # preloaded own_peer either.
+        conv_id = await _make_conversation(
+            own_write_cap=b"\xaa" * 168, own_read_cap=b"\xbb" * 136,
+        )
+        async with persistent.asession() as sess:
+            conv = await sess.get(persistent.Conversation, conv_id)
+            sess.expire(conv, attribute_names=["own_peer"])
+            assert await persistent.own_read_cap(sess, conv) == b"\xaa" * 136
