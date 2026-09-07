@@ -39,6 +39,8 @@ writing.
 
 ## Item 1 — 45-4b: "already inducted" guard (HIGH importance, correctness)
 
+**done in 0b4f3b5.**
+
 **Motivation.** `voucher._add_peer` inserts a fresh `ReadCapWAL` +
 `ConversationPeer` unconditionally. A second run of the induction path for the
 *same* voucher (a retried/double GUI induction, or a handshake the wire let
