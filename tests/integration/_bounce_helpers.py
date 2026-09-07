@@ -1,13 +1,17 @@
-"""Shared subprocess/voucher helpers for the restart and client-reconnect
-integration tests.
+"""Shared subprocess/voucher/podman helpers for the integration tests.
 
-Previously duplicated verbatim between test_restart.py and
-test_client_reconnect.py, where the two copies had already started to
-drift (test_restart.py's _expect_token routed through a _combined()
-helper; test_client_reconnect.py's inlined `proc.stdout + proc.stderr`
-directly). One copy here so a fix to how these subprocesses are launched
-or their output parsed can't be applied to one file and missed in the
-other.
+The subprocess and voucher helpers were previously duplicated verbatim
+between test_restart.py and test_client_reconnect.py, where the two copies
+had already started to drift (test_restart.py's _expect_token routed
+through a _combined() helper; test_client_reconnect.py's inlined
+`proc.stdout + proc.stderr` directly). One copy here so a fix to how these
+subprocesses are launched or their output parsed can't be applied to one
+file and missed in the other.
+
+The podman helpers (kpclientd_reachable, find_kpclientd_container,
+find_same_network_container, podman, wait_reachable) serve the watchdog
+tests that live-verify container restarts and mixnet blips
+(test_watchdog_reconnect.py, test_watchdog_mixnet_reconnect.py).
 """
 from __future__ import annotations
 

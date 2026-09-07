@@ -48,9 +48,9 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
 
     # Alice waits for a message Bob hasn't sent yet: a genuine in-flight
     # read sitting in the daemon's stop-and-wait ARQ when we bounce it.
-    # 1500s, matching test_write_survives_kpclientd_restart: after a cold
-    # container restart the daemon takes up to ~9 min to re-attach to the
-    # mixnet gateway, well beyond the default 360s chat-session deadline.
+    # 1500s: after a cold container restart the daemon takes up to ~9 min
+    # to re-attach to the mixnet gateway, well beyond the default 360s
+    # chat-session deadline.
     alice_proc = spawn_role(
         alice_state, "chat-session", "demo", "READ:m1:1500",
         stdout_path=alice_out, stderr_path=alice_err,
@@ -76,10 +76,12 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         container_stopped = False
         wait_reachable(120.0)
 
-        # Bob's send happens only AFTER the daemon is back: Alice's read
-        # task is still pending at reconnect time, so the reconnect_event
-        # is guaranteed to fire before the read itself resolves, forcing
-        # the grace-period branch rather than racing past it.
+        # Bob's send happens only AFTER the daemon is back, while Alice's
+        # read task is still pending. Note this does NOT force the
+        # reconnect-watchdog grace branch: a full daemon restart never
+        # fires on_connection_status (see the module docstring), so the
+        # read recovers via the read-drain loop's exception-handling
+        # paths instead.
         #
         # wait_reachable above only confirms the TCP port is listening
         # again, not that the daemon has finished re-attaching to the
