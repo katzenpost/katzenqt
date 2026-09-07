@@ -442,6 +442,42 @@ class SentLog(SQLModel, table=True):
         return conversation_id
 
 
+async def peer_has_read_cap(
+    session: "AsyncSession", conversation_id: int, read_cap: bytes,
+) -> bool:
+    """True if any peer of the conversation (the owner included) already
+    holds this read cap.
+
+    Read caps are a member's unique cryptographic identity, so this is the
+    dedup key for the "already inducted" guard: a failed post-commit ack
+    makes a naive retry re-run the induction, and without a guard that
+    retry would add a second peer for the same person (the same hazard
+    ``_already_has`` closes for the announcement path). Uses an explicit
+    join query rather than relationship traversal: the receive and voucher
+    paths call this from SQLAlchemy's async session, where touching a
+    ``conv.peers`` lazy relationship raises ``MissingGreenlet``.
+    """
+    rows = (
+        await session.exec(
+            select(ReadCapWAL.read_cap)
+            .join(
+                ConversationPeer,
+                ConversationPeer.read_cap_id == ReadCapWAL.id,
+            )
+            .join(
+                ConversationPeerLink,
+                ConversationPeerLink.conversation_peer_id
+                == ConversationPeer.id,
+            )
+            .where(
+                ConversationPeerLink.conversation_id == conversation_id,
+                ReadCapWAL.read_cap == read_cap,
+            )
+        )
+    ).all()
+    return bool(rows)
+
+
 async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25) -> bool:
     """Poll SentLog for ``pwal_id`` until it appears or ``deadline_s``
     elapses. Returns True if acked in time, False on timeout.

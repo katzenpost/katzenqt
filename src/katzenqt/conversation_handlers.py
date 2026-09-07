@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import logging
 
-from sqlmodel import select
-
 from . import persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
 from .tally import controller as tally_controller
@@ -88,24 +86,16 @@ async def _already_has(sess, conv_id: int, intro: "GroupChatPleaseAdd") -> bool:
     present, including ourselves — there is no uniqueness enforced on
     display names anywhere in the mint/induct flow.
 
-    Uses an explicit query rather than relationship traversal: the receive path
-    runs in SQLAlchemy's async session, where touching a ``conv.peers`` lazy
-    relationship raises ``MissingGreenlet``.
+    Delegates to ``persistent.peer_has_read_cap``, the same dedup check the
+    voucher induction paths use for their "already inducted" guard, so one
+    query stays correct everywhere. That helper uses an explicit join rather
+    than relationship traversal: the receive path runs in SQLAlchemy's async
+    session, where touching a ``conv.peers`` lazy relationship raises
+    ``MissingGreenlet``.
     """
-    read_caps = (await sess.exec(
-        select(persistent.ReadCapWAL.read_cap)
-        .join(
-            persistent.ConversationPeer,
-            persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id,
-        )
-        .join(
-            persistent.ConversationPeerLink,
-            persistent.ConversationPeerLink.conversation_peer_id
-            == persistent.ConversationPeer.id,
-        )
-        .where(persistent.ConversationPeerLink.conversation_id == conv_id)
-    )).all()
-    return intro.read_cap in read_caps
+    if intro.read_cap is None:
+        return False
+    return await persistent.peer_has_read_cap(sess, conv_id, intro.read_cap)
 
 
 async def _handle_tally(sess, peer, gcm, full_payload) -> "tuple[bool, bool, None]":

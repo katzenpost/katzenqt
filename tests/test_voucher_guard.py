@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
-from katzenqt import network, persistent, voucher
+from katzenqt import models, network, persistent, voucher
 from sqlmodel import Session, select
 
 
@@ -308,3 +309,151 @@ async def test_same_loop_contention_does_not_deadlock():
 
     assert acquired_order == ["a", "b"]
     assert sorted(results.values()) == [0, 1]
+
+
+class TestPeerHasReadCap:
+    @pytest.mark.asyncio
+    async def test_distinct_cap_is_not_held(self):
+        conversation_id = await _make_conversation()
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x09" * 136,
+            ) is False
+
+    @pytest.mark.asyncio
+    async def test_active_peers_cap_is_held(self):
+        conversation_id = await _make_conversation()
+        await _add_active_peer(conversation_id, "alice")
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x01" * 136,
+            ) is True
+
+    @pytest.mark.asyncio
+    async def test_own_peers_cap_is_held(self):
+        conversation_id = await _make_conversation()
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x00" * 136,
+            ) is True
+
+    @pytest.mark.asyncio
+    async def test_same_cap_in_another_conversation_is_not_held(self):
+        conv_a = await _make_conversation("a")
+        conv_b = await _make_conversation("b")
+        await _add_active_peer(conv_a, "alice")
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conv_b, b"\x01" * 136,
+            ) is False
+
+
+class TestAlreadyInductedGuard:
+    @pytest.mark.asyncio
+    async def test_derive_rerun_does_not_duplicate_member(self, monkeypatch):
+        """A re-run of the induction (naive retry after a failed post-commit
+        ack) must not add a second peer for the same read cap, and must still
+        re-send the INTRODUCTION announcement."""
+        conversation_id = await _make_conversation()
+
+        class Induct:
+            display_name = "bob"
+            mutated_message_read_cap = b"\x03" * 136
+            sealed_reply = b"sealed_reply"
+
+        async def fake_read_box(*_a, **_k):
+            return (b"voucher_payload", b"\x00" * 104)
+
+        async def fake_publish_box(*_a, **_k):
+            return b"\x00" * 104
+
+        sent_announcements: list = []
+
+        async def fake_send_intro(cid, display_name, read_cap):
+            sent_announcements.append((cid, display_name, read_cap))
+
+        monkeypatch.setattr(voucher, "_read_box", fake_read_box)
+        monkeypatch.setattr(voucher, "_publish_box", fake_publish_box)
+        monkeypatch.setattr(voucher, "send_introduction_message", fake_send_intro)
+
+        class Connection:
+            async def voucher_derive_stream(self, *, voucher):
+                return SimpleNamespace(
+                    voucher_write_cap=b"\x04" * 168,
+                    voucher_read_cap=b"\x04" * 136,
+                )
+
+            async def voucher_induct(self, *, voucher, voucher_payload, who_reply):
+                return Induct()
+
+        conn = Connection()
+        assert await voucher.derive_read_and_induct(
+            conn, conversation_id, "bob", b"v" * 32,
+        ) == "bob"
+        assert await voucher.derive_read_and_induct(
+            conn, conversation_id, "bob", b"v" * 32,
+        ) == "bob"
+
+        async with persistent.asession() as sess:
+            caps = (await sess.exec(
+                select(persistent.ReadCapWAL.read_cap).where(
+                    persistent.ReadCapWAL.read_cap == Induct.mutated_message_read_cap,
+                )
+            )).all()
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.name == "bob",
+                )
+            )).all()
+        assert len(caps) == 1
+        assert len(peers) == 1
+        assert len(sent_announcements) == 2
+
+    @pytest.mark.asyncio
+    async def test_await_and_open_rerun_does_not_duplicate_members(
+        self, monkeypatch,
+    ):
+        conversation_id = await _make_conversation()
+        await _add_pending(conversation_id)
+
+        who_reply = models.GroupChatReplyWho(please_adds=[
+            models.GroupChatPleaseAdd(display_name="alice", read_cap=b"\x05" * 136),
+            models.GroupChatPleaseAdd(display_name="bob", read_cap=b"\x06" * 136),
+        ])
+
+        async def fake_read_box(*_a, **_k):
+            return (b"sealed reply", b"\x00" * 104)
+
+        monkeypatch.setattr(voucher, "_read_box", fake_read_box)
+        monkeypatch.setattr(
+            models.GroupChatReplyWho, "from_cbor", lambda _cbor: who_reply,
+        )
+
+        class Opened:
+            who_reply = b"who_reply cbor"
+            mutated_message_write_cap = b"\x07" * 168
+
+        class Connection:
+            async def voucher_open(self, *, voucher_secret_key, sealed_reply, message_write_cap):
+                return Opened()
+
+        conn = Connection()
+        await voucher.await_and_open(conn, conversation_id)
+        await _add_pending(conversation_id)
+        await voucher.await_and_open(conn, conversation_id)
+
+        async with persistent.asession() as sess:
+            caps = (await sess.exec(
+                select(persistent.ReadCapWAL.read_cap).where(
+                    persistent.ReadCapWAL.read_cap.in_([b"\x05" * 136, b"\x06" * 136]),
+                )
+            )).all()
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.name.in_(["alice", "bob"]),
+                )
+            )).all()
+        assert sorted(caps) == sorted([
+            b"\x05" * 136, b"\x06" * 136,
+        ])
+        assert sorted(peer.name for peer in peers) == ["alice", "bob"]

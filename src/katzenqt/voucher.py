@@ -366,7 +366,21 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         sess.add(wcw)
         added = []
         for please_add in reply_who.please_adds:
-            _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
+            if await persistent.peer_has_read_cap(
+                sess, conversation_id, please_add.read_cap,
+            ):
+                # This member was already added by an earlier run of this
+                # open (or an announcement that beat it here); adding a
+                # second peer for the same read cap would read their
+                # stream twice.
+                logger.warning(
+                    "await_and_open: %r already holds read cap %s on "
+                    "conversation %d; skipping duplicate _add_peer",
+                    please_add.display_name, _brief(please_add.read_cap),
+                    conversation_id,
+                )
+            else:
+                _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
             added.append(please_add.display_name)
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
@@ -502,7 +516,20 @@ async def derive_read_and_induct(connection, conversation_id: int, peer_name: st
     joiner_name = induct.display_name or peer_name
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
-        _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
+        if not await persistent.peer_has_read_cap(
+            sess, conversation_id, induct.mutated_message_read_cap,
+        ):
+            _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
+        else:
+            # Already inducted (a failed post-commit ack made a naive retry
+            # re-run the handshake); re-adding would duplicate the member
+            # and read their stream twice.
+            logger.warning(
+                "derive_read_and_induct: %r already holds read cap %s on "
+                "conversation %d; skipping duplicate induction",
+                joiner_name, _brief(induct.mutated_message_read_cap),
+                conversation_id,
+            )
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
