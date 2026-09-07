@@ -29,22 +29,22 @@ logger = logging.getLogger("katzen.persistent")
 
 
 # conversation_order is assigned by a scalar subquery evaluated at INSERT time
-# (autoflush, right before COMMIT). Every ConversationLog append site that
-# uses the async engine (_engine) funnels through the single writer coroutine
-# on the io loop — the GUI send path hops in via run_in_io
-# (append_outbound_chat) and the receive/voucher paths already run on the io
-# loop — so the aiosqlite session is never shared across two loops. (A GUI-
-# thread site that only needs a one-shot commit, e.g. new_conversation, uses
-# the separate sync engine (_engine_sync) instead, which has no event-loop
-# affinity and so needs no funnel.) The appends still serialise their "count,
-# insert, commit" critical section with the per-conversation async poll lock
-# below: two in-flight appends to the same conversation cannot read the same
-# count and trip UniqueConstraint(conversation_id, conversation_order),
-# silently dropping a message (or failing an induction that already
-# succeeded on the wire). The lock is a non-blocking acquire-and-poll so a
-# same-conversation waiter on the *same* loop can never deadlock the loop
-# thread that holds the lock mid-await — and, being cross-loop capable, it
-# stays correct even if a future caller skips the funnel.
+# (autoflush, right before COMMIT). Every ConversationLog append site funnels
+# through the single writer coroutine on the io loop — the GUI send path hops
+# in via run_in_io (append_outbound_chat), new_conversation via
+# run_in_io(_commit_new_conversation), and the receive/voucher paths already
+# run on the io loop — so the aiosqlite session is never shared across two
+# loops. (The GUI-thread _engine_sync circuit is gone: _commit_new_conversation
+# replaced the one Qt-thread commit site that previously carved itself out
+# here.) The appends still serialise their "count, insert, commit" critical
+# section with the per-conversation async poll lock below: two in-flight
+# appends to the same conversation cannot read the same count and trip
+# UniqueConstraint(conversation_id, conversation_order), silently dropping a
+# message (or failing an induction that already succeeded on the wire). The
+# lock is a non-blocking acquire-and-poll so a same-conversation waiter on the
+# *same* loop can never deadlock the loop thread that holds the lock mid-await
+# — and, being cross-loop capable, it stays correct even if a future caller
+# skips the funnel.
 __conversation_log_order_locks: dict[int, Lock] = {}
 __conversation_log_order_locks_guard = Lock()
 

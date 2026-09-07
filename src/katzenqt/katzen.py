@@ -147,6 +147,39 @@ def async_cb(method):
     return f
 
 
+async def _commit_new_conversation(
+    wcapwal: persistent.WriteCapWAL,
+    rcapwal: persistent.ReadCapWAL,
+    convo: persistent.Conversation,
+    own_peer: persistent.ConversationPeer,
+    first_post: persistent.ConversationLog,
+) -> None:
+    """Persist a freshly-built conversation's ORM objects on the io loop.
+
+    Runs via ``MainWindow.iothread.run_in_io`` from ``new_conversation`` (never
+    on the Qt thread): the async engine's aiosqlite session is bound to the loop
+    that created it, and every other ConversationLog write already funnels
+    through this single-writer path, so the GUI-thread ``_engine_sync`` circuit
+    is no longer a second writer. The refreshes happen in place, so the SAME
+    object instances — still referenced by the caller's ``convo`` — carry the
+    generated ids/FKs back to ``add_conversation`` on the Qt thread. It is a
+    one-shot owned by ``new_conversation``; a stray repeat re-adds the (clean,
+    detached) instances and so emits UPDATEs that change nothing.
+    """
+    async with persistent.asession() as sess:
+        sess.add(wcapwal)
+        sess.add(rcapwal)
+        sess.add(convo)
+        sess.add(own_peer)
+        sess.add(first_post)
+        await sess.commit()
+        await sess.refresh(convo)
+        await sess.refresh(own_peer)
+        await sess.refresh(wcapwal)
+        await sess.refresh(rcapwal)
+        await sess.refresh(first_post)
+
+
 class FirewallNetworkAccessManager(QtNetwork.QNetworkAccessManager):
     def connectToHost(self, *args) -> None:
         print("firewall: connectToHost")
@@ -915,24 +948,16 @@ class MainWindow(QMainWindow):
             conversation_order=0,
             payload=b"Your name in this conversation is " + own_peer.name.encode(),
         )
-        # The sync engine (_engine_sync), not asession()/the async engine:
-        # this runs on the Qt thread's own event loop, and aiosqlite
-        # connections from the async engine's pool are not safe to use from
-        # a loop other than the one that created them (see persistent.py's
-        # comment on the io-loop funnel). The sync engine has no such
-        # affinity.
-        with persistent.Session(persistent._engine_sync) as sess:
-            sess.add(wcapwal)
-            sess.add(rcapwal)
-            sess.add(convo)
-            sess.add(own_peer)
-            sess.add(first_post)
-            sess.commit()
-            sess.refresh(first_post)
-            sess.refresh(own_peer)
-            sess.refresh(convo)
-            sess.refresh(rcapwal)
-            sess.refresh(wcapwal)
+        # The objects must be written on the io loop, not the Qt thread, and via
+        # the same single-writer path every other ConversationLog append uses
+        # (mirror of network.notify_outbound_chat_sent): the aiosqlite session
+        # of the async engine is not safe to touch from any loop other than the
+        # one that created it, and a second writer on the Qt thread (_engine_sync)
+        # would race it. The helper refreshes the objects in place, so `convo`
+        # carries the generated ids back to add_conversation on the Qt thread.
+        await self.iothread.run_in_io(
+            _commit_new_conversation(wcapwal, rcapwal, convo, own_peer, first_post)
+        )
         await add_conversation(self, convo)
 
     @async_cb
