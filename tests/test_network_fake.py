@@ -1934,7 +1934,7 @@ class TestDoneCallbackPrimitive:
         loop = asyncio.get_running_loop()
         handler_calls = []
         prev_handler = loop.get_exception_handler()
-        loop.set_exception_handler(lambda l, c: handler_calls.append(c))
+        loop.set_exception_handler(lambda loop_, ctx: handler_calls.append(ctx))
         try:
             async def boom():
                 raise RuntimeError("nope")
