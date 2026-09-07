@@ -347,6 +347,20 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                     return str(cl.id)
                 else:
                     # Derive display text and attachment roles from the payload.
+                    # INTRODUCTION rows carry no body text, so surface the
+                    # announcement ("<author> added <name>") before the
+                    # attachment-oriented decode handles the rest.
+                    if role == 0 and cl.payload[:1] == b"F":
+                        try:
+                            from .models import GroupChatMessage
+                            cm = GroupChatMessage.from_cbor(cl.payload[1:])
+                        except Exception:
+                            cm = None
+                        if cm is not None and (intro := cm.as_introduction):
+                            return (
+                                f"{cl.conversation_peer.name} added "
+                                f"{intro.display_name}"
+                            )
                     info = _decode_group_chat_payload(cl.payload)
                     return _attachment_role_value(info, role)
                 # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent

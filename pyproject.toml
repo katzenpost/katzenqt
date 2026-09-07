@@ -11,18 +11,18 @@ requires-python = ">=3.11"
 version = "0.0.1"
 
 dependencies = [
-"pynacl==1.6.0",
-"pyside6~=6.9.3",
-"sqlmodel>=0",
-"alembic~=1.16.5",
-"aiosqlite~=0.21.0",
-"pydantic~=2.11.7",
-"cbor2~=5.6.5",
-"pycrdt~=0.13.1",
-# Keep in lockstep with the katzenpost daemon ref in
-# .github/workflows/test-integration-docker.yml.
-"katzenpost_thinclient==0.0.23",
-"rustic-audio-tool",
+    "pynacl==1.6.0",
+    "pyside6~=6.9.3",
+    "sqlmodel>=0",
+    "alembic~=1.16.5",
+    "aiosqlite~=0.21.0",
+    "pydantic~=2.11.7",
+    "cbor2~=5.6.5",
+    "pycrdt~=0.13.1",
+    # Keep in lockstep with the katzenpost daemon ref in
+    # .github/workflows/test-integration-docker.yml.
+    "katzenpost-thinclient==0.0.24",
+    "rustic-audio-tool",
 ]
 
 [dependency-groups]

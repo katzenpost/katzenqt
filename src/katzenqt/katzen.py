@@ -44,10 +44,11 @@ from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
 from base64 import b64decode, b64encode
+from katzenpost_thinclient import ThinClientOfflineError
 from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
-                     pending_voucher_for)
+                     pending_joiner_join_conversation_ids, pending_voucher_for)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task
 from .models import (GroupChatFileUpload,
@@ -66,7 +67,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
 
-
 class _AttachmentError(Exception):
     """User-facing attachment problem (missing file, checksum mismatch,
     oversized body that was dropped on receive)."""
@@ -77,6 +77,12 @@ class _ResolvedAttachment(NamedTuple):
     basename: str
     filetype: str | None
     path: Path
+
+# Bound on how long receive_msg_listener/peer_added_listener wait for a
+# conversation_id to appear in conversation_state_by_id before giving up on
+# that one queue item. The UI can briefly lag the io thread at startup, but a
+# stale or deleted conversation_id must not starve every later item forever.
+_CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
 
 class AsyncioThread(threading.Thread):
     def run(self):
@@ -154,6 +160,39 @@ def async_cb(method):
     def f(*args, **kwargs):
         return ensure_future(method(*args, **kwargs))
     return f
+
+
+async def _commit_new_conversation(
+    wcapwal: persistent.WriteCapWAL,
+    rcapwal: persistent.ReadCapWAL,
+    convo: persistent.Conversation,
+    own_peer: persistent.ConversationPeer,
+    first_post: persistent.ConversationLog,
+) -> None:
+    """Persist a freshly-built conversation's ORM objects on the io loop.
+
+    Runs via ``MainWindow.iothread.run_in_io`` from ``new_conversation`` (never
+    on the Qt thread): the async engine's aiosqlite session is bound to the loop
+    that created it, and every other ConversationLog write already funnels
+    through this single-writer path, so the GUI-thread ``_engine_sync`` circuit
+    is no longer a second writer. The refreshes happen in place, so the SAME
+    object instances — still referenced by the caller's ``convo`` — carry the
+    generated ids/FKs back to ``add_conversation`` on the Qt thread. It is a
+    one-shot owned by ``new_conversation``; a stray repeat re-adds the (clean,
+    detached) instances and so emits UPDATEs that change nothing.
+    """
+    async with persistent.asession() as sess:
+        sess.add(wcapwal)
+        sess.add(rcapwal)
+        sess.add(convo)
+        sess.add(own_peer)
+        sess.add(first_post)
+        await sess.commit()
+        await sess.refresh(convo)
+        await sess.refresh(own_peer)
+        await sess.refresh(wcapwal)
+        await sess.refresh(rcapwal)
+        await sess.refresh(first_post)
 
 
 class FirewallNetworkAccessManager(QtNetwork.QNetworkAccessManager):
@@ -710,14 +749,19 @@ class MainWindow(QMainWindow):
               f"{option}.font.pointSize": font.pointSize(),
             }
             self.settings = {**self.settings, **new}
-            with persistent.Session(persistent._engine_sync) as sess:
-                for n,v in new.items():
-                  if not (ex := sess.get(persistent.AppSetting, n)):
-                      ex = persistent.AppSetting(id=n)
-                  ex.type = 'int' if isinstance(v,int) else 'str'
-                  ex.value = v
-                  sess.add(ex)
-                sess.commit()
+            try:
+                with persistent.Session(persistent._engine_sync) as sess:
+                    for n,v in new.items():
+                      if not (ex := sess.get(persistent.AppSetting, n)):
+                          ex = persistent.AppSetting(id=n)
+                      ex.type = 'int' if isinstance(v,int) else 'str'
+                      ex.value = v
+                      sess.add(ex)
+                    sess.commit()
+            except Exception as e:
+                # self.settings already reflects the new font in memory; a
+                # failure here only means it won't survive a restart.
+                logger.warning("could not persist font setting: %s", e)
             # In theory we could now redraw the conversation QML, but we don't have
             # a way to trigger a full redraw. We should have something similar to
             # "on another conversation selected", but which we could force-redraw with.
@@ -1013,57 +1057,145 @@ class MainWindow(QMainWindow):
 
         group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
 
-        await self._enqueue_outgoing_gcm(
-            convo_state,
-            group_chat_message,
-            # TODO massive hack here because we don't reassemble sendops yet
-            local_payload=b"F" + group_chat_message.to_cbor(),
+        # TODO: this is general code that should live in a shared place:
+        send_op = SendOperation(
+            bacap_stream=convo_state.own_peer_bacap_uuid,
+            messages=[group_chat_message]
         )
+        # TODO this code is duplicated in self.send_file
+        new_write_caps, db_entries = send_op.serialize(
+            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            conversation_id=convo_state.conversation_id)
+
+        # conversation_order is a count subquery evaluated at commit. The
+        # receive/voucher paths append on the io loop; the send path funnels
+        # its append through the same single writer loop (via run_in_io) under
+        # the per-conversation lock, so two transactions can never stamp the
+        # same order and trip the unique constraint.
+        #
+        # One run_in_io hop, not three: append, the queue-put that wakes
+        # receive_msg_listener, and check_for_new all happen inside the same
+        # io-loop coroutine instead of three separate cross-thread round trips.
+        await self.iothread.run_in_io(
+            network.notify_outbound_chat_sent(
+                conversation_id=convo_state.conversation_id,
+                conversation_peer_id=convo_state.own_peer_id,
+                new_write_caps=new_write_caps,
+                db_entries=db_entries,
+                payload=b"F" + group_chat_message.to_cbor(),
+                # TODO massive hack here because we don't reassemble sendops yet
+                final_pwal_id=db_entries[-1].id,
+            )
+        )
+
+    async def _wait_for_conversation_state(self, conversation_id, *, what: str) -> bool:
+        """Wait for conversation_id to appear in conversation_state_by_id.
+
+        Bounded: the UI can briefly lag the io thread at startup, but a
+        conversation_id that never appears (stale or deleted) must not
+        starve every later queue item forever. Returns False (log and skip)
+        if it never shows up within the timeout."""
+        waited = 0
+        while conversation_id not in self.conversation_state_by_id:
+            if waited >= _CONVERSATION_STATE_WAIT_TIMEOUT_S:
+                logger.error(
+                    "%s: conversation_id %s never appeared in "
+                    "conversation_state_by_id after %ds; dropping",
+                    what, conversation_id, waited,
+                )
+                return False
+            logger.debug(f"{what}: conversation_id {conversation_id} not in conversation_state_by_id yet")
+            await asyncio.sleep(1)
+            waited += 1
+        return True
 
     async def receive_msg_listener(self):
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
         while True:
-            (conversation_id, redraw_only) = await self.iothread.run_in_io(network.conversation_update_queue.get())
-            while conversation_id not in self.conversation_state_by_id:
-                logger.debug(f"conversation_id {conversation_id} not in conversation_state_by_id yet")
-                await asyncio.sleep(1)  # encountered a race here once, where the UI hadn't loaded. not sure if still there.
-            convo_state = self.conversation_state_by_id[conversation_id]
-            if redraw_only:
-                convo_state.conversation_log_model.redraw_network_status()
-                continue
-            convo_state.conversation_log_model.increment_row_count()
-            # And then we can increment the row count to let the UI register it:
+            try:
+                (conversation_id, redraw_only) = await self.iothread.run_in_io(
+                    network.conversation_update_queue.get()
+                )
+                await self._process_conversation_update(conversation_id, redraw_only)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: one bad item must not
+                # take the whole refresh loop down (the known root causes were
+                # fixed separately; this is a safety net for a future unknown
+                # bug).
+                logger.error(
+                    "receive_msg_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
 
-            # x) Scrolling - two cases:
-            if convo_state is self.convo_state_or_none():
-                #   x.1) Scrolling: Conversation is in focus:
-                # TODO make which of these to do configurable:
-                convo_state.chat_lines_scroll_idx = 1.0
-                root = self.ui.qml_ChatLines.rootObject()
-                await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
-                root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
-                #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
-                #print(xx)
-                #import pdb;pdb.set_trace()
-                #print("current", self.ui.ChatLines.verticalScrollBar().value())
-                #print("next", min(
-                #    1 + self.ui.ChatLines.verticalScrollBar().value(),
-                #    conversation_order-3))
-                #self.ui.ChatLines.scrollToBottom()
-            else:
-                #   x.2) Scrolling: Conversation is NOT in focus:
-                print("NOT IN FOCUS")
-                convo_state.chat_lines_scroll_idx += 1.0
-                # convo_state.chat_lines_scroll_idx = conversation_order
-                # TODO we should flash the contact entry somehow
-                # TODO we should bump "unread message" counter
+    async def _process_conversation_update(self, conversation_id, redraw_only) -> None:
+        if not await self._wait_for_conversation_state(conversation_id, what="receive_msg_listener"):
+            return
+        convo_state = self.conversation_state_by_id[conversation_id]
+        if redraw_only:
+            convo_state.conversation_log_model.redraw_network_status()
+            return
+        convo_state.conversation_log_model.increment_row_count()
+        # And then we can increment the row count to let the UI register it:
 
-            # if the main window is not in focus, we should issue a notification:
-            if not self.app.focusWidget():
-                self.app.alert(self)
-                # self.app.beep()
-            self.systray.has_new_messages() # TODO move this into block above
+        # x) Scrolling - two cases:
+        if convo_state is self.convo_state_or_none():
+            #   x.1) Scrolling: Conversation is in focus:
+            # TODO make which of these to do configurable:
+            convo_state.chat_lines_scroll_idx = 1.0
+            root = self.ui.qml_ChatLines.rootObject()
+            await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
+            root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
+        else:
+            #   x.2) Scrolling: Conversation is NOT in focus:
+            print("NOT IN FOCUS")
+            convo_state.chat_lines_scroll_idx += 1.0
+            # TODO we should flash the contact entry somehow
+            # TODO we should bump "unread message" counter
+
+        # if the main window is not in focus, we should issue a notification:
+        if not self.app.focusWidget():
+            self.app.alert(self)
+            # self.app.beep()
+        self.systray.has_new_messages() # TODO move this into block above
+
+    async def peer_added_listener(self):
+        """Append members announced via INTRODUCTION to the contacts tree in
+        real time. The receive path persists the peer but stays Qt-free; this
+        listener turns that into a visible row (deduplicated by name), so a
+        joining member shows up on every live client's contact list without a
+        restart."""
+        while True:
+            try:
+                (conversation_id, name) = await self.iothread.run_in_io(
+                    network.peer_added_queue.get()
+                )
+                await self._process_peer_added(conversation_id, name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: a single malformed
+                # announcement must not kill the whole contact-tree listener.
+                logger.error(
+                    "peer_added_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
+
+    async def _process_peer_added(self, conversation_id, name) -> None:
+        if not await self._wait_for_conversation_state(conversation_id, what="peer_added_listener"):
+            return
+        convo_state = self.conversation_state_by_id[conversation_id]
+        item = convo_state.contacts_standard_item
+        already = any(
+            row is not None and row.text() == name
+            for row in (item.child(r) for r in range(item.rowCount()))
+        )
+        if already:
+            return
+        item.appendRow(QStandardItem(name))
+        logger.debug("added announced contact %r to conversation %d", name, conversation_id)
 
     def convo_state(self) -> ConversationUIState:
         convo = self.convo_state_or_none()
@@ -1150,7 +1282,7 @@ class MainWindow(QMainWindow):
             else:
                 src_path = str(f_path)
 
-            # Store a lightweight local marker rather than the file bytes: the
+# Store a lightweight local marker rather than the file bytes: the
             # renderer only needs the basename/filetype, and the bytes are
             # already on disk at src_path.
             marker_fields = {
@@ -1411,18 +1543,16 @@ class MainWindow(QMainWindow):
             conversation_order=0,
             payload=b"Your name in this conversation is " + own_peer.name.encode(),
         )
-        async with persistent.asession() as sess:
-            sess.add(wcapwal)
-            sess.add(rcapwal)
-            sess.add(convo)
-            sess.add(own_peer)
-            sess.add(first_post)
-            await sess.commit()
-            await sess.refresh(first_post)
-            await sess.refresh(own_peer)
-            await sess.refresh(convo)
-            await sess.refresh(rcapwal)
-            await sess.refresh(wcapwal)
+        # The objects must be written on the io loop, not the Qt thread, and via
+        # the same single-writer path every other ConversationLog append uses
+        # (mirror of network.notify_outbound_chat_sent): the aiosqlite session
+        # of the async engine is not safe to touch from any loop other than the
+        # one that created it, and a second writer on the Qt thread (_engine_sync)
+        # would race it. The helper refreshes the objects in place, so `convo`
+        # carries the generated ids back to add_conversation on the Qt thread.
+        await self.iothread.run_in_io(
+            _commit_new_conversation(wcapwal, rcapwal, convo, own_peer, first_post)
+        )
         await add_conversation(self, convo)
 
     @async_cb
@@ -1497,10 +1627,14 @@ class MainWindow(QMainWindow):
         ensure_future(self._await_voucher_join(convo))
 
     async def _await_voucher_join(self, convo):
+        # A fresh GUI start may still be dialling the daemon on the io thread
+        # (kp_client only becomes set once reconnect() returns), and transient
+        # daemon dropouts mid-wait ride out the _read_box rounds in voucher.py.
+        # Wait for the connection to exist, then retry short-lived failures a
+        # few times with backoff before surfacing an error, so a restart
+        # reliably resumes a pending join.
         try:
-            added = await self.iothread.run_in_io(
-                await_and_open(self.iothread.kp_client, convo.conversation_id)
-            )
+            added = await self._wait_and_open_with_retries(convo.conversation_id)
         except Exception as e:
             logging.warning("voucher await failed: %s", e)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
@@ -1514,6 +1648,24 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: QMessageBox.information(
             self, f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
+
+    async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
+        for attempt in range(5):
+            try:
+                # getattr, not a direct attribute access: AsyncioThread sets
+                # kp_client as the first line of async_main(), so a call
+                # made before that thread has even started running would
+                # otherwise raise AttributeError here instead of waiting.
+                while getattr(self.iothread, "kp_client", None) is None:
+                    await asyncio.sleep(1)
+                return await self.iothread.run_in_io(
+                    await_and_open(self.iothread.kp_client, conversation_id)
+                )
+            except (ThinClientOfflineError, ConnectionError, BrokenPipeError, OSError):
+                logging.warning("voucher join attempt %d failed (daemon transient); retrying", attempt + 1)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
+        raise ConnectionError("voucher join could not reach the daemon after retries")
 
     @async_cb
     async def induct_via_voucher(self):
@@ -1555,12 +1707,20 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        name = joiner_name or "contact"
-        convo.contacts_standard_item.appendRow(QStandardItem(name))
+        if joiner_name is None:
+            # Already inducted by an earlier run of this same handshake;
+            # voucher.py has already logged and skipped the duplicate add,
+            # so there is no new contact to reflect here.
+            QTimer.singleShot(0, lambda: QMessageBox.information(
+                self, f"Inducted: {APP_NAME}", "This contact was already inducted.",
+            ))
+            return
+
+        convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Inducted: {APP_NAME}", f"Inducted {name} into this conversation.",
+            self, f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
         ))
 
     @async_cb
@@ -1771,6 +1931,16 @@ async def main(window: MainWindow):
 
     window.show()
     create_task(window.receive_msg_listener())
+    create_task(window.peer_added_listener())
+
+    # Resume any joiner handshake a previous run left in flight: the inductor
+    # may reply over the rendezvous stream while this app is down, and the
+    # pending voucher rows persist exactly so a restart can pick them up again.
+    for conv_id in await pending_joiner_join_conversation_ids():
+        convo_state = window.conversation_state_by_id.get(conv_id)
+        if convo_state is not None:
+            logger.warning("resuming pending voucher join for conversation %d", conv_id)
+            create_task(window._await_voucher_join(convo_state))
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html
@@ -1854,7 +2024,6 @@ def cli():
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
 
-    logging.getLogger('sqlalchemy.engine.Engine').disabled=True
     if args.level:
         for logger_name, level in args.level:
             log_level = getattr(logging, level.upper(), None)
