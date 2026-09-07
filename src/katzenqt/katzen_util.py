@@ -1,17 +1,21 @@
 import asyncio
-import traceback
+import logging
+
+logger = logging.getLogger("katzen.util")
 
 def create_task(coro):
     """Wrapper around asyncio.create_task() that logs exceptions"""
     def throw_if_needed(task):
         if task.cancelled():
             return  # cancellation is expected on shutdown, not an error
-        try:
-            task.result()
-        except Exception:
-            print(f"create_task {task.exception()}")
-            traceback.print_exc()
-            raise
+        exc = task.exception()
+        if exc is not None:
+            # Log the failure but do NOT re-raise: a done-callback's raise
+            # only surfaces as a spurious asyncio "Exception in callback"
+            # traceback (seen on transient kpclientd link drops during a
+            # bounce). logger.error's exc_info already preserves the
+            # traceback through the normal logging configuration.
+            logger.error("create_task: unhandled exception in %s", task, exc_info=exc)
     task = asyncio.create_task(coro)
     task.add_done_callback(throw_if_needed)
     return task

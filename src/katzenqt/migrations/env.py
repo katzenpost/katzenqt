@@ -5,6 +5,7 @@ https://medium.com/@estretyakov/the-ultimate-async-setup-fastapi-sqlmodel-alembi
 import asyncio
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -16,7 +17,10 @@ from alembic import context
 config = context.config
 
 # TODO here we need to import the SQLModel models
-from katzenqt.persistent import ConversationPeerLink, ConversationPeer, Conversation, metadata, _sql_url
+from katzenqt.persistent import (
+    ConversationPeerLink, ConversationPeer, Conversation, metadata,
+    _sql_url, _set_sqlite_pragmas,
+)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -81,6 +85,11 @@ async def run_async_migrations() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    # This is a separate engine from persistent.py's _engine/_engine_sync, so
+    # it doesn't get their busy_timeout pragma for free. Without it, running
+    # a migration while the app is live can hit an immediate "database is
+    # locked" instead of waiting out the app's own contention.
+    sa.event.listens_for(connectable.sync_engine, "connect")(_set_sqlite_pragmas)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

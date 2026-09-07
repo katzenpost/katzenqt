@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 from .katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
@@ -23,8 +23,119 @@ if TYPE_CHECKING:
 from alembic import context
 import logging
 import os
+from threading import Lock
 
 logger = logging.getLogger("katzen.persistent")
+
+
+# conversation_order is assigned by a scalar subquery evaluated at INSERT time
+# (autoflush, right before COMMIT). Every ConversationLog append site funnels
+# through the single writer coroutine on the io loop — the GUI send path hops
+# in via run_in_io (append_outbound_chat), new_conversation via
+# run_in_io(_commit_new_conversation), and the receive/voucher paths already
+# run on the io loop — so the aiosqlite session is never shared across two
+# loops. (The GUI-thread _engine_sync circuit is gone: _commit_new_conversation
+# replaced the one Qt-thread commit site that previously carved itself out
+# here.) The appends still serialise their "count, insert, commit" critical
+# section with the per-conversation async poll lock below: two in-flight
+# appends to the same conversation cannot read the same count and trip
+# UniqueConstraint(conversation_id, conversation_order), silently dropping a
+# message (or failing an induction that already succeeded on the wire). The
+# lock is a non-blocking acquire-and-poll so a same-conversation waiter on the
+# *same* loop can never deadlock the loop thread that holds the lock mid-await
+# — and, being cross-loop capable, it stays correct even if a future caller
+# skips the funnel.
+__conversation_log_order_locks: dict[int, Lock] = {}
+__conversation_log_order_locks_guard = Lock()
+
+# Poll interval for conversation_log_order_lock's non-blocking acquire loop.
+# Small relative to a human-paced chat send, so contention adds no
+# perceptible latency; large enough that an uncontended waiter isn't
+# spinning the loop needlessly.
+_CONVERSATION_LOG_ORDER_LOCK_POLL_S = 0.005
+
+@asynccontextmanager
+async def conversation_log_order_lock(conversation_id: int) -> AsyncIterator[None]:
+    """Hold the write lock for a conversation's log-append critical section.
+
+    Use it around the ``sess.add(ConversationLog(...))`` .. ``await
+    sess.commit()`` window at every site that assigns ``conversation_order``.
+
+    This has to be an async context manager, not a blocking one: two of the
+    three call sites run as asyncio tasks that can share an event loop with
+    another task appending to the *same* conversation (drain_mixwal2 fans
+    out one create_task() per readable MixWAL row with no await between
+    calls, so two peers of one conversation routinely land on the same
+    io-thread loop in the same pass). A blocking threading.Lock.acquire()
+    here would let one task's genuine await (e.g. sess.commit()) while
+    holding the lock stall a second task's acquire() call on the *same* OS
+    thread -- and a blocked acquire() never lets that thread's loop run the
+    first task's continuation, which is what would release the lock: a
+    permanent same-thread deadlock. Polling with a non-blocking acquire()
+    and sleeping between attempts keeps every wait cooperative, whether the
+    other holder is on this loop or, via the shared threading.Lock, a
+    different loop's thread entirely.
+    """
+    with __conversation_log_order_locks_guard:
+        lock = __conversation_log_order_locks.setdefault(conversation_id, Lock())
+    # Acquire before entering the try: a task cancelled while parked in the
+    # poll sleep holds nothing, and an unconditional finally release() there
+    # would either raise RuntimeError on a free lock (on top of the
+    # CancelledError) or silently unlock another same-conversation task's
+    # lock mid-critical-section, reopening the count/insert race.
+    while not lock.acquire(blocking=False):
+        await asyncio.sleep(_CONVERSATION_LOG_ORDER_LOCK_POLL_S)
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def next_conversation_order(conversation_id: int):
+    """Scalar subquery for the next ``conversation_order`` value: a live
+    COUNT evaluated at INSERT/COMMIT time. Shared by every ConversationLog
+    append site so a future change to how the order is derived only needs
+    to be made once."""
+    return (
+        select(count())
+        .select_from(ConversationLog)
+        .where(ConversationLog.conversation_id == conversation_id)
+        .scalar_subquery()
+    )
+
+
+async def append_outbound_chat(
+    *,
+    conversation_id: int,
+    conversation_peer_id: int,
+    new_write_caps: list[uuid.UUID],
+    db_entries: list[SQLModel],
+    payload: bytes,
+    final_pwal_id: uuid.UUID | None = None,
+) -> None:
+    """Append one outbound chat message's WAL rows and its ConversationLog entry.
+
+    This is the GUI send path's writer: it runs on the io loop (invoked via
+    ``MainWindow.iothread.run_in_io``) so the aiosqlite session is never
+    shared across the Qt loop and the io loop, under the per-conversation
+    writer lock, so the ``conversation_order`` count-subquery (evaluated at
+    COMMIT) is stamped atomically with respect to the receive/voucher appends.
+    """
+    async with conversation_log_order_lock(conversation_id):
+        async with asession() as sess:
+            for cap_uuid in new_write_caps:
+                sess.add(WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            sess.add(ConversationLog(
+                conversation_id=conversation_id,
+                conversation_peer_id=conversation_peer_id,
+                conversation_order=next_conversation_order(conversation_id),
+                payload=payload,
+                network_status=1,
+                outgoing_pwal=final_pwal_id,
+            ))
+            await sess.commit()
 
 
 def _resolve_alembic_ini() -> Path:
@@ -59,8 +170,44 @@ state_file += ".sqlite3"
 state_file = app_data / state_file
 _sql_url = f"sqlite+aiosqlite:///{ state_file }"
 logger.info("sql url: %s", _sql_url)
-_engine = create_async_engine(_sql_url, echo=True, future=True, pool_size=1000)
-_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=True, pool_size=1000)
+# pool_size is generous on purpose: sqlite itself serialises actual writes
+# (via WAL + busy_timeout above), so this pool isn't adding write throughput.
+# What it avoids is SQLAlchemy's own default QueuePool (size 5 + overflow 10)
+# queuing a checkout behind its 30s pool_timeout before a caller ever reaches
+# sqlite's much shorter busy wait — under a write burst (many concurrent
+# asyncio.to_thread sessions plus the io loop's own) that pool-level queue,
+# not sqlite's lock, becomes the thing that stalls the Qt GUI thread's own
+# settings writes for tens of seconds instead of a bounded couple of ticks.
+_engine = create_async_engine(_sql_url, future=True, pool_size=1000)
+_engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), pool_size=1000)
+
+
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    """Enable WAL and a short busy timeout on every pooled connection.
+
+    Without busy_timeout, any write that finds another writer holding the
+    sqlite write lock fails immediately with ``database is locked``; the
+    GUI send and io receive threads contend on the same file, so a burst
+    wedges whatever drain task happened to be committing. WAL keeps readers
+    out of the writers' way and turns most of that contention into waits.
+    The timeout must stay SMALL: the sync engine is used both from worker
+    threads (mark_sent's asyncio.to_thread calls) and directly from the Qt
+    GUI thread (settings writes), so a large value freezes whichever of
+    those threads is waiting for its full duration on every contended
+    write. 250ms absorbs ordinary micro-
+    contention yet bounds any loop/GUI stall to a couple of timer ticks;
+    sustained contention degrades to the drains' give_up-and-retry path
+    instead of a blocking stall. WAL is file-persistent; busy_timeout is per
+    connection, hence the connect event rather than engine-level setup.
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=250")
+    cursor.close()
+
+
+sa.event.listens_for(_engine.sync_engine, "connect")(_set_sqlite_pragmas)
+sa.event.listens_for(_engine_sync, "connect")(_set_sqlite_pragmas)
 
 
 NAMING_CONVENTION = {
@@ -220,6 +367,16 @@ class PendingVoucher(SQLModel, table=True):
     display_name: str | None = Field(None, description="joiner's own name, for the mint")
     peer_name: str | None = Field(None, description="inductor's name for the joining peer")
 
+# Caps how many of mark_sent's asyncio.to_thread calls (below) run at once.
+# Each can block a worker thread for up to busy_timeout (250ms) waiting on
+# sqlite's write lock; unbounded, a burst of simultaneously-resendable writes
+# (e.g. right after a reconnect) can saturate Python's shared default
+# ThreadPoolExecutor and start queuing unrelated asyncio.to_thread callers
+# elsewhere in the app behind these DB commits. Semaphore-over-worker-pool is
+# this project's usual pattern for bounding a variable-throughput stream.
+_MARK_SENT_THREAD_SEM = asyncio.Semaphore(8)
+
+
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
@@ -242,10 +399,15 @@ class SentLog(SQLModel, table=True):
         # mismatch surfaces as an MKEM/BACAP decrypt failure at the reader.
         # Read the wcw blob first in a small sync transaction, then resolve
         # the counters via the thinclient OUTSIDE the session so we don't
-        # hold a DB transaction across an await.
-        with Session(_engine_sync) as sess:
-            wcw_precheck = sess.get(WriteCapWAL, mw.bacap_stream)
-            precheck_next_blob = wcw_precheck.next_index if wcw_precheck else None
+        # hold a DB transaction across an await. The sync transactions
+        # themselves run on a worker thread: mark_sent is awaited directly on
+        # the event-loop task that owns the write drain, so blocking sqlite
+        # I/O here (with its fsync commits) would stall every other task on
+        # the loop regardless of the busy timeout's size.
+        async with _MARK_SENT_THREAD_SEM:
+            precheck_next_blob = await asyncio.to_thread(
+                _read_wcw_precheck, mw.bacap_stream,
+            )
         if precheck_next_blob is not None:
             real_next = await connection.get_message_box_index_counter(precheck_next_blob)
             our_next = await connection.get_message_box_index_counter(mw.next_message_index)
@@ -255,56 +417,222 @@ class SentLog(SQLModel, table=True):
                     "(db next=%d >= our next=%d); not regressing index",
                     mw.bacap_stream, real_next, our_next,
                 )
-                # Clean up the stray MW so we don't re-drain it; leave the
-                # PWAL alone if it still exists — a later MW with a fresh
-                # next_message_index will mark it sent.
-                with Session(_engine_sync) as sess:
-                    stale_mw = sess.get(MixWAL, mw.id)
-                    if stale_mw is not None:
-                        sess.delete(stale_mw)
-                        sess.commit()
+                # Clean up the stray MW so we don't re-drain it, and finish
+                # the job for this message: the writer has already advanced
+                # past our_next, so the boxes this envelope sealed were
+                # written and we just got their ACK — the PWAL is proven
+                # delivered. Finalize it here rather than trusting a later
+                # MW to do it: in the crash-then-relaunch case (write drain
+                # died mid-commit) no later MW exists, and without this the
+                # message resends forever.
+                async with _MARK_SENT_THREAD_SEM:
+                    conversation_id = await asyncio.to_thread(
+                        _finalize_stale_ack, mw.id, mw.plaintextwal,
+                    )
                 resend_queue.discard(mw.bacap_stream)
-                return
+                return conversation_id
         # Resolve the diagnostic counters once so the commit-time print is
         # as cheap as a tuple format rather than two more thinclient calls.
         new_idx = our_next if precheck_next_blob is not None else (
             await connection.get_message_box_index_counter(mw.next_message_index)
         )
-        with Session(_engine_sync) as sess:
-            pwal = sess.get(PlaintextWAL, mw.plaintextwal)
-            if not pwal:
-                logger.warning(
-                    "mark_sent: pwal lookup failed for mw.plaintextwal=%s "
-                    "(is_read=%s); most likely a duplicate ACK for an MW "
-                    "whose PWAL was already reaped",
-                    mw.plaintextwal, mw.is_read,
-                )
-                resend_queue.discard(mw.bacap_stream)
-                return
-            sess.add(cls(id=pwal.id))  # SentLog entry for the pwal id
-            wcw = sess.get(WriteCapWAL, mw.bacap_stream)
-            old_idx = real_next if precheck_next_blob is not None else None
-            logger.debug("updating wcw: old=%s new=%s", old_idx, new_idx)
-            wcw.next_index = mw.next_message_index
-            if pwal.bacap_payload[:1] in (b'F',b'I'):
-                # This is either:
-                #   I: an Indirection release pointing to something else
-                #   F: a Final message
-                # If it's at a top level, we would have a local ConversationLog entry already,
-                # and we can update that to reflect that message has been sent.
-                if convlog := sess.exec(select(ConversationLog).where(ConversationLog.outgoing_pwal == pwal.id)).first():
-                    conversation_id = convlog.conversation_id
-                    convlog.network_status = 2
-                    sess.add(convlog)
-            sess.add(wcw)
-            if mw.bacap_stream != pwal.bacap_stream:
-                logger.error("mw.bacap_stream doesn't match pwal.bacap_stream")
-            sess.delete(sess.get(MixWAL, mw.id))
-            sess.delete(pwal)
-            # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
-            sess.commit()
-            resend_queue.discard(pwal.bacap_stream)  # TODO not sure if we still use this?
+        async with _MARK_SENT_THREAD_SEM:
+            conversation_id = await asyncio.to_thread(
+                _mark_sent_txn,
+                mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
+                mw.next_message_index, new_idx,
+                real_next if precheck_next_blob is not None else None,
+            )
+        resend_queue.discard(mw.bacap_stream)
         return conversation_id
+
+
+async def peer_has_read_cap(
+    session: "AsyncSession", conversation_id: int, read_cap: bytes,
+) -> bool:
+    """True if any peer of the conversation (the owner included) already
+    holds this read cap.
+
+    Read caps are a member's unique cryptographic identity, so this is the
+    dedup key for the "already inducted" guard: a failed post-commit ack
+    makes a naive retry re-run the induction, and without a guard that
+    retry would add a second peer for the same person (the same hazard
+    ``_already_has`` closes for the announcement path). Uses an explicit
+    join query rather than relationship traversal: the receive and voucher
+    paths call this from SQLAlchemy's async session, where touching a
+    ``conv.peers`` lazy relationship raises ``MissingGreenlet``.
+    """
+    rows = (
+        await session.exec(
+            select(ReadCapWAL.read_cap)
+            .join(
+                ConversationPeer,
+                ConversationPeer.read_cap_id == ReadCapWAL.id,
+            )
+            .join(
+                ConversationPeerLink,
+                ConversationPeerLink.conversation_peer_id
+                == ConversationPeer.id,
+            )
+            .where(
+                ConversationPeerLink.conversation_id == conversation_id,
+                ReadCapWAL.read_cap == read_cap,
+            )
+        )
+    ).all()
+    return bool(rows)
+
+
+async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
+    """The conversation owner's salt-mutated read cap: the write cap's
+    [32:] suffix once that is provisioned, else the unmutated
+    ``rcapwal.read_cap``.
+
+    Two call sites hand-wrote this same lookup in slightly different
+    shapes (``_handle_introduction`` recognises an announcement about
+    ourselves with it; ``_build_who_reply`` announces ourselves to a
+    joiner with it), so a change to how the own cap is derived only needs
+    to be made once. A freshly created conversation's write cap is filled
+    in by the background provisioning loop shortly after creation, so None
+    here is a transient early-state, not an error.
+
+    It resolves the owner through columns and explicit ``session.get``
+    alone — never through the ``conversation.own_peer`` relationship.
+    ``own_peer`` is a ``lazy="selectin"`` relationship and is NOT
+    eager-loaded when ``conversation`` is reached via ``peer.conversation``
+    (the link-model path used by ``drain_mixwal_read_single``), so reading
+    it here makes SQLAlchemy fall back to a synchronous lazy-load and
+    raise ``MissingGreenlet`` inside the aiosqlite session.
+    """
+    own_peer_id = conversation.own_peer_id
+    own_rcw = None
+    if own_peer_id is not None:
+        own_peer = await session.get(ConversationPeer, own_peer_id)
+        if own_peer is not None:
+            own_rcw = await session.get(ReadCapWAL, own_peer.read_cap_id)
+    own_cap = own_rcw.read_cap if own_rcw is not None else None
+    if conversation.write_cap is not None:
+        wcw = await session.get(WriteCapWAL, conversation.write_cap)
+        if wcw is not None and wcw.write_cap is not None:
+            own_cap = wcw.write_cap[32:]
+    return own_cap
+
+
+async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25) -> bool:
+    """Poll SentLog for ``pwal_id`` until it appears or ``deadline_s``
+    elapses. Returns True if acked in time, False on timeout.
+
+    Shared by every caller that needs to block until an outbound
+    plaintext's ACK lands (voucher.py's introduction wait, the headless
+    SEND step); each decides for itself what a timeout means (log and
+    move on, vs. fail the whole action)."""
+    deadline = asyncio.get_event_loop().time() + deadline_s
+    while asyncio.get_event_loop().time() < deadline:
+        async with asession() as sess:
+            hit = (await sess.exec(
+                select(SentLog).where(SentLog.id == pwal_id)
+            )).first()
+        if hit is not None:
+            return True
+        await asyncio.sleep(poll_s)
+    return False
+
+
+def _read_wcw_precheck(bacap_stream) -> "bytes | None":
+    """Return wcw.next_index for the stream (worker-thread helper for mark_sent)."""
+    with Session(_engine_sync) as sess:
+        wcw = sess.get(WriteCapWAL, bacap_stream)
+        return wcw.next_index if wcw else None
+
+
+def _ensure_sent_log_and_flip_status(sess, pwal: "PlaintextWAL") -> "int | None":
+    """Idempotent-insert pwal's SentLog row, and flip its ConversationLog
+    entry (if any) to sent. Shared by both mark_sent finalize paths.
+
+    A pre-existing SentLog row (a prior ACK commit won, its PWAL deletion
+    racing) is reused instead of re-inserted, so this never raises
+    IntegrityError on the SentLog primary key.
+    """
+    if sess.get(SentLog, pwal.id) is None:
+        sess.add(SentLog(id=pwal.id))
+    conversation_id = None
+    if pwal.bacap_payload[:1] in (b"F", b"I"):
+        # This is either:
+        #   I: an Indirection release pointing to something else
+        #   F: a Final message
+        # If it's at a top level, we would have a local ConversationLog entry already,
+        # and we can update that to reflect that message has been sent.
+        if convlog := sess.exec(select(ConversationLog).where(ConversationLog.outgoing_pwal == pwal.id)).first():
+            conversation_id = convlog.conversation_id
+            convlog.network_status = 2
+            sess.add(convlog)
+    return conversation_id
+
+
+def _finalize_stale_ack(mw_id, plaintextwal_id) -> "int | None":
+    """Stale/stray-MW finalize transaction (worker-thread helper for mark_sent).
+
+    Runs when the regression guard detected the writer already advanced past
+    our next index. Reaps the stray MixWAL, records SentLog, flips
+    ConversationLog status, and commits — see mark_sent's stale-ACK comment
+    for the intent.
+    """
+    conversation_id = None
+    with Session(_engine_sync) as sess:
+        stale_mw = sess.get(MixWAL, mw_id)
+        if stale_mw is not None:
+            sess.delete(stale_mw)
+        pwal = sess.get(PlaintextWAL, plaintextwal_id)
+        if pwal is not None:
+            conversation_id = _ensure_sent_log_and_flip_status(sess, pwal)
+            sess.delete(pwal)
+        sess.commit()
+    return conversation_id
+
+
+def _mark_sent_txn(mw_id, bacap_stream, plaintextwal_id, is_read,
+                   next_index, new_idx, real_next) -> "int | None":
+    """Normal ACK finalize transaction (worker-thread helper for mark_sent).
+
+    Records SentLog, advances WriteCapWAL, flips ConversationLog status, and
+    reaps the MixWAL/PlaintextWAL rows. Idempotent against duplicate ACKs: a
+    pre-existing SentLog row (a prior ACK commit won, its PWAL deletion
+    racing) is reused instead of re-inserted, so this never raises
+    IntegrityError on the SentLog primary key. The MW delete is null-guarded
+    for the same race.
+    """
+    with Session(_engine_sync) as sess:
+        pwal = sess.get(PlaintextWAL, plaintextwal_id)
+        if not pwal:
+            logger.warning(
+                "mark_sent: pwal lookup failed for mw.plaintextwal=%s "
+                "(is_read=%s); most likely a duplicate ACK for an MW "
+                "whose PWAL was already reaped",
+                plaintextwal_id, is_read,
+            )
+            if mw_row := sess.get(MixWAL, mw_id):
+                sess.delete(mw_row)
+                sess.commit()
+            return None
+        conversation_id = _ensure_sent_log_and_flip_status(sess, pwal)
+        if wcw := sess.get(WriteCapWAL, bacap_stream):
+            logger.debug("updating wcw: old=%s new=%s", real_next, new_idx)
+            wcw.next_index = next_index
+            sess.add(wcw)
+        else:
+            logger.error(
+                "mark_sent: no WriteCapWAL for bacap_stream=%s; "
+                "next_index not advanced", bacap_stream,
+            )
+        if bacap_stream != pwal.bacap_stream:
+            logger.error("mw.bacap_stream doesn't match pwal.bacap_stream")
+        if mw_row := sess.get(MixWAL, mw_id):
+            sess.delete(mw_row)
+        sess.delete(pwal)
+        # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
+        sess.commit()
+    return conversation_id
+
 
 class PlaintextWAL(SQLModel, table=True):
     """Plaintext chunks of (bacap_payload) to insert into (bacap_stream).
@@ -526,11 +854,7 @@ class ConversationLog(SQLModel, table=True):
             conversation_id=conversation_peer.conversation.id,
             conversation_peer=conversation_peer,
             payload=payload,
-            conversation_order=(
-                select(count())
-                .select_from(cls)
-                .where(cls.conversation_id == conversation_peer.conversation.id)
-                .scalar_subquery()),
+            conversation_order=next_conversation_order(conversation_peer.conversation.id),
         )
 
 

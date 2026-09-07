@@ -160,6 +160,11 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                         try:
                             from .models import GroupChatMessage
                             cm = GroupChatMessage.from_cbor(cl.payload[1:])
+                            if intro := cm.as_introduction:
+                                return (
+                                    f"{cl.conversation_peer.name} added "
+                                    f"{intro.display_name}"
+                                )
                             return cm.text
                         except Exception as e:
                             print(e, cl.payload)
