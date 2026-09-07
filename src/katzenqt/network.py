@@ -929,7 +929,22 @@ async def drain_mixwal2(connection: ThinClient):
                     __resend_queue.add(mw.bacap_stream)
                     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
                     if len(rcw.read_cap) != 136:
-                      raise Exception(f"ReadCapWAL.rcw from persistent has incorrect size: len(rcw.read_cap) {repr(rcw)} (from {mw.bacap_stream}")
+                        # A malformed row must not take down the whole drain
+                        # loop (see drain_mixwal's wrapper, which catches an
+                        # escaped exception here but then simply returns,
+                        # permanently ending every read AND write drain for
+                        # the rest of the process). Skip only this stream,
+                        # the same log-and-continue contract every other
+                        # per-item failure path in this loop already gets.
+                        logger.error(
+                            "drain_mixwal: ReadCapWAL.read_cap for "
+                            "bacap_stream=%s has incorrect length %d "
+                            "(expected 136); skipping this stream: %r",
+                            mw.bacap_stream, len(rcw.read_cap), rcw,
+                        )
+                        draining_right_now.discard(mw.bacap_stream)
+                        __resend_queue.discard(mw.bacap_stream)
+                        continue
                     read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
 
                     def _on_read_done(task, stream=mw.bacap_stream) -> None:

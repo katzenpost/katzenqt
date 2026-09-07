@@ -242,13 +242,13 @@ async def _set_up_write_flow(
     return setup
 
 
-async def _set_up_read_flow(fake, *, plaintext: "bytes | None" = None):
+async def _set_up_read_flow(fake, *, plaintext: "bytes | None" = None, **insert_kwargs):
     if plaintext is None:
         plaintext = _make_F_payload("hello")
     """Like _set_up_write_flow but also pre-stores the box and builds a
     read-MixWAL row so drain_mixwal_read_single can be tested.
     """
-    setup = await _insert_write_setup(fake)
+    setup = await _insert_write_setup(fake, **insert_kwargs)
     fake.pre_store(
         write_cap=setup["write_cap"],
         message_box_index=setup["first_message_index"],
@@ -1402,6 +1402,59 @@ class TestDrainMixwal2:
             peers = (await sess.exec(select(persistent.ConversationPeer))).all()
             assert [p.name for p in peers] == ["self"]
         assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_malformed_read_cap_does_not_kill_the_whole_drain_loop(
+        self, fake_thinclient,
+    ):
+        """A single corrupted ReadCapWAL row (wrong-length read_cap) used to
+        raise straight out of the loop body with nothing catching it inside
+        drain_mixwal2 itself; drain_mixwal's wrapper logs it CRITICAL and
+        simply returns, permanently ending every read AND write drain for
+        the rest of the process. One malformed row must only cost its own
+        stream, leaving every other stream (read or write) draining as
+        normal."""
+        healthy = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("hi"),
+        )
+        broken = await _set_up_read_flow(
+            fake_thinclient, seed=b"\x44" * 32, conv_name="demo2",
+        )
+        async with persistent.asession() as sess:
+            rcw = await sess.get(persistent.ReadCapWAL, broken["bacap_stream"])
+            rcw.read_cap = rcw.read_cap[:-1]
+            sess.add(rcw)
+            await sess.commit()
+
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "__mixwal_updated").set()
+        getattr(network, "__mixnet_connected").set()
+
+        async def healthy_drained():
+            async with persistent.asession() as sess:
+                return await sess.get(persistent.MixWAL, healthy["mw_id"]) is None
+
+        loop_task = asyncio.create_task(network.drain_mixwal2(fake_thinclient))
+        try:
+            for _ in range(500):
+                await asyncio.sleep(0.02)
+                if await healthy_drained() or loop_task.done():
+                    break
+            assert not loop_task.done(), (
+                f"drain_mixwal2 crashed instead of skipping the malformed "
+                f"stream: {loop_task.exception() if loop_task.done() else None}"
+            )
+            assert await healthy_drained()
+            # The malformed one is left alone (not silently deleted), just
+            # released so it doesn't strand draining_right_now.
+            async with persistent.asession() as sess:
+                assert await sess.get(persistent.MixWAL, broken["mw_id"]) is not None
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
 
 # ---------------------------------------------------------------------------
 # readables_to_mixwal
