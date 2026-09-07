@@ -219,6 +219,8 @@ now a single `persistent.own_read_cap` helper (commit e561d24).
 
 ## Item 5 — 48-5: funnel `new_conversation` through the io-loop writer (MEDIUM importance, threading correctness — ADDED on maintainer request)
 
+**done in 5d9fce9.**
+
 **Motivation.** persistent.py's funnel comment (:31-47) claims every
 ConversationLog-append site serialises through the io-loop single writer and
 carves out `new_conversation` as "no funnel needed" on `_engine_sync`. The
@@ -292,7 +294,10 @@ confirm the row set, roster, and that the Qt thread is not blocked. Keep existin
 2. 47-R1: keep `_on_write_done`/`_on_read_done`/`on_error` names as thin
    wrappers; do not touch `katzen_util.create_task`.
 3. 48-2b: **log-and-continue**; no modal, no loop auto-restart.
-4. 45-dup-note: close as review-text inconsistency (no audit).
+4. 45-dup-note: deviated from "close as review-text inconsistency (no audit)"
+   — audited, found the two unnamed findings (PR#47's finalize block and the
+   done-callback reuse), and deduped the one remaining cross-file duplicate
+   (own-read-cap lookup → `persistent.own_read_cap`). See the Item 4 section.
 5. 48-5: funnel `new_conversation` (in scope); `send_file` twin = recommended
    follow-up; 48-1 backstop (1200s flat backstop that still trips benignly after
    ~20min idle) stays as-is, out of scope.
