@@ -14,11 +14,24 @@ Skipped unless KATZENQT_DOCKER_INTEGRATION=1 (see conftest.py).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import time
 
 import pytest
 
-from tests.integration._bounce_helpers import bootstrap_voucher, spawn_role, run_role
+from tests.integration._bounce_helpers import (
+    bootstrap_voucher, spawn_role, run_role, PhaseStopwatch,
+)
+
+
+def _poll_for(path: Path, needle: str, deadline_s: float) -> bool:
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        if needle in path.read_text():
+            return True
+        time.sleep(1.0)
+    return False
 
 
 @pytest.mark.integration
@@ -40,19 +53,32 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
         stdout_path=alice_out, stderr_path=alice_err,
     )
 
+    tw = PhaseStopwatch("epoch_rollover")
     try:
-        # Comfortably more than one docker-mixnet epoch (2m default), so
-        # Alice's read is guaranteed to have spanned at least one rollover
-        # before Bob ever sends anything.
-        time.sleep(140.0)
+        # Wait for a real PKI epoch rollover to be observed mid-read, rather
+        # than sleeping a fixed >1-epoch interval: the rollover fires at the
+        # next epoch boundary (up to one epoch_duration away), so this is
+        # typically far shorter than a blind 2x-epoch sleep and never longer
+        # in the worst case. Alice's box doesn't exist yet (Bob hasn't sent),
+        # so her read stays pending until the boundary genuinely rolls.
+        if not _poll_for(
+            alice_err, "PKI epoch rolled over mid-wait for bacap_stream=", 220.0,
+        ):
+            raise AssertionError(
+                "PKI epoch did not roll over mid-wait within 220s\n"
+                f"{alice_err.read_text()[-4000:]}"
+            )
+        tw.mark("rollover_seen")
 
         send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=300.0)
         assert send.returncode == 0, send.stdout + send.stderr
+        tw.mark("bob_sent")
 
         # If the fix regressed, this hangs on the stale envelope up to the
         # 1200s backstop; bound the wait well under that so a regression
         # fails the test instead of stalling the suite for 20 minutes.
         alice_proc.wait(timeout=180.0)
+        tw.mark("alice_read")
     except Exception:
         alice_proc.kill()
         raise

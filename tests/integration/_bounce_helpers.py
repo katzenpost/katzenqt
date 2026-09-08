@@ -22,6 +22,36 @@ import sys
 import time
 from pathlib import Path
 
+# Opt-in per-phase timing for the integration-suite slow-path investigation
+# (REPORT.md). Off by default so normal runs are unaffected.
+_TIMING = os.environ.get("KQT_INTEGRATION_TIMING") == "1"
+
+
+class PhaseStopwatch:
+    """Measure phases of a slow integration scenario.
+
+    With KQT_INTEGRATION_TIMING=1 each :meth:`mark` prints ``[KQT-TIMING]
+    <what> <phase>: <elapsed>s`` (wall time since the stopwatch began), so a
+    solo run exposes exactly where the wall clock went. Cheap no-op
+    otherwise.
+    """
+
+    def __init__(self, what: str):
+        self._what = what
+        self._t0 = time.perf_counter()
+        self._last = self._t0
+
+    def mark(self, phase: str) -> None:
+        now = time.perf_counter()
+        if _TIMING:
+            print(
+                f"[KQT-TIMING] {self._what} {phase}: {now - self._t0:.2f}s "
+                f"(d={now - self._last:.2f}s)",
+                flush=True,
+            )
+        self._last = now
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = REPO_ROOT / ".venv" / "bin" / "python3"
 PYTHON = os.environ.get(

@@ -224,11 +224,29 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
 
     # Start the joiner's poll first; it rides out an unwritten box 1.
     await_proc = _spawn_role(carol_state, "voucher-await", "demo")
+    t_spawn = time.perf_counter()
     try:
-        # Give the poll time to reach the daemon before the reply appears.
-        time.sleep(250)
+        # Give the poll time to reach the daemon and span at least one PKI
+        # epoch (120s default) BEFORE the reply appears. That epoch-crossing
+        # is the core of the regression this test guards: a stale ride-out
+        # read that started a full epoch before the inductor wrote box 1
+        # must still collect it once the reply lands. 140s = one epoch plus
+        # margin (the next boundary is at most an epoch away, so this
+        # guarantees the poll observed one).
+        time.sleep(140)
+        if _TIMING:
+            print(
+                f"[KQT-TIMING] overlap sleep_done: {time.perf_counter() - t_spawn:.2f}s",
+                flush=True,
+            )
+        t_induct = time.perf_counter()
         induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=300.0)
         _assert_ok(induct, "alice voucher-induct carol")
+        if _TIMING:
+            print(
+                f"[KQT-TIMING] overlap induct: {time.perf_counter() - t_induct:.2f}s",
+                flush=True,
+            )
         out, err = await_proc.communicate(timeout=300.0)
     finally:
         if await_proc.poll() is None:

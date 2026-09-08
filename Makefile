@@ -247,7 +247,21 @@ docker-integration: setup
 	fi
 	@# Bypass `uv run`'s lock-resync — it would re-resolve the git-pinned
 	@# thinclient and silently overwrite our editable install.
-	@KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv
+	@# Run the non-container-bouncing tests in parallel (see
+	@# @pytest.mark.serial_docker), then the container-bouncing ones serially
+	@# afterwards: they stop/pause the shared kpclientd/gateway containers,
+	@# which must not race the parallel workers.
+	@# KQT_INTEGRATION_PARALLEL: number of pytest-xdist workers (default: 4,
+	@# ~matching the 4-vCPU ubuntu-latest runner CI uses).
+	@if [[ -n "$$KQT_INTEGRATION_PARALLEL" ]]; then \
+		KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv \
+			-n "$$KQT_INTEGRATION_PARALLEL" --dist loadscope \
+			-m "not serial_docker"; \
+	else \
+		KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv \
+			-n 4 --dist loadscope -m "not serial_docker"; \
+	fi
+	@KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv -m serial_docker
 .PHONY: docker-integration
 
 $(KATZENPOST_DIR):

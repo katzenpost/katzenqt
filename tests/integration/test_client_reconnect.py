@@ -17,10 +17,10 @@ triggers the outage entirely client-side:
 
 Deterministic shape:
 
-- Alice runs a long-lived chat-session that SLEEPs through the bounce and
-  then READs ``m1`` using the standard 1500 s budget (kept from the
-  kpclientd-restart version; now cheap, since the bounce is a client-side
-  reconnect rather than a ~9 min daemon re-attach).
+- Alice runs a long-lived chat-session that READs ``m1`` with the standard
+  1500 s budget, which keeps her alive across the bounce AND polls through
+  it: she starts reading before the outage and her read simply stays
+  pending until the leftover write lands.
 - Bob runs three short incarnations from ONE state dir:
   1. ``SEND:m0`` — baseline, proves the pair is connected and working;
   2. ``SEND:m1`` — killed the moment ``STEP_WAITING_ACK`` is logged. At that
@@ -28,10 +28,15 @@ Deterministic shape:
      he never reaches ``STEP_OK:...:SEND:m1`` before the kill makes the
      test fail loudly rather than silently degrade if the ACK ever becomes
      faster than the kill;
-  3. a reconnect session that SLEEPs long enough for the drain to sweep the
-     leftover write-MixWAL row and deliver it.
-- Alice's ``STEP_OK:1:READ:m1`` is the end-to-end proof the write rode out
-  the disconnect and reconnect.
+  3. a reconnect session that SLEEPs while the drain sweeps the leftover
+     write-MixWAL row and delivers it. Measured: m1 lands ~one epoch
+     (~120 s) after the bounce (epoch-aligned re-delivery), so the 120 s
+     sleep is what keeps a live writer in the session across that boundary
+     -- an earlier exit would leave no one riding m1 out;
+- Alice's ``STEP_OK:0:READ:m1`` is the end-to-end proof the write rode out
+  the disconnect and reconnect. She starts reading immediately (no leading
+  SLEEP step), so her read is already in flight across the whole bounce —
+  a strictly stronger scenario than reading only after it is over.
 
 Skipped unless ``KATZENQT_DOCKER_INTEGRATION=1`` (see conftest.py).
 """
@@ -47,6 +52,7 @@ from tests.integration._bounce_helpers import (
     run_role as _run_role,
     spawn_role as _spawn_role,
     bootstrap_voucher as _bootstrap_voucher,
+    PhaseStopwatch,
 )
 
 
@@ -100,19 +106,21 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         f"stdout:\n{baseline.stdout}\nstderr:\n{baseline.stderr}"
     )
 
+    tw = PhaseStopwatch("reconnect")
     alice_out = log_dir / "alice.out"
     alice_err = log_dir / "alice.err"
     bob2_out = log_dir / "bob2.out"
     bob2_err = log_dir / "bob2.err"
 
     alice_proc = _spawn_role(
-        alice_state, "chat-session", "demo", "SLEEP:300", "READ:m1:1500",
+        alice_state, "chat-session", "demo", "READ:m1:1500",
         stdout_path=alice_out, stderr_path=alice_err,
     )
 
     bob2_proc = None
     try:
         # 2. Bob commits m1 to MixWAL and is killed mid-send.
+        tw.mark("spawn_alice")
         bob2_proc = _spawn_role(
             bob_state, "chat-session", "demo", "SEND:m1",
             stdout_path=bob2_out, stderr_path=bob2_err,
@@ -124,6 +132,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
             bob2_err, "STEP_WAITING_ACK:0:SEND:m1", 300.0,
             what="bob2 never committed SEND:m1 to MixWAL",
         )
+        tw.mark("bob2_commit")
         # Must be alive at the kill point: bob2 dying on its own before the
         # SIGTERM would mean the write did not ride out a kill+reconnect at
         # all (and could never have been retried by a later incarnation).
@@ -137,9 +146,13 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
             " disconnect (the race must fail loudly, not degrade silently)\n"
             f"bob2 stderr:\n{bob2_err.read_text()[-3000:]}"
         )
+        tw.mark("bob2_killed")
 
         # 3. Reconnect session from the same state: the drain sweeps the
-        # leftover write-MixWAL row and delivers m1.
+        # leftover write-MixWAL row and delivers m1. Measured: m1 lands ~one
+        # epoch (~120s) after the bounce (epoch-aligned re-delivery), so
+        # bob3 must stay alive that long -- an earlier exit would leave no
+        # live writer to ride m1 across the boundary.
         bob3 = _run_role(bob_state, "chat-session", "demo", "SLEEP:120", timeout=600.0)
         bob3_all = bob3.stdout + bob3.stderr
         for line in bob3_all.splitlines():
@@ -153,8 +166,10 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
             f"bob reconnect session did not emit SESSION_DONE\n"
             f"stderr:\n{bob3.stderr[-3000:]}"
         )
+        tw.mark("bob3_done")
 
         alice_proc.wait(timeout=2100.0)
+        tw.mark("alice_done")
     except Exception:
         alice_proc.kill()
         if bob2_proc is not None:
@@ -171,7 +186,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         f"stderr:\n{alice_err.read_text()[-3000:]}"
     )
     # The write that rode out the client disconnect+reconnect must have landed.
-    assert "STEP_OK:1:READ:m1" in alice_all, (
+    assert "STEP_OK:0:READ:m1" in alice_all, (
         f"alice never read m1 after the reconnect\n"
         f"alice stderr:\n{alice_err.read_text()[-6000:]}"
     )

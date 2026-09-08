@@ -185,6 +185,13 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
     This is the scenario the user reports: two running clients, both
     quit, both restart from disk — if the state on disk is not
     correctly saved or not correctly reloaded, round 2 will fail.
+
+    NOTE: overlaps heavily with test_bidirectional_restart (the same
+    bait: concurrent two-way exchange, clean shutdown, restart from
+    disk, exchange again). Kept separate because pairing with the other
+    restart tests here costs nothing once parallelism masks the wall
+    clock; if the suite ever needs to shrink, the shared core of the
+    two could be merged into one test.
     """
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
@@ -368,6 +375,13 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     This matches the user-reported scenario: 'alice and bob can invite each
     other to a group chat and chat with each other, but after restart they
     can no longer read each other's messages'.
+
+    NOTE: overlaps heavily with test_concurrent_session_shutdown_then_restart
+    (the same bait: two-way exchange, clean shutdown, restart from disk,
+    exchange again). Kept separate because pairing with the other restart
+    tests here costs nothing once parallelism masks the wall clock; if
+    the suite ever needs to shrink, the shared core of the two could be
+    merged into one test.
     """
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"

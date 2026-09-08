@@ -102,20 +102,27 @@ jobs:
         working-directory: katzenqt
         # CI runs roughly 2.5-3x slower than a local docker mixnet, and
         # the multi-box reassembly tests are the slowest, dominating the
-        # wall clock at around eight minutes apiece. The watchdog
-        # regression tests (test_watchdog_*.py) add real-time-bounded
-        # waits of their own (an epoch-rollover confirmation deliberately
-        # sleeps past a full epoch_duration) that scale the same way. A
-        # run with 14 integration tests measured 49m for this step alone
-        # (job total ~60m including setup), right at the previous
-        # sixty-minute ceiling -- the job was killed by the timeout after
-        # every test had already passed. Ninety minutes leaves real
-        # headroom for the whole sequence without inviting per-test
-        # timeouts to mask protocol-level regressions.
+        # wall clock at around eight minutes apiece. A serial run with 14
+        # integration tests measured 49m for this step alone.
+        #
+        # Two phases:
+        #  1. everything EXCEPT the container-bouncing watchdog tests runs
+        #     in parallel via pytest-xdist loadscope (each worker gets its
+        #     own process stack; the only shared resource is kpclientd,
+        #     which the parallel set only talks to, never bounces);
+        #  2. the @pytest.mark.serial_docker tests run afterwards, serially,
+        #     because they stop/pause the shared kpclientd/gateway
+        #     containers and must not race the parallel workers.
+        # 4 workers on the 4-vCPU runner; raise if the runner class
+        # changes.
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
-        run: .venv/bin/pytest tests/integration -vv
+          KQT_INTEGRATION_PARALLEL: "4"
+        run: |
+          .venv/bin/pytest tests/integration -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+            --dist loadscope -m "not serial_docker"
+          .venv/bin/pytest tests/integration -vv -m serial_docker
 
       - name: Stop the mixnet
         if: always()
