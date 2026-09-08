@@ -110,15 +110,29 @@ jobs:
         #  2. the @pytest.mark.serial_docker tests run afterwards, serially,
         #     because they stop/pause the shared kpclientd/gateway
         #     containers and must not race the parallel workers.
-        # 4 workers on the 4-vCPU runner; raise if the runner class
-        # changes.
+        # 2 workers on the 4-vCPU runner: the send-side wall-clock budget in
+        # katzenqt's _send_one_gcm is tight enough that 4-way concurrent load
+        # on the single shared kpclientd (CI is ~2.5-3x slower than a local
+        # mixnet) causes send timeouts. 2 workers halve the concurrent client
+        # load. Raise only if the runner class changes.
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
-          KQT_INTEGRATION_PARALLEL: "4"
+          KQT_INTEGRATION_PARALLEL: "2"
         run: |
           .venv/bin/pytest tests/integration -vv -n "${KQT_INTEGRATION_PARALLEL}" \
             --dist loadscope -m "not serial_docker"
+
+      - name: Run serial watchdog integration tests
+        working-directory: katzenqt
+        # Always run the @pytest.mark.serial_docker watchdog tests even when
+        # the parallel phase above fails, so the state of the shared
+        # kpclientd/gateway containers is still probed on every CI run.
+        if: always()
+        timeout-minutes: 90
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+        run: |
           .venv/bin/pytest tests/integration -vv -m serial_docker
 
       - name: Stop the mixnet
@@ -132,5 +146,5 @@ jobs:
         with:
           name: mixnet-${{ github.run_id }}-${{ github.job }}
           path: |
-            katzenqt/katzenpost/docker/voting_mixnet/*/*.log
-            katzenqt/katzenpost/docker/voting_mixnet/*/*/*.log
+            katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
+            katzenqt/katzenpost/docker/mixnet-alpine/*/*/*.log
