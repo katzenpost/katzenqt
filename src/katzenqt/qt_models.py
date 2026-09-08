@@ -11,7 +11,7 @@ from typing import Any, NamedTuple
 
 import cbor2
 
-from . import attachment_images, persistent
+from . import attachment_images, ordering, persistent
 
 import functools
 from functools import lru_cache
@@ -199,6 +199,29 @@ def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
     return AttachmentDisplay("", None, None, False, "text", None)
 
 
+def _sender_epoch_of(payload: bytes) -> "bytes | None":
+    """The membership hash the SENDER stamped on a row's payload, normalized
+    (sentinel/absent -> None). Used only for epoch-anchored ordering; hostile
+    input, so it is decoded defensively and never trusted beyond comparison."""
+    if payload[:1] != b"F":
+        return None
+    body = payload[1:]
+    try:
+        decoded = cbor2.loads(body)
+    except Exception:
+        decoded = None
+    if isinstance(decoded, dict) and "membership_hash" in decoded:
+        mh = decoded.get("membership_hash")
+        return ordering.normalize_membership_hash(mh if isinstance(mh, bytes)
+                                                  else None)
+    try:
+        from .models import GroupChatMessage
+        gm = GroupChatMessage.from_cbor(body)
+    except Exception:
+        return None
+    return ordering.normalize_membership_hash(gm.membership_hash)
+
+
 def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
     """Map a decoded payload to the value for one attachment/display role."""
     if role == 0:
@@ -250,6 +273,45 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
+        self._order_cache: "list[int] | None" = None
+        self._order_cache_count: int = -1
+
+    def _message_metas(self) -> "list[ordering.MessageMeta]":
+        """Every row's ordering metadata for this conversation (one DB pass).
+        arrival_epoch is left None here (the inline arrival colouring is a
+        separate port); ordering only needs conversation_order/peer_id/
+        message_id and, for the epoch strategy, the sender-stamped hash."""
+        metas: "list[ordering.MessageMeta]" = []
+        with persistent.Session(persistent._engine_sync) as sess:
+            rows = sess.query(persistent.ConversationLog).filter(
+                persistent.ConversationLog.conversation_id == self.convo_id
+            ).all()
+            for row in rows:
+                peer = row.conversation_peer
+                metas.append(ordering.MessageMeta(
+                    conversation_order=row.conversation_order,
+                    peer_id=row.conversation_peer_id,
+                    author=peer.name if peer is not None else "",
+                    message_id=str(row.id),
+                    arrival_epoch=None,
+                    sender_epoch=_sender_epoch_of(row.payload),
+                ))
+        return metas
+
+    def _display_order(self) -> "list[int] | None":
+        """conversation_order values in display position, or None for the
+        identity map (the insertion default -- no DB pass, no behaviour change).
+        Cached against row_count so a non-default strategy pays one pass per
+        change, not one per rendered row."""
+        strat = ordering.active_strategy()
+        if strat.name == "insertion":
+            return None
+        if (self._order_cache is not None
+                and self._order_cache_count == self.row_count):
+            return self._order_cache
+        self._order_cache = strat.order(self._message_metas())
+        self._order_cache_count = self.row_count
+        return self._order_cache
 
     def roleNames(self):
         """These map names used in QML to ints used in QAbstractItemModel
@@ -299,6 +361,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         qmi = QModelIndex()
         self.beginInsertRows(qmi, self.row_count-1, self.row_count-1)
         self.row_count += 1
+        self._order_cache = None
         self.endInsertRows()
 
     def redraw_network_status(self):
@@ -332,14 +395,20 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             return None
         index_row : int = index.row()
         #print("DATA: INDEX ROW IS", index_row, repr(index))
-        # TODO we definitely want to paginate this stuff for performance reasons,
-        # and when we do we want order by:
-        # sa_relationship_kwargs={"order_by": "conversation_order", "lazy": "dynamic"},
+        order = self._display_order()
+        if order is None:
+            target = index_row
+        elif 0 <= index_row < len(order):
+            target = order[index_row]
+        else:
+            return None
 
         with persistent.Session(persistent._engine_sync) as sess:
                 cl = sess.query(persistent.ConversationLog).filter(
                     persistent.ConversationLog.conversation_id == self.convo_id).filter(
-                        persistent.ConversationLog.conversation_order==index_row).first()
+                        persistent.ConversationLog.conversation_order==target).first()
+                if cl is None:
+                    return None
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
                     if cl.network_status == 1:
