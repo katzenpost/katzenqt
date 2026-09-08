@@ -93,10 +93,7 @@ jobs:
       # apt/pipx bootstrap which the GitHub runner doesn't need.
       - name: Install katzenqt + dev deps
         working-directory: katzenqt
-        run: |
-          uv venv .venv
-          uv pip install -e '.[dev]' || uv pip install -e .
-          uv pip install pytest pytest-asyncio pytest-cov hypothesis
+        run: uv sync --all-extras --dev --locked
 
       - name: Run integration tests
         working-directory: katzenqt
