@@ -91,6 +91,38 @@ _last_connected: "bool | None" = None  # tracks the previous on_connection_statu
 # drain_mixwal_read_single's watchdog).
 _reconnect_event = asyncio.Event()
 
+# Same swap-on-transition pattern as _reconnect_event, but for PKI epoch
+# rollovers: start_resending_encrypted_message's envelope is only valid for
+# the epoch it was encrypted under (see voucher.py's _read_box docstring),
+# so a read that spans a rollover needs to notice and re-encrypt with a
+# fresh envelope rather than let the daemon's own ride-out keep retrying an
+# envelope the courier will reject forever.
+_last_epoch: "int | None" = None
+_epoch_event = asyncio.Event()
+
+
+async def on_new_pki_document(event: "Dict[str, Any]") -> None:
+    """Bump _epoch_event on every epoch advance.
+
+    Parses the epoch out of the raw event ourselves (rather than going
+    through connection.pki_document(), which needs a ThinClient instance
+    this module-level callback doesn't have a handle on) — the same
+    cbor2.loads(event["payload"]) the thin client library itself does in
+    parse_pki_doc, called just before this callback fires.
+    """
+    global _last_epoch, _epoch_event
+    try:
+        doc = cbor2.loads(event["payload"])
+    except Exception as e:
+        logger.debug("on_new_pki_document: could not parse event payload: %s", e)
+        return
+    epoch = doc.get("Epoch")
+    if epoch is None or epoch == _last_epoch:
+        return
+    _last_epoch = epoch
+    old_event, _epoch_event = _epoch_event, asyncio.Event()
+    old_event.set()
+
 
 def _is_transient_sqlite_busy(exc: OperationalError) -> bool:
     """True for sqlite's own lock-contention error, false for anything else
@@ -236,31 +268,47 @@ _SUBSTREAM_NAME_PREFIX = ":substream:"
 # read never gets a reply AND never observes a reconnect either.
 READ_WATCHDOG_SECONDS = 1200.0
 
-# How long to give an in-flight read's reply after the daemon reconnects mid-
-# wait, before treating it as lost. A reconnect is the one concrete signal we
-# have that a reply could have been orphaned: kpclientd's reconnect-replay
-# can deliver the courier's reply to a query_id whose original listener (this
-# call) already gave up waiting on the old connection.
+# How long to give an in-flight read's reply after a mid-wait daemon
+# reconnect OR a PKI epoch rollover, before treating it as lost. Both are
+# concrete signals that a reply could have been orphaned or the envelope
+# gone stale: kpclientd's reconnect-replay can deliver the courier's reply
+# to a query_id whose original listener (this call) already gave up
+# waiting on the old connection; an epoch rollover makes the courier
+# reject the (now-stale) envelope outright.
 _RECONNECT_GRACE_SECONDS = 30.0
 
 
 async def _await_read_reply(connection, *, read_watchdog_s: float,
                              reconnect_grace_s: float, bacap_uuid, **kwargs):
     """Await start_resending_encrypted_message, racing it against a daemon
-    reconnect rather than a flat clock.
+    reconnect or a PKI epoch rollover rather than a flat clock.
+
+    Either signal means the in-flight envelope could be stale or orphaned:
+    a reconnect can deliver a reply to a query_id whose listener already
+    gave up (see the reconnect log line below); an epoch rollover makes
+    the courier reject the envelope outright, and the daemon's own
+    no_retry_on_box_id_not_found=False ride-out swallows that rejection
+    into more silent retries on the SAME now-stale envelope rather than
+    ever returning (see voucher.py's _read_box docstring). Either way the
+    fix is the same: give the in-flight call a short grace period, then
+    let the caller's existing TimeoutError recovery path cancel it and
+    retry -- drain_mixwal_read_single re-encrypts a fresh envelope on
+    every call, so that retry is never stale.
 
     Returns the reply, or raises whatever the call itself raised, or raises
-    asyncio.TimeoutError (for the caller's existing recovery path) if either
-    the reconnect-grace period or the backstop elapses first.
+    asyncio.TimeoutError (for the caller's existing recovery path) if
+    either the grace period or the backstop elapses first.
     """
     reconnect_marker = _reconnect_event
+    epoch_marker = _epoch_event
     task = asyncio.ensure_future(
         connection.start_resending_encrypted_message(**kwargs)
     )
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
+    epoch_wait = asyncio.ensure_future(epoch_marker.wait())
     try:
         done, _pending = await asyncio.wait(
-            {task, reconnect_wait}, timeout=read_watchdog_s,
+            {task, reconnect_wait, epoch_wait}, timeout=read_watchdog_s,
             return_when=asyncio.FIRST_COMPLETED,
         )
         if task in done:
@@ -273,13 +321,23 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
                 bacap_uuid, reconnect_grace_s,
             )
             return await asyncio.wait_for(task, timeout=reconnect_grace_s)
+        if epoch_wait in done:
+            logger.warning(
+                "drain_mixwal_read_single: PKI epoch rolled over mid-wait "
+                "for bacap_stream=%s; giving the in-flight ARQ %s s to "
+                "answer before treating the envelope as stale",
+                bacap_uuid, reconnect_grace_s,
+            )
+            return await asyncio.wait_for(task, timeout=reconnect_grace_s)
         # Backstop: read_watchdog_s elapsed with no reply and no observed
-        # reconnect. Should be rare; treat it the same as a reconnect-grace
-        # timeout so the caller's single recovery path handles both.
+        # reconnect or epoch rollover. Should be rare; treat it the same as
+        # a grace-period timeout so the caller's single recovery path
+        # handles all three.
         task.cancel()
         raise asyncio.TimeoutError()
     finally:
         reconnect_wait.cancel()
+        epoch_wait.cancel()
 
 # Cap on attachment size after reassembly. Anything larger is
 # logged at WARNING, the bytes are discarded, and a
@@ -468,6 +526,19 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     return
 
   try:
+    # Re-encrypt fresh every call rather than reusing mw's persisted
+    # envelope: start_resending_encrypted_message's envelope is only valid
+    # for the PKI epoch it was encrypted under, so a stream that's been
+    # given up on and retried (any give_up() below, on this call or a
+    # previous one) after an epoch rollover must not resend the same now-
+    # stale envelope, which the courier would reject forever (see
+    # voucher.py's _read_box docstring). mw's own envelope_hash/
+    # encrypted_payload/envelope_descriptor/next_message_index columns are
+    # left as they were when readables_to_mixwal() first created the row;
+    # only this fresh result is ever used for the actual RPC.
+    rcr = await connection.encrypt_read(
+        read_cap=rcw_read_cap, message_box_index=mw.current_message_index,
+    )
     resp = await _await_read_reply(
         connection,
         read_watchdog_s=read_watchdog_s,
@@ -477,9 +548,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         write_cap=None,
         message_box_index=mw.current_message_index,
         reply_index=None,
-        envelope_descriptor=mw.envelope_descriptor,
-        envelope_hash=mw.envelope_hash,
-        message_ciphertext=mw.encrypted_payload,
+        envelope_descriptor=rcr.envelope_descriptor,
+        envelope_hash=rcr.envelope_hash,
+        message_ciphertext=rcr.message_ciphertext,
         no_retry_on_box_id_not_found=False,
     )
   except asyncio.TimeoutError:
@@ -496,7 +567,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     )
     try:
         await asyncio.wait_for(
-            connection.cancel_resending_encrypted_message(mw.envelope_hash),
+            connection.cancel_resending_encrypted_message(rcr.envelope_hash),
             timeout=10,
         )
         logger.debug("drain_mixwal_read_single: cancelled in-flight ARQ for %s", bacap_uuid)
@@ -561,7 +632,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   async with persistent.asession() as sess:
     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
     idx_old = await connection.get_message_box_index_counter(rcw.next_index)
-    idx_new = await connection.get_message_box_index_counter(mw.next_message_index)
+    idx_new = await connection.get_message_box_index_counter(rcr.next_message_box_index)
     if idx_old >= idx_new:
       logger.warning(f"not advancing idx to {idx_new} from old {idx_old}, we probably already handled this? ought to not be possible.")
       try:
@@ -574,7 +645,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       return
     logger.info(f"advancing read to idx {idx_new}")
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
-    rcw.next_index = mw.next_message_index
+    rcw.next_index = rcr.next_message_box_index
     sess.add(rcw)
     chunk_type = resp.plaintext[:1]
     chunk_body = resp.plaintext[1:]
@@ -858,7 +929,22 @@ async def drain_mixwal2(connection: ThinClient):
                     __resend_queue.add(mw.bacap_stream)
                     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
                     if len(rcw.read_cap) != 136:
-                      raise Exception(f"ReadCapWAL.rcw from persistent has incorrect size: len(rcw.read_cap) {repr(rcw)} (from {mw.bacap_stream}")
+                        # A malformed row must not take down the whole drain
+                        # loop (see drain_mixwal's wrapper, which catches an
+                        # escaped exception here but then simply returns,
+                        # permanently ending every read AND write drain for
+                        # the rest of the process). Skip only this stream,
+                        # the same log-and-continue contract every other
+                        # per-item failure path in this loop already gets.
+                        logger.error(
+                            "drain_mixwal: ReadCapWAL.read_cap for "
+                            "bacap_stream=%s has incorrect length %d "
+                            "(expected 136); skipping this stream: %r",
+                            mw.bacap_stream, len(rcw.read_cap), rcw,
+                        )
+                        draining_right_now.discard(mw.bacap_stream)
+                        __resend_queue.discard(mw.bacap_stream)
+                        continue
                     read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
 
                     def _on_read_done(task, stream=mw.bacap_stream) -> None:
@@ -1274,7 +1360,7 @@ async def reconnect(config_path: "str | Path | None" = None) -> ThinClient:
         on_message_reply=on_message_reply,
         on_message_sent=on_message_sent,
         on_connection_status=on_connection_status,
-        #on_new_pki_document=...
+        on_new_pki_document=on_new_pki_document,
     )
     client = ThinClient(cfg)
     await client.start(asyncio.get_running_loop())  # this can throw exceptions

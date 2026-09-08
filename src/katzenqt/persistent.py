@@ -78,9 +78,14 @@ async def conversation_log_order_lock(conversation_id: int) -> AsyncIterator[Non
     """
     with __conversation_log_order_locks_guard:
         lock = __conversation_log_order_locks.setdefault(conversation_id, Lock())
+    # Acquire before entering the try: a task cancelled while parked in the
+    # poll sleep holds nothing, and an unconditional finally release() there
+    # would either raise RuntimeError on a free lock (on top of the
+    # CancelledError) or silently unlock another same-conversation task's
+    # lock mid-critical-section, reopening the count/insert race.
+    while not lock.acquire(blocking=False):
+        await asyncio.sleep(_CONVERSATION_LOG_ORDER_LOCK_POLL_S)
     try:
-        while not lock.acquire(blocking=False):
-            await asyncio.sleep(_CONVERSATION_LOG_ORDER_LOCK_POLL_S)
         yield
     finally:
         lock.release()

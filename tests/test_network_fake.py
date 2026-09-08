@@ -21,6 +21,7 @@ import asyncio
 import logging
 import uuid
 
+import cbor2
 import pytest
 from sqlmodel import select
 
@@ -241,13 +242,13 @@ async def _set_up_write_flow(
     return setup
 
 
-async def _set_up_read_flow(fake, *, plaintext: "bytes | None" = None):
+async def _set_up_read_flow(fake, *, plaintext: "bytes | None" = None, **insert_kwargs):
     if plaintext is None:
         plaintext = _make_F_payload("hello")
     """Like _set_up_write_flow but also pre-stores the box and builds a
     read-MixWAL row so drain_mixwal_read_single can be tested.
     """
-    setup = await _insert_write_setup(fake)
+    setup = await _insert_write_setup(fake, **insert_kwargs)
     fake.pre_store(
         write_cap=setup["write_cap"],
         message_box_index=setup["first_message_index"],
@@ -580,7 +581,7 @@ class TestDrainMixwalReadSingle:
         # drain loop re-casts the same box with a fresh query id.
         payload = _make_F_payload("hang then recover")
         setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
-        fake_thinclient.hold_ack(setup["rcr"].envelope_hash)
+        fake_thinclient.hold_ack_for_box(setup["read_cap"], setup["first_message_index"])
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         draining: set = {setup["bacap_stream"]}
@@ -606,7 +607,7 @@ class TestDrainMixwalReadSingle:
         # rather than trivially passing because give_up() already emptied
         # the set above.
         draining.add(setup["bacap_stream"])
-        fake_thinclient.release_ack(setup["rcr"].envelope_hash)
+        fake_thinclient.release_ack_for_box(setup["read_cap"], setup["first_message_index"])
         await network.drain_mixwal_read_single(
             connection=fake_thinclient,
             rcw_read_cap=setup["read_cap"],
@@ -634,7 +635,7 @@ class TestDrainMixwalReadSingle:
         network._last_connected = None
         payload = _make_F_payload("hang then reconnect")
         setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
-        fake_thinclient.hold_ack(setup["rcr"].envelope_hash)
+        fake_thinclient.hold_ack_for_box(setup["read_cap"], setup["first_message_index"])
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         draining: set = {setup["bacap_stream"]}
@@ -656,6 +657,59 @@ class TestDrainMixwalReadSingle:
         await reconnector
         fake_thinclient.last_call("cancel_resending_encrypted_message")
         assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_lost_read_reply_is_recovered_after_epoch_rollover(self, fake_thinclient):
+        # A PKI epoch rollover mid-wait makes start_resending_encrypted_message's
+        # envelope stale for the courier; the watchdog should notice via
+        # on_new_pki_document and give up promptly, same as a reconnect.
+        payload = _make_F_payload("hang then epoch roll")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        fake_thinclient.hold_ack_for_box(setup["read_cap"], setup["first_message_index"])
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+
+        def _pki_event(epoch: int) -> "dict":
+            return {"payload": cbor2.dumps({"Epoch": epoch})}
+
+        async def simulate_epoch_rollover():
+            await asyncio.sleep(0.02)
+            await network.on_new_pki_document(_pki_event(1))
+            await network.on_new_pki_document(_pki_event(2))
+
+        roller = asyncio.ensure_future(simulate_epoch_rollover())
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=draining,
+            read_watchdog_s=60.0,
+            reconnect_grace_s=0.05,
+        )
+        await roller
+        fake_thinclient.last_call("cancel_resending_encrypted_message")
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_read_re_encrypts_a_fresh_envelope_every_call(self, fake_thinclient):
+        # The epoch-rollover fix depends on this: a retried read must never
+        # reuse the persisted (potentially stale) envelope on the MixWAL
+        # row, or give_up()-then-retry after a rollover would just resend
+        # the same now-stale envelope forever.
+        payload = _make_F_payload("fresh envelope each time")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now={setup["bacap_stream"]},
+        )
+        assert fake_thinclient.call_count("start_resending_encrypted_message") == 1
+        used_envelope_hash = fake_thinclient.last_call("start_resending_encrypted_message")["envelope_hash"]
+        assert used_envelope_hash != setup["rcr"].envelope_hash
 
     @pytest.mark.asyncio
     async def test_transient_sqlite_busy_on_read_commit_is_retried(
@@ -1348,6 +1402,59 @@ class TestDrainMixwal2:
             peers = (await sess.exec(select(persistent.ConversationPeer))).all()
             assert [p.name for p in peers] == ["self"]
         assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_malformed_read_cap_does_not_kill_the_whole_drain_loop(
+        self, fake_thinclient,
+    ):
+        """A single corrupted ReadCapWAL row (wrong-length read_cap) used to
+        raise straight out of the loop body with nothing catching it inside
+        drain_mixwal2 itself; drain_mixwal's wrapper logs it CRITICAL and
+        simply returns, permanently ending every read AND write drain for
+        the rest of the process. One malformed row must only cost its own
+        stream, leaving every other stream (read or write) draining as
+        normal."""
+        healthy = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("hi"),
+        )
+        broken = await _set_up_read_flow(
+            fake_thinclient, seed=b"\x44" * 32, conv_name="demo2",
+        )
+        async with persistent.asession() as sess:
+            rcw = await sess.get(persistent.ReadCapWAL, broken["bacap_stream"])
+            rcw.read_cap = rcw.read_cap[:-1]
+            sess.add(rcw)
+            await sess.commit()
+
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "__mixwal_updated").set()
+        getattr(network, "__mixnet_connected").set()
+
+        async def healthy_drained():
+            async with persistent.asession() as sess:
+                return await sess.get(persistent.MixWAL, healthy["mw_id"]) is None
+
+        loop_task = asyncio.create_task(network.drain_mixwal2(fake_thinclient))
+        try:
+            for _ in range(500):
+                await asyncio.sleep(0.02)
+                if await healthy_drained() or loop_task.done():
+                    break
+            assert not loop_task.done(), (
+                f"drain_mixwal2 crashed instead of skipping the malformed "
+                f"stream: {loop_task.exception() if loop_task.done() else None}"
+            )
+            assert await healthy_drained()
+            # The malformed one is left alone (not silently deleted), just
+            # released so it doesn't strand draining_right_now.
+            async with persistent.asession() as sess:
+                assert await sess.get(persistent.MixWAL, broken["mw_id"]) is not None
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
 
 # ---------------------------------------------------------------------------
 # readables_to_mixwal
