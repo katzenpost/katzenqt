@@ -18,6 +18,12 @@ Item {
    objectName: "chatRoot"
    required property var ctx
 
+   function epochTint(base, hex) {
+     if (!hex) return base
+     var c = Qt.color(hex)
+     return Qt.tint(base, Qt.rgba(c.r, c.g, c.b, 0.16))
+   }
+
    SystemPalette {
      id: sysPalette
      colorGroup: SystemPalette.Active
@@ -193,9 +199,29 @@ TreeView {
           implicitHeight: rowBody.implicitHeight + 6
 
           background: Rectangle {
-            // Themed row background so contact names (sysPalette.text) are
-            // legible in dark mode rather than light-on-white.
-            color: sysPalette.base
+            id: bgRect
+            property string epochHex: model.epoch_color ? model.epoch_color : ""
+            property bool isBoundary: model.epoch_boundary === true
+            color: bgRect.epochHex !== ""
+                 ? chatRoot.epochTint(sysPalette.base, bgRect.epochHex)
+                 : sysPalette.base
+
+            Row {
+              id: epochDivider
+              visible: bgRect.isBoundary
+              anchors { top: parent.top; left: parent.left; right: parent.right }
+              height: 3
+              spacing: 4
+              clip: true
+              Repeater {
+                model: 240
+                delegate: Rectangle {
+                  width: 7
+                  height: 3
+                  color: bgRect.epochHex !== "" ? bgRect.epochHex : sysPalette.mid
+                }
+              }
+            }
           }
 
           contentItem: RowLayout {

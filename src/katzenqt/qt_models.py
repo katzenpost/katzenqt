@@ -11,6 +11,8 @@ from typing import Any, NamedTuple
 
 import cbor2
 
+from sqlmodel import Session, col, select
+
 from . import attachment_images, ordering, persistent
 
 import functools
@@ -53,6 +55,8 @@ ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
 ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save visibility
 ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
 ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
+ROLE_CHAT_EPOCH_COLOR = 0x109
+ROLE_CHAT_EPOCH_BOUNDARY = 0x10A
 
 
 class AttachmentDisplay(NamedTuple):
@@ -222,6 +226,75 @@ def _sender_epoch_of(payload: bytes) -> "bytes | None":
     return ordering.normalize_membership_hash(gm.membership_hash)
 
 
+def _introduction_read_cap(payload: bytes) -> "bytes | None":
+    """The read cap an INTRODUCTION row announces (the member it adds), or None
+    for any other row. Same defensive framing as the other payload decoders."""
+    if payload[:1] != b"F":
+        return None
+    try:
+        from .models import GroupChatMessage, GroupChatTypeEnum
+        gm = GroupChatMessage.from_cbor(payload[1:])
+    except Exception:
+        return None
+    if gm.msg_type != GroupChatTypeEnum.INTRODUCTION or gm.introduction is None:
+        return None
+    cap: bytes = gm.introduction.read_cap
+    return cap
+
+
+def arrival_membership_states(conversation_id: int) -> "dict[str, bytes]":
+    """Map each message id to the LOCAL membership hash in effect when it
+    arrived, reconstructed by replaying INTRODUCTION rows in conversation_order
+    (a member counts from the row that announced it; members learned at join
+    count from the start). Purely local -- no wire field, leaks no reading
+    progress -- so it is the colour source, unlike the sender-stamped hash.
+    Reconstructs local membership at each message."""
+    from . import models
+    states: "dict[str, bytes]" = {}
+    with Session(persistent._engine_sync) as sess:
+        conv = sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return states
+        own_cap = b""
+        wcw = sess.get(persistent.WriteCapWAL, conv.write_cap)
+        if wcw is not None and wcw.write_cap is not None:
+            own_cap = wcw.write_cap[32:]
+        peer_caps: list[bytes] = []
+        peers = sess.exec(
+            select(persistent.ConversationPeer)
+            .where(persistent.ConversationPeer.id
+                   == persistent.ConversationPeerLink.conversation_peer_id)
+            .where(persistent.ConversationPeerLink.conversation_id
+                   == conversation_id)
+        ).all()
+        for peer in peers:
+            if peer.id == conv.own_peer_id or not peer.active:
+                continue
+            if peer.name.startswith(models.SUBSTREAM_NAME_PREFIX):
+                continue
+            rcw = sess.get(persistent.ReadCapWAL, peer.read_cap_id)
+            if rcw is not None and rcw.read_cap is not None:
+                peer_caps.append(rcw.read_cap)
+        rows = sess.exec(
+            select(persistent.ConversationLog)
+            .where(persistent.ConversationLog.conversation_id == conversation_id)
+            .order_by(col(persistent.ConversationLog.conversation_order))
+        ).all()
+        joined_at: "dict[bytes, int]" = {}
+        for row in rows:
+            cap = _introduction_read_cap(row.payload)
+            if cap is not None and cap not in joined_at:
+                joined_at[cap] = row.conversation_order
+        for row in rows:
+            k = row.conversation_order
+            caps = [own_cap] if own_cap else []
+            for cap in peer_caps:
+                if joined_at.get(cap, 0) <= k:
+                    caps.append(cap)
+            states[str(row.id)] = models.canonical_membership_hash(caps)
+    return states
+
+
 def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
     """Map a decoded payload to the value for one attachment/display role."""
     if role == 0:
@@ -273,14 +346,17 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
+        self.row_count: int = 0
         self._order_cache: "list[int] | None" = None
         self._order_cache_count: int = -1
+        self._epoch_cache: "dict[int, ordering.EpochRow] | None" = None
+        self._epoch_cache_count: int = -1
 
     def _message_metas(self) -> "list[ordering.MessageMeta]":
-        """Every row's ordering metadata for this conversation (one DB pass).
-        arrival_epoch is left None here (the inline arrival colouring is a
-        separate port); ordering only needs conversation_order/peer_id/
-        message_id and, for the epoch strategy, the sender-stamped hash."""
+        """Every row's ordering + colouring metadata for this conversation.
+        arrival_epoch is the receiver-local membership hash (colour source);
+        sender_epoch is the wire-stamped hash (epoch-anchored ordering)."""
+        arrival = arrival_membership_states(self.convo_id)
         metas: "list[ordering.MessageMeta]" = []
         with persistent.Session(persistent._engine_sync) as sess:
             rows = sess.query(persistent.ConversationLog).filter(
@@ -288,15 +364,31 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ).all()
             for row in rows:
                 peer = row.conversation_peer
+                message_id = str(row.id)
                 metas.append(ordering.MessageMeta(
                     conversation_order=row.conversation_order,
                     peer_id=row.conversation_peer_id,
                     author=peer.name if peer is not None else "",
-                    message_id=str(row.id),
-                    arrival_epoch=None,
+                    message_id=message_id,
+                    arrival_epoch=arrival.get(message_id),
                     sender_epoch=_sender_epoch_of(row.payload),
                 ))
         return metas
+
+    def _epoch_annotations(self) -> "dict[int, ordering.EpochRow]":
+        """conversation_order -> EpochRow (arrival colour + divider boundary),
+        computed over the active display order and cached against row_count."""
+        if (self._epoch_cache is not None
+                and self._epoch_cache_count == self.row_count):
+            return self._epoch_cache
+        metas = self._message_metas()
+        order = ordering.active_strategy().order(metas)
+        by_co = {m.conversation_order: m for m in metas}
+        ordered = [by_co[co] for co in order if co in by_co]
+        rows = ordering.annotate_epochs(ordered)
+        self._epoch_cache = {r.conversation_order: r for r in rows}
+        self._epoch_cache_count = self.row_count
+        return self._epoch_cache
 
     def _display_order(self) -> "list[int] | None":
         """conversation_order values in display position, or None for the
@@ -334,6 +426,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND: QByteArray(b'attachment_kind'),
             ROLE_CHAT_ATTACHMENT_REL_PATH: QByteArray(b'attachment_rel_path'),
             ROLE_CHAT_PICTURE_PATH: QByteArray(b'picture_path'),
+            ROLE_CHAT_EPOCH_COLOR: QByteArray(b'epoch_color'),
+            ROLE_CHAT_EPOCH_BOUNDARY: QByteArray(b'epoch_boundary'),
         }
 
     @lru_cache(maxsize=10000)
@@ -362,6 +456,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self.beginInsertRows(qmi, self.row_count-1, self.row_count-1)
         self.row_count += 1
         self._order_cache = None
+        self._epoch_cache = None
         self.endInsertRows()
 
     def redraw_network_status(self):
@@ -391,6 +486,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND,
             ROLE_CHAT_ATTACHMENT_REL_PATH,
             ROLE_CHAT_PICTURE_PATH,
+            ROLE_CHAT_EPOCH_COLOR,
+            ROLE_CHAT_EPOCH_BOUNDARY,
         ):
             return None
         index_row : int = index.row()
@@ -402,6 +499,13 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             target = order[index_row]
         else:
             return None
+
+        if role == ROLE_CHAT_EPOCH_COLOR:
+            er = self._epoch_annotations().get(target)
+            return er.color if er is not None else None
+        if role == ROLE_CHAT_EPOCH_BOUNDARY:
+            er = self._epoch_annotations().get(target)
+            return bool(er.is_boundary) if er is not None else False
 
         with persistent.Session(persistent._engine_sync) as sess:
                 cl = sess.query(persistent.ConversationLog).filter(
