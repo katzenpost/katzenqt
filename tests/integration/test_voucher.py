@@ -28,6 +28,29 @@ _PYTHON = os.environ.get(
     str(_VENV_PY) if _VENV_PY.exists() else sys.executable,
 )
 
+# Opt-in per-phase timing for the slow-path investigation (REPORT.md) and the
+# per-hop daemon-leg table. Off by default so normal runs are unaffected.
+_TIMING = os.environ.get("KQT_INTEGRATION_TIMING") == "1"
+_VOUCHER_MARKERS = (
+    " returned after ",
+    " not present yet after ",
+    "retrying in ",
+    "still not present after ",
+)
+
+
+def _timed_run(what: str, role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
+    """Run a role subprocess, printing wall-clock elapsed plus any voucher
+    round-timing lines from its captured stderr when KQT_INTEGRATION_TIMING=1."""
+    t0 = time.perf_counter()
+    proc = _run_role(role_state, *cli_args, timeout=timeout)
+    if _TIMING:
+        print(f"[KQT-TIMING] {what}: {time.perf_counter() - t0:.2f}s", flush=True)
+        for line in _output(proc).splitlines():
+            if any(m in line for m in _VOUCHER_MARKERS):
+                print(f"[KQT-VOUCHER] {line.strip()}", flush=True)
+    return proc
+
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
 # / KATZENQT_KPCLIENTD_PORT, matching conftest).
@@ -114,35 +137,35 @@ def test_voucher_handshake_then_bidirectional(kpclientd_endpoint, tmp_path_facto
     bob_state = tmp_path_factory.mktemp("bob") / "state"
 
     # Each party provisions its own MessageStream (write/read cap).
-    _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
-    _assert_ok(_run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv")
+    _assert_ok(_timed_run("alice create-conv", alice_state, "create-conv", "demo", "alice"), "alice create-conv")
+    _assert_ok(_timed_run("bob create-conv", bob_state, "create-conv", "demo", "bob"), "bob create-conv")
 
     # Bob mints a Voucher and publishes his payload to box 0.
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    mint = _timed_run("bob voucher-mint", bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
     _assert_ok(mint, "bob voucher-mint")
     voucher = _expect_token(mint, "VOUCHER=")
     assert voucher, "empty voucher"
 
     # Alice inducts Bob with the out-of-band voucher.
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    induct = _timed_run("alice voucher-induct", alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
     _assert_ok(induct, "alice voucher-induct")
     assert "INDUCTED=" in _output(induct)
 
     # Bob polls box 1, opens the reply, and joins.
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
+    joined = _timed_run("bob voucher-await", bob_state, "voucher-await", "demo", timeout=300.0)
     _assert_ok(joined, "bob voucher-await")
     assert "JOINED" in _output(joined)
 
     # Alice -> Bob: Bob holds Alice's read cap from the WhoReply.
-    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", timeout=300.0), "alice send")
-    read_bob = _run_role(bob_state, "read", "demo", "180", "hello from alice", timeout=240.0)
+    _assert_ok(_timed_run("alice send", alice_state, "send", "demo", "hello from alice", timeout=300.0), "alice send")
+    read_bob = _timed_run("bob read", bob_state, "read", "demo", "180", "hello from alice", timeout=240.0)
     _assert_ok(read_bob, "bob read")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
     # Bob -> Alice on the salt-mutated stream: Alice holds Bob's mutated
     # read cap from induction. This is the cross-mutation crux.
-    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", timeout=300.0), "bob send")
-    read_alice = _run_role(alice_state, "read", "demo", "180", "hello from bob", timeout=240.0)
+    _assert_ok(_timed_run("bob send", bob_state, "send", "demo", "hello from bob", timeout=300.0), "bob send")
+    read_alice = _timed_run("alice read", alice_state, "read", "demo", "180", "hello from bob", timeout=240.0)
     _assert_ok(read_alice, "alice read")
     assert _expect_token(read_alice, "RECV=") == "hello from bob"
 
