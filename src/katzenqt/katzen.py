@@ -1037,6 +1037,11 @@ class MainWindow(QMainWindow):
         self.theme = theme.ThemeManager(self.app, self)
         self.theme.restore()
         self.ui.action_testme.triggered.connect(self.testme)
+        self.ui.menuAbout.setEnabled(True)
+        self.action_about = QAction(f"About {APP_NAME}", self)
+        self.action_about.setMenuRole(QAction.MenuRole.AboutRole)
+        self.ui.menuAbout.addAction(self.action_about)
+        self.action_about.triggered.connect(self.show_about_dialog)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
@@ -1149,6 +1154,21 @@ class MainWindow(QMainWindow):
         else:
             QApplication.clipboard().setText(code)
             self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
+
+    def show_about_dialog(self) -> None:
+        import importlib.metadata
+        try:
+            version = importlib.metadata.version("katzenqt")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {APP_NAME}")
+        box.setText(
+            f"<b>{APP_NAME}</b><br>"
+            "Katzenpost group chat, Qt/KDE edition<br>"
+            f"Version {version}"
+        )
+        box.exec()
 
     async def _enqueue_outgoing_gcm(
         self,
