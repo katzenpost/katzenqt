@@ -35,10 +35,9 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 
 # make docker-integration KQT_INTEGRATION_PARALLEL=2
 # Number of pytest-xdist workers for the non-serial_docker phase of
-# docker-integration. Default 4 is tuned for a fast local docker mixnet;
-# CI itself runs with 2 (see the workflow), since CI's ~2.5-3x slower
-# mixnet hits _send_one_gcm send timeouts under 4-way concurrent load
-# against the single shared kpclientd.
+# docker-integration. Default 4 matches CI's worker count (see the
+# workflow); CI's ~2.5-3x slower mixnet is absorbed by the raised 240s
+# _send_one_gcm floor rather than by dropping concurrency.
 KQT_INTEGRATION_PARALLEL ?= 4
 
 .PHONY: default default_uv_setup default_pip_setup help \

@@ -102,7 +102,7 @@ def epoch_duration_s() -> float:
         return float(override)
     compose_path = Path(os.environ.get(
         "KATZENPOST_DOCKER_COMPOSE",
-        str(REPO_ROOT / "katzenpost" / "docker" / "voting_mixnet" / "docker-compose.yml"),
+        str(REPO_ROOT / "katzenpost" / "docker" / "mixnet-alpine" / "docker-compose.yml"),
     ))
     try:
         text = compose_path.read_text()
