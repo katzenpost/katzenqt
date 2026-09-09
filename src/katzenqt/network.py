@@ -316,6 +316,21 @@ READ_WATCHDOG_SECONDS = 1200.0
 # reject the (now-stale) envelope outright.
 _RECONNECT_GRACE_SECONDS = 30.0
 
+# Upper bound on how long readables_to_mixwal() and
+# send_resendable_plaintexts() park at the __mixnet_connected gate when the
+# latch is cleared. __mixnet_connected is only ever re-set by an
+# is_connected=True on_connection_status report; a full kpclientd restart
+# can clear it and then reconnect the thin client below the callback layer,
+# so no re-set ever arrives. Once this bound elapses both loops proceed
+# anyway and ride real outages out via their per-item error handling
+# instead of stranding forever (see _wait_for_connection_or_shutdown).
+_CONNECTION_IDLE_RETRY_S = 60.0
+
+# Cadence at which readables_to_mixwal() runs an arming pass even when
+# readables_to_mixwal_event is never re-set (see that loop). Matches
+# _CONNECTION_IDLE_RETRY_S so a full kpclientd restart is recovered from
+# on the same timescale as the latch gate above.
+_ARMING_SWEEP_S = 60.0
 
 
 class ConnectionLifeInterruptedError(Exception):
@@ -909,13 +924,22 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   __mixwal_updated.set()
 
 
-async def _wait_for_connection_or_shutdown() -> bool:
+async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool:
     """Block until either __mixnet_connected is set or __should_quit fires.
 
     Returns True if the mixnet is reportedly connected, False if shutdown
     happened first. Loops use this at the top of each iteration so they
     pause cleanly during outages instead of burning cycles against a
     daemon that will only raise ThinClientOfflineError back at them.
+
+    ``idle_retry_s`` guards against a status notification that is lost and
+    never re-sent: ``__mixnet_connected`` is ONLY re-set by an
+    is_connected=True on_connection_status report, and a full kpclientd
+    restart can surface the disconnect while the thin-client library
+    reconnects below the callback layer, so no re-set ever arrives. With
+    ``idle_retry_s`` > 0 the wait is bounded: once it elapses the caller
+    proceeds anyway (returning True) so its own per-item error handling
+    rides out a real outage instead of stranding forever on a stale latch.
     """
     if __should_quit.is_set():
         return False
@@ -924,8 +948,8 @@ async def _wait_for_connection_or_shutdown() -> bool:
     await asyncio.wait((
         create_task(__mixnet_connected.wait()),
         create_task(__should_quit.wait()),
-    ), return_when=asyncio.FIRST_COMPLETED)
-    return __mixnet_connected.is_set() and not __should_quit.is_set()
+    ), timeout=(idle_retry_s or None), return_when=asyncio.FIRST_COMPLETED)
+    return not __should_quit.is_set()
 
 
 def _done_callback(task: "asyncio.Task", *, desc: str,
@@ -1159,17 +1183,27 @@ async def readables_to_mixwal(connection):
         return mw
     while not __should_quit.is_set():
         # Pause while the mixnet is unreachable so the loop does not
-        # try to encrypt_read against a daemon that cannot route.
-        if not await _wait_for_connection_or_shutdown():
+        # try to encrypt_read against a daemon that cannot route. The
+        # wait is bounded: a full kpclientd restart can clear the
+        # connected latch without ever re-setting it (the thin client
+        # reconnects below the on_connection_status callback layer), so
+        # we re-attempt arming on a fixed cadence rather than stranding
+        # the read-arming loop -- the only source of is_read MixWAL rows
+        # -- forever.
+        if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
         logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
-        a, b = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=60)
+        _, _ = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=_ARMING_SWEEP_S)
         if __should_quit.is_set():
             continue
-        if not len(a):
-            logger.debug("readables_to_mixwal_event.wait() timed out, nothing new to read")
-            continue
         readables_to_mixwal_event.clear()
+        # Run the pass whether the event fired or the 60s timeout elapsed.
+        # After a kpclientd restart nothing re-signals arming (deliveries
+        # and writes -- the usual pokes -- stop while it is down), so the
+        # event-only wakeup would leave any stream whose MixWAL row was
+        # consumed permanently un-armed. A fixed cadence re-arms it within
+        # ~60s of the daemon coming back, exactly as drain_mixwal2's sweep
+        # keeps re-casting rows it already has.
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
         async with persistent.asession() as sess:
             # TODO are these guaranteed to be distinct?
@@ -1188,7 +1222,10 @@ async def readables_to_mixwal(connection):
                 try:
                   mw = await process_box(cpeer, rcw)
                 except Exception as e:
-                  logger.critical(f"process_box failed: {e}")
+                  # Expected when a pass sneaks in during a daemon
+                  # bounce/reattach (the bounded gate above now allows
+                  # these); ride out and retry next pass.
+                  logger.warning(f"process_box failed: {e}")
                   continue
                 sess.add(mw)
                 logger.debug("finished one peer: %s", cpeer.name)
@@ -1228,8 +1265,12 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     __resend_queue_populated.set()
     while not __should_quit.is_set():
         # Pause while the mixnet is unreachable; encrypt_write/
-        # start_resending need a live route through kpclientd.
-        if not await _wait_for_connection_or_shutdown():
+        # start_resending need a live route through kpclientd. Bounded the
+        # same way as readables_to_mixwal's gate: a kpclientd restart can
+        # leave __mixnet_connected cleared with no re-set ever arriving,
+        # so degrade to a fixed retry cadence instead of stranding the
+        # write path forever.
+        if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
         _, _ = await asyncio.wait((create_task(resendable_event.wait()),), timeout=60)
         if __should_quit.is_set():
