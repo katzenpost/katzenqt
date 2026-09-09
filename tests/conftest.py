@@ -23,13 +23,25 @@ from tests.fakes.thinclient import FakeThinClient
 
 
 @pytest.fixture(autouse=True)
-def _fresh_tables():
+def _fresh_tables(request):
     """Drop + recreate all tables before every test.
 
     We skip alembic (it would try to read the repo's migrations/) and use
     sqlmodel's metadata directly, which is the source of truth the test
     subjects (MixWAL, PlaintextWAL, etc.) are actually defined against.
+
+    The docker integration tests are excluded: they drive the real app via
+    ``katzenqt.integration_runner`` subprocesses with per-test state dirs
+    and never touch this in-process engine, so dropping/recreating here
+    would be wasted work -- and, under pytest-xdist, an actual race: every
+    worker inherits the master's ``KQT_STATE`` (root conftest sets it
+    per-PID, but workers are spawned with the master's env already in
+    place), so all workers would share one scratch SQLite file and fight
+    over the drop/create.
     """
+    if request.node.get_closest_marker("integration"):
+        yield
+        return
     SQLModel.metadata.drop_all(persistent._engine_sync)
     SQLModel.metadata.create_all(persistent._engine_sync)
     yield

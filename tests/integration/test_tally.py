@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._bounce_helpers import bootstrap_voucher as _bootstrap_voucher
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -62,24 +64,6 @@ def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
     raise AssertionError(
         f"no line containing {token!r}:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
-
-
-def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
-    """Establish mutual contact: both create a stream, Bob mints a voucher,
-    Alice inducts him, Bob joins. Afterwards each holds the other's read cap."""
-    for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = _run_role(state, "create-conv", "demo", name, timeout=180.0)
-        assert create.returncode == 0, _output(create)
-
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
-    assert mint.returncode == 0, _output(mint)
-    voucher = _expect_token(mint, "VOUCHER=")
-
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
-    assert induct.returncode == 0, _output(induct)
-
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
-    assert joined.returncode == 0, _output(joined)
 
 
 def _slots_by_id(tally_json: dict) -> dict:

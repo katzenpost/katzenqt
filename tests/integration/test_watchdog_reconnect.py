@@ -32,10 +32,12 @@ import pytest
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role,
     kpclientd_reachable, find_kpclientd_container, podman, wait_reachable,
+    PhaseStopwatch,
 )
 
 
 @pytest.mark.integration
+@pytest.mark.serial_docker
 def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path_factory):
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
@@ -57,10 +59,12 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
     )
 
     container_stopped = False
+    tw = PhaseStopwatch("full_restart")
     try:
         # Give Alice's read time to actually reach the daemon and be
         # registered as in-flight before we pull the rug.
         time.sleep(10.0)
+        tw.mark("alice_read_registered")
 
         podman(["stop", container])
         container_stopped = True
@@ -71,10 +75,12 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
             time.sleep(0.5)
         else:
             raise AssertionError("kpclientd still reachable after podman stop")
+        tw.mark("stopped")
 
         podman(["start", container])
         container_stopped = False
         wait_reachable(120.0)
+        tw.mark("tcp_back")
 
         # Bob's send happens only AFTER the daemon is back, while Alice's
         # read task is still pending. Note this does NOT force the
@@ -91,8 +97,10 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         # fire before that inner retry ever gets a chance to succeed.
         send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=900.0)
         assert send.returncode == 0, send.stdout + send.stderr
+        tw.mark("bob_sent")
 
         alice_proc.wait(timeout=2100.0)
+        tw.mark("alice_read")
     except Exception:
         alice_proc.kill()
         if container_stopped:

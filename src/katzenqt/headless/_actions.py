@@ -273,7 +273,9 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
     PlaintextWAL to land in SentLog. The budget scales with the
     number of chunks so a multi-box attachment is given enough time
     to clear (sixty seconds per chunk on the local docker mixnet,
-    one-hundred-twenty seconds minimum).
+    two-hundred-forty seconds minimum). The raised floor absorbs
+    4-way concurrent CI load on a slower runner (see
+    test-integration-docker.yml).
     """
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -309,7 +311,7 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
             sess.add(obj)
         await sess.commit()
 
-    budget_s = max(120.0, num_pwals * 60.0)
+    budget_s = max(240.0, num_pwals * 60.0)
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()

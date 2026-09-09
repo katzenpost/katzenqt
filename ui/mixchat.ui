@@ -878,7 +878,7 @@ QToolButton {
                    </property>
                    <property name="icon">
                     <iconset>
-                     <normaloff>resources/invite.png</normaloff>resources/invite.png</iconset>
+                     <normaloff>resources/invite.svg</normaloff>resources/invite.svg</iconset>
                    </property>
                    <property name="iconSize">
                     <size>
@@ -2835,10 +2835,6 @@ QToolButton {
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
   <action name="action_testme">
-   <property name="icon">
-    <iconset>
-     <normaloff>fugue-icons-3.5.6/icons/flask--arrow.png</normaloff>fugue-icons-3.5.6/icons/flask--arrow.png</iconset>
-   </property>
    <property name="text">
     <string>Testme</string>
    </property>
@@ -2858,7 +2854,7 @@ QToolButton {
   <action name="action_accept_invitation">
    <property name="icon">
     <iconset>
-     <normaloff>resources/accept.png</normaloff>resources/accept.png</iconset>
+     <normaloff>resources/accept.svg</normaloff>resources/accept.svg</iconset>
    </property>
    <property name="text">
     <string>Induct via voucher</string>
@@ -2888,7 +2884,7 @@ QToolButton {
   <action name="action_invite_contact">
    <property name="icon">
     <iconset>
-     <normaloff>resources/invite.png</normaloff>resources/invite.png</iconset>
+     <normaloff>resources/invite.svg</normaloff>resources/invite.svg</iconset>
    </property>
    <property name="text">
     <string>Generate voucher</string>
@@ -2931,7 +2927,7 @@ QToolButton {
   <action name="action_quit">
    <property name="icon">
     <iconset>
-     <normaloff>resources/quit.png</normaloff>resources/quit.png</iconset>
+     <normaloff>resources/quit.svg</normaloff>resources/quit.svg</iconset>
    </property>
    <property name="text">
     <string>Quit</string>
@@ -2960,7 +2956,7 @@ QToolButton {
   <action name="action_new_conversation">
    <property name="icon">
     <iconset>
-     <normaloff>resources/3-chat.png</normaloff>resources/3-chat.png</iconset>
+     <normaloff>resources/3-chat.svg</normaloff>resources/3-chat.svg</iconset>
    </property>
    <property name="text">
     <string>New conversation</string>
@@ -3029,7 +3025,7 @@ QToolButton {
    </property>
    <property name="icon">
     <iconset>
-     <normaloff>resources/information.png</normaloff>resources/information.png</iconset>
+     <normaloff>resources/information.svg</normaloff>resources/information.svg</iconset>
    </property>
    <property name="text">
     <string>Documentation</string>

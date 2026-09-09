@@ -22,6 +22,7 @@ dependencies = [
     # Keep in lockstep with the katzenpost daemon ref in
     # .github/workflows/test-integration-docker.yml.
     "katzenpost-thinclient==0.0.24",
+    "rustic-audio-tool",
 ]
 
 [dependency-groups]
@@ -65,6 +66,9 @@ build-backend = "flit_core.buildapi"
 [tool.flit.module]
 name = "katzenqt"
 
+[tool.uv.sources]
+rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "2158e2a5cc5e58f430b4c0bf2f5603d8909becc6" }
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -79,6 +83,7 @@ testpaths = [
 markers = [
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
+    "serial_docker: bounces shared docker containers (kpclientd/gateway); run after and separately from the parallel workers",
 ]
 # We have to re-state the .hypothesis ignore that pytest defaults to,
 # because setting norecursedirs at all replaces the built-in list
