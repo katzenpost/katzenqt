@@ -204,13 +204,29 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
     try:
-      resp = await connection.start_resending_encrypted_message(
-      write_cap=wcw.write_cap,
-      envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
-      message_ciphertext=mw.encrypted_payload,
-      read_cap=None, message_box_index=None, reply_index=None
-
+      resp = await _rpc_racing_connection_life(
+          bacap_uuid=mw.bacap_stream,
+          what="start_resending_encrypted_message",
+          rpc_factory=lambda: connection.start_resending_encrypted_message(
+              write_cap=wcw.write_cap,
+              envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
+              message_ciphertext=mw.encrypted_payload,
+              read_cap=None, message_box_index=None, reply_index=None,
+          ),
       )
+    except ConnectionLifeInterruptedError as e:
+      # A daemon disconnect left one of the RPCs above with no reply and no
+      # exception (the request was sent, then the daemon died, and the reply
+      # went nowhere). The envelope was not (or not yet) ACK'd; leave the MW
+      # for the drainage loop to re-send on the reconnected client -- same
+      # envelope by hash, so the resend is idempotent.
+      logger.warning(
+          "thin client reconnected or epoch rolled over mid-write RPC for "
+          "bacap_stream=%s (%s); leaving MixWAL row for the next drain pass",
+          mw.bacap_stream, e,
+      )
+      give_up()
+      return
     except (ThinClientOfflineError, BrokenPipeError, StartResendingCancelledError, OSError) as e:
       # OSError (e.g. a stale socket's "Bad file descriptor" right after a
       # daemon reconnect) is included here to match the equivalent read-path
@@ -232,7 +248,26 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     - bump drain_mixwal
     """
     try:
-      conv_id = await asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue))
+      conv_id = await _rpc_racing_connection_life(
+          bacap_uuid=mw.bacap_stream,
+          what="mark_sent",
+          rpc_factory=lambda: asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue)),
+      )
+    except ConnectionLifeInterruptedError:
+      # The courier ACK for this envelope is already secured; mark_sent only
+      # does local bookkeeping (which nonetheless awaits the thinclient to
+      # resolve BACAP counters, and a disconnect mid-way can orphan that RPC
+      # exactly like the pre-ACK calls above). Leave the MW for the next
+      # drain pass, which re-sends the already-ACKed envelope idempotently
+      # and runs mark_sent to completion; this mirrors the sqlite-busy
+      # branch below rather than wedging the stream on an un-raiseable await.
+      logger.warning(
+          "drain_mixwal_write_single: connection-life signal interrupted ACK "
+          "bookkeeping for bacap_stream=%s; leaving MW for the next drain pass",
+          mw.bacap_stream,
+      )
+      give_up()
+      return
     except OperationalError as e:
       if not _is_transient_sqlite_busy(e):
           raise
@@ -278,6 +313,86 @@ _RECONNECT_GRACE_SECONDS = 30.0
 _DAEMON_RPC_TIMEOUT_SECONDS = 30.0
 
 
+
+class ConnectionLifeInterruptedError(Exception):
+    """An in-flight thinclient RPC raced against a daemon reconnect or a PKI
+    epoch rollover and lost; the daemon may have died with the reply in
+    flight (or the envelope may have gone stale after a rollover), so the
+    awaiting coroutine could otherwise never unpend. Callers treat this like
+    a transient failure: release the stream and let the drain loop re-cast
+    (re-encrypting a fresh envelope for reads, re-sending the same
+    idempotent envelope for writes)."""
+
+
+async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
+                                      backstop_s: float = READ_WATCHDOG_SECONDS,
+                                      grace_s: "float | None" = None):
+    """Run the RPC returned by ``rpc_factory``, racing it against a daemon
+    reconnect or a PKI epoch rollover rather than a flat clock.
+
+    A disconnect can leave a pending thinclient RPC awaiting forever: the
+    request was sent before the daemon died, the reply is delivered to a
+    query_id whose listener already gave up (dropped), and reconnect-replay
+    never restores it. Every RPC await in the drain paths is exposed to this,
+    so this helper is the single guard. Either connection-life signal means
+    the reply could be orphaned or the envelope stale, so we give the
+    in-flight call a short grace period and then raise
+    :class:`ConnectionLifeInterruptedError` for the caller's give-up-and-
+    re-cast recovery path. The backstop bounds the same wait when no signal
+    ever fires.
+
+    Returns the RPC's result unless it raised on its own (that exception
+    propagates) or the race was lost.
+    """
+    if grace_s is None:
+        grace_s = _RECONNECT_GRACE_SECONDS
+    reconnect_marker = _reconnect_event
+    epoch_marker = _epoch_event
+    task = asyncio.ensure_future(rpc_factory())
+    reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
+    epoch_wait = asyncio.ensure_future(epoch_marker.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {task, reconnect_wait, epoch_wait}, timeout=backstop_s,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if task in done:
+            return task.result()
+        if reconnect_wait in done:
+            logger.warning(
+                "daemon reconnected mid-%s for bacap_stream=%s; giving the "
+                "in-flight call %s s to answer before treating the reply as "
+                "orphaned", what, bacap_uuid, grace_s,
+            )
+            try:
+                return await asyncio.wait_for(task, timeout=grace_s)
+            except asyncio.TimeoutError:
+                task.cancel()
+        elif epoch_wait in done:
+            logger.warning(
+                "PKI epoch rolled over mid-%s for bacap_stream=%s; giving the "
+                "in-flight call %s s to answer before treating the envelope "
+                "as stale", what, bacap_uuid, grace_s,
+            )
+            try:
+                return await asyncio.wait_for(task, timeout=grace_s)
+            except asyncio.TimeoutError:
+                task.cancel()
+        else:
+            # Backstop: backstop_s elapsed with no reply and no observed
+            # reconnect or epoch rollover. Should be rare; treat it the same
+            # as a grace-period timeout so the caller's single recovery path
+            # handles all three.
+            task.cancel()
+        raise ConnectionLifeInterruptedError(
+            f"{what} for bacap_stream={bacap_uuid} did not answer within "
+            f"{backstop_s} s"
+        )
+    finally:
+        reconnect_wait.cancel()
+        epoch_wait.cancel()
+
+
 async def _await_read_reply(connection, *, read_watchdog_s: float,
                              reconnect_grace_s: float, bacap_uuid, **kwargs):
     """Await start_resending_encrypted_message, racing it against a daemon
@@ -299,46 +414,16 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
     asyncio.TimeoutError (for the caller's existing recovery path) if
     either the grace period or the backstop elapses first.
     """
-    reconnect_marker = _reconnect_event
-    epoch_marker = _epoch_event
-    task = asyncio.ensure_future(
-        connection.start_resending_encrypted_message(**kwargs)
-    )
-    reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
-    epoch_wait = asyncio.ensure_future(epoch_marker.wait())
     try:
-        done, _pending = await asyncio.wait(
-            {task, reconnect_wait, epoch_wait}, timeout=read_watchdog_s,
-            return_when=asyncio.FIRST_COMPLETED,
+        return await _rpc_racing_connection_life(
+            bacap_uuid=bacap_uuid,
+            what="start_resending_encrypted_message",
+            rpc_factory=lambda: connection.start_resending_encrypted_message(**kwargs),
+            backstop_s=read_watchdog_s,
+            grace_s=reconnect_grace_s,
         )
-        if task in done:
-            return task.result()
-        if reconnect_wait in done:
-            logger.warning(
-                "drain_mixwal_read_single: daemon reconnected mid-wait for "
-                "bacap_stream=%s; giving the in-flight ARQ %s s to answer "
-                "before treating the reply as orphaned",
-                bacap_uuid, reconnect_grace_s,
-            )
-            return await asyncio.wait_for(task, timeout=reconnect_grace_s)
-        if epoch_wait in done:
-            logger.warning(
-                "drain_mixwal_read_single: PKI epoch rolled over mid-wait "
-                "for bacap_stream=%s; giving the in-flight ARQ %s s to "
-                "answer before treating the envelope as stale",
-                bacap_uuid, reconnect_grace_s,
-            )
-            return await asyncio.wait_for(task, timeout=reconnect_grace_s)
-        # Backstop: read_watchdog_s elapsed with no reply and no observed
-        # reconnect or epoch rollover. Should be rare; treat it the same as
-        # a grace-period timeout so the caller's single recovery path
-        # handles all three.
-        task.cancel()
-        raise asyncio.TimeoutError()
-    finally:
-        for pending in (task, reconnect_wait, epoch_wait):
-            pending.cancel()
-        await asyncio.gather(task, reconnect_wait, epoch_wait, return_exceptions=True)
+    except ConnectionLifeInterruptedError as exc:
+        raise asyncio.TimeoutError() from exc
 
 async def _substream_parent(
     sess: persistent.AsyncSession, name: str,
@@ -582,6 +667,21 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         message_ciphertext=rcr.message_ciphertext,
         no_retry_on_box_id_not_found=False,
     )
+  except ConnectionLifeInterruptedError as e:
+    # The daemon reconnected (or the PKI epoch rolled over) while the fresh
+    # encrypt_read was in flight and it never answered. Unlike a lost
+    # start_resending reply there is no in-flight ARQ to cancel here: the
+    # envelope was never even dispatched, so the box is still untouched at
+    # the daemon and re-encrypting the same message_box_index on the now-
+    # reconnected client is safe (see the fresh-envelope comment above).
+    # Release the stream so the drain loop re-casts on the next sweep.
+    logger.warning(
+        "drain_mixwal_read_single: %s; re-scheduling the read for "
+        "bacap_stream=%s (nothing was dispatched for this envelope)",
+        e, bacap_uuid,
+    )
+    give_up()
+    return
   except asyncio.TimeoutError:
     # A lost read reply can strand `_send_and_wait` forever: the thinclient's
     # reconnect-replay may deliver the courier's reply to a query_id with no
