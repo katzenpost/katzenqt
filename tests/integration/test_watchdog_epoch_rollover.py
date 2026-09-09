@@ -25,6 +25,12 @@ from tests.integration._bounce_helpers import (
 )
 
 
+# Emitted by network.py's on_new_pki_document when a read's epoch-triggered
+# grace path engages. Shared between the poll below and the final assertion
+# so the two can't silently drift apart if the log wording ever changes.
+_ROLLOVER_LOG_NEEDLE = "PKI epoch rolled over mid-wait for bacap_stream="
+
+
 def _poll_for(path: Path, needle: str, deadline_s: float) -> bool:
     deadline = time.time() + deadline_s
     while time.time() < deadline:
@@ -61,9 +67,7 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
         # typically far shorter than a blind 2x-epoch sleep and never longer
         # in the worst case. Alice's box doesn't exist yet (Bob hasn't sent),
         # so her read stays pending until the boundary genuinely rolls.
-        if not _poll_for(
-            alice_err, "PKI epoch rolled over mid-wait for bacap_stream=", 220.0,
-        ):
+        if not _poll_for(alice_err, _ROLLOVER_LOG_NEEDLE, 220.0):
             raise AssertionError(
                 "PKI epoch did not roll over mid-wait within 220s\n"
                 f"{alice_err.read_text()[-4000:]}"
@@ -97,11 +101,10 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
         f"alice never read m1 after the epoch rollover\n{alice_err.read_text()[-6000:]}"
     )
     # Alice's box doesn't exist until Bob's send below, so her read stays
-    # pending for the entire 140s sleep -- longer than one docker-mixnet
-    # epoch (120s) -- guaranteeing a rollover happened while it was
-    # in-flight. This is the direct confirmation on_new_pki_document fired
-    # and _await_read_reply's epoch-triggered grace path actually engaged.
-    assert "PKI epoch rolled over mid-wait for bacap_stream=" in alice_all, (
+    # pending until the _poll_for above observes a genuine epoch rollover.
+    # This is the direct confirmation on_new_pki_document fired and
+    # _await_read_reply's epoch-triggered grace path actually engaged.
+    assert _ROLLOVER_LOG_NEEDLE in alice_all, (
         "the epoch-rollover watchdog path never engaged despite the read "
         "spanning a full epoch_duration; either it recovered some other "
         "way, or the fix regressed\n"
