@@ -22,6 +22,10 @@ jobs:
       contents: read
       packages: write
     runs-on: ubuntu-latest
+    # Bounds the whole job, including both the parallel and serial pytest
+    # steps below combined -- each of those also carries its own
+    # timeout-minutes: 90 label, but that is not an independent budget on
+    # top of this one; whichever limit is hit first ends the job.
     timeout-minutes: 90
 
     steps:
