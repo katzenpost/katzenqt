@@ -23,7 +23,7 @@ from typing import (
 
 import cbor2
 
-from . import attachment_images, persistent
+from . import attachment_images, grouphash, persistent
 
 if TYPE_CHECKING:
     from . import katzen, models, network
@@ -75,6 +75,8 @@ ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for imag
 ROLE_CHAT_TALLY_KIND = 0x109  # QML: tally_kind, one of create/vote/recast/close/sync/invalid (tally rows only)
 ROLE_CHAT_TALLY_SURVEY_ID = 0x10A  # QML: tally_survey_id, survey id hex to open on click (tally rows only)
 ROLE_CHAT_IS_TALLY = 0x10B  # QML: is_tally, true for tally rows (so the delegate can style/click them)
+ROLE_CHAT_GROUP_COLOR = 0x10C
+ROLE_CHAT_GROUP_BOUNDARY = 0x10D
 
 # Custom roles for the Transfers panel. The table is driven by DownloadsModel
 # below; these roles let a future delegate/QML entry fetch the
@@ -827,6 +829,174 @@ _DECODE_CACHE_SIZE = 512
 
 
 @lru_cache(maxsize=_DECODE_CACHE_SIZE)
+def _claimed_membership_hash(payload: bytes) -> "bytes | None":
+    """The membership hash a stored row claims, or None where it claims none.
+
+    A text message and a marker for a received file both carry the hash
+    under the same key. A marker this client wrote for its own upload
+    carries none, and neither does a row written before the protocol had
+    the field. A peer controls this value, so it is decoded defensively
+    and used only to compare against what we worked out ourselves.
+
+    >>> _claimed_membership_hash(b"written before the protocol") is None
+    True
+    >>> claim = b"\\x01" * 32
+    >>> from katzenqt.models import GroupChatMessage
+    >>> sent = GroupChatMessage(version=0, membership_hash=claim, text="hi")
+    >>> _claimed_membership_hash(b"F" + sent.to_cbor()) == claim
+    True
+    >>> marker = {"kind": "file_marker", "membership_hash": claim}
+    >>> _claimed_membership_hash(b"F" + cbor2.dumps(marker)) == claim
+    True
+    >>> own = {"kind": "file_outgoing", "basename": "cat.png"}
+    >>> _claimed_membership_hash(b"F" + cbor2.dumps(own)) is None
+    True
+    >>> _claimed_membership_hash(b"F\\x9f") is None
+    True
+    >>> _claimed_membership_hash(b"F" + cbor2.dumps("a bare string")) is None
+    True
+    """
+    if payload[:1] != b"F":
+        return None
+    try:
+        decoded = cbor2.loads(payload[1:])
+    except Exception:
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    claim = decoded.get("membership_hash")
+    return claim if isinstance(claim, bytes) else None
+
+
+def _introduction_read_cap(payload: bytes) -> "bytes | None":
+    """The read cap an INTRODUCTION row announces, or None for other rows.
+
+    >>> _introduction_read_cap(b"written before the protocol") is None
+    True
+    >>> _introduction_read_cap(b"F\\x9f") is None
+    True
+    >>> from katzenqt.models import (
+    ...     GroupChatMessage, GroupChatPleaseAdd, GroupChatTypeEnum,
+    ... )
+    >>> plain = GroupChatMessage(
+    ...     version=0, membership_hash=bytes(32), text="hi",
+    ... )
+    >>> _introduction_read_cap(b"F" + plain.to_cbor()) is None
+    True
+    >>> cap = bytes([7]) * 136
+    >>> added = GroupChatMessage(
+    ...     version=0, membership_hash=bytes(32),
+    ...     msg_type=GroupChatTypeEnum.INTRODUCTION,
+    ...     introduction=GroupChatPleaseAdd(display_name="a", read_cap=cap),
+    ... )
+    >>> _introduction_read_cap(b"F" + added.to_cbor()) == cap
+    True
+    >>> empty = GroupChatMessage(
+    ...     version=0, membership_hash=bytes(32),
+    ...     msg_type=GroupChatTypeEnum.INTRODUCTION,
+    ... )
+    >>> _introduction_read_cap(b"F" + empty.to_cbor()) is None
+    True
+    """
+    if payload[:1] != b"F":
+        return None
+    from .models import GroupChatMessage, GroupChatTypeEnum
+    try:
+        gm = GroupChatMessage.from_cbor(payload[1:])
+    except Exception:
+        return None
+    if gm.msg_type != GroupChatTypeEnum.INTRODUCTION:
+        return None
+    if gm.introduction is None:
+        return None
+    cap: bytes = gm.introduction.read_cap
+    return cap
+
+
+class _GroupTint(NamedTuple):
+    color: str
+    boundary: bool
+
+
+_UNTINTED = _GroupTint(color=grouphash.NO_COLOR, boundary=False)
+
+
+class _ArrivalRow(NamedTuple):
+    order: int
+    local: "bytes | None"
+    suspect: bool
+
+
+def _arrival_membership_rows(conversation_id: int) -> "list[_ArrivalRow]":
+    """Each row's local membership state, in conversation order.
+
+    ``local`` is the membership hash this client believed was in force
+    when the row arrived, rebuilt by replaying the INTRODUCTION rows: a
+    peer counts from the row that announced it, and peers known at join
+    count from the start. It is ours, so it leaks no reading progress and
+    no peer can steer the colour with it.
+
+    ``suspect`` is set where a row from a peer claims a membership hash
+    that is not the one we worked out, which includes claiming a
+    placeholder or claiming nothing. Our own rows claim nothing for an
+    upload marker, so they are never suspect on that account.
+    """
+    from . import models
+    rows: "list[_ArrivalRow]" = []
+    with persistent.Session(persistent._engine_sync) as sess:
+        conv = sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return rows
+        own_cap = b""
+        wcw = sess.get(persistent.WriteCapWAL, conv.write_cap)
+        if wcw is not None and wcw.write_cap is not None:
+            own_cap = wcw.write_cap[32:]
+        peer_caps: "list[bytes]" = []
+        peers = sess.exec(
+            select(persistent.ConversationPeer)
+            .where(persistent.ConversationPeer.id
+                   == persistent.ConversationPeerLink.conversation_peer_id)
+            .where(persistent.ConversationPeerLink.conversation_id
+                   == conversation_id)
+        ).all()
+        for peer in peers:
+            if peer.id == conv.own_peer_id or not peer.active:
+                continue
+            if peer.name.startswith(models.SUBSTREAM_NAME_PREFIX):
+                continue
+            rcw = sess.get(persistent.ReadCapWAL, peer.read_cap_id)
+            if rcw is not None and rcw.read_cap is not None:
+                peer_caps.append(rcw.read_cap)
+        stored = sess.exec(
+            select(persistent.ConversationLog)
+            .where(
+                persistent.ConversationLog.conversation_id
+                == conversation_id,
+            )
+            .order_by(col(persistent.ConversationLog.conversation_order))
+        ).all()
+        joined_at: "dict[bytes, int]" = {}
+        for row in stored:
+            cap = _introduction_read_cap(row.payload)
+            if cap is not None and cap not in joined_at:
+                joined_at[cap] = row.conversation_order
+        for row in stored:
+            caps = [own_cap] if own_cap else []
+            caps.extend(
+                cap for cap in peer_caps
+                if joined_at.get(cap, 0) <= row.conversation_order
+            )
+            local = models.canonical_membership_hash(caps) if caps else None
+            claim = _claimed_membership_hash(row.payload)
+            mine = row.conversation_peer_id == conv.own_peer_id
+            rows.append(_ArrivalRow(
+                order=row.conversation_order,
+                local=local,
+                suspect=not mine and claim != local,
+            ))
+    return rows
+
+
 def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
     # Keep ConversationLog as the source of truth and derive renderer-friendly
     # roles lazily so audio rows can share the same persistence format as text.
@@ -1045,6 +1215,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         # returns; ``_view_count`` is how many rows Qt has been told about,
         # which drives insert/reset transitions.
         self._orders: list[int] = []
+        self._group_tint = False
+        self._group_cache: "dict[int, _GroupTint] | None" = None
         self._row_count = 0
         self._view_count = 0
 
@@ -1072,6 +1244,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_TALLY_KIND: QByteArray(b'tally_kind'),
             ROLE_CHAT_TALLY_SURVEY_ID: QByteArray(b'tally_survey_id'),
             ROLE_CHAT_IS_TALLY: QByteArray(b'is_tally'),
+            ROLE_CHAT_GROUP_COLOR: QByteArray(b'group_color'),
+            ROLE_CHAT_GROUP_BOUNDARY: QByteArray(b'group_boundary'),
         }
 
     def index(self, row:int, column:int, parent:"QModelIndex | QPersistentModelIndex" = QModelIndex()) -> QModelIndex:
@@ -1193,6 +1367,45 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         bottom = self.index(self._view_count - 1, 0, QModelIndex())
         self.dataChanged.emit(top, bottom, [ROLE_CHAT_NETWORK_STATUS])
 
+    def set_group_tint(self, enabled: bool) -> None:
+        """Turn the membership tint on or off for this conversation's view."""
+        if bool(enabled) == self._group_tint:
+            return
+        self._group_tint = bool(enabled)
+        self._clear_data_caches()
+        if self._view_count == 0:
+            return
+        self.dataChanged.emit(
+            self.index(0, 0, QModelIndex()),
+            self.index(self._view_count - 1, 0, QModelIndex()),
+            [ROLE_CHAT_GROUP_COLOR, ROLE_CHAT_GROUP_BOUNDARY],
+        )
+
+    def _group_rows(self) -> "dict[int, _GroupTint]":
+        """Each row's tint, keyed by conversation_order.
+
+        Empty while the tint is off, so nothing is read or decoded for a
+        view that is not showing it.
+        """
+        if self._group_cache is not None:
+            return self._group_cache
+        if not self._group_tint:
+            self._group_cache = {}
+            return self._group_cache
+        rows = _arrival_membership_rows(self.convo_id)
+        flags = grouphash.boundaries([row.local for row in rows])
+        self._group_cache = {
+            row.order: _GroupTint(
+                color=(
+                    grouphash.SUSPECT_COLOR if row.suspect
+                    else grouphash.color_for(row.local)
+                ),
+                boundary=boundary,
+            )
+            for row, boundary in zip(rows, flags)
+        }
+        return self._group_cache
+
     def _clear_data_caches(self) -> None:
         """Drop cached data()/tally-row cells after the row count changed.
 
@@ -1204,6 +1417,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         if clear is not None:
             clear()
         _TALLY_ROW_CACHE.clear()
+        self._group_cache = None
 
     def refresh_tally_rows(self) -> None:
         """Re-project every row after a tally event.
@@ -1246,6 +1460,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_TALLY_KIND,
             ROLE_CHAT_TALLY_SURVEY_ID,
             ROLE_CHAT_IS_TALLY,
+            ROLE_CHAT_GROUP_COLOR,
+            ROLE_CHAT_GROUP_BOUNDARY,
         ):
             return None
         index_row : int = index.row()
@@ -1256,6 +1472,11 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             self._orders[index_row]
             if index_row < len(self._orders) else index_row
         )
+        if role in (ROLE_CHAT_GROUP_COLOR, ROLE_CHAT_GROUP_BOUNDARY):
+            group = self._group_rows().get(order, _UNTINTED)
+            if role == ROLE_CHAT_GROUP_COLOR:
+                return group.color
+            return group.boundary
         #print("DATA: INDEX ROW IS", index_row, repr(index))
         # TODO we definitely want to paginate this stuff for performance reasons,
         # and when we do we want order by:
