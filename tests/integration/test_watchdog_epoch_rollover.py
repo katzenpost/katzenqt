@@ -4,11 +4,13 @@ peer ever sends anything must still complete promptly once they do,
 rather than hanging on a stale envelope (PR45 finding #5; see
 network.py's on_new_pki_document and _await_read_reply).
 
-Relies on the docker mixnet's short epoch_duration (2m by default) to
-observe a real rollover within a reasonable test time. Touches no
-containers at all -- purely a timing scenario -- so it's safe to run
-alongside the other integration files, though it's still slow enough
-(one full epoch's wait) to run on its own.
+All waits below are sized off the mixnet's actual epoch_duration (see
+_bounce_helpers.epoch_duration_s()) rather than the docker mixnet's 2m
+default, so this test also works unmodified against a network with a
+longer epoch -- just proportionally slower to run. Touches no containers
+at all -- purely a timing scenario -- so it's safe to run alongside the
+other integration files, though it's still slow enough (one full epoch's
+wait) to run on its own.
 
 Skipped unless KATZENQT_DOCKER_INTEGRATION=1 (see conftest.py).
 """
@@ -21,7 +23,7 @@ import time
 import pytest
 
 from tests.integration._bounce_helpers import (
-    bootstrap_voucher, spawn_role, run_role, PhaseStopwatch,
+    bootstrap_voucher, spawn_role, run_role, epoch_duration_s, PhaseStopwatch,
 )
 
 
@@ -52,10 +54,16 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
     alice_out = log_dir / "alice.out"
     alice_err = log_dir / "alice.err"
 
+    # Alice's own READ deadline must comfortably outlast the rollover poll
+    # below plus the post-send read wait, or her chat-session would give up
+    # before either has a chance to happen.
+    read_deadline_s = epoch_duration_s() + 480.0
+    rollover_poll_deadline_s = epoch_duration_s() + 100.0
+
     # Alice waits for a message Bob hasn't sent yet: a genuine in-flight
     # read whose envelope will still be sitting there when the epoch rolls.
     alice_proc = spawn_role(
-        alice_state, "chat-session", "demo", "READ:m1:600",
+        alice_state, "chat-session", "demo", f"READ:m1:{read_deadline_s:.0f}",
         stdout_path=alice_out, stderr_path=alice_err,
     )
 
@@ -67,9 +75,10 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
         # typically far shorter than a blind 2x-epoch sleep and never longer
         # in the worst case. Alice's box doesn't exist yet (Bob hasn't sent),
         # so her read stays pending until the boundary genuinely rolls.
-        if not _poll_for(alice_err, _ROLLOVER_LOG_NEEDLE, 220.0):
+        if not _poll_for(alice_err, _ROLLOVER_LOG_NEEDLE, rollover_poll_deadline_s):
             raise AssertionError(
-                "PKI epoch did not roll over mid-wait within 220s\n"
+                f"PKI epoch did not roll over mid-wait within "
+                f"{rollover_poll_deadline_s:.0f}s\n"
                 f"{alice_err.read_text()[-4000:]}"
             )
         tw.mark("rollover_seen")

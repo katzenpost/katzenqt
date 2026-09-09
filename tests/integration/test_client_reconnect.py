@@ -29,10 +29,11 @@ Deterministic shape:
      test fail loudly rather than silently degrade if the ACK ever becomes
      faster than the kill;
   3. a reconnect session that SLEEPs while the drain sweeps the leftover
-     write-MixWAL row and delivers it. Measured: m1 lands ~one epoch
-     (~120 s) after the bounce (epoch-aligned re-delivery), so the 120 s
-     sleep is what keeps a live writer in the session across that boundary
-     -- an earlier exit would leave no one riding m1 out;
+     write-MixWAL row and delivers it. Measured: m1 lands ~one epoch after
+     the bounce (epoch-aligned re-delivery), so the sleep is sized to the
+     mixnet's actual epoch_duration (_bounce_helpers.epoch_duration_s()) to
+     keep a live writer in the session across that boundary -- an earlier
+     exit would leave no one riding m1 out;
 - Alice's ``STEP_OK:0:READ:m1`` is the end-to-end proof the write rode out
   the disconnect and reconnect. She starts reading immediately (no leading
   SLEEP step), so her read is already in flight across the whole bounce —
@@ -52,6 +53,7 @@ from tests.integration._bounce_helpers import (
     run_role as _run_role,
     spawn_role as _spawn_role,
     bootstrap_voucher as _bootstrap_voucher,
+    epoch_duration_s,
     PhaseStopwatch,
 )
 
@@ -150,10 +152,16 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
 
         # 3. Reconnect session from the same state: the drain sweeps the
         # leftover write-MixWAL row and delivers m1. Measured: m1 lands ~one
-        # epoch (~120s) after the bounce (epoch-aligned re-delivery), so
-        # bob3 must stay alive that long -- an earlier exit would leave no
-        # live writer to ride m1 across the boundary.
-        bob3 = _run_role(bob_state, "chat-session", "demo", "SLEEP:120", timeout=600.0)
+        # epoch after the bounce (epoch-aligned re-delivery), so bob3 must
+        # stay alive that long -- an earlier exit would leave no live writer
+        # to ride m1 across the boundary. The subprocess timeout keeps the
+        # same 5x margin over the sleep that was measured comfortable at
+        # the docker mixnet's 2m epoch (120s sleep, 600s timeout).
+        bob3_sleep_s = epoch_duration_s()
+        bob3 = _run_role(
+            bob_state, "chat-session", "demo", f"SLEEP:{bob3_sleep_s:.0f}",
+            timeout=bob3_sleep_s * 5.0,
+        )
         bob3_all = bob3.stdout + bob3.stderr
         for line in bob3_all.splitlines():
             if any(t in line for t in ("STEP_OK", "STEP_FAIL", "SESSION_DONE")):

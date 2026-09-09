@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._bounce_helpers import epoch_duration_s
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -227,13 +228,13 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     t_spawn = time.perf_counter()
     try:
         # Give the poll time to reach the daemon and span at least one PKI
-        # epoch (120s default) BEFORE the reply appears. That epoch-crossing
-        # is the core of the regression this test guards: a stale ride-out
-        # read that started a full epoch before the inductor wrote box 1
-        # must still collect it once the reply lands. 140s = one epoch plus
-        # margin (the next boundary is at most an epoch away, so this
-        # guarantees the poll observed one).
-        time.sleep(140)
+        # epoch BEFORE the reply appears. That epoch-crossing is the core of
+        # the regression this test guards: a stale ride-out read that
+        # started a full epoch before the inductor wrote box 1 must still
+        # collect it once the reply lands. epoch_duration_s() + margin
+        # guarantees the poll observed one boundary (the next is at most an
+        # epoch away).
+        time.sleep(epoch_duration_s() + 20.0)
         if _TIMING:
             print(
                 f"[KQT-TIMING] overlap sleep_done: {time.perf_counter() - t_spawn:.2f}s",
