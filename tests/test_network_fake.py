@@ -2016,6 +2016,111 @@ class TestDisconnectPauseAndResume:
                 loop_task.cancel()
 
     @pytest.mark.asyncio
+    async def test_readables_to_mixwal_retries_after_idle_bound_while_latch_unset(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """A full kpclientd restart can clear __mixnet_connected without any
+        later is_connected=True report ever re-setting it (the thin client
+        reconnects below the on_connection_status callback layer). The gate
+        is bounded by _CONNECTION_IDLE_RETRY_S for exactly that case: the
+        loop must proceed and attempt an arming pass anyway rather than
+        stranding the sole read-arming path forever."""
+        await _insert_write_setup(fake_thinclient)
+        getattr(network, "__resend_queue_populated").set()  # loop prelude
+        monkeypatch.setattr(network, "_CONNECTION_IDLE_RETRY_S", 0.05)
+        monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.05)
+        # Latch cleared once (restart), and no reconnect ever reports in.
+        await network.on_connection_status({"is_connected": False, "err": None})
+        getattr(network, "readables_to_mixwal_event").set()
+        loop_task = asyncio.create_task(
+            network.readables_to_mixwal(fake_thinclient),
+        )
+        try:
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_read") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_read") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_readables_to_mixwal_rearms_on_sweep_when_event_never_fires(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """readables_to_mixwal_event is how the arming loop gets poked, but
+        after a kpclientd restart nothing re-pokes it (deliveries and writes
+        -- the usual pokes -- stop while the daemon is down). The loop must
+        run an arming pass on its _ARMING_SWEEP_S cadence even when the
+        event never fires again, or rows whose MixWAL entries were consumed
+        would stay un-armed forever."""
+        await _insert_write_setup(fake_thinclient)
+        getattr(network, "__resend_queue_populated").set()  # loop prelude
+        monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.05)
+        # Mixnet connected, latch set; event starts clear and stays clear.
+        await network.on_connection_status({"is_connected": True, "err": None})
+        event = getattr(network, "readables_to_mixwal_event")
+        event.clear()
+        loop_task = asyncio.create_task(
+            network.readables_to_mixwal(fake_thinclient),
+        )
+        try:
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_read") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_read") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_send_resendable_retries_after_idle_bound_while_latch_unset(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """Same bounded-gate behaviour for the write path: with the latch
+        cleared and never re-set (restart below the callback layer), the
+        loop must still dispatch pending plaintext after the idle bound
+        rather than stranding resends forever."""
+        setup = await _insert_write_setup(fake_thinclient)
+        async with persistent.asession() as sess:
+            pwal = persistent.PlaintextWAL(
+                bacap_stream=setup["bacap_stream"],
+                conversation_id=setup["conversation_id"],
+                bacap_payload=b"Fstill here",
+            )
+            sess.add(pwal)
+            await sess.commit()
+        monkeypatch.setattr(network, "_CONNECTION_IDLE_RETRY_S", 0.05)
+        await network.on_connection_status({"is_connected": False, "err": None})
+        getattr(network, "resendable_event").set()
+        loop_task = asyncio.create_task(
+            network.send_resendable_plaintexts(fake_thinclient),
+        )
+        try:
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_write") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_write") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
     async def test_drain_mixwal_write_single_swallows_offline_mid_call(
         self, fake_thinclient,
     ):
