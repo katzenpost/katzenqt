@@ -7,52 +7,38 @@ B = bytes(range(1, 33))
 SENTINEL = b"TODO" * 8
 
 
-def test_no_rows_gives_no_annotations() -> None:
-    assert grouphash.annotate([]) == []
+def test_a_real_hash_keeps_its_own_colour() -> None:
+    assert grouphash.color_for(A) == grouphash.color_for(A)
+    assert grouphash.color_for(A) != grouphash.color_for(B)
+    assert grouphash.color_for(A).startswith("#")
+    assert len(grouphash.color_for(A)) == 7
+
+
+def test_a_state_that_is_not_a_hash_is_loud() -> None:
+    assert grouphash.color_for(SENTINEL) == grouphash.SUSPECT_COLOR
+    assert grouphash.color_for(bytes(32)) == grouphash.SUSPECT_COLOR
+    assert grouphash.color_for(b"short") == grouphash.SUSPECT_COLOR
+
+
+def test_a_state_we_could_not_work_out_is_left_alone() -> None:
+    assert grouphash.color_for(None) == grouphash.NO_COLOR
+
+
+def test_no_rows_have_no_boundaries() -> None:
+    assert grouphash.boundaries([]) == []
 
 
 def test_the_first_row_is_never_a_boundary() -> None:
-    rows = grouphash.annotate([A])
-    assert (rows[0].boundary, rows[0].suspect) == (False, False)
-    assert rows[0].color == grouphash.color_for(A)
+    assert grouphash.boundaries([A]) == [False]
 
 
-def test_the_same_hash_twice_is_one_group() -> None:
-    rows = grouphash.annotate([A, A])
-    assert [r.boundary for r in rows] == [False, False]
-    assert rows[0].color == rows[1].color
-
-
-def test_a_different_hash_starts_a_group() -> None:
-    rows = grouphash.annotate([A, B])
-    assert [r.boundary for r in rows] == [False, True]
-    assert rows[0].color != rows[1].color
-
-
-def test_a_placeholder_hash_is_loud_and_not_inherited() -> None:
-    rows = grouphash.annotate([A, SENTINEL, A])
-    assert [r.suspect for r in rows] == [False, True, False]
-    assert [r.boundary for r in rows] == [False, True, True]
-    assert rows[1].color == grouphash.SUSPECT_COLOR
-    assert rows[1].color != rows[0].color
-
-
-def test_a_run_of_placeholders_is_one_group() -> None:
-    rows = grouphash.annotate([SENTINEL, bytes(32), b"short"])
-    assert [r.suspect for r in rows] == [True, True, True]
-    assert [r.boundary for r in rows] == [False, False, False]
-    assert {r.color for r in rows} == {grouphash.SUSPECT_COLOR}
-
-
-def test_a_row_claiming_nothing_is_left_alone() -> None:
-    rows = grouphash.annotate([A, None, A])
-    assert [r.color for r in rows] == [
-        grouphash.color_for(A), grouphash.NO_COLOR, grouphash.color_for(A),
+def test_a_boundary_falls_where_the_state_changes() -> None:
+    assert grouphash.boundaries([A, A, B, B, A]) == [
+        False, False, True, False, True,
     ]
-    assert [r.boundary for r in rows] == [False, False, False]
-    assert [r.suspect for r in rows] == [False, False, False]
 
 
-def test_a_claim_of_nothing_does_not_hide_the_next_change() -> None:
-    rows = grouphash.annotate([A, None, B])
-    assert [r.boundary for r in rows] == [False, False, True]
+def test_an_unknown_row_neither_starts_nor_ends_a_run() -> None:
+    assert grouphash.boundaries([A, None, A]) == [False, False, False]
+    assert grouphash.boundaries([A, None, B]) == [False, False, True]
+    assert grouphash.boundaries([None, A]) == [False, False]
