@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._bounce_helpers import epoch_duration_s
 from tests.integration._process import run_logged
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -212,7 +213,14 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
         stdout_path=await_out, stderr_path=await_err,
     )
     try:
-        time.sleep(250)
+        # Give the poll time to reach the daemon and span at least one PKI
+        # epoch BEFORE the reply appears. That epoch-crossing is the core of
+        # the regression this test guards: a stale ride-out read that
+        # started a full epoch before the inductor wrote box 1 must still
+        # collect it once the reply lands. epoch_duration_s() + margin
+        # guarantees the poll observed one boundary (the next is at most an
+        # epoch away).
+        time.sleep(epoch_duration_s() + 20.0)
         induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=900.0)
         _assert_ok(induct, "alice voucher-induct carol")
         await_proc.wait(timeout=900.0)
