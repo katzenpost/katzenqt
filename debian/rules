@@ -1,0 +1,10 @@
+#!/usr/bin/make -f
+export PYBUILD_NAME=katzenqt
+
+export SOURCE_DATE_EPOCH ?= $(shell dpkg-parsechangelog -STimestamp)
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_auto_test:
+	:

@@ -1,0 +1,10 @@
+ARG BASE=docker.io/ubuntu:26.04
+FROM ${BASE}
+
+ARG BUILD_DEPS="build-essential debhelper dh-python python3-all pybuild-plugin-pyproject flit dpkg-dev"
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update \
+	&& apt install -y --no-install-recommends ${BUILD_DEPS} \
+	&& rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build

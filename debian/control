@@ -1,0 +1,37 @@
+Source: katzenqt
+Section: net
+Priority: optional
+Maintainer: Katzenpost <katzenqt@katzenpost.network>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               python3-all,
+               flit,
+               pybuild-plugin-pyproject
+Standards-Version: 4.7.0
+Homepage: https://github.com/katzenpost/katzenqt
+Rules-Requires-Root: no
+
+Package: katzenqt
+Architecture: all
+Depends: ${python3:Depends},
+         ${misc:Depends},
+         python3-pyside6.qtcore,
+         python3-pyside6.qtwidgets,
+         python3-pyside6.qtquick,
+         python3-nacl,
+         python3-pydantic,
+         python3-cbor2,
+         python3-sqlalchemy,
+         python3-sqlmodel,
+         python3-aiosqlite,
+         python3-alembic
+Description: Katzenpost mixnet chat client (experimental)
+ katzenqt is an experimental Qt group chat client for the Katzenpost mix
+ network. It must not be relied on for security, anonymity, privacy,
+ reliability, or message delivery, and offers no protection against data
+ retention.
+ .
+ Note: pycrdt and katzenpost-thinclient are not yet packaged in Debian; this
+ package depends on python3-pycrdt and python3-katzenpost-thinclient, which
+ must be provided separately until they are packaged, so the application can
+ import them at runtime.

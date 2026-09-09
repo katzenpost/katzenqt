@@ -44,9 +44,13 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
+	deb \
 	clean clean-venv deps deps-audio
 
 deps: deps-audio default_uv_setup
+
+deb:
+	@$(MAKE) -C packaging/debian
 
 default: default_uv_setup
 
