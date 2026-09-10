@@ -8,3 +8,17 @@ export SOURCE_DATE_EPOCH ?= $(shell dpkg-parsechangelog -STimestamp)
 
 override_dh_auto_test:
 	:
+
+override_dh_auto_install:
+	dh_auto_install
+	install -d debian/katzenqt/usr/lib/systemd/user
+	sed -e 's|%h/.local/bin/kpclientd|/usr/bin/kpclientd|' \
+	    -e 's|%h/.local/katzenpost/client.toml|/etc/kpclientd/client.toml|' \
+	    src/katzenqt/data/kpclientd.service \
+	    > debian/katzenqt/usr/lib/systemd/user/kpclientd.service
+	install -d debian/katzenqt/usr/lib/systemd/user-preset
+	printf '%s\n' 'enable kpclientd.service' \
+	    > debian/katzenqt/usr/lib/systemd/user-preset/90-katzenqt.preset
+
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable

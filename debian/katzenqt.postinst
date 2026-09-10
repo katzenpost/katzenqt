@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ] && [ -t 0 ]; then
+	echo "katzenqt: start the Katzenpost daemon as your user service with:" >&2
+	echo "    systemctl --user enable --now kpclientd" >&2
+fi
+
+#DEBHELPER#
