@@ -15,6 +15,7 @@ Package: katzenqt
 Architecture: all
 Depends: ${python3:Depends},
          ${misc:Depends},
+         kpclientd,
          python3-pyside6.qtcore,
          python3-pyside6.qtwidgets,
          python3-pyside6.qtquick,

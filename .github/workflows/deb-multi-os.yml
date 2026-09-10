@@ -26,6 +26,10 @@ jobs:
             dpkg-dev golang-go git ca-certificates systemd pkg-config cmake \
             python3-dev python3-venv python3-pip cargo rustc unzip
 
+      - name: Build the kpclientd .deb
+        run: packaging/container/kpclientd-build.sh /tmp/debs
+
       - name: Build the katzenqt .deb
         run: |
           dpkg-buildpackage -b -uc -us
+          mv ../katzenqt_*.deb /tmp/debs/
