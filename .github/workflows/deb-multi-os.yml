@@ -26,6 +26,9 @@ jobs:
             dpkg-dev golang-go git ca-certificates systemd pkg-config cmake \
             python3-dev python3-venv python3-pip cargo rustc unzip
 
+      - name: Build the from-source Python closure (.debs)
+        run: packaging/container/pydeps-build.sh /tmp/debs
+
       - name: Build the kpclientd .deb
         run: packaging/container/kpclientd-build.sh /tmp/debs
 
@@ -33,3 +36,20 @@ jobs:
         run: |
           dpkg-buildpackage -b -uc -us
           mv ../katzenqt_*.deb /tmp/debs/
+
+      - name: Install the whole stack with apt (no pip)
+        run: |
+          apt install -y \
+            /tmp/debs/python3-pprintpp_*.deb \
+            /tmp/debs/python3-pycrdt_*.deb \
+            /tmp/debs/python3-katzenpost-thinclient_*.deb \
+            /tmp/debs/kpclientd_0.0.1_*.deb \
+            /tmp/debs/katzenqt_0.0.1_all.deb
+
+      - name: Smoke test and assert the service is installed but not enabled
+        run: |
+          set -eu
+          katzenqt-headless --help >/dev/null
+          python3 -c "import pycrdt, katzenpost_thinclient"
+          test -x /usr/bin/kpclientd
+          test -f /etc/kpclientd/client.toml
