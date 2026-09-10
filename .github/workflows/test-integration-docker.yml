@@ -86,6 +86,7 @@ jobs:
       # Build kpclientd + start the mixnet via katzenpost's own docker
       # Makefile. `make wait` blocks until the dirauths reach consensus.
       - name: Build and start the docker mixnet
+        id: start_mixnet
         working-directory: katzenqt/katzenpost/docker
         run: make base_port=62331 start wait
 
@@ -96,6 +97,7 @@ jobs:
       # what `make docker-integration` does locally, minus the Makefile's
       # apt/pipx bootstrap which the GitHub runner doesn't need.
       - name: Install katzenqt + dev deps
+        id: install_deps
         working-directory: katzenqt
         run: uv sync --all-extras --dev --locked
 
@@ -133,8 +135,11 @@ jobs:
         working-directory: katzenqt
         # Always run the @pytest.mark.serial_docker watchdog tests even when
         # the parallel phase above fails, so the state of the shared
-        # kpclientd/gateway containers is still probed on every CI run.
-        if: always()
+        # kpclientd/gateway containers is still probed on every CI run --
+        # but only once the mixnet is actually up and deps are installed;
+        # skip cleanly rather than probing a mixnet that never started or
+        # a missing venv, and skip on cancellation like every other step.
+        if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' && steps.install_deps.outcome == 'success' }}
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
