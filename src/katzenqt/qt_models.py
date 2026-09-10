@@ -7,8 +7,11 @@ from PySide6.QtQuick import QQuickImageProvider
 
 from pydantic import BaseModel, Field
 import uuid
+from typing import Any, NamedTuple
 
-from . import persistent
+import cbor2
+
+from . import attachment_images, persistent
 
 import functools
 from functools import lru_cache
@@ -43,6 +46,173 @@ class FilterProxyModel(QtCore.QSortFilterProxyModel):
 
 ROLE_CHAT_AUTHOR = 0x100  # see ConversationLogModel.roleNames()
 ROLE_CHAT_NETWORK_STATUS = 0x101  # ConversationLog.network_status
+ROLE_CHAT_MESSAGE_ID = 0x102
+ROLE_CHAT_ATTACHMENT_BASENAME = 0x103
+ROLE_CHAT_ATTACHMENT_FILETYPE = 0x104
+ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
+ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save visibility
+ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
+ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
+
+
+class AttachmentDisplay(NamedTuple):
+    """Renderer-friendly view of a ConversationLog.payload.
+
+    ``kind`` is one of ``"text"``, ``"inline"``, ``"marker"``, ``"outgoing"``
+    or ``"oversized"`` and drives which (if any) attachment controls QML shows.
+    ``picture_path`` is a state-dir-relative thumbnail path for image
+    attachments (and ``None`` otherwise), consumed by ChatImageProvider.
+    """
+    display: str
+    basename: str | None
+    filetype: str | None
+    is_audio: bool
+    kind: str  # text | inline | marker | outgoing | oversized
+    rel_path: str | None
+    picture_path: str | None = None
+
+
+def _attachment_display_for_marker(decoded: dict[str, Any]) -> AttachmentDisplay:
+    """Build an :class:`AttachmentDisplay` from a decoded CBOR marker dict
+    (``file_marker`` / ``file_outgoing`` / ``file_oversized``)."""
+    kind = decoded.get("kind")
+    basename = decoded.get("basename") or "unnamed"
+    filetype = decoded.get("filetype")
+    is_audio = filetype == "audio/opus"
+
+    if kind == "file_oversized":
+        size = decoded.get("size") or 0
+        mib = size / (1024 * 1024)
+        return AttachmentDisplay(
+            display=f"[attachment too large] {basename} ({mib:.1f} MiB)",
+            basename=basename,
+            filetype=filetype,
+            is_audio=False,
+            kind="oversized",
+            rel_path=None,
+        )
+
+    is_image = attachment_images.is_image_attachment(filetype, basename)
+    rel_path = decoded.get("rel_path")  # received marker only
+    # Image rows render as a thumbnail, so suppress the redundant
+    # "[attachment] test.jpg" text. The thumbnail falls back to the full
+    # received file when no dedicated thumb was generated.
+    if is_image:
+        display = ""
+        picture_path = decoded.get("thumb_rel_path") or rel_path
+    else:
+        display = (
+            f"Voice note: {basename}" if is_audio else f"[attachment] {basename}"
+        )
+        picture_path = None
+
+    if kind == "file_outgoing":
+        # src_path is never surfaced to QML; the resolve helper reads it from
+        # the persisted payload on demand.
+        return AttachmentDisplay(
+            display=display,
+            basename=basename,
+            filetype=filetype,
+            is_audio=is_audio,
+            kind="outgoing",
+            rel_path=None,
+            picture_path=picture_path,
+        )
+    # file_marker (received)
+    return AttachmentDisplay(
+        display=display,
+        basename=basename,
+        filetype=filetype,
+        is_audio=is_audio,
+        kind="marker",
+        rel_path=rel_path,
+        picture_path=picture_path,
+    )
+
+
+# Cache decoded rows so scrolling does not re-parse CBOR on every repaint.
+# Keyed on payload bytes: modern rows carry a small marker (well under a KiB),
+# so 512 entries is roughly half a MiB; only deprecated inline rows hold a full
+# image, and those are no longer produced.
+_DECODE_CACHE_SIZE = 512
+
+
+@lru_cache(maxsize=_DECODE_CACHE_SIZE)
+def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
+    # Keep ConversationLog as the source of truth and derive renderer-friendly
+    # roles lazily so audio rows can share the same persistence format as text.
+    if payload[:1] != b"F":
+        # Pre-protocol rows: raw UTF-8 text, no CBOR wrapper.
+        return AttachmentDisplay(
+            payload.decode(errors="replace"), None, None, False, "text", None,
+        )
+
+    body = payload[1:]
+
+    # Attachment markers (received/sent/oversized) are CBOR dicts carrying a
+    # "kind" key; try that before the inline GroupChatMessage decode.
+    try:
+        decoded = cbor2.loads(body)
+    except Exception:
+        decoded = None
+    if isinstance(decoded, dict) and decoded.get("kind") in (
+        "file_marker", "file_outgoing", "file_oversized",
+    ):
+        return _attachment_display_for_marker(decoded)
+
+    try:
+        from .models import GroupChatMessage
+
+        # Older rows store the full GroupChatMessage CBOR inline (bytes in payload).
+        group_message = GroupChatMessage.from_cbor(body)
+    except Exception:
+        return AttachmentDisplay(
+            payload.decode(errors="replace"), None, None, False, "text", None,
+        )
+
+    if group_message.text:
+        return AttachmentDisplay(
+            group_message.text, None, None, False, "text", None,
+        )
+
+    if group_message.file_upload is not None:
+        basename = group_message.file_upload.basename
+        filetype = group_message.file_upload.filetype
+        is_audio_message = filetype == "audio/opus"
+        # Legacy inline images have no spilled thumbnail; the resolve path
+        # rehydrates the full bytes to a cache file on demand, so leave
+        # picture_path unset here and rely on the attachment controls.
+        if attachment_images.is_image_attachment(filetype, basename):
+            display = ""
+        elif is_audio_message:
+            display = f"Voice note: {basename}"
+        else:
+            display = f"[attachment] {basename}"
+        return AttachmentDisplay(
+            display, basename, filetype, is_audio_message, "inline", None,
+        )
+
+    return AttachmentDisplay("", None, None, False, "text", None)
+
+
+def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
+    """Map a decoded payload to the value for one attachment/display role."""
+    if role == 0:
+        return info.display
+    if role == ROLE_CHAT_ATTACHMENT_BASENAME:
+        return info.basename
+    if role == ROLE_CHAT_ATTACHMENT_FILETYPE:
+        return info.filetype
+    if role == ROLE_CHAT_IS_AUDIO_MESSAGE:
+        return info.is_audio
+    if role == ROLE_CHAT_ATTACHMENT_KIND:
+        return info.kind
+    if role == ROLE_CHAT_ATTACHMENT_REL_PATH:
+        return info.rel_path
+    if role == ROLE_CHAT_PICTURE_PATH:
+        return info.picture_path
+    return None
+
 
 def lru_cache_for_data_roles(maxsize=10000):
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
@@ -91,6 +261,13 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             #3: QByteArray(b'toolTip'),
             ROLE_CHAT_AUTHOR: QByteArray(b'author'),
             ROLE_CHAT_NETWORK_STATUS: QByteArray(b'network_status'),
+            ROLE_CHAT_MESSAGE_ID: QByteArray(b'message_id'),
+            ROLE_CHAT_ATTACHMENT_BASENAME: QByteArray(b'attachment_basename'),
+            ROLE_CHAT_ATTACHMENT_FILETYPE: QByteArray(b'attachment_filetype'),
+            ROLE_CHAT_IS_AUDIO_MESSAGE: QByteArray(b'is_audio_message'),
+            ROLE_CHAT_ATTACHMENT_KIND: QByteArray(b'attachment_kind'),
+            ROLE_CHAT_ATTACHMENT_REL_PATH: QByteArray(b'attachment_rel_path'),
+            ROLE_CHAT_PICTURE_PATH: QByteArray(b'picture_path'),
         }
 
     @lru_cache(maxsize=10000)
@@ -136,7 +313,18 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         """returns data for index
         PySide6.QtCore.Qt.DisplayRole
         """
-        if role not in (0, ROLE_CHAT_AUTHOR, ROLE_CHAT_NETWORK_STATUS):
+        if role not in (
+            0,
+            ROLE_CHAT_AUTHOR,
+            ROLE_CHAT_NETWORK_STATUS,
+            ROLE_CHAT_MESSAGE_ID,
+            ROLE_CHAT_ATTACHMENT_BASENAME,
+            ROLE_CHAT_ATTACHMENT_FILETYPE,
+            ROLE_CHAT_IS_AUDIO_MESSAGE,
+            ROLE_CHAT_ATTACHMENT_KIND,
+            ROLE_CHAT_ATTACHMENT_REL_PATH,
+            ROLE_CHAT_PICTURE_PATH,
+        ):
             return None
         index_row : int = index.row()
         #print("DATA: INDEX ROW IS", index_row, repr(index))
@@ -155,22 +343,26 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                     return cl.conversation_peer.name
                 elif role == ROLE_CHAT_NETWORK_STATUS:
                     return cl.network_status
-                elif role == 0:
-                    if cl.payload.startswith(b'F'):                        
+                elif role == ROLE_CHAT_MESSAGE_ID:
+                    return str(cl.id)
+                else:
+                    # Derive display text and attachment roles from the payload.
+                    # INTRODUCTION rows carry no body text, so surface the
+                    # announcement ("<author> added <name>") before the
+                    # attachment-oriented decode handles the rest.
+                    if role == 0 and cl.payload[:1] == b"F":
                         try:
                             from .models import GroupChatMessage
                             cm = GroupChatMessage.from_cbor(cl.payload[1:])
-                            if intro := cm.as_introduction:
-                                return (
-                                    f"{cl.conversation_peer.name} added "
-                                    f"{intro.display_name}"
-                                )
-                            return cm.text
-                        except Exception as e:
-                            print(e, cl.payload)
-                            return cl.payload.decode()
-                    else:
-                        return cl.payload.decode()
+                        except Exception:
+                            cm = None
+                        if cm is not None and (intro := cm.as_introduction):
+                            return (
+                                f"{cl.conversation_peer.name} added "
+                                f"{intro.display_name}"
+                            )
+                    info = _decode_group_chat_payload(cl.payload)
+                    return _attachment_role_value(info, role)
                 # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent
         #print(self,"data", index, repr(QtCore.Qt.ItemDataRole(role)))
         #return f"hi {self.convo_id}"
@@ -187,13 +379,40 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         return QtCore.Qt.NoItemFlags
 
 class ChatImageProvider(QQuickImageProvider):
-    def __init__(self):
-        super(ChatImageProvider, self).__init__(QQuickImageProvider.Image)
+    """Serves inline chat thumbnails for ``image://ChatImageProvider/<rel>``.
+
+    ``<rel>`` is a state-dir-relative path produced by
+    ``attachment_images.spill_image_thumbnail`` (a small JPEG) or, for
+    legacy rows without a dedicated thumbnail, the full received image.
+    Missing or undecodable files yield a null image, which QML renders as
+    an empty (hidden) row picture rather than an error."""
+    def __init__(self) -> None:
+        super().__init__(QQuickImageProvider.Image)  # type: ignore[attr-defined]
+
     def requestImage(self, path: str, size: QtCore.QSize, requestedSize: QtCore.QSize) -> QImage:
-        # path is whatever we give to QML's Image:
-        # size/requestedSize are QtCore.QSize
-        img = QImage(123,400, QImage.Format_RGBA8888)
-        img.fill(QtCore.Qt.red)
+        if not path:
+            return QImage()
+        abs_path = persistent.state_file.parent / path
+        # Guard against path traversal escaping the state directory.
+        try:
+            abs_path.resolve().relative_to(persistent.state_file.parent.resolve())
+        except ValueError:
+            return QImage()
+        img = attachment_images.load_bounded_image(abs_path)
+        if img is None:
+            return QImage()
+        # Full images (legacy fallback) are scaled to the thumbnail box so
+        # rows stay compact; pre-sized thumbnails pass through unchanged.
+        max_px = attachment_images.THUMB_MAX_PX
+        if img.width() > max_px or img.height() > max_px:
+            img = img.scaled(
+                max_px, max_px,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        if size is not None:
+            size.setWidth(img.width())
+            size.setHeight(img.height())
         return img
 
 
