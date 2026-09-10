@@ -32,6 +32,13 @@ _PYTHON = os.environ.get(
 # Opt-in per-phase timing for the slow-path investigation (REPORT.md) and the
 # per-hop daemon-leg table. Off by default so normal runs are unaffected.
 _TIMING = os.environ.get("KQT_INTEGRATION_TIMING") == "1"
+
+# Outer subprocess bound for the "send" verb: comfortably above
+# _send_one_gcm's own wall-clock budget (KQT_SEND_BUDGET_FLOOR_S, default
+# 120s; see katzenqt.headless._actions._send_one_gcm), so raising that
+# floor for CI can't silently eat this margin again.
+_SEND_TIMEOUT_S = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0")) + 180.0
+
 _VOUCHER_MARKERS = (
     " returned after ",
     " not present yet after ",
@@ -171,14 +178,14 @@ def test_voucher_handshake_then_bidirectional(kpclientd_endpoint, tmp_path_facto
     assert "JOINED" in _output(joined)
 
     # Alice -> Bob: Bob holds Alice's read cap from the WhoReply.
-    _assert_ok(_timed_run("alice send", alice_state, "send", "demo", "hello from alice", timeout=300.0), "alice send")
+    _assert_ok(_timed_run("alice send", alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
     read_bob = _timed_run("bob read", bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
     _assert_ok(read_bob, "bob read")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
     # Bob -> Alice on the salt-mutated stream: Alice holds Bob's mutated
     # read cap from induction. This is the cross-mutation crux.
-    _assert_ok(_timed_run("bob send", bob_state, "send", "demo", "hello from bob", timeout=300.0), "bob send")
+    _assert_ok(_timed_run("bob send", bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
     read_alice = _timed_run("alice read", alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
     _assert_ok(read_alice, "alice read")
     assert _expect_token(read_alice, "RECV=") == "hello from bob"
@@ -307,12 +314,12 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(joined_bob, "bob voucher-await")
     assert "JOINED" in _output(joined_bob)
 
-    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", timeout=300.0), "alice send")
+    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
     read_bob = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
     _assert_ok(read_bob, "bob read alice")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
-    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", timeout=300.0), "bob send")
+    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
     read_alice_bob = _run_role(alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
     _assert_ok(read_alice_bob, "alice read bob")
     assert _expect_token(read_alice_bob, "RECV=") == "hello from bob"
@@ -332,7 +339,7 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(joined_carol, "carol voucher-await")
     assert "JOINED" in _output(joined_carol)
 
-    _assert_ok(_run_role(carol_state, "send", "demo", "hello from carol", timeout=300.0), "carol send")
+    _assert_ok(_run_role(carol_state, "send", "demo", "hello from carol", timeout=_SEND_TIMEOUT_S), "carol send")
     read_bob_carol = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from carol", timeout=_read_timeout_s())
     _assert_ok(read_bob_carol, "bob read carol")
     assert _expect_token(read_bob_carol, "RECV=") == "hello from carol"

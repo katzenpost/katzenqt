@@ -114,15 +114,17 @@ jobs:
         #  2. the @pytest.mark.serial_docker tests run afterwards, serially,
         #     because they stop/pause the shared kpclientd/gateway
         #     containers and must not race the parallel workers.
-        # 4 workers with a 240s send budget: the send-side wall-clock budget
-        # in katzenqt's _send_one_gcm (floor raised from 120s to 240s) now
-        # absorbs the ~2.5-3x CI slowdown plus 4-way concurrent load on the
-        # single shared kpclientd, which previously caused send timeouts on
-        # the 4-vCPU runner. Drop this only if the runner class changes.
+        # 4 workers with a raised send budget floor: the send-side
+        # wall-clock budget in katzenqt's _send_one_gcm (floor raised from
+        # 120s to 240s via KQT_SEND_BUDGET_FLOOR_S) now absorbs the
+        # ~2.5-3x CI slowdown plus 4-way concurrent load on the single
+        # shared kpclientd, which previously caused send timeouts on the
+        # 4-vCPU runner. Drop this only if the runner class changes.
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
           KQT_INTEGRATION_PARALLEL: "4"
+          KQT_SEND_BUDGET_FLOOR_S: "240"
         run: |
           .venv/bin/pytest tests/integration -vv -n "${KQT_INTEGRATION_PARALLEL}" \
             --dist loadscope -m "not serial_docker"
