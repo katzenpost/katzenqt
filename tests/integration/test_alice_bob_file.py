@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._process import run_logged
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -48,9 +50,8 @@ def _run_role(
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
-    return subprocess.run(
-        cmd, env=env, cwd=str(_REPO_ROOT),
-        capture_output=True, text=True, timeout=timeout,
+    return run_logged(
+        role_state, cmd, env=env, cwd=str(_REPO_ROOT), timeout=timeout,
     )
 
 

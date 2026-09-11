@@ -203,8 +203,6 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
     try:
-      mw_current_idx = await connection.get_message_box_index_counter(mw.current_message_index)
-      logger.info(f"TX_SINGLE idx:{mw_current_idx} ")
       resp = await connection.start_resending_encrypted_message(
       write_cap=wcw.write_cap,
       envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
@@ -276,6 +274,7 @@ READ_WATCHDOG_SECONDS = 1200.0
 # waiting on the old connection; an epoch rollover makes the courier
 # reject the (now-stale) envelope outright.
 _RECONNECT_GRACE_SECONDS = 30.0
+_DAEMON_RPC_TIMEOUT_SECONDS = 30.0
 
 
 async def _await_read_reply(connection, *, read_watchdog_s: float,
@@ -336,8 +335,9 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
         task.cancel()
         raise asyncio.TimeoutError()
     finally:
-        reconnect_wait.cancel()
-        epoch_wait.cancel()
+        for pending in (task, reconnect_wait, epoch_wait):
+            pending.cancel()
+        await asyncio.gather(task, reconnect_wait, epoch_wait, return_exceptions=True)
 
 async def _substream_parent(
     sess: persistent.AsyncSession, name: str,
@@ -554,19 +554,19 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     return
 
   try:
-    # Re-encrypt fresh every call rather than reusing mw's persisted
-    # envelope: start_resending_encrypted_message's envelope is only valid
-    # for the PKI epoch it was encrypted under, so a stream that's been
-    # given up on and retried (any give_up() below, on this call or a
-    # previous one) after an epoch rollover must not resend the same now-
-    # stale envelope, which the courier would reject forever (see
-    # voucher.py's _read_box docstring). mw's own envelope_hash/
-    # encrypted_payload/envelope_descriptor/next_message_index columns are
-    # left as they were when readables_to_mixwal() first created the row;
-    # only this fresh result is ever used for the actual RPC.
-    rcr = await connection.encrypt_read(
-        read_cap=rcw_read_cap, message_box_index=mw.current_message_index,
+    rcr = await asyncio.wait_for(
+        connection.encrypt_read(
+            read_cap=rcw_read_cap, message_box_index=mw.current_message_index,
+        ),
+        timeout=_DAEMON_RPC_TIMEOUT_SECONDS,
     )
+  except (TimeoutError, ThinClientOfflineError, OSError) as exc:
+    logger.warning("Read setup failed for %s; retrying: %s", bacap_uuid, exc)
+    await asyncio.sleep(5)
+    give_up()
+    return
+
+  try:
     resp = await _await_read_reply(
         connection,
         read_watchdog_s=read_watchdog_s,
@@ -1065,8 +1065,10 @@ async def readables_to_mixwal(connection):
     global __resend_queue
     await __resend_queue_populated.wait()
     async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
-        logger.debug("process box cpeer-rcw:", cpeer, await connection.get_message_box_index_counter(rcw.next_index))
-        rcreply: "EncryptReadResult" = await connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
+        rcreply = await asyncio.wait_for(
+            connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index),
+            timeout=_DAEMON_RPC_TIMEOUT_SECONDS,
+        )
         logger.debug("process_box got this from encrypt_read: %s", rcreply)
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
@@ -1086,14 +1088,15 @@ async def readables_to_mixwal(connection):
         if not await _wait_for_connection_or_shutdown():
             continue
         logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
-        a, b = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=60)
+        try:
+            await asyncio.wait_for(readables_to_mixwal_event.wait(), timeout=60)
+        except TimeoutError:
+            pass
         if __should_quit.is_set():
-            continue
-        if not len(a):
-            logger.debug("readables_to_mixwal_event.wait() timed out, nothing new to read")
             continue
         readables_to_mixwal_event.clear()
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
+        retry_needed = False
         async with persistent.asession() as sess:
             # TODO are these guaranteed to be distinct?
             readable_peers = (await sess.exec(select(
@@ -1111,7 +1114,8 @@ async def readables_to_mixwal(connection):
                 try:
                   mw = await process_box(cpeer, rcw)
                 except Exception as e:
-                  logger.critical(f"process_box failed: {e}")
+                  logger.warning("Read setup failed; retrying: %s", e)
+                  retry_needed = True
                   continue
                 sess.add(mw)
                 logger.debug("finished one peer: %s", cpeer.name)
@@ -1121,6 +1125,9 @@ async def readables_to_mixwal(connection):
         if len(readable_peers):
             __mixwal_updated.set()
             logger.debug("__mixwal_updated.set() from readables_to_mixwal")
+        if retry_needed:
+            await asyncio.sleep(5)
+            readables_to_mixwal_event.set()
 
 def on_error(task, func, *args, **kwargs):
     """Attach ``func(*args, **kwargs)`` to ``task``'s completion, firing only
@@ -1262,6 +1269,10 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # and issuing ThinClient.start_resending_encrypted_message
     __mixwal_updated.set()
 
+async def on_daemon_disconnected(event):
+    await on_connection_status({"is_connected": False})
+
+
 async def on_connection_status(status:"Dict[str,Any]"):
     global _last_connected, _reconnect_event
     connected = bool(status["is_connected"])
@@ -1394,6 +1405,7 @@ async def reconnect(config_path: "str | Path | None" = None) -> ThinClient:
         on_message_reply=on_message_reply,
         on_message_sent=on_message_sent,
         on_connection_status=on_connection_status,
+        on_daemon_disconnected=on_daemon_disconnected,
         on_new_pki_document=on_new_pki_document,
     )
     client = ThinClient(cfg)
