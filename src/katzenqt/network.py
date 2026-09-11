@@ -220,11 +220,10 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
           ),
       )
     except ConnectionLifeInterruptedError as e:
-      # A daemon disconnect left one of the RPCs above with no reply and no
-      # exception (the request was sent, then the daemon died, and the reply
-      # went nowhere). The envelope was not (or not yet) ACK'd; leave the MW
-      # for the drainage loop to re-send on the reconnected client -- same
-      # envelope by hash, so the resend is idempotent.
+      # A reconnect or epoch rollover interrupted the RPC above; the request
+      # may have reached the daemon without its reply. The envelope was not
+      # ACK'd, so leave the MixWAL row for the next drain pass to re-send
+      # (idempotent by envelope hash).
       logger.warning(
           "thin client reconnected or epoch rolled over mid-write RPC for "
           "bacap_stream=%s (%s); leaving MixWAL row for the next drain pass",
@@ -260,12 +259,9 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       )
     except ConnectionLifeInterruptedError:
       # The courier ACK for this envelope is already secured; mark_sent only
-      # does local bookkeeping (which nonetheless awaits the thinclient to
-      # resolve BACAP counters, and a disconnect mid-way can orphan that RPC
-      # exactly like the pre-ACK calls above). Leave the MW for the next
-      # drain pass, which re-sends the already-ACKed envelope idempotently
-      # and runs mark_sent to completion; this mirrors the sqlite-busy
-      # branch below rather than wedging the stream on an un-raiseable await.
+      # does local bookkeeping via a thinclient RPC. Leave the MW for the
+      # next drain pass to re-send the already-ACKed envelope and complete
+      # the ACK -- same recovery as the sqlite-busy branch below.
       logger.warning(
           "drain_mixwal_write_single: connection-life signal interrupted ACK "
           "bookkeeping for bacap_stream=%s; leaving MW for the next drain pass",
@@ -316,48 +312,34 @@ READ_WATCHDOG_SECONDS = 1200.0
 # reject the (now-stale) envelope outright.
 _RECONNECT_GRACE_SECONDS = 30.0
 
-# Upper bound on how long readables_to_mixwal() and
-# send_resendable_plaintexts() park at the __mixnet_connected gate when the
-# latch is cleared. __mixnet_connected is only ever re-set by an
-# is_connected=True on_connection_status report; a full kpclientd restart
-# can clear it and then reconnect the thin client below the callback layer,
-# so no re-set ever arrives. Once this bound elapses both loops proceed
-# anyway and ride real outages out via their per-item error handling
-# instead of stranding forever (see _wait_for_connection_or_shutdown).
+# How long readables_to_mixwal() and send_resendable_plaintexts() wait at
+# the __mixnet_connected gate before proceeding via per-item error handling.
+# Covers the case where on_connection_status never re-sets the latch (a
+# kpclientd restart can reconnect below the callback layer).
 _CONNECTION_IDLE_RETRY_S = 60.0
 
-# Cadence at which readables_to_mixwal() runs an arming pass even when
-# readables_to_mixwal_event is never re-set (see that loop). Matches
-# _CONNECTION_IDLE_RETRY_S so a full kpclientd restart is recovered from
-# on the same timescale as the latch gate above.
+# Cadence at which readables_to_mixwal() runs an arming pass when
+# readables_to_mixwal_event is never re-set (e.g. while the daemon is down).
 _ARMING_SWEEP_S = 60.0
 
 
 class ConnectionLifeInterruptedError(Exception):
-    """An in-flight thinclient RPC raced against a daemon reconnect or a PKI
-    epoch rollover and lost; the daemon may have died with the reply in
-    flight (or the envelope may have gone stale after a rollover), so the
-    awaiting coroutine could otherwise never unpend. Callers treat this like
-    a transient failure: release the stream and let the drain loop re-cast
-    (re-encrypting a fresh envelope for reads, re-sending the same
-    idempotent envelope for writes)."""
+    """An in-flight thinclient RPC was interrupted by a daemon reconnect or a
+    PKI epoch rollover, so its reply may never arrive. Callers treat it as a
+    transient failure: release the stream and let the drain loop re-cast
+    (a fresh envelope for reads, the same idempotent envelope for writes)."""
 
 
 async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                                       backstop_s: float = READ_WATCHDOG_SECONDS,
                                       grace_s: "float | None" = None):
-    """Run the RPC returned by ``rpc_factory``, racing it against a daemon
-    reconnect or a PKI epoch rollover rather than a flat clock.
+    """Await an RPC, racing it against the daemon-reconnect and PKI-epoch
+    signals rather than a flat clock.
 
-    A disconnect can leave a pending thinclient RPC awaiting forever: the
-    request was sent before the daemon died, the reply is delivered to a
-    query_id whose listener already gave up (dropped), and reconnect-replay
-    never restores it. Every RPC await in the drain paths is exposed to this,
-    so this helper is the single guard. Either connection-life signal means
-    the reply could be orphaned or the envelope stale, so we give the
-    in-flight call a short grace period and then raise
+    If a connection-life signal fires while the RPC is in flight, its reply
+    may never arrive; we give it ``grace_s`` more to answer, then raise
     :class:`ConnectionLifeInterruptedError` for the caller's give-up-and-
-    re-cast recovery path. The backstop bounds the same wait when no signal
+    re-cast recovery path. ``backstop_s`` bounds the wait when no signal
     ever fires.
 
     Returns the RPC's result unless it raised on its own (that exception
@@ -674,13 +656,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         no_retry_on_box_id_not_found=False,
     )
   except ConnectionLifeInterruptedError as e:
-    # The daemon reconnected (or the PKI epoch rolled over) while the fresh
-    # encrypt_read was in flight and it never answered. Unlike a lost
-    # start_resending reply there is no in-flight ARQ to cancel here: the
-    # envelope was never even dispatched, so the box is still untouched at
-    # the daemon and re-encrypting the same message_box_index on the now-
-    # reconnected client is safe (see the fresh-envelope comment above).
-    # Release the stream so the drain loop re-casts on the next sweep.
+    # The fresh encrypt_read was interrupted before dispatching anything, so
+    # the daemon's box is untouched; re-encrypting the same message_box_index
+    # on the reconnected client is safe. Release the stream so the drain
+    # loop re-casts on the next sweep.
     logger.warning(
         "drain_mixwal_read_single: %s; re-scheduling the read for "
         "bacap_stream=%s (nothing was dispatched for this envelope)",
@@ -941,14 +920,11 @@ async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool
     pause cleanly during outages instead of burning cycles against a
     daemon that will only raise ThinClientOfflineError back at them.
 
-    ``idle_retry_s`` guards against a status notification that is lost and
-    never re-sent: ``__mixnet_connected`` is ONLY re-set by an
-    is_connected=True on_connection_status report, and a full kpclientd
-    restart can surface the disconnect while the thin-client library
-    reconnects below the callback layer, so no re-set ever arrives. With
-    ``idle_retry_s`` > 0 the wait is bounded: once it elapses the caller
-    proceeds anyway (returning True) so its own per-item error handling
-    rides out a real outage instead of stranding forever on a stale latch.
+    ``idle_retry_s`` bounds the wait: after it elapses the caller proceeds
+    anyway (returning True) and relies on its own per-item error handling.
+    Covers the case where ``__mixnet_connected`` is never re-set (a
+    kpclientd restart can reconnect below the on_connection_status callback
+    layer).
     """
     if __should_quit.is_set():
         return False
@@ -1193,12 +1169,9 @@ async def readables_to_mixwal(connection):
     while not __should_quit.is_set():
         # Pause while the mixnet is unreachable so the loop does not
         # try to encrypt_read against a daemon that cannot route. The
-        # wait is bounded: a full kpclientd restart can clear the
-        # connected latch without ever re-setting it (the thin client
-        # reconnects below the on_connection_status callback layer), so
-        # we re-attempt arming on a fixed cadence rather than stranding
-        # the read-arming loop -- the only source of is_read MixWAL rows
-        # -- forever.
+        # wait is bounded by _CONNECTION_IDLE_RETRY_S so a kpclientd
+        # restart (which can leave the latch cleared) does not strand
+        # the read-arming loop, the only source of is_read MixWAL rows.
         if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
         logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
@@ -1206,13 +1179,9 @@ async def readables_to_mixwal(connection):
         if __should_quit.is_set():
             continue
         readables_to_mixwal_event.clear()
-        # Run the pass whether the event fired or the 60s timeout elapsed.
-        # After a kpclientd restart nothing re-signals arming (deliveries
-        # and writes -- the usual pokes -- stop while it is down), so the
-        # event-only wakeup would leave any stream whose MixWAL row was
-        # consumed permanently un-armed. A fixed cadence re-arms it within
-        # ~60s of the daemon coming back, exactly as drain_mixwal2's sweep
-        # keeps re-casting rows it already has.
+        # Run the pass whether the event fired or the _ARMING_SWEEP_S timeout
+        # elapsed: the fixed cadence re-arms streams even while the daemon
+        # is down and nothing pokes the event.
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
         async with persistent.asession() as sess:
             # TODO are these guaranteed to be distinct?
@@ -1231,9 +1200,8 @@ async def readables_to_mixwal(connection):
                 try:
                   mw = await process_box(cpeer, rcw)
                 except Exception as e:
-                  # Expected when a pass sneaks in during a daemon
-                  # bounce/reattach (the bounded gate above now allows
-                  # these); ride out and retry next pass.
+                  # Expected when a pass races a daemon bounce; retry on the
+                  # next pass.
                   logger.warning(f"process_box failed: {e}")
                   continue
                 sess.add(mw)
@@ -1274,11 +1242,9 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     __resend_queue_populated.set()
     while not __should_quit.is_set():
         # Pause while the mixnet is unreachable; encrypt_write/
-        # start_resending need a live route through kpclientd. Bounded the
-        # same way as readables_to_mixwal's gate: a kpclientd restart can
-        # leave __mixnet_connected cleared with no re-set ever arriving,
-        # so degrade to a fixed retry cadence instead of stranding the
-        # write path forever.
+        # start_resending need a live route through kpclientd. Bounded by
+        # _CONNECTION_IDLE_RETRY_S the same way as readables_to_mixwal's
+        # gate.
         if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
         _, _ = await asyncio.wait((create_task(resendable_event.wait()),), timeout=60)
