@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=katzenqt
+GenericName=Mixnet chat client
+Comment=Group chat over the Katzenpost mix network
+Exec=katzenqt
+Icon=network.katzenpost.katzenqt
+Terminal=false
+Categories=Qt;Network;Chat;
+StartupNotify=true
+SingleMainWindow=true
+X-GNOME-UsesNotifications=true

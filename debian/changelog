@@ -1,0 +1,5 @@
+katzenqt (0.0.1) unstable; urgency=medium
+
+  * Initial Debian packaging.
+
+ -- Katzenpost <katzenqt@katzenpost.network>  Fri, 11 Sep 2026 14:46:00 +0200
