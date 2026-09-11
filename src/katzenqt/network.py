@@ -1,7 +1,7 @@
 import secrets
 import katzenpost_thinclient
 from katzenpost_thinclient import (
-    ThinClient, ThinClientOfflineError,
+    ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
     DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
     CourierError,
@@ -26,6 +26,7 @@ from pathlib import Path
 import cbor2
 
 from .katzen_util import create_task
+from ._thinclient import ThinClient
 from pydantic.dataclasses import dataclass
 from . import attachment_images, conversation_handlers, models, persistent
 from sqlmodel import select
