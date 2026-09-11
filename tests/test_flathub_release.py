@@ -2,11 +2,22 @@ import importlib.util
 import io
 import subprocess
 import tarfile
+import tomllib
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).parents[1]
+PROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
+VERSION = PROJECT["project"]["version"]
+TAG = f"v{VERSION}"
+BUILD_LINES = (ROOT / "packaging/flatpak/build.sh").read_text().splitlines()
+EPOCH = int(
+    next(line[6:] for line in BUILD_LINES if line.startswith("epoch="))
+)
+RELEASE_DATE = datetime.fromtimestamp(EPOCH, timezone.utc).date().isoformat()
 SPEC = importlib.util.spec_from_file_location(
     "katzenqt_flathub_release", ROOT / "packaging/flatpak/release.py"
 )
@@ -20,41 +31,41 @@ def test_tag_details_requires_annotated_main_tag(monkeypatch):
     def fake_run(*args, **kwargs):
         calls.append(args)
         values = {
-            ("git", "cat-file", "-t", "v0.0.1"): "tag",
-            ("git", "rev-parse", "v0.0.1^{commit}"): "abc",
+            ("git", "cat-file", "-t", TAG): "tag",
+            ("git", "rev-parse", f"{TAG}^{{commit}}"): "abc",
             ("git", "rev-parse", "HEAD"): "abc",
             ("git", "status", "--porcelain"): "",
             ("git", "rev-parse", "FETCH_HEAD"): "def",
             (
                 "git",
                 "show",
-                "v0.0.1:pyproject.toml",
-            ): '[project]\nversion = "0.0.1"',
+                f"{TAG}:pyproject.toml",
+            ): f'[project]\nversion = "{VERSION}"',
             (
                 "git",
                 "show",
-                "v0.0.1:packaging/flatpak/"
+                f"{TAG}:packaging/flatpak/"
                 "network.katzenpost.katzenqt.metainfo.xml",
             ): (
-                '<component><releases><release version="0.0.1" '
-                'date="2026-08-28"/></releases></component>'
+                f'<component><releases><release version="{VERSION}" '
+                f'date="{RELEASE_DATE}"/></releases></component>'
             ),
-            ("git", "log", "-1", "--format=%ct", "v0.0.1"): "1787875200",
+            ("git", "log", "-1", "--format=%ct", TAG): str(EPOCH),
             (
                 "git",
                 "ls-remote",
                 "--exit-code",
                 "origin",
-                "refs/tags/v0.0.1",
+                f"refs/tags/{TAG}",
             ): "abc",
         }
         return values.get(args, "")
 
     monkeypatch.setattr(release, "run", fake_run)
-    assert release.tag_details("v0.0.1", True) == (
+    assert release.tag_details(TAG, True) == (
         "abc",
-        "0.0.1",
-        "2026-08-28",
+        VERSION,
+        RELEASE_DATE,
     )
     assert ("git", "fetch", "origin", "main") in calls
     assert ("git", "merge-base", "--is-ancestor", "abc", "def") in calls
@@ -63,20 +74,20 @@ def test_tag_details_requires_annotated_main_tag(monkeypatch):
 def test_tag_details_rejects_lightweight_tag(monkeypatch):
     monkeypatch.setattr(release, "run", lambda *args, **kwargs: "commit")
     with pytest.raises(ValueError, match="annotated"):
-        release.tag_details("v0.0.1")
+        release.tag_details(TAG)
 
 
 def test_tag_details_requires_tag_checkout(monkeypatch):
     values = {
-        ("git", "cat-file", "-t", "0.0.1"): "tag",
-        ("git", "rev-parse", "0.0.1^{commit}"): "tagged",
+        ("git", "cat-file", "-t", VERSION): "tag",
+        ("git", "rev-parse", f"{VERSION}^{{commit}}"): "tagged",
         ("git", "rev-parse", "HEAD"): "other",
     }
     monkeypatch.setattr(
         release, "run", lambda *args, **kwargs: values.get(args, "")
     )
     with pytest.raises(ValueError, match="HEAD"):
-        release.tag_details("0.0.1")
+        release.tag_details(VERSION)
 
 
 def test_tag_details_accepts_repository_tag_style(monkeypatch):
@@ -84,38 +95,38 @@ def test_tag_details_accepts_repository_tag_style(monkeypatch):
         release,
         "run",
         lambda *args, **kwargs: {
-            ("git", "cat-file", "-t", "0.0.1"): "tag",
-            ("git", "rev-parse", "0.0.1^{commit}"): "abc",
+            ("git", "cat-file", "-t", VERSION): "tag",
+            ("git", "rev-parse", f"{VERSION}^{{commit}}"): "abc",
             ("git", "rev-parse", "HEAD"): "abc",
             ("git", "status", "--porcelain"): "",
             (
                 "git",
                 "show",
-                "0.0.1:pyproject.toml",
-            ): '[project]\nversion = "0.0.1"',
+                f"{VERSION}:pyproject.toml",
+            ): f'[project]\nversion = "{VERSION}"',
             (
                 "git",
                 "show",
-                "0.0.1:packaging/flatpak/"
+                f"{VERSION}:packaging/flatpak/"
                 "network.katzenpost.katzenqt.metainfo.xml",
             ): (
-                '<component><releases><release version="0.0.1" '
-                'date="2026-08-28"/></releases></component>'
+                f'<component><releases><release version="{VERSION}" '
+                f'date="{RELEASE_DATE}"/></releases></component>'
             ),
-            ("git", "log", "-1", "--format=%ct", "0.0.1"): "1787875200",
+            ("git", "log", "-1", "--format=%ct", VERSION): str(EPOCH),
         }.get(args, ""),
     )
-    assert release.tag_details("0.0.1")[1] == "0.0.1"
+    assert release.tag_details(VERSION)[1] == VERSION
 
 
 def test_stage_contains_only_tagged_application_source(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        release, "tag_details", lambda *args: ("abc", "0.0.1", "2026-08-28")
+        release, "tag_details", lambda *args: ("abc", VERSION, RELEASE_DATE)
     )
     monkeypatch.setattr(
         release,
         "archive",
-        lambda tag: ("https://example/v0.0.1.tar.gz", "a" * 64),
+        lambda tag: (f"https://example/{TAG}.tar.gz", "a" * 64),
     )
     files = {
         "packaging/flatpak/LICENSE": b"license",
@@ -136,20 +147,24 @@ def test_stage_contains_only_tagged_application_source(tmp_path, monkeypatch):
         ).read_bytes(),
     }
     monkeypatch.setattr(release, "tagged_file", lambda tag, path: files[path])
-    destination = release.stage("v0.0.1", tmp_path / "dist")
-    assert (destination / "rustic-audio-tool.json").read_bytes() == b"audio-module"
-    assert (destination / "rustic-audio-sources.json").read_bytes() == b"audio-sources"
+    destination = release.stage(TAG, tmp_path / "dist")
+    assert (
+        destination / "rustic-audio-tool.json"
+    ).read_bytes() == b"audio-module"
+    assert (
+        destination / "rustic-audio-sources.json"
+    ).read_bytes() == b"audio-sources"
     manifest = (destination / f"{release.APP_ID}.yaml").read_text()
-    assert "https://example/v0.0.1.tar.gz" in manifest
+    assert f"https://example/{TAG}.tar.gz" in manifest
     assert f"sha256: {'a' * 64}" in manifest
     assert "../../" not in manifest
     assert f"path: {release.APP_ID}.desktop" in manifest
     assert (
-        "/v0.0.1/packaging/flatpak/screenshots/"
+        f"/{TAG}/packaging/flatpak/screenshots/"
         in (destination / f"{release.APP_ID}.metainfo.xml").read_text()
     )
 
-    second = release.stage("v0.0.1", tmp_path / "second")
+    second = release.stage(TAG, tmp_path / "second")
     first_files = {
         path.relative_to(destination): path.read_bytes()
         for path in destination.rglob("*")
@@ -165,12 +180,12 @@ def test_stage_contains_only_tagged_application_source(tmp_path, monkeypatch):
 
 def test_stage_uses_tagged_packaging_not_worktree(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        release, "tag_details", lambda *args: ("abc", "0.0.1", "2026-08-28")
+        release, "tag_details", lambda *args: ("abc", VERSION, RELEASE_DATE)
     )
     monkeypatch.setattr(
         release,
         "archive",
-        lambda tag: ("https://example/0.0.1.tar.gz", "a" * 64),
+        lambda tag: (f"https://example/{VERSION}.tar.gz", "a" * 64),
     )
     tagged = (
         b"app-id: network.katzenpost.katzenqt\n"
@@ -182,7 +197,7 @@ def test_stage_uses_tagged_packaging_not_worktree(tmp_path, monkeypatch):
         "tagged_file",
         lambda tag, path: tagged if path.endswith(".yaml") else b"tagged",
     )
-    destination = release.stage("0.0.1", tmp_path / "dist")
+    destination = release.stage(VERSION, tmp_path / "dist")
     assert (
         (destination / f"{release.APP_ID}.yaml")
         .read_bytes()
@@ -194,7 +209,7 @@ def test_submit_opens_pr_without_merging(tmp_path, monkeypatch):
     calls = []
     destination = tmp_path / "dist"
     destination.mkdir()
-    (destination / ".checked-tag").write_text("v0.0.1\n")
+    (destination / ".checked-tag").write_text(f"{TAG}\n")
 
     def fake_stage(*args):
         destination.mkdir(exist_ok=True)
@@ -214,7 +229,7 @@ def test_submit_opens_pr_without_merging(tmp_path, monkeypatch):
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 1),
     )
-    release.submit("v0.0.1", destination)
+    release.submit(TAG, destination)
     assert any(call[:3] == ("gh", "pr", "create") for call in calls)
     assert not any(call[:3] == ("gh", "pr", "merge") for call in calls)
 
@@ -227,22 +242,26 @@ def test_submit_requires_a_matching_checked_tag(tmp_path, monkeypatch):
         release, "stage", lambda *args: pytest.fail("staged without a check")
     )
     with pytest.raises(ValueError, match="check before submit"):
-        release.submit("v0.0.1", destination)
+        release.submit(TAG, destination)
     (destination / ".checked-tag").write_text("v9.9.9\n")
     with pytest.raises(ValueError, match="check before submit"):
-        release.submit("v0.0.1", destination)
+        release.submit(TAG, destination)
 
 
 def test_stage_fails_when_manifest_formatting_drifts(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        release, "tag_details", lambda *args: ("abc", "0.0.1", "2026-08-28")
+        release, "tag_details", lambda *args: ("abc", VERSION, RELEASE_DATE)
     )
     monkeypatch.setattr(
-        release, "archive", lambda tag: ("https://example/0.0.1.tar.gz", "a" * 64)
+        release,
+        "archive",
+        lambda tag: (f"https://example/{VERSION}.tar.gz", "a" * 64),
     )
-    monkeypatch.setattr(release, "tagged_file", lambda tag, path: b"app-id: drift\n")
+    monkeypatch.setattr(
+        release, "tagged_file", lambda tag, path: b"app-id: drift\n"
+    )
     with pytest.raises(ValueError, match="formatting drifted"):
-        release.stage("0.0.1", tmp_path / "dist")
+        release.stage(VERSION, tmp_path / "dist")
 
 
 def _tar_bytes(files, prefix, mode):
@@ -257,18 +276,20 @@ def _tar_bytes(files, prefix, mode):
 
 def test_verify_archive_accepts_matching_tarballs(monkeypatch):
     files = {"packaging/x": b"one", "src/app.py": b"two"}
-    fetched = _tar_bytes(files, "katzenqt-0.0.1/", "w:gz")
+    fetched = _tar_bytes(files, f"katzenqt-{VERSION}/", "w:gz")
     local = _tar_bytes(files, "", "w")
     monkeypatch.setattr(
         release.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=local),
     )
-    release.verify_archive("v0.0.1", fetched)
+    release.verify_archive(TAG, fetched)
 
 
 def test_verify_archive_rejects_tampered_tarball(monkeypatch):
-    fetched = _tar_bytes({"packaging/x": b"one"}, "katzenqt-0.0.1/", "w:gz")
+    fetched = _tar_bytes(
+        {"packaging/x": b"one"}, f"katzenqt-{VERSION}/", "w:gz"
+    )
     local = _tar_bytes({"packaging/x": b"tampered"}, "", "w")
     monkeypatch.setattr(
         release.subprocess,
@@ -276,4 +297,51 @@ def test_verify_archive_rejects_tampered_tarball(monkeypatch):
         lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=local),
     )
     with pytest.raises(ValueError, match="does not match"):
-        release.verify_archive("v0.0.1", fetched)
+        release.verify_archive(TAG, fetched)
+
+
+def test_current_release_metadata_matches_project_and_build_epoch():
+    metadata = ET.parse(release.PACKAGE / f"{release.APP_ID}.metainfo.xml")
+    current = metadata.find("./releases/release")
+    assert current is not None
+    assert current.get("version") == VERSION
+    assert current.get("date") == RELEASE_DATE
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "expected"),
+    [
+        ("project", "pyproject version"),
+        ("metadata_version", "AppStream version"),
+        ("metadata_date", "AppStream release date"),
+    ],
+)
+def test_tag_details_rejects_release_metadata_drift(
+    monkeypatch, mismatch, expected
+):
+    version = VERSION + ".invalid"
+    project_version = version if mismatch == "project" else VERSION
+    metadata_version = version if mismatch == "metadata_version" else VERSION
+    metadata_date = "invalid" if mismatch == "metadata_date" else RELEASE_DATE
+    values = {
+        ("git", "cat-file", "-t", TAG): "tag",
+        ("git", "rev-parse", f"{TAG}^{{commit}}"): "abc",
+        ("git", "rev-parse", "HEAD"): "abc",
+        ("git", "show", f"{TAG}:pyproject.toml"): (
+            f'[project]\nversion = "{project_version}"'
+        ),
+        (
+            "git",
+            "show",
+            f"{TAG}:packaging/flatpak/{release.APP_ID}.metainfo.xml",
+        ): (
+            f'<component><releases><release version="{metadata_version}" '
+            f'date="{metadata_date}"/></releases></component>'
+        ),
+        ("git", "log", "-1", "--format=%ct", TAG): str(EPOCH),
+    }
+    monkeypatch.setattr(
+        release, "run", lambda *args, **kwargs: values.get(args, "")
+    )
+    with pytest.raises(ValueError, match=expected):
+        release.tag_details(TAG)
