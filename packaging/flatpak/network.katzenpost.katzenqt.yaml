@@ -44,8 +44,8 @@ modules:
         /app/share/applications/network.katzenpost.katzenqt.desktop
       - install -Dm644 network.katzenpost.katzenqt.metainfo.xml
         /app/share/metainfo/network.katzenpost.katzenqt.metainfo.xml
-      - install -Dm644 resources/echomix_256.png
-        /app/share/icons/hicolor/256x256/apps/network.katzenpost.katzenqt.png
+      - install -Dm644 resources/echomix_icon.svg
+        /app/share/icons/hicolor/scalable/apps/network.katzenpost.katzenqt.svg
       - install -Dm644 LICENSE.flatpak
         /app/share/licenses/network.katzenpost.katzenqt/katzenqt/LICENSE
     sources:

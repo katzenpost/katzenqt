@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt update \
 	&& apt install -y --no-install-recommends \
 		flatpak flatpak-builder ostree appstream desktop-file-utils \
-		ca-certificates elfutils git python3 \
+		ca-certificates elfutils git librsvg2-common python3 \
 	&& rm -rf /var/lib/apt/lists/*
 
 RUN flatpak remote-add --if-not-exists flathub \
