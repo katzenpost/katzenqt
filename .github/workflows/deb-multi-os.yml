@@ -59,3 +59,15 @@ jobs:
             echo "error: kpclientd.service is enabled; it must be opt-in per user" >&2
             exit 1
           fi
+
+      - name: Verify the katzenqt .deb builds reproducibly
+        run: |
+          set -eu
+          rm -rf /tmp/ra /tmp/rb
+          cp -a . /tmp/ra
+          cp -a . /tmp/rb
+          ( cd /tmp/ra && rm -rf dist && packaging/debian/build.sh >/dev/null )
+          ( cd /tmp/rb && rm -rf dist && packaging/debian/build.sh >/dev/null )
+          a=$(sha256sum /tmp/ra/dist/katzenqt_*.deb | cut -d' ' -f1)
+          b=$(sha256sum /tmp/rb/dist/katzenqt_*.deb | cut -d' ' -f1)
+          test "$a" = "$b"

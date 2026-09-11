@@ -2,7 +2,7 @@ PODMAN ?= podman
 DISTRO ?= ubuntu-26.04
 DISTROS ?= ubuntu-26.04 debian-13
 
-.PHONY: container container-kpclientd container-pydeps container-all container-clean
+.PHONY: container container-kpclientd container-pydeps container-all container-clean repro
 
 container:
 	@../container/build.sh $(DISTRO)
@@ -19,6 +19,9 @@ container-all:
 		../container/build-kpclientd.sh $$d; \
 		../container/build.sh $$d; \
 	done
+
+repro:
+	@PODMAN=$(PODMAN) ./reproducible.sh $(DISTRO)
 
 container-clean:
 	@PODMAN=$(PODMAN) ./container-clean.sh
