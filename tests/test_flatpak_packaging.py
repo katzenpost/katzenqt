@@ -170,3 +170,27 @@ def test_build_mirrors_the_screenshot():
     assert "mirror-screenshot.py" in body
     assert " catalog " in body
     assert " repo " in body
+
+
+def test_flatpak_test_target_is_thin():
+    body = target_body("flatpak-test")
+    assert len(body) == 1
+    assert body[0].strip() == "@packaging/flatpak/test.sh"
+
+
+def test_docker_test_script():
+    script = FLATPAK / "test.sh"
+    assert os.access(script, os.X_OK)
+    body = script.read_text()
+    assert "trap cleanup EXIT INT TERM" in body
+    assert "managed test mixnet is still reachable" in body
+    assert "running.stamp" in body
+    assert body.index("trap cleanup") < body.index("start wait")
+    assert "- imports < " in body
+    assert "- permissions < " in body
+    assert "test ! -e /app/bin/kpclientd" in body
+
+
+def test_integration_wrapper_dies_with_parent():
+    wrapper = (FLATPAK / "integration-python").read_text()
+    assert "flatpak run --die-with-parent" in wrapper

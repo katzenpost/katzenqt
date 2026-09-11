@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+import configparser
 import json
 import os
 import shutil
@@ -53,9 +54,29 @@ def endpoint() -> Path | str | None:
     return ABSTRACT_SOCKET if alive(ABSTRACT_SOCKET) else None
 
 
+def networked() -> bool:
+    if not FLATPAK:
+        return True
+    info = configparser.ConfigParser()
+    info.read("/.flatpak-info")
+    return "network" in info.get("Context", "shared", fallback="").split(";")
+
+
 def main() -> None:
     """Report daemon availability or launch the GUI with its socket."""
+
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    tcp = os.environ.get("KATZENQT_KPCLIENTD_TCP")
+    if tcp:
+        if not networked():
+            raise SystemExit("Docker kpclientd requires Flatpak network access")
+        if mode == "--status":
+            print("docker")
+            return
+        os.environ["KATZENQT_THINCLIENT_CONFIG"] = str(thin(tcp, "Tcp"))
+        if FLATPAK:
+            os.chdir("/app/share/katzenqt")
+        raise SystemExit(subprocess.call([GUI, *sys.argv[1:]]))
     address = endpoint()
     if mode == "--status":
         print(

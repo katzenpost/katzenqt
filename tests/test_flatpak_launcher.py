@@ -91,3 +91,25 @@ def test_endpoint_reaches_default_abstract_socket(launcher, monkeypatch):
     monkeypatch.setattr(Path, "exists", lambda _: False)
     monkeypatch.setattr(launcher, "alive", lambda address: address == "@katzenpost")
     assert launcher.endpoint() == "@katzenpost"
+
+
+def test_networked_true_outside_flatpak(launcher, monkeypatch):
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    assert launcher.networked() is True
+
+
+def test_tcp_status_reports_docker(launcher, monkeypatch, capsys):
+    monkeypatch.setenv("KATZENQT_KPCLIENTD_TCP", "127.0.0.1:64331")
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setattr(sys, "argv", ["launcher", "--status"])
+    launcher.main()
+    assert capsys.readouterr().out.strip() == "docker"
+
+
+def test_tcp_requires_network_in_flatpak(launcher, monkeypatch):
+    monkeypatch.setenv("KATZENQT_KPCLIENTD_TCP", "127.0.0.1:64331")
+    monkeypatch.setattr(launcher, "FLATPAK", True)
+    monkeypatch.setattr(launcher, "networked", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["launcher"])
+    with pytest.raises(SystemExit, match="network access"):
+        launcher.main()

@@ -44,7 +44,7 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	flatpak-build flatpak-install flatpak-run flatpak-system-deps \
+	flatpak-build flatpak-install flatpak-run flatpak-test flatpak-system-deps \
 	clean clean-venv deps deps-audio
 
 deps: deps-audio default_uv_setup
@@ -57,6 +57,9 @@ flatpak-install:
 
 flatpak-run:
 	@packaging/flatpak/run.sh
+
+flatpak-test:
+	@packaging/flatpak/test.sh
 
 flatpak-system-deps:
 	@packaging/flatpak/system-deps.sh
@@ -105,6 +108,7 @@ help:
 		'  make flatpak-build         Build the flatpak in podman (lints, checks, and validates)' \
 		'  make flatpak-install       Install the built flatpak for this user' \
 		'  make flatpak-run           Run the installed flatpak' \
+		'  make flatpak-test          Test the installed flatpak against the docker testnet' \
 		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \

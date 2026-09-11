@@ -21,6 +21,9 @@ Run these from the repo root:
   reproducible, and validates the desktop and metainfo files.
 - `make flatpak-install`      Install the built Flatpak for your user.
 - `make flatpak-run`          Run the installed Flatpak.
+- `make flatpak-test`         Test the installed Flatpak against the Katzenpost
+  docker testnet. It first checks the sandbox (imports, no network, read-only
+  socket) and then runs the integration suite through the sandboxed Python.
 
 Python dependencies are vendored as pinned, hash-checked sources
 (`python3-deps.json`, `pyside6-sources.json`) because the build has no network.
