@@ -12,15 +12,52 @@ The podman helpers (kpclientd_reachable, find_kpclientd_container,
 find_same_network_container, podman, wait_reachable) serve the watchdog
 tests that live-verify container restarts and mixnet blips
 (test_watchdog_reconnect.py, test_watchdog_mixnet_reconnect.py).
+
+epoch_duration_s() is the mixnet's actual epoch length, for the handful of
+tests whose waits must span (or deliberately stay under) a PKI epoch
+boundary -- so those waits scale with whatever network they're pointed at
+instead of assuming the docker mixnet's 2m default.
 """
 from __future__ import annotations
 
+import functools
 import os
+import re
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Opt-in per-phase timing for the integration-suite slow-path investigation
+# (REPORT.md). Off by default so normal runs are unaffected.
+_TIMING = os.environ.get("KQT_INTEGRATION_TIMING") == "1"
+
+
+class PhaseStopwatch:
+    """Measure phases of a slow integration scenario.
+
+    With KQT_INTEGRATION_TIMING=1 each :meth:`mark` prints ``[KQT-TIMING]
+    <what> <phase>: <elapsed>s`` (wall time since the stopwatch began), so a
+    solo run exposes exactly where the wall clock went. Cheap no-op
+    otherwise.
+    """
+
+    def __init__(self, what: str):
+        self._what = what
+        self._t0 = time.perf_counter()
+        self._last = self._t0
+
+    def mark(self, phase: str) -> None:
+        now = time.perf_counter()
+        if _TIMING:
+            print(
+                f"[KQT-TIMING] {self._what} {phase}: {now - self._t0:.2f}s "
+                f"(d={now - self._last:.2f}s)",
+                flush=True,
+            )
+        self._last = now
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = REPO_ROOT / ".venv" / "bin" / "python3"
@@ -28,6 +65,60 @@ PYTHON = os.environ.get(
     "KATZENQT_INTEGRATION_PYTHON",
     str(_VENV_PY) if _VENV_PY.exists() else sys.executable,
 )
+
+_GO_DURATION_TERM_RE = re.compile(r"(\d+(?:\.\d+)?)(h|ms|m|s)")
+_ENV_LINE_RE = re.compile(r"KATZENPOST_EPOCH_DURATION=(\S+)")
+
+
+def _parse_go_duration(text: str) -> float:
+    """Parse a Go time.ParseDuration-style string ("2m", "1h30m", "45s")
+    into seconds. Only h/m/s/ms are needed here: genconfig's --epochDuration
+    flag is passed straight through as this string."""
+    total = 0.0
+    matched = False
+    for amount, unit in _GO_DURATION_TERM_RE.findall(text):
+        matched = True
+        scale = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}[unit]
+        total += float(amount) * scale
+    if not matched:
+        raise ValueError(f"not a Go duration string: {text!r}")
+    return total
+
+
+@functools.lru_cache(maxsize=1)
+def epoch_duration_s() -> float:
+    """The mixnet's actual epoch length in seconds.
+
+    KQT_EPOCH_DURATION_S overrides everything else, for targets with no
+    docker-compose.yml to read (e.g. namenlos). Otherwise this comes from
+    the generated docker-compose.yml: genconfig's GenDockerCompose writes
+    KATZENPOST_EPOCH_DURATION into every service's environment block from
+    the same --epochDuration value the mixnet's own processes were started
+    with, so this reads the value actually governing the running network
+    rather than a second guess at it.
+    """
+    override = os.environ.get("KQT_EPOCH_DURATION_S")
+    if override:
+        return float(override)
+    compose_path = Path(os.environ.get(
+        "KATZENPOST_DOCKER_COMPOSE",
+        str(REPO_ROOT / "katzenpost" / "docker" / "mixnet-alpine" / "docker-compose.yml"),
+    ))
+    try:
+        text = compose_path.read_text()
+    except OSError as e:
+        raise RuntimeError(
+            f"can't determine epoch_duration: {compose_path} not readable "
+            f"({e}); set KQT_EPOCH_DURATION_S to override"
+        ) from e
+    match = _ENV_LINE_RE.search(text)
+    if not match:
+        raise RuntimeError(
+            f"can't determine epoch_duration: no KATZENPOST_EPOCH_DURATION "
+            f"in {compose_path}; set KQT_EPOCH_DURATION_S to override"
+        )
+    return _parse_go_duration(match.group(1))
+
 
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST

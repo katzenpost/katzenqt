@@ -83,6 +83,7 @@ testpaths = [
 markers = [
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
+    "serial_docker: bounces shared docker containers (kpclientd/gateway); run after and separately from the parallel workers",
 ]
 # We have to re-state the .hypothesis ignore that pytest defaults to,
 # because setting norecursedirs at all replaces the built-in list

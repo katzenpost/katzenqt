@@ -22,6 +22,10 @@ jobs:
       contents: read
       packages: write
     runs-on: ubuntu-latest
+    # Bounds the whole job, including both the parallel and serial pytest
+    # steps below combined -- each of those also carries its own
+    # timeout-minutes: 90 label, but that is not an independent budget on
+    # top of this one; whichever limit is hit first ends the job.
     timeout-minutes: 90
 
     steps:
@@ -43,7 +47,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: a25e9a7656b6c5a90c3551de39e37138c04c6faa # tip of main as of 2026-09-06
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc # tip of main as of 2026-09-08
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
@@ -82,6 +86,7 @@ jobs:
       # Build kpclientd + start the mixnet via katzenpost's own docker
       # Makefile. `make wait` blocks until the dirauths reach consensus.
       - name: Build and start the docker mixnet
+        id: start_mixnet
         working-directory: katzenqt/katzenpost/docker
         run: make base_port=62331 start wait
 
@@ -99,30 +104,54 @@ jobs:
           sudo apt-get install -y libasound2-dev cargo
 
       - name: Install katzenqt + dev deps
+        id: install_deps
         working-directory: katzenqt
-        run: |
-          uv venv .venv
-          uv pip install -e '.[dev]' || uv pip install -e .
-          uv pip install pytest pytest-asyncio pytest-cov hypothesis
+        run: uv sync --all-extras --dev --locked
 
       - name: Run integration tests
         working-directory: katzenqt
         # CI runs roughly 2.5-3x slower than a local docker mixnet, and
         # the multi-box reassembly tests are the slowest, dominating the
-        # wall clock at around eight minutes apiece. The watchdog
-        # regression tests (test_watchdog_*.py) add real-time-bounded
-        # waits of their own (an epoch-rollover confirmation deliberately
-        # sleeps past a full epoch_duration) that scale the same way. A
-        # run with 14 integration tests measured 49m for this step alone
-        # (job total ~60m including setup), right at the previous
-        # sixty-minute ceiling -- the job was killed by the timeout after
-        # every test had already passed. Ninety minutes leaves real
-        # headroom for the whole sequence without inviting per-test
-        # timeouts to mask protocol-level regressions.
+        # wall clock at around eight minutes apiece. A serial run with 14
+        # integration tests measured 49m for this step alone.
+        #
+        # Two phases:
+        #  1. everything EXCEPT the container-bouncing watchdog tests runs
+        #     in parallel via pytest-xdist loadscope (each worker gets its
+        #     own process stack; the only shared resource is kpclientd,
+        #     which the parallel set only talks to, never bounces);
+        #  2. the @pytest.mark.serial_docker tests run afterwards, serially,
+        #     because they stop/pause the shared kpclientd/gateway
+        #     containers and must not race the parallel workers.
+        # 4 workers with a raised send budget floor: the send-side
+        # wall-clock budget in katzenqt's _send_one_gcm (floor raised from
+        # 120s to 240s via KQT_SEND_BUDGET_FLOOR_S) now absorbs the
+        # ~2.5-3x CI slowdown plus 4-way concurrent load on the single
+        # shared kpclientd, which previously caused send timeouts on the
+        # 4-vCPU runner. Drop this only if the runner class changes.
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
-        run: .venv/bin/pytest tests/integration -vv
+          KQT_INTEGRATION_PARALLEL: "4"
+          KQT_SEND_BUDGET_FLOOR_S: "240"
+        run: |
+          .venv/bin/pytest tests/integration -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+            --dist loadscope -m "not serial_docker"
+
+      - name: Run serial watchdog integration tests
+        working-directory: katzenqt
+        # Always run the @pytest.mark.serial_docker watchdog tests even when
+        # the parallel phase above fails, so the state of the shared
+        # kpclientd/gateway containers is still probed on every CI run --
+        # but only once the mixnet is actually up and deps are installed;
+        # skip cleanly rather than probing a mixnet that never started or
+        # a missing venv, and skip on cancellation like every other step.
+        if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' && steps.install_deps.outcome == 'success' }}
+        timeout-minutes: 90
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+        run: |
+          .venv/bin/pytest tests/integration -vv -m serial_docker
 
       - name: Stop the mixnet
         if: always()
@@ -135,5 +164,5 @@ jobs:
         with:
           name: mixnet-${{ github.run_id }}-${{ github.job }}
           path: |
-            katzenqt/katzenpost/docker/voting_mixnet/*/*.log
-            katzenqt/katzenpost/docker/voting_mixnet/*/*/*.log
+            katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
+            katzenqt/katzenpost/docker/mixnet-alpine/*/*/*.log

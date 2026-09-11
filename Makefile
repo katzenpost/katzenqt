@@ -33,6 +33,13 @@ UV_LOCK := $(wildcard uv.lock)
 ALEMBIC_MSG ?=
 ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 
+# make docker-integration KQT_INTEGRATION_PARALLEL=2
+# Number of pytest-xdist workers for the non-serial_docker phase of
+# docker-integration. Default 4 matches CI's worker count (see the
+# workflow); CI's ~2.5-3x slower mixnet is absorbed by the raised 240s
+# _send_one_gcm floor rather than by dropping concurrency.
+KQT_INTEGRATION_PARALLEL ?= 4
+
 .PHONY: default default_uv_setup default_pip_setup help \
 	system-setup install-debian-packages install-uv clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
@@ -250,7 +257,21 @@ docker-integration: setup
 	fi
 	@# Bypass `uv run`'s lock-resync — it would re-resolve the git-pinned
 	@# thinclient and silently overwrite our editable install.
-	@KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv
+	@# Run the non-container-bouncing tests in parallel (see
+	@# @pytest.mark.serial_docker), then the container-bouncing ones serially
+	@# afterwards: they stop/pause the shared kpclientd/gateway containers,
+	@# which must not race the parallel workers. The serial phase always
+	@# runs, even if the parallel phase fails, so the shared containers are
+	@# still probed on every invocation (mirrors CI's `if: always()`).
+	@set +e; \
+	KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv \
+		-n "$(KQT_INTEGRATION_PARALLEL)" --dist loadscope -m "not serial_docker"; \
+	parallel_rc=$$?; \
+	KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv -m serial_docker; \
+	serial_rc=$$?; \
+	set -e; \
+	if [[ $$parallel_rc -ne 0 ]]; then exit $$parallel_rc; fi; \
+	exit $$serial_rc
 .PHONY: docker-integration
 
 $(KATZENPOST_DIR):
