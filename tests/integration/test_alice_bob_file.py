@@ -116,7 +116,7 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
 
     t0 = time.monotonic()
     send = _run_role(
-        alice_state, "send-file", "demo", str(src),
+        alice_state, "send-file", "demo", str(src), "--timeout", "600",
         timeout=900.0,
     )
     assert send.returncode == 0 and "SENT" in _output(send), (
