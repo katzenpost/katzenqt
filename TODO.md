@@ -145,6 +145,13 @@ The synthetic substream peers appear in the contact/user list in the GUI.
   substream peer rows caused real damage; housekeeping here is non-trivial
   because the `active` flag is also used to stop reads.)
 
+### Related commit to review before planning implementation
+
+- `a3d2e2bc44b` "Stop a peer name from spoofing a substream and crashing the
+  reader" — not yet reviewed in this session. It may be relevant to this item
+  (peer-name handling around `:substream:`), so **review it and decide whether
+  to merge it before planning the fix here**.
+
 ---
 
 ## 3. Underlying bug that forced DB surgery: dead-substream read amplification (a.k.a. the "replica storm feedback" bug)
@@ -198,14 +205,41 @@ important thing to understand before touching item 1.
 
 ### Open questions / likely fix surfaces
 
-- What makes a stream "abandonable" once data is known lost? There is no
-  current concept of a terminal `Tombstone`/give-up for a *known-lost*
-  substream read cap (only the Tombstone replica error for a single box).
-- Should the client give up (deactivate the peer + delete the MixWAL) on a dead
-  stream after N consecutive `BoxIDNotFound` rides, instead of the current
-  infinite `no_retry_on_box_id_not_found=False` ride-out?
-- Is the write-side ever told reliably that a chunk was NOT durable? If not,
-  the reader is stuck with a read cap pointing at an empty space.
+RESOLVED DURING REVIEW (2026-09-11) — the design is confirmed and item 3 is
+being implemented this session:
+
+- **What the writer's ACK means (answered from Go code):** a write completes on
+  the courier's ACK — "a single mixnet round trip" (`client/thin/pigeonhole.go:452`,
+  `client/arq.go:84-99`: idempotent write + `ReplyType=ACK` -> `ARQActionComplete`).
+  The courier's `ackReply` fires "the moment an envelope is accepted. Replica
+  dispatch happens asynchronously" (`courier/server/plugin.go:523-528`) and is
+  fire-and-forget to the 2 intermediate replicas, with NO courier-level retry on
+  the normal write path. So the writer's ACK means **only "a courier cached the
+  envelope" — not that any replica durable-stored it**, and the write client is
+  ACK'd and gone (cache-based redispatch, which only fires on client re-polls,
+  never runs). BUT the reader's not-found is a much stronger signal: reads never
+  consult the courier cache, they hit the shard replicas through the proxy
+  failover (`readBoxFromShardReplicas`/"trying the next holder"), so a
+  `BoxIDNotFound` reaching the reader means **no holder anywhere can serve it**.
+- **First not-found IS terminal → deactivate on the FIRST not-found, no N
+  counter needed.** Even with async dispatch, the I-chunk is gated
+  `after_stream` (only written after all substream boxes ACK'd at couriers), the
+  reader only learns of the substream after the I-chunk survives a full mixnet
+  round trip, plus app-facing delays (5s give_up sleep, 15s sweep, 60s arming
+  sweep) stack on top — any replica dispatch still in flight has landed or
+  permanently failed long before the reader first tries the substream box. This
+  matches operationally: boxes 5526-5543 never reappeared.
+- **Design confirmed:** in `drain_mixwal_read_single`, for peers whose name
+  starts with `_SUBSTREAM_NAME_PREFIX`, use `no_retry_on_box_id_not_found=True`
+  (fail-fast, like `voucher._read_box`); on the first `BoxIDNotFoundError`/
+  `TombstoneError`, cancel the in-flight ARQ (`cancel_resending_encrypted_message`)
+  and drain task (new per-`bacap_stream` registry), set `cp.active=False`,
+  delete the is_read MixWAL row, `draining_right_now.discard`, and WARNING-log.
+  Keep the ReadCapWAL + ReceivedPiece rows so a future retry (item 4/5) can
+  resume from `next_index`. Normal conversation peers keep the current
+  ride-out behavior.
+- Are the items above (deactivate/keep-RP/retry primitive) consistent with item
+  5's per-peer pause/resume? Yes — pause/deactivate share the same machinery.
 
 ---
 
@@ -237,48 +271,27 @@ the whole file arrives. Feature request (addition, not a bugfix):
 
 ---
 
-## 5. Review branch `fix/readarm-drain-race` for relevance — DONE (assessed as unrelated to storm, PR-worthwhile but not a fix for items 1/3)
+## 5. Feature: per-peer pause/resume (and the retry primitive for dead substreams)
 
-There is a local (currently unmerged) branch `fix/readarm-drain-race`
-(also `fix/readarm-latch-wedge` exists — its parent, but on the audio branch;
-still unexamined, ignore for now).
+The `ConversationPeer.active` flag (`persistent.py:762`) already gates arming
+(`network.py:1221`), but there is no GUI way to toggle it individual peers, and
+`active=False` alone is not enough to stop reads: `drain_mixwal2`'s 15s sweep
+re-casts pending is_read MixWAL rows regardless of `active`. Building
+per-peer pause/resume:
 
-REVIEW OUTCOME (2026-09-11):
-
-- Branch = 2 commits on `b7cc1028` (ancestor of `deckard-dev`, so it applies
-  onto our HEAD cleanly; `git merge-tree --write-tree da4276d fix/readarm-drain-race`
-  shows a clean merge). Files touched: `src/katzenqt/network.py` (+270, -59
-  roughly) and `tests/test_network_fake.py` (+349). No replica/Go code.
-  ~70 tests pass on the branch (ran `pytest tests/test_network_fake.py` in the
-  existing worktree `/home/kpdev/katzenqt.readarm`).
-- What it actually fixes:
-  1. `b3f1d10` races the drain RPCs (`get_message_box_index_counter`,
-     `start_resending_encrypted_message`, `encrypt_read`, `mark_sent`) against
-     `_reconnect_event` / `_epoch_event`, raising `ConnectionLifeInterruptedError`;
-     `drain_mixwal_read_single` catches it and `give_up()` (leaves MW for
-     idempotent re-send) instead of wedging the stream on an orphaned RPC reply
-     after a daemon bounce.
-  2. `54ca382` bounds `_wait_for_connection_or_shutdown` with
-     `_CONNECTION_IDLE_RETRY_S` and adds an `_ARMING_SWEEP_S` re-arm pass so
-     `readables_to_mixwal` / `send_resendable_plaintexts` don't strand forever
-     if `__mixnet_connected` is cleared and never re-set on a full kpclientd restart.
-- **Relevance vs the session's bugs:**
-  - NOT the replica proxy-sweep storm (item 1) — that is Go-side
-    (`/home/kpdev/katzenpost`), this branch is Python client-side only.
-  - NOT a fix for the dead-substream infinite BoxIDNotFound ride-out (item 3a);
-    `no_retry_on_box_id_not_found=False` + "readably alive" peers still ride
-    outcome-nonfatal reads forever.
-  - NOT the idx-mismatch/duplicate read-cursor race that forced DB surgery
-    (item 3b) — none of the "not advancing idx ... already handled?" logic at
-    `network.py:645-654` is touched.
-  - BUT it does harden the exact failure family we hit operationally
-    (client stream wedges / stranded read-arm loops after bounce). It would NOT
-    have saved the delivery on its own; the storm was replica-side.
-- **Recommendation (drafted, awaiting user go/no-go):** worth a PR to main as a
-  general robustness improvement (clean, well-tested, targets daemon-bounce
-  wedges), but it does NOT address TODO items 1 or 3. **Do not merge as a
-  "fix our storm"** — treat as orthogonal hardening.
-
-> Note: reviewing this branch was task 5; it was deliberately weighted AFTER
-> the two bug tasks (1,3) and the feature (4) so review conclusions could be
-> weighed against what we now know operationally.
+- Pause a peer = set `active=False`, delete its pending is_read MixWAL rows,
+  and cancel any in-flight read ARQ (`cancel_resending_encrypted_message`) and
+  drain task (shared per-`bacap_stream` registry from item 3), so reads stop
+  immediately rather than on the next sweep.
+- Resume = set `active=True` and poke `readables_to_mixwal_event` so the read
+  arms again from the saved ReadCapWAL `next_index`. Kept ReceivedPiece rows
+  are picked up by `_try_assemble`.
+- GUI: tag contacts-tree peer `QStandardItem`s with `peer.id` (Qt.UserRole;
+  currently only convo items carry `conversation_id` at `katzen.py:1833`, peer
+  items have no id) and add a right-click Pause/Resume action on peer rows
+  (not own-peer; `katzen.py:1536`). QMenu already imported at `katzen.py:34`.
+- This is also the retry primitive item 4's download pause/cancel and the
+  dead-substream resume button need — a deactivated substream (item 3) can be
+  re-armed via Resume.
+- Note: `a3d2e2bc44b` (see item 2) touches peer-name/substream handling and
+  should be reviewed/possibly merged before implementation planning here.
