@@ -6,7 +6,7 @@
     },
     "build-commands": [
         "pip3 install --prefix=/app --no-deps --no-index --find-links=. maturin==1.8.2",
-        "maturin build --offline --locked --release --interpreter python3",
+        "maturin build --offline --locked --release --compatibility linux --interpreter python3",
         "pip3 install --prefix=/app --no-deps --no-index target/wheels/rustic_audio_tool-*.whl"
     ],
     "sources": [
