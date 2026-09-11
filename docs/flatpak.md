@@ -27,3 +27,17 @@ Run these from the repo root:
 
 Python dependencies are vendored as pinned, hash-checked sources
 (`python3-deps.json`, `pyside6-sources.json`) because the build has no network.
+
+## Starting the daemon
+
+Outside the Flatpak the launcher can start the daemon itself. `python -m
+katzenqt.launcher --install-service` writes the plain `Type=simple` unit from
+package data, reloads the user manager, and enables and starts it; `make
+kpclientd.service` builds and installs the binary and config and then calls the
+launcher to do this. On a normal run, if no socket is reachable the launcher
+installs and starts the service and waits for the socket. systemd owns
+supervision through the unit's restart policy.
+
+Inside the Flatpak the launcher never starts the daemon: a sandboxed GUI cannot
+reach the host systemd user manager, so it only reaches an already running host
+daemon over the socket.

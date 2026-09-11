@@ -6,10 +6,13 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
+from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
 APP = "network.katzenpost.katzenqt"
+DATA = files("katzenqt") / "data"
 FLATPAK = Path("/.flatpak-info").exists()
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 ROOT = RUNTIME / ("app" if FLATPAK else "") / APP
@@ -62,10 +65,44 @@ def networked() -> bool:
     return "network" in info.get("Context", "shared", fallback="").split(";")
 
 
+def service_blocker() -> str | None:
+    if FLATPAK:
+        return "cannot install a host service from inside Flatpak"
+    if not (Path.home() / ".local/bin/kpclientd").is_file():
+        return "kpclientd is not installed at ~/.local/bin (run: make install-kpclient)"
+    if not (Path.home() / ".local/katzenpost/client.toml").is_file():
+        return "client.toml is not at ~/.local/katzenpost (run: make install-kpclient)"
+    if not shutil.which("systemctl"):
+        return "systemctl not found (a systemd user session is required)"
+    return None
+
+
+def install_service() -> bool:
+    if service_blocker():
+        return False
+    units = Path.home() / ".config/systemd/user"
+    units.mkdir(mode=0o700, parents=True, exist_ok=True)
+    unit = units / "kpclientd.service"
+    wanted = (DATA / "kpclientd.service").read_bytes()
+    if not unit.exists() or unit.read_bytes() != wanted:
+        unit.write_bytes(wanted)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(
+        ["systemctl", "--user", "enable", "--now", "kpclientd"], check=True
+    )
+    return True
+
+
 def main() -> None:
-    """Report daemon availability or launch the GUI with its socket."""
 
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if mode == "--install-service":
+        blocker = service_blocker()
+        if blocker:
+            raise SystemExit(f"kpclientd.service not installed: {blocker}")
+        install_service()
+        print("kpclientd.service installed, enabled, and started")
+        return
     tcp = os.environ.get("KATZENQT_KPCLIENTD_TCP")
     if tcp:
         if not networked():
@@ -87,10 +124,23 @@ def main() -> None:
             else "unavailable"
         )
         return
+    installed = False
+    if not address and not FLATPAK:
+        installed = install_service()
+        if installed:
+            for _ in range(600):
+                address = endpoint()
+                if address:
+                    break
+                time.sleep(0.05)
     if not address:
-        raise SystemExit(
-            "kpclientd is unavailable; start it and retry"
-        )
+        if FLATPAK:
+            hint = "install the native service and retry"
+        elif installed:
+            hint = "check 'systemctl --user status kpclientd'"
+        else:
+            hint = "install kpclientd with 'make install-kpclient' and retry"
+        raise SystemExit(f"kpclientd is unavailable; {hint}")
     os.environ["KATZENQT_THINCLIENT_CONFIG"] = str(thin(address))
     if FLATPAK:
         os.chdir("/app/share/katzenqt")

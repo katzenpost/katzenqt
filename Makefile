@@ -330,10 +330,7 @@ install-kpclient: $(KPCLIENTD_BIN)
 	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
-	@install -d -m 0700 ~/.config/systemd/user
-	@install -m 0644 src/katzenqt/data/kpclientd.service ~/.config/systemd/user/kpclientd.service
-	@systemctl --user daemon-reload
-	@systemctl --user enable --now kpclientd >/dev/null 2>&1
+	@$(VENV)/bin/python -m katzenqt.launcher --install-service
 
 alembic-check-uv:
 	@state=$$(mktemp -d); \

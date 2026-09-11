@@ -194,3 +194,16 @@ def test_docker_test_script():
 def test_integration_wrapper_dies_with_parent():
     wrapper = (FLATPAK / "integration-python").read_text()
     assert "flatpak run --die-with-parent" in wrapper
+
+
+def test_kpclientd_service_is_a_plain_systemd_unit():
+    service = (ROOT / "src" / "katzenqt" / "data" / "kpclientd.service").read_text()
+    assert "Type=simple" in service
+    assert "BusName" not in service
+    assert "ExecStart=%h/.local/bin/kpclientd -c" in service
+
+
+def test_kpclientd_service_target_delegates_to_launcher():
+    body = target_body("kpclientd.service")
+    assert len(body) == 1
+    assert "katzenqt.launcher --install-service" in body[0]

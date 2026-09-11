@@ -1,5 +1,6 @@
 import importlib
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -60,7 +61,9 @@ def test_status_reports_all_endpoints(launcher, monkeypatch, capsys):
 
 
 def test_unavailable_daemon_never_starts_gui(launcher, monkeypatch):
+    monkeypatch.setattr(launcher, "FLATPAK", False)
     monkeypatch.setattr(launcher, "endpoint", lambda: None)
+    monkeypatch.setattr(launcher, "install_service", lambda: False)
     monkeypatch.setattr(
         launcher.subprocess, "call", lambda *_: pytest.fail("GUI started")
     )
@@ -113,3 +116,90 @@ def test_tcp_requires_network_in_flatpak(launcher, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["launcher"])
     with pytest.raises(SystemExit, match="network access"):
         launcher.main()
+
+
+def _seed_daemon(home, config_text):
+    binary = home / ".local/bin/kpclientd"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    config = home / ".local/katzenpost/client.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(config_text)
+
+
+def test_install_service_writes_plain_unit_and_starts(launcher, monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_daemon(tmp_path, "hand-tuned\n")
+    monkeypatch.setattr(launcher.shutil, "which", lambda name: "/usr/bin/systemctl")
+    ran = []
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda *a, **k: ran.append(a[0]) or subprocess.CompletedProcess(a, 0),
+    )
+    assert launcher.install_service() is True
+    assert (tmp_path / ".config/systemd/user/kpclientd.service").is_file()
+    assert (tmp_path / ".local/katzenpost/client.toml").read_text() == "hand-tuned\n"
+    assert ["systemctl", "--user", "daemon-reload"] in ran
+    assert ["systemctl", "--user", "enable", "--now", "kpclientd"] in ran
+
+
+def test_install_service_keeps_a_matching_unit(launcher, monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_daemon(tmp_path, "hand-tuned\n")
+    monkeypatch.setattr(launcher.shutil, "which", lambda name: "/usr/bin/systemctl")
+    unit = tmp_path / ".config/systemd/user/kpclientd.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_bytes((launcher.DATA / "kpclientd.service").read_bytes())
+    ran = []
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda *a, **k: ran.append(a[0]) or subprocess.CompletedProcess(a, 0),
+    )
+    assert launcher.install_service() is True
+    assert ["systemctl", "--user", "daemon-reload"] not in ran
+    assert ["systemctl", "--user", "enable", "--now", "kpclientd"] in ran
+
+
+def test_install_service_skips_without_binary(launcher, monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    called = []
+    monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: called.append(a))
+    assert launcher.install_service() is False
+    assert called == []
+
+
+def test_install_service_mode_reports_blocker(launcher, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["launcher", "--install-service"])
+    monkeypatch.setattr(launcher, "service_blocker", lambda: "run: make install-kpclient")
+    monkeypatch.setattr(
+        launcher, "install_service", lambda: pytest.fail("should not install")
+    )
+    with pytest.raises(SystemExit, match="make install-kpclient"):
+        launcher.main()
+
+
+def test_dev_mode_installs_service_then_launches(launcher, monkeypatch):
+    calls = {"install": 0}
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setattr(
+        launcher,
+        "install_service",
+        lambda: calls.__setitem__("install", calls["install"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        launcher, "endpoint", lambda: launcher.HOST if calls["install"] else None
+    )
+    monkeypatch.setattr(launcher.time, "sleep", lambda _: None)
+    launched = []
+    monkeypatch.setattr(launcher.subprocess, "call", lambda *a: launched.append(a) or 0)
+    monkeypatch.setattr(sys, "argv", ["launcher"])
+    with pytest.raises(SystemExit):
+        launcher.main()
+    assert calls["install"] == 1
+    assert launched
