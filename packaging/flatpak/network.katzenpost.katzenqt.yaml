@@ -2,10 +2,13 @@ app-id: network.katzenpost.katzenqt
 runtime: org.kde.Platform
 runtime-version: '6.9'
 sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: katzenqt
 
 finish-args:
   - --socket=wayland
+  - --socket=pulseaudio
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
@@ -24,6 +27,8 @@ modules:
     sources:
       - pyside6-sources.json
 
+  - rustic-audio-tool.json
+
   - name: katzenqt
     buildsystem: simple
     build-commands:
@@ -34,6 +39,8 @@ modules:
       - install -d /app/share/katzenqt
       - cp -a resources /app/share/katzenqt/
       - install -Dm644 network.katzenpost.katzenqt.desktop
+        /app/share/applications/network.katzenpost.katzenqt.desktop
+      - desktop-file-edit --set-icon=network.katzenpost.katzenqt
         /app/share/applications/network.katzenpost.katzenqt.desktop
       - install -Dm644 network.katzenpost.katzenqt.metainfo.xml
         /app/share/metainfo/network.katzenpost.katzenqt.metainfo.xml

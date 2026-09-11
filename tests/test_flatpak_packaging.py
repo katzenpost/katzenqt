@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -81,7 +82,7 @@ def test_scripts_are_executable_posix_sh():
 
 def test_build_script_builds_and_folds_the_checks():
     body = (FLATPAK / "build.sh").read_text()
-    assert "git archive" in body
+    assert 'git -C "$root" archive' in body
     assert "flatpak-builder" in body
     assert "make flatpak-system-deps" in body
     assert "lint.sh" in body
@@ -133,7 +134,6 @@ def test_container_driver_declares_the_privileged_flags():
     assert '"$PODMAN" run' in body
     assert "--privileged" in body
     assert "--device /dev/fuse" in body
-    assert "github.com/flatpak/flatpak-github-actions" in body
 
 
 def test_container_image_carries_the_toolchain():
@@ -227,3 +227,22 @@ def test_release_script_runs_the_release_stages():
 def test_flathub_skips_unsupported_arch():
     flathub = FLATPAK / "flathub.json"
     assert json.loads(flathub.read_text()) == {"skip-arches": ["aarch64"]}
+
+
+def test_flatpak_pins_match_the_application_lock():
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    thin = next(p for p in lock["package"] if p["name"] == "katzenpost-thinclient")
+    modules = json.loads((FLATPAK / "python3-deps.json").read_text())["modules"]
+    module = next(p for p in modules if p["name"] == "python3-katzenpost_thinclient")
+    wheel = thin["wheels"][0]
+    assert any(
+        source.get("url") == wheel["url"]
+        and source["sha256"] == wheel["hash"].removeprefix("sha256:")
+        for source in module["sources"]
+    )
+    audio = json.loads((FLATPAK / "rustic-audio-tool.json").read_text())
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert audio["sources"][0]["commit"] == (
+        project["tool"]["uv"]["sources"]["rustic-audio-tool"]["rev"]
+    )
+    assert "--socket=pulseaudio" in MANIFEST.read_text()

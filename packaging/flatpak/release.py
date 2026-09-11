@@ -138,6 +138,8 @@ def stage(tag, destination, remote=False):
         "packaging/flatpak/flathub.json",
         "packaging/flatpak/pyside6-sources.json",
         "packaging/flatpak/python3-deps.json",
+        "packaging/flatpak/rustic-audio-tool.json",
+        "packaging/flatpak/rustic-audio-sources.json",
         f"packaging/flatpak/{APP_ID}.metainfo.xml",
         f"packaging/{APP_ID}.desktop",
         "packaging/flatpak/screenshots/katzenqt.png",

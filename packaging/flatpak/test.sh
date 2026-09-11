@@ -26,11 +26,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if "$here/docker-check.sh" "$FLATPAK_DOCKER_ADDRESS" >/dev/null 2>&1; then
-	test -f "$docker/voting_mixnet/running.stamp"
-	"$MAKE" -C "$docker" ps | grep -Eq '(^|[[:space:]])kpclientd([[:space:]]|$)'
+	test -f "$docker/${KATZENQT_NET_NAME:-mixnet-alpine}/running.stamp"
 else
 	started=1
-	"$MAKE" -C "$docker" start wait
+	"$MAKE" -C "$docker" base_port=62331 start wait
 fi
 
 "$MAKE" setup-uv

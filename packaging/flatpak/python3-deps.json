@@ -312,7 +312,7 @@
             "name": "python3-katzenpost_thinclient",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"katzenpost_thinclient==0.0.23\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"katzenpost_thinclient==0.0.24\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -337,8 +337,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/45/d2/57eaa14e83364f91c1144ab95cd2038558392f011fada1f2e8eb50280a32/katzenpost_thinclient-0.0.23-py3-none-any.whl",
-                    "sha256": "c9c9aeab68c3fcdef15a46894e8d556dcdcbc7bcc70f29e8f7171fba38e0f176"
+                    "url": "https://files.pythonhosted.org/packages/b4/e3/739aca17b3a1428550f9f7d7d8dd9d8a60232cd39929c8cb276cbbd2b4ff/katzenpost_thinclient-0.0.24-py3-none-any.whl",
+                    "sha256": "5e542c3f1bb4c3c2c4814e67bd5f7d8f941d4f95d20f9244fda957f796510c60"
                 },
                 {
                     "type": "file",

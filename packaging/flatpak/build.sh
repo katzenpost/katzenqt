@@ -4,15 +4,14 @@ set -eu
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/../.." && pwd)
 id=network.katzenpost.katzenqt
-epoch=1787647836
-timestamp=2026-08-25T08:50:36Z
+epoch=1789130760
+timestamp=2026-09-11T12:46:00Z
 screenshot="$here/screenshots/katzenqt.png"
 media_url=https://dl.flathub.org/media/network/katzenpost/katzenqt/katzenqt.png
 
 build_all() {
 	cd "$root"
-	rm -rf .flatpak-build .flatpak-export .flatpak-repo "$here/katzenqt-src.tar.gz"
-	git archive --format=tar.gz -o "$here/katzenqt-src.tar.gz" HEAD
+	rm -rf .flatpak-build .flatpak-export .flatpak-repo
 	flatpak-builder --force-clean --override-source-date-epoch="$epoch" \
 		--repo=.flatpak-export .flatpak-build "packaging/flatpak/$id.yaml"
 	python3 "$here/mirror-screenshot.py" catalog .flatpak-build "$screenshot" "$media_url" "$timestamp"
@@ -22,14 +21,11 @@ build_all() {
 	flatpak build-update-repo --no-update-appstream .flatpak-repo
 }
 
-# second build for the reproducibility check
 if [ "${KQT_REBUILD:-}" = "1" ]; then
 	build_all
 	exit 0
 fi
 
-# inside the container: run the real build and the folded checks. the image
-# already carries the toolchain and the runtime, so there is nothing to probe.
 if [ "${KQT_FLATPAK_INNER:-}" = "1" ]; then
 	build_all
 	"$here/lint.sh" "packaging/flatpak/$id.yaml" .flatpak-repo
@@ -41,12 +37,10 @@ if [ "${KQT_FLATPAK_INNER:-}" = "1" ]; then
 	exit 0
 fi
 
-# on the host: the build and every check run inside podman so the heavy flatpak
-# toolchain never touches the host. only podman is required here; the driver
-# builds the image and runs this script again with KQT_FLATPAK_INNER=1.
 command -v podman >/dev/null 2>&1 || {
 	printf '%s\n' "podman is required to build the flatpak" \
 		"run: make flatpak-system-deps" >&2
 	exit 1
 }
+git -C "$root" archive --format=tar.gz -o "$here/katzenqt-src.tar.gz" HEAD
 exec "$here/container/build.sh"
