@@ -1,5 +1,21 @@
 # katzenqt / katzenpost TODO
 
+## Maintenance rules for this file
+
+This file is a living document and is committed to git (branch `deckard-dev`).
+Keep it up to date as part of the working session:
+
+- Whenever a TODO item is completed, mark it done (move it to a "Done" /
+  "Resolved" section or update its status) and **commit** the change.
+- Whenever new discoveries obsolete or supersede statements in this file,
+  update the statements and **commit**.
+- Whenever new tasks surface, add them (either marked as new/backlog or with a
+  note about their priority) and **commit** if they are "session-worthy".
+  Small ephemeral notes that will be consumed within the same session can
+  stay uncommitted until the session ends.
+- Commit messages should be short and match the repo's existing style
+  (imperative, lowercase-ish, e.g. `add TODO.md: ...`, `update TODO.md: ...`).
+
 State as of 2026-09-11. Session context: recovering from a proxy-sweep storm in a
 5-replica katzenpost mixnet while debugging the delivery of Bob's
 `jamiroquai.webp` (37300 B) to Alice and Carol. **Delivery of Bob's second
