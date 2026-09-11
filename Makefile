@@ -31,6 +31,8 @@ THINCLIENT_VER := 0.0.24
 PPRINTPP_VER := 0.4.0
 PIP_VER := 24.2
 MATURIN_VER := 1.8.2
+RUSTIC_AUDIO_URL := https://github.com/katzenpost/Rustic_Audio_PyO3
+RUSTIC_AUDIO_REV := 2158e2a5cc5e58f430b4c0bf2f5603d8909becc6
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py

@@ -12,6 +12,8 @@ def test_pins_are_explicit():
     assert re.search(r"^PYCRDT_REV := [0-9a-f]{40}$", makefile, re.MULTILINE)
     assert re.search(r"^THINCLIENT_VER := ", makefile, re.MULTILINE)
     assert re.search(r"^PPRINTPP_VER := ", makefile, re.MULTILINE)
+    assert re.search(r"^RUSTIC_AUDIO_URL := https://github.com/", makefile, re.MULTILINE)
+    assert re.search(r"^RUSTIC_AUDIO_REV := [0-9a-f]{40}$", makefile, re.MULTILINE)
 
 
 def test_closure_builds_from_source_not_prebuilt_binaries():
@@ -22,6 +24,8 @@ def test_closure_builds_from_source_not_prebuilt_binaries():
     assert "--no-binary :all:" in body
     assert "python3-pycrdt" in body
     assert "python3-katzenpost-thinclient" in body
+    assert "python3-rustic-audio-tool" in body
+    assert "$RUSTIC_AUDIO_URL" in body and "$RUSTIC_AUDIO_REV" in body
 
 
 def test_vendored_debs_declare_their_debian_runtime_deps():

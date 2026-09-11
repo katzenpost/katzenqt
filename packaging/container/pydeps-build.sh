@@ -13,6 +13,8 @@ MATURIN_VER=$(sed -n 's/^MATURIN_VER := //p' "$mk")
 
 SOURCE_DATE_EPOCH=$(dpkg-parsechangelog -l "$root/debian/changelog" -STimestamp)
 export SOURCE_DATE_EPOCH
+RUSTIC_AUDIO_URL=$(sed -n 's/^RUSTIC_AUDIO_URL := //p' "$mk")
+RUSTIC_AUDIO_REV=$(sed -n 's/^RUSTIC_AUDIO_REV := //p' "$mk")
 
 mkdir -p "$out"
 work=$(mktemp -d)
@@ -48,6 +50,13 @@ git -C "$work/pycrdt" -c advice.detachedHead=false switch --detach "$PYCRDT_REV"
 mkdir -p "$work/wh-pycrdt"
 "$PIP" wheel --no-deps -w "$work/wh-pycrdt" "$work/pycrdt"
 build_deb python3-pycrdt amd64 "$work/wh-pycrdt" "python3, python3-anyio"
+
+git clone --quiet "$RUSTIC_AUDIO_URL" "$work/audio"
+git -C "$work/audio" -c advice.detachedHead=false switch --detach "$RUSTIC_AUDIO_REV"
+mkdir -p "$work/wh-audio"
+"$PIP" wheel --no-deps -w "$work/wh-audio" "$work/audio"
+build_deb python3-rustic-audio-tool amd64 "$work/wh-audio" \
+	"python3, libasound2t64 | libasound2"
 
 mkdir -p "$work/wh-pprintpp"
 "$PIP" wheel --no-deps --only-binary :all: -w "$work/wh-pprintpp" "pprintpp==$PPRINTPP_VER"

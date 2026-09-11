@@ -18,5 +18,5 @@ out="dist/$distro"
 mkdir -p "$out"
 "$PODMAN" run --rm -v "$PWD:/src:ro,z" -v "$PWD/$out:/out:rw,z" "$image" \
 	/src/packaging/container/pydeps-build.sh /out
-sha256sum "$out"/python3-pycrdt_*.deb "$out"/python3-pprintpp_*.deb \
+sha256sum "$out"/python3-pycrdt_*.deb "$out"/python3-pprintpp_*.deb "$out"/python3-rustic-audio-tool_*.deb \
 	"$out"/python3-katzenpost-thinclient_*.deb

@@ -25,7 +25,8 @@ Depends: ${python3:Depends},
          python3-sqlalchemy,
          python3-sqlmodel,
          python3-aiosqlite,
-         python3-alembic
+         python3-alembic,
+         python3-rustic-audio-tool
 Description: Katzenpost mixnet chat client (experimental)
  katzenqt is an experimental Qt group chat client for the Katzenpost mix
  network. It must not be relied on for security, anonymity, privacy,
