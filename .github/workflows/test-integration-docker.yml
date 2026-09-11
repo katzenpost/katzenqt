@@ -91,6 +91,13 @@ jobs:
       # Create the venv and install katzenqt in editable mode — matches
       # what `make docker-integration` does locally, minus the Makefile's
       # apt/pipx bootstrap which the GitHub runner doesn't need.
+      # rustic-audio-tool's maturin build needs ALSA headers and cargo, which
+      # make deps installs elsewhere but this job skips.
+      - name: Install audio build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev cargo
+
       - name: Install katzenqt + dev deps
         working-directory: katzenqt
         run: |

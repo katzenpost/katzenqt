@@ -4,32 +4,34 @@ APP_NAME = "KatzenQt"
 import argparse
 import asyncio
 import fcntl
+import hashlib
 import logging
 import math
 import os
+import shutil
 import sys
 import threading
 import time
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import NamedTuple, Optional, TYPE_CHECKING
+
+import cbor2
 
 import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
-                            QSettings, QSize, QThread, QUrl, Signal, QTimer)
-from PySide6.QtGui import (QAction, QIcon, QKeySequence, QPixmap, QShortcut,
-                           QStandardItem, QStandardItemModel)
-from PySide6.QtMultimedia import (QAudioBufferInput, QAudioBufferOutput,
-                                  QAudioFormat, QAudioInput,
-                                  QMediaCaptureSession, QMediaRecorder)
+                            QSettings, QSize, Property, Slot, QThread, QUrl,
+                            Signal, QTimer)
+from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
+                           QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
-                               QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QFormLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QToolButton, QTreeView,
                                QTreeWidgetItem, QVBoxLayout)
@@ -37,6 +39,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
+from . import attachment_images
 from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
@@ -46,11 +49,12 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
                      pending_joiner_join_conversation_ids, pending_voucher_for)
+from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
-# qt_models.py — also re-exports ConversationUIState (moved here so the
+# qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
 from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
@@ -62,6 +66,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
+
+class _AttachmentError(Exception):
+    """User-facing attachment problem (missing file, checksum mismatch,
+    oversized body that was dropped on receive)."""
+
+
+class _ResolvedAttachment(NamedTuple):
+    """On-disk path for a chat attachment, looked up from ConversationLog."""
+    basename: str
+    filetype: str | None
+    path: Path
 
 # Bound on how long receive_msg_listener/peer_added_listener wait for a
 # conversation_id to appear in conversation_state_by_id before giving up on
@@ -107,7 +122,7 @@ class AsyncioThread(threading.Thread):
 # https://www.datacamp.com/tutorial/introduction-to-pyside6-for-building-gui-applications-with-python
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtQml/QQmlEngine.html
-# offlineStoragePathᅟ - The directory for storing offline user data
+# offlineStoragePath - The directory for storing offline user data
 # clearComponentCache()
 
 def todo_unicode():
@@ -261,79 +276,466 @@ class MainWindow(QMainWindow):
     def X_keyReleaseEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key released", key)
+
+    def _push_to_talk_audio(self) -> PttAudioBridge | None:
+        if getattr(self, "_ptt_audio_failed", False):
+            return None
+        if audio := getattr(self, "_ptt_audio", None):
+            return audio
+        try:
+            self._ptt_audio = PttAudioBridge()
+        except AudioEngineUnavailable as exc:
+            self._ptt_audio_failed = True
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    str(exc),
+                ),
+            )
+            return None
+        # The attachment controls are created before the audio engine is lazily
+        # initialized, so refresh them once the backend becomes available.
+        if hasattr(self, "stop_attachment_audio_button"):
+            self._update_attachment_controls()
+        return self._ptt_audio
+
+    def _push_to_talk_reset_ui(self) -> None:
+        self.ui.ptt_hold_space_label.setText("Hold space bar to record audio.")
+
+    def _show_status_message(
+        self,
+        title: str,
+        message: str,
+        *,
+        timeout_ms: int = 5000,
+    ) -> None:
+        status_text = f"{title}: {message}" if title else message
+        self.statusBar().showMessage(status_text, timeout_ms)
+
+    def _start_playback_monitor(self, failure_message: str) -> None:
+        self._playback_failure_message = failure_message
+        self._playback_error_timer.start()
+
+    def _stop_playback_monitor(self) -> None:
+        self._playback_failure_message = None
+        self._playback_error_timer.stop()
+        self._set_playing_message_id("")
+
+    def _poll_playback_error(self) -> None:
+        audio = getattr(self, "_ptt_audio", None)
+        if audio is None:
+            self._stop_playback_monitor()
+            return
+
+        try:
+            if error := audio.take_playback_error():
+                failure_message = self._playback_failure_message or "Audio playback failed."
+                self._stop_playback_monitor()
+                QMessageBox.critical(
+                    self,
+                    f"ERROR: {APP_NAME}",
+                    f"{failure_message}\n\n{error}",
+                )
+                return
+            if not audio.is_playing:
+                # Playback may finish just before the Rust thread stores an error.
+                if error := audio.take_playback_error():
+                    failure_message = self._playback_failure_message or "Audio playback failed."
+                    self._stop_playback_monitor()
+                    QMessageBox.critical(
+                        self,
+                        f"ERROR: {APP_NAME}",
+                        f"{failure_message}\n\n{error}",
+                    )
+                    return
+                self._stop_playback_monitor()
+        except AudioEngineError as exc:
+            self._stop_playback_monitor()
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to monitor audio playback.\n\n{exc}",
+            )
+
+    def _selected_attachment_item(self) -> QListWidgetItem | None:
+        return self.ui.attached_files_QListWidget.currentItem()
+
+    def _selected_attachment_path(self) -> Path | None:
+        item = self._selected_attachment_item()
+        if item is None:
+            return None
+        path = item.data(0x100)
+        if not path:
+            return None
+        return Path(path)
+
+    def _is_previewable_attachment(self, path: Path | None) -> bool:
+        return path is not None and path.is_file() and path.suffix.lower() == ".opus"
+
+    def _update_attachment_controls(self) -> None:
+        selected_path = self._selected_attachment_path()
+        audio = getattr(self, "_ptt_audio", None)
+        is_draft = bool(audio and selected_path and audio.is_draft_path(selected_path))
+
+        self.preview_attachment_button.setEnabled(self._is_previewable_attachment(selected_path))
+        self.stop_attachment_audio_button.setEnabled(audio is not None)
+        self.discard_attachment_button.setEnabled(selected_path is not None)
+        self.discard_attachment_button.setText(
+            "Discard voice note" if is_draft else "Remove attachment"
+        )
+
+    def _play_attachment_preview(self) -> None:
+        audio = self._push_to_talk_audio()
+        selected_path = self._selected_attachment_path()
+        if not audio or not self._is_previewable_attachment(selected_path):
+            return
+        try:
+            audio.play_preview(selected_path)
+            self._start_playback_monitor("Failed to preview the selected audio clip.")
+        except AudioEngineError as exc:
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to preview the selected audio clip.\n\n{exc}",
+            )
+
+    def _discard_selected_attachment(self) -> None:
+        item = self._selected_attachment_item()
+        if item is None:
+            return
+        convo = self.convo_state()
+        path = Path(item.data(0x100))
+        audio = getattr(self, "_ptt_audio", None)
+        if audio is not None:
+            try:
+                audio.stop_playback()
+            except AudioEngineError:
+                pass
+            self._stop_playback_monitor()
+            if audio.is_draft_path(path):
+                audio.discard_draft(path)
+        convo.attached_files.discard(str(path))
+        self.refresh_attached_files_for_conversation(convo)
+
+    def _resolve_attachment(self, message_id: str) -> "_ResolvedAttachment | None":
+        """Rehydrate an attachment to a concrete on-disk path.
+
+        QML only carries lightweight model roles, so the payload is decoded
+        here on demand. Handles the three persisted shapes:
+
+        * ``file_marker`` (received): the bytes are already spilled to disk by
+          :func:`network._spill_attachment`; verify the SHA-256 and return it.
+        * ``file_outgoing`` (sent): read from the original ``src_path`` if it
+          is still on disk; an empty ``src_path`` (voice-note draft) yields
+          ``None``.
+        * inline ``GroupChatMessage.file_upload`` (legacy): spill the inline
+          bytes into a per-message cache file.
+
+        Raises :class:`_AttachmentError` for oversized markers, missing
+        spilled files, and checksum mismatches. ``self`` is intentionally
+        unused so the helper can be exercised in isolation.
+        """
+        try:
+            message_uuid = uuid.UUID(message_id)
+        except ValueError:
+            return None
+
+        with persistent.Session(persistent._engine_sync) as sess:
+            conversation_log = sess.get(persistent.ConversationLog, message_uuid)
+            if conversation_log is None or conversation_log.payload[:1] != b"F":
+                return None
+            body = conversation_log.payload[1:]  # strip framing byte shared with wire format
+
+        state_root = persistent.state_file.parent
+
+        # Attachment markers are CBOR dicts carrying a "kind" key.
+        try:
+            decoded = cbor2.loads(body)
+        except Exception:
+            decoded = None
+
+        if isinstance(decoded, dict) and "kind" in decoded:
+            kind = decoded.get("kind")
+            basename = decoded.get("basename") or "unnamed"
+            filetype = decoded.get("filetype")
+
+            if kind == "file_oversized":
+                raise _AttachmentError(
+                    f"{basename} was too large to receive and its contents "
+                    "were dropped."
+                )
+
+            if kind == "file_marker":
+                # Bytes live under state_dir/attachments/; marker holds rel_path + sha256.
+                rel_path = decoded.get("rel_path")
+                if not rel_path:
+                    raise _AttachmentError(f"{basename} has no stored location.")
+                abs_path = state_root / rel_path
+                try:
+                    abs_path.resolve().relative_to(state_root.resolve())
+                except ValueError:
+                    raise _AttachmentError(
+                        f"{basename} has an invalid stored location."
+                    ) from None
+                if not abs_path.is_file():
+                    raise _AttachmentError(
+                        f"The received file for {basename} is missing on disk."
+                    )
+                marker_sha = decoded.get("sha256")
+                if marker_sha is not None:
+                    actual_sha = hashlib.sha256(abs_path.read_bytes()).digest()
+                    if actual_sha != marker_sha:
+                        raise _AttachmentError(
+                            f"Checksum mismatch for {basename}; the file may be "
+                            "corrupt."
+                        )
+                return _ResolvedAttachment(basename, filetype, abs_path)
+
+            if kind == "file_outgoing":
+                src_path = decoded.get("src_path") or ""
+                if not src_path:
+                    # Voice-note draft was discarded after sending; nothing to
+                    # play back until the peer echoes it.
+                    return None
+                abs_path = Path(src_path)
+                if not abs_path.is_file():
+                    raise _AttachmentError(
+                        f"The original file for {basename} is no longer "
+                        f"available at {src_path}."
+                    )
+                return _ResolvedAttachment(basename, filetype, abs_path)
+
+            return None
+
+        # Legacy inline file upload: spill the bytes to a cache file.
+        try:
+            group_message = GroupChatMessage.from_cbor(body)
+        except Exception:
+            return None
+        if group_message.file_upload is None:
+            return None
+        upload = group_message.file_upload
+        cache_dir = state_root / "attachments" / "_inline_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        safe = network._safe_basename(upload.basename)
+        cache_path = cache_dir / f"{message_id}-{safe}"
+        if not cache_path.exists() or cache_path.read_bytes() != upload.payload:
+            cache_path.write_bytes(upload.payload)
+        return _ResolvedAttachment(upload.basename, upload.filetype, cache_path)
+
+    # Emitted whenever the currently-playing voice note changes so QML can
+    # flip a row's Play/Stop button without polling.
+    playingMessageIdChanged = Signal()
+
+    def _set_playing_message_id(self, message_id: str) -> None:
+        if getattr(self, "_playing_message_id", "") != message_id:
+            self._playing_message_id = message_id
+            self.playingMessageIdChanged.emit()
+
+    @Property(str, notify=playingMessageIdChanged)
+    def playingMessageId(self) -> str:
+        """The message id of the voice note currently playing, or "" if none.
+        QML binds against this to show Stop on the active row and Play on the
+        rest."""
+        return getattr(self, "_playing_message_id", "")
+
+    @Slot(str)
+    def playReceivedMessage(self, message_id: str) -> None:
+        """QML slot: play a received or sent voice note."""
+        audio = self._push_to_talk_audio()
+        if not audio:
+            return
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This voice note is not available locally yet.",
+            )
+            return
+        # Stop any clip already playing so a second Play does not overlap.
+        self.stopAudioPlayback()
+        try:
+            # Rust playback wants a stable file path; cache from resolved bytes.
+            cached_path = audio.cache_received_clip(
+                message_id,
+                resolved.basename,
+                resolved.path.read_bytes(),
+            )
+            audio.play_received(cached_path)
+            self._set_playing_message_id(message_id)
+            self._start_playback_monitor("Failed to play the received voice note.")
+        except AudioEngineError as exc:
+            self._set_playing_message_id("")
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to play the received voice note.\n\n{exc}",
+            )
+
+    @Slot(str)
+    def openAttachment(self, message_id: str) -> None:
+        """QML slot: open a non-audio attachment with the desktop handler."""
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This attachment is not available locally yet.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.path)))
+
+    @Slot(str)
+    def saveAttachment(self, message_id: str) -> None:
+        """QML slot: copy attachment bytes to a user-chosen path."""
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This attachment is not available locally yet.",
+            )
+            return
+        name_filter = (
+            "Opus audio (*.opus)" if resolved.filetype == "audio/opus" else ""
+        )
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save attachment", resolved.basename, name_filter,
+        )
+        if not dest:
+            return
+        try:
+            shutil.copyfile(resolved.path, dest)
+        except OSError as exc:
+            QMessageBox.critical(
+                self, f"ERROR: {APP_NAME}",
+                f"Could not save the attachment.\n\n{exc}",
+            )
+
+    @Slot()
+    def stopAudioPlayback(self) -> None:
+        audio = getattr(self, "_ptt_audio", None)
+        if audio is None:
+            return
+        try:
+            audio.stop_playback()
+            self._stop_playback_monitor()
+        except AudioEngineError as exc:
+            self._stop_playback_monitor()
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to stop audio playback.\n\n{exc}",
+            )
+
     def push_to_talk_start(self):
-        # TODO Instead of trying to use the QMediaCapture, maybe we'd rather want to just grab stuff
-        # from an input device, encode in a separate thread, and then send that as a file.
-        # The Qt APIs seemed nice, but unfortunately QMediaRecorder can only write to files, not memory, and it likely can't encode to any of the codecs we want.
+        audio = self._push_to_talk_audio()
+        if not audio:
+            return
+        convo = self.convo_state()
+        self._stop_playback_monitor()
+        try:
+            audio.start_capture(convo.conversation_id)
+        except AudioEngineError as exc:
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.critical(
+                    self,
+                    f"ERROR: {APP_NAME}",
+                    f"Failed to start push-to-talk capture.\n\n{exc}",
+                ),
+            )
+            return
 
-        # https://doc.qt.io/qtforpython-6/examples/example_charts_audio.html#example-charts-audio
-        # This example shows more or less how to do that
+        self.push_to_talk_started = True
+        self.push_to_talk_recording_conversation_id = convo.conversation_id
+        self.ui.ptt_hold_space_label.setText(
+            "Recording audio... release Space to attach the voice note."
+        )
+        if not self.push_to_talk_watchdog.isActive():
+            self.push_to_talk_watchdog.start()
 
-        # https://doc.qt.io/qtforpython-6/examples/example_multimedia_audiosource.html#example-multimedia-audiosource
-        # This example shows how to select microphone and ask for permission on MacOS/Android
+    def push_to_talk_finish(self, *, cancel: bool) -> None:
+        if not getattr(self, "push_to_talk_started", False):
+            return
 
-        # https://doc.qt.io/qtforpython-6/examples/example_multimedia_audiooutput.html#example-multimedia-audiooutput
-        # This example shows how to do audio playback using raw samples.
+        audio = getattr(self, "_ptt_audio", None)
+        self.push_to_talk_started = False
+        self.push_to_talk_recording_conversation_id = None
+        self.push_to_talk_watchdog.stop()
+        self._push_to_talk_reset_ui()
 
-        # Then what we need is the external encoder/decoder receiving/producing PCM samples,
-        # and to hook it all up. We probably want these things running in a separate thread so as not to
-        # tie up the main event loop, and to avoid stuttering if something else ties it up.
+        if not audio:
+            return
 
-        # https://pastebin.com/n7e9KREA
-        self.push_to_talk_started = True  # TODO should use the qt state stuff for this I guess
+        if cancel:
+            try:
+                audio.cancel_capture()
+            except AudioEngineError as exc:
+                QTimer.singleShot(
+                    0,
+                    lambda: QMessageBox.critical(
+                        self,
+                        f"ERROR: {APP_NAME}",
+                        f"Failed to cancel push-to-talk capture.\n\n{exc}",
+                    ),
+                )
+            return
 
-        self.mSession = QMediaCaptureSession()
-        mSession=self.mSession
-        self.aInput=QAudioInput()  # whatever default input dev, probably want to make this configurable.
-        mSession.setAudioInput(self.aInput)
-        self.recorder = QMediaRecorder()
-        if not self.recorder.isAvailable():
-            print("MediaRecorder does not seem available")
-        self.recorder.setAutoStop(True)  # This property controls whether the media recorder stops automatically when all media inputs have reported the end of the stream or have been deactivated.
+        try:
+            draft = audio.stop_capture()
+        except AudioEngineError as exc:
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.critical(
+                    self,
+                    f"ERROR: {APP_NAME}",
+                    f"Failed to finalize push-to-talk capture.\n\n{exc}",
+                ),
+            )
+            return
 
-        aformat = QAudioFormat()
-        aformat.setSampleFormat(QAudioFormat.Float)
-        aformat.setSampleRate(44100)
-        aformat.setChannelConfig(QAudioFormat.ChannelConfigMono)
-        self.audio_buffer = QAudioBufferOutput(aformat)
+        convo = self.convo_state()
+        convo.attached_files.add(str(draft.path))
+        self.refresh_attached_files_for_conversation(convo)
+        self.ui.singlemultitab.setCurrentWidget(self.ui.attach_file_tab)
+        self._show_status_message(
+            "Voice note attached",
+            f"{draft.path.name} ({draft.duration_seconds:.1f}s)",
+        )
 
-        mSession.setRecorder(self.recorder)
-        # TODO: instead of setOutputLocation we should mock a https://doc.qt.io/qt-6/qiodevice.html
-        # TODO: in order to capture the data so we can give it to our custom encoder,
-        # TODO: and also so we can avoid writing to disk.
-        #self.recorder.setOutputLocation(QUrl("out.opus"))
+    def push_to_talk_watchdog_tick(self) -> None:
+        if not getattr(self, "push_to_talk_started", False):
+            self.push_to_talk_watchdog.stop()
+            return
+        try:
+            convo = self.convo_state()
+        except Exception:
+            self.push_to_talk_finish(cancel=True)
+            return
 
-        #recorder.readyToSendAudioBuffer.connect(push_to_talk_buffer)
-        if self.recorder.audioChannelCount() != 1:
-            self.recorder.setAudioChannelCount(1)
-        self.recorder.record()
-        # duration() is in ms
-        # what is recorder.autoStop ?
-        # encodingMode averagebitrate, constantbitrate, constantquality, twopassencoding
-        # isAvailable
-        # metadata()
+        if convo.conversation_id != self.push_to_talk_recording_conversation_id:
+            self.push_to_talk_finish(cancel=True)
+            return
 
-        # recorderStateChanged
-        #>>> self.recorder.recorderState()
-        #<RecorderState.RecordingState: 1>
-        # PausedState == 2, StoppedState
+        if self.ui.ptt_tab.parent().currentWidget() != self.ui.ptt_tab:
+            self.push_to_talk_finish(cancel=True)
+            return
 
-        # TODO that happens -a lot-:
-        #self.recorder.durationChanged.connect(lambda: print("recorder.durationChanged"))
-
-        # recorder.errorChanged.connect
-        # recorder.errorOccured.connect
-        def push_to_talk_buffer():
-            print("buff")
-            mAudioInputBuffer.sendAudioBuffer()
-
-        # TODO: we need a listener for when self.push_to_talk_started becomes false
-        # TODO: that should call recorder.stop()
-        # TODO: and then we should figure out -why- it was stopped: cancelled or because
-        # TODO: user cancelled or switched away from the push-to-talk tab
-
-        import pdb;pdb.set_trace()
-        pass
+        if duration_time_ns() - convo.last_push_to_talk_ns > 100_000_000:
+            self.push_to_talk_finish(cancel=False)
 
     def font_settings_dialog(self):
         def font_example(qtoolbtn):
@@ -424,6 +826,8 @@ class MainWindow(QMainWindow):
             # Probably cancel sending it too.
             # TODO actually this could just be a listener on singlemultitab
             # then we can also make the space shortcut conditional there.
+            if getattr(self, "push_to_talk_started", False):
+                self.push_to_talk_finish(cancel=True)
             return True
         #== "ptt_tab"
         # - conversation not changed
@@ -447,6 +851,69 @@ class MainWindow(QMainWindow):
         self.app = app
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        # Expose a tiny playback surface to QML instead of routing the whole
+        # window object through custom model roles.
+        self.ui.qml_ChatLines.rootContext().setContextProperty("chatController", self)
+        self._ptt_audio: PttAudioBridge | None = None
+        self._ptt_audio_failed = False
+        self._playing_message_id: str = ""
+        self._playback_failure_message: str | None = None
+        self._playback_error_timer = QTimer(self)
+        self._playback_error_timer.setInterval(100)
+        self._playback_error_timer.timeout.connect(self._poll_playback_error)
+        self.push_to_talk_started = False
+        self.push_to_talk_recording_conversation_id: int | None = None
+        self.push_to_talk_watchdog = QTimer(self)
+        self.push_to_talk_watchdog.setInterval(50)
+        self.push_to_talk_watchdog.timeout.connect(self.push_to_talk_watchdog_tick)
+        # Override the generated UI defaults: enable the list, allow single
+        # selection, and use ListMode so items scroll vertically rather than
+        # wrapping as icons.
+        self.ui.attached_files_QListWidget.setEnabled(True)
+        self.ui.attached_files_QListWidget.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.ui.attached_files_QListWidget.setViewMode(
+            QListView.ViewMode.ListMode
+        )
+        # Draft review happens in the existing attachment tab so the send path can
+        # stay unchanged once the voice note is finalized.
+        self.preview_attachment_button = QToolButton(self.ui.attach_file_tab)
+        self.preview_attachment_button.setText("Preview clip")
+        self.preview_attachment_button.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.preview_attachment_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+        )
+        self.preview_attachment_button.setEnabled(False)
+        self.ui.formLayout_2.setWidget(
+            2,
+            QFormLayout.ItemRole.FieldRole,
+            self.preview_attachment_button,
+        )
+        self.stop_attachment_audio_button = QToolButton(self.ui.attach_file_tab)
+        self.stop_attachment_audio_button.setText("Stop audio")
+        self.stop_attachment_audio_button.setIcon(QIcon.fromTheme("media-playback-stop"))
+        self.stop_attachment_audio_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+        )
+        self.stop_attachment_audio_button.setEnabled(False)
+        self.ui.formLayout_2.setWidget(
+            3,
+            QFormLayout.ItemRole.FieldRole,
+            self.stop_attachment_audio_button,
+        )
+        self.discard_attachment_button = QToolButton(self.ui.attach_file_tab)
+        self.discard_attachment_button.setText("Remove attachment")
+        self.discard_attachment_button.setIcon(QIcon.fromTheme("edit-delete"))
+        self.discard_attachment_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+        )
+        self.discard_attachment_button.setEnabled(False)
+        self.ui.formLayout_2.setWidget(
+            4,
+            QFormLayout.ItemRole.FieldRole,
+            self.discard_attachment_button,
+        )
 
         # failed attempt to firewall external resource access:
         eng = self.ui.qml_ChatLines.engine()
@@ -491,8 +958,12 @@ class MainWindow(QMainWindow):
         # Sending files to a conversation: File attachment/sending callbacks
         self.ui.attach_file_button.clicked.connect(self.attach_file)
         self.ui.send_file_button.clicked.connect(self.send_file)
-        self.ui.attached_files_QListWidget.itemClicked.connect(self.attach_file_remove)
-        self.ui.attached_files_QListWidget.itemDoubleClicked.connect(self.attach_file_remove)
+        self.ui.attached_files_QListWidget.itemSelectionChanged.connect(
+            self._update_attachment_controls
+        )
+        self.preview_attachment_button.clicked.connect(self._play_attachment_preview)
+        self.stop_attachment_audio_button.clicked.connect(self.stopAudioPlayback)
+        self.discard_attachment_button.clicked.connect(self._discard_selected_attachment)
 
         self.all_contacts = QStandardItemModel()
         #self.ui.contacts_treeWidget.setModel(self.all_contacts)
@@ -507,6 +978,70 @@ class MainWindow(QMainWindow):
         #self.ui.contacts_treeWidget.keyboardSearch.connect(lambda: print("KB search")) # TODO not a signal, but when user starts typing here we want to set the focus to contactFilterLineEdit instead
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
+
+    async def _enqueue_outgoing_gcm(
+        self,
+        convo_state: "ConversationUIState",
+        gcm: GroupChatMessage,
+        *,
+        local_payload: bytes,
+        log_id: uuid.UUID | None = None,
+    ) -> None:
+        """Shared WAL-commit path for both text and file sends.
+
+        Serialises ``gcm`` into the conversation's own write-cap BACAP stream,
+        records the WriteCapWAL/PlaintextWAL rows the network writer consumes,
+        appends an optimistic ConversationLog row (so the message shows up
+        immediately as "pending"), then nudges both the UI refresh queue and
+        the network thread.
+
+        ``local_payload`` is what gets stored in ConversationLog.payload for
+        local display; the network wire format comes from ``gcm`` itself.
+
+        ``log_id`` lets the caller pre-assign the ConversationLog primary key
+        so it can key cached side-data (e.g. a sent voice note's playback clip)
+        to the same id the renderer resolves against.
+        """
+        send_op = SendOperation(
+            # Must match convo.write_cap so find_resendable picks up our PWAL rows.
+            bacap_stream=convo_state.own_peer_bacap_uuid,
+            messages=[gcm],
+        )
+        print("serializing SendOperation for outgoing message", send_op)
+        new_write_caps, db_entries = send_op.serialize(
+            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            conversation_id=convo_state.conversation_id,
+        )
+
+        async with persistent.asession() as sess:
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            final_pwal_id = db_entries[-1].id  # relying on this being a plaintextwal is a little bit of an assumption about the internal of .serialize() ....
+
+            # Then we pretend that we have received it:
+            sess.add(persistent.ConversationLog(
+                id=log_id or uuid.uuid4(),
+                conversation_id=convo_state.conversation_id,
+                conversation_peer_id=convo_state.own_peer_id,
+                conversation_order=select(func.count())
+                .select_from(persistent.ConversationLog)
+                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
+                .scalar_subquery(),
+                payload=local_payload,
+                network_status=1,
+                outgoing_pwal=final_pwal_id,
+            ))
+            await sess.commit()
+
+        # Wake the chat view (was missing from the old send_file path).
+        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id, False)))
+
+        # Signal the network module that we have a new outgoing message:
+        await self.iothread.run_in_io(
+            network.check_for_new()
+        )
 
     @async_cb
     async def chat_msg_single_line(self):
@@ -686,76 +1221,107 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def send_file(self):
-        """Send attached files.
-
-        This is more or less like self.chat_msg_single_line(),
-        except of course we're sending some potentially big files.
-        If we don't think the files will change, we can stream them to the temp stream.
-        But the safest would be to load the whole thing into the WAL, that way user can delete
-        or modify their file. In the future that should probably be a setting.
-        For now let's just do the simple thing:
-        - Each file is one big message
-        - We send them back to back and end up with a huge ephemeral BACAP stream
-        - When done uploading, we put a reference to the big stream into the chat.
-        - We can choose whether we want to block the user's chat stream or not (if we don't,
-          they can keep chatting but their attached files may look out of order).
-          This might be a good reason to allow sending a message along with the files.
+        """Send each queued attachment as its own SendOperation.
+        
+        Wire format is a full GroupChatMessage (bytes in PWAL); the local
+        ConversationLog row gets a lightweight ``file_outgoing`` marker so
+        the chat view does not store megabytes inline.
         """
         convo = self.convo_state()
         print("should send files", convo.attached_files)
 
-        # TODO actually send them
-        fmsgs = []
-        for fn in convo.attached_files:
+        voice_note_drafts = []
+        audio = getattr(self, "_ptt_audio", None)
+        # One SendOperation per file; unserialize() only decodes one GCM.
+        for fn in sorted(convo.attached_files):
             f_path = Path(fn)
-            fmsgs.append(
-                GroupChatMessage(
-                version=0,
-                membership_hash=b"t"*32, # TODO: mocked for now; convo_state.group_chat_state.membership_hash
-                    file_upload=GroupChatFileUpload(
-                        basename=f_path.name,
-                        filetype="arbitrary",
-                        payload=f_path.read_bytes(), # TODO we'll obviously need a better strategy for big files
-                    )
+            is_draft = bool(audio and audio.is_draft_path(f_path))
+
+            if not f_path.is_file():
+                QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    f"Attachment no longer exists and was skipped:\n{f_path}",
                 )
+                continue
+
+            size = f_path.stat().st_size
+            # Same cap network._spill_attachment uses on receive.
+            if size > network._ATTACHMENT_HARD_CAP:
+                cap_mib = network._ATTACHMENT_HARD_CAP / (1024 * 1024)
+                QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    f"{f_path.name} is {size / (1024 * 1024):.1f} MiB, which "
+                    f"exceeds the {cap_mib:.0f} MiB attachment limit. "
+                    "It was not sent.",
+                )
+                continue
+
+            upload = GroupChatFileUpload.from_path(f_path)
+            gcm = GroupChatMessage(
+                version=0,
+                membership_hash=b"TODO" * (32 // 4),  # TODO: convo_state.group_chat_state.membership_hash
+                file_upload=upload,
             )
 
-        send_op = SendOperation(
-            messages=fmsgs,
-            bacap_stream=uuid.uuid4() # TODO look up the right uuid in convo_state.group_chat_state.bacap_uuid
-        )
+            # Pre-assign the ConversationLog id so a voice-note draft (which is
+            # discarded right after sending) can be cached for playback under
+            # the same id the renderer later resolves against.
+            log_id = uuid.uuid4()
 
-        new_write_caps, db_entries = send_op.serialize(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
-            conversation_id=convo.conversation_id)
+            # Voice-note drafts are deleted after send, so persist a stable
+            # playback copy keyed to the log id and point src_path at it. Other
+            # attachments stay on disk at their original src_path.
+            if is_draft and audio:
+                src_path = str(
+                    audio.cache_received_clip(
+                        str(log_id), upload.basename, f_path.read_bytes(),
+                    )
+                )
+            else:
+                src_path = str(f_path)
 
-        # The sync engine (_engine_sync), not asession()/the async engine:
-        # this runs on the Qt thread's own event loop, and aiosqlite
-        # connections from the async engine's pool are not safe to use from
-        # a loop other than the one that created them.
-        # TODO: need to only READ COMMITTED, we do not want dirty reads here
-        with persistent.Session(persistent._engine_sync) as sess:
-            for cap_uuid in new_write_caps:
-                sess.add(persistent.WriteCapWAL(id=cap_uuid))  # the network writer needs to create these before it can process plaintextwals
-            for db_obj in db_entries:
-                sess.add(db_obj)  # These are PlaintextWAL and ReadCapWal entries
-            sess.commit()
+# Store a lightweight local marker rather than the file bytes: the
+            # renderer only needs the basename/filetype, and the bytes are
+            # already on disk at src_path.
+            marker_fields = {
+                "v": 0,
+                "kind": "file_outgoing",
+                "basename": upload.basename,
+                "filetype": upload.filetype,
+                "size": size,
+                "src_path": src_path,
+            }
+            safe_basename = network._safe_basename(upload.basename)
+            is_image = attachment_images.is_image_attachment(
+                upload.filetype, safe_basename,
+            )
+            if is_image:
+                thumb_rel_path = attachment_images.spill_image_thumbnail(
+                    conversation_id=convo.conversation_id,
+                    file_uuid=log_id,
+                    safe_basename=safe_basename,
+                    source=f_path,
+                )
+                if thumb_rel_path is not None:
+                    marker_fields["thumb_rel_path"] = thumb_rel_path
+            local_payload = b"F" + cbor2.dumps(marker_fields)
 
-        # Signal network.py that we have written a new SendOperation to PlaintextWAL
-        await self.iothread.run_in_io(
-            network.check_for_new()
-        )
+            await self._enqueue_outgoing_gcm(
+                convo, gcm, local_payload=local_payload, log_id=log_id,
+            )
+
+            if is_draft:
+                voice_note_drafts.append(f_path)
 
         # Remove sent files from model and view:
         convo.attached_files.clear()
         self.ui.attached_files_QListWidget.clear()
-
-    def attach_file_remove(self, item: QListWidgetItem) -> None:
-        """Clicking on a file path in the QListWidgetItem path removes it"""
-        convo = self.convo_state()
-        convo.attached_files.remove(item.data(0x100))
-        # Redraw:
-        self.refresh_attached_files_for_conversation(convo)
+        self._update_attachment_controls()
+        if audio:
+            for draft_path in voice_note_drafts:
+                audio.discard_draft(draft_path)
 
     @async_cb
     async def attach_file(self):
@@ -779,7 +1345,10 @@ class MainWindow(QMainWindow):
         self.refresh_attached_files_for_conversation(convo)
 
     def refresh_attached_files_for_conversation(self, convo: ConversationUIState):
+        selected_path = self._selected_attachment_path()
         self.ui.attached_files_QListWidget.clear()
+        audio = getattr(self, "_ptt_audio", None)
+        selected_item = None
         for fname in convo.attached_files:
             itm = QListWidgetItem()
             itm.setData(0x100, fname)  # full path stored in Qt.UserRole
@@ -793,8 +1362,27 @@ class MainWindow(QMainWindow):
             except (FileNotFoundError, PermissionError):
                 # TODO should report this error
                 continue
+            # Surface voice-note state directly in the attachment list so drafts
+            # can be reviewed without adding another model or tab.
+            if audio and audio.is_draft_path(p):
+                abbrev = f"voice note draft\r\n{abbrev}"
+            elif p.suffix.lower() == ".opus":
+                abbrev = f"audio clip\r\n{abbrev}"
             itm.setText(abbrev)  # abbreviated path with first parent + size stored in "display"
+            itm.setToolTip(str(p))
             self.ui.attached_files_QListWidget.addItem(itm)
+            if selected_path == p:
+                selected_item = itm
+
+        has_files = self.ui.attached_files_QListWidget.count() > 0
+        # Send is only meaningful when at least one file is queued.
+        self.ui.send_file_button.setEnabled(has_files)
+
+        if selected_item is not None:
+            self.ui.attached_files_QListWidget.setCurrentItem(selected_item)
+        elif has_files:
+            self.ui.attached_files_QListWidget.setCurrentRow(0)
+        self._update_attachment_controls()
 
     @async_cb
     async def conversation_selected(self, selected:QTreeWidgetItem, old:QTreeWidgetItem|None):
@@ -899,6 +1487,13 @@ class MainWindow(QMainWindow):
         self.ui.chat_lineEdit.setText(convo_state.chat_lineEdit_buffer)
         # Update the label we display at the top left corner of the chat view:
         self.ui.ContactName.setText(f"{selected} (your name: {convo_state.own_peer_name})")
+
+        # The whole attach-file tab and its key children start disabled in the
+        # generated UI; enable them once a real conversation is in scope.
+        self.ui.attach_file_tab.setEnabled(True)
+        self.ui.attach_file_button.setEnabled(True)
+        self.ui.attached_files_QListWidget.setEnabled(True)
+
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
 
