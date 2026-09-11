@@ -36,6 +36,7 @@ from tests.integration._bounce_helpers import (
 
 
 @pytest.mark.integration
+@pytest.mark.serial_docker
 def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path_factory):
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
