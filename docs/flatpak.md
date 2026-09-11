@@ -41,3 +41,11 @@ supervision through the unit's restart policy.
 Inside the Flatpak the launcher never starts the daemon: a sandboxed GUI cannot
 reach the host systemd user manager, so it only reaches an already running host
 daemon over the socket.
+
+## Releasing to Flathub
+
+`make flatpak-release TAG=vX.Y.Z` validates that the tag is an annotated,
+merged release whose version matches `pyproject.toml` and the metainfo, stages
+the Flathub files from the tag, builds and lints them, and opens a pull request
+against Flathub. It only reads the tag, so a dirty or unmatched worktree stops
+the release early.

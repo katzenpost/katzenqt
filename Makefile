@@ -44,7 +44,7 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	flatpak-build flatpak-install flatpak-run flatpak-test flatpak-system-deps \
+	flatpak-build flatpak-install flatpak-run flatpak-test flatpak-release flatpak-system-deps \
 	clean clean-venv deps deps-audio
 
 deps: deps-audio default_uv_setup
@@ -60,6 +60,9 @@ flatpak-run:
 
 flatpak-test:
 	@packaging/flatpak/test.sh
+
+flatpak-release:
+	@TAG="$(TAG)" packaging/flatpak/release.sh
 
 flatpak-system-deps:
 	@packaging/flatpak/system-deps.sh
@@ -109,6 +112,7 @@ help:
 		'  make flatpak-install       Install the built flatpak for this user' \
 		'  make flatpak-run           Run the installed flatpak' \
 		'  make flatpak-test          Test the installed flatpak against the docker testnet' \
+		'  make flatpak-release TAG=vX.Y.Z  Validate a tag and open the Flathub pull request' \
 		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \

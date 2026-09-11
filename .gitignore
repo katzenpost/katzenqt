@@ -22,4 +22,5 @@ dist/
 .flatpak-builder/
 .flatpak-export/
 .flatpak-repo/
+.flathub-dist/
 packaging/flatpak/katzenqt-src.tar.gz

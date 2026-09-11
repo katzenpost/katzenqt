@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from pathlib import Path
@@ -207,3 +208,22 @@ def test_kpclientd_service_target_delegates_to_launcher():
     body = target_body("kpclientd.service")
     assert len(body) == 1
     assert "katzenqt.launcher --install-service" in body[0]
+
+
+def test_flatpak_release_target_calls_the_script():
+    body = target_body("flatpak-release")
+    assert len(body) == 1
+    assert "packaging/flatpak/release.sh" in body[0]
+
+
+def test_release_script_runs_the_release_stages():
+    script = FLATPAK / "release.sh"
+    assert os.access(script, os.X_OK)
+    body = script.read_text()
+    for stage in ("validate", "dist", "check", "submit"):
+        assert f'release.py" {stage}' in body
+
+
+def test_flathub_skips_unsupported_arch():
+    flathub = FLATPAK / "flathub.json"
+    assert json.loads(flathub.read_text()) == {"skip-arches": ["aarch64"]}
