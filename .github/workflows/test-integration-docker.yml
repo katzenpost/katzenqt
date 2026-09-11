@@ -105,7 +105,7 @@ jobs:
           KQT_INTEGRATION_PARALLEL: "4"
         run: |
           mkdir -p integration-results
-          .venv/bin/pytest tests/integration -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
             --dist loadscope -m "not serial_docker" \
             --basetemp=integration-results/parallel \
             --junitxml=integration-results/parallel.xml
@@ -118,7 +118,7 @@ jobs:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
-          .venv/bin/pytest tests/integration -vv -m serial_docker \
+          .venv/bin/pytest tests/integration --no-cov -vv -m serial_docker \
             --basetemp=integration-results/serial \
             --junitxml=integration-results/serial.xml
 
