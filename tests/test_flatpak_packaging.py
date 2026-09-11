@@ -155,3 +155,18 @@ def test_gitignore_covers_the_build_outputs():
         "packaging/flatpak/katzenqt-src.tar.gz",
     ):
         assert entry in ignore, entry
+
+
+def test_screenshot_is_real_and_pinned():
+    screenshot = FLATPAK / "screenshots" / "katzenqt.png"
+    metainfo = (FLATPAK / "network.katzenpost.katzenqt.metainfo.xml").read_text()
+    assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert screenshot.stat().st_size > 40_000
+    assert "/main/packaging/flatpak/screenshots/katzenqt.png" in metainfo
+
+
+def test_build_mirrors_the_screenshot():
+    body = (FLATPAK / "build.sh").read_text()
+    assert "mirror-screenshot.py" in body
+    assert " catalog " in body
+    assert " repo " in body

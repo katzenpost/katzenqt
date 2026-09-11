@@ -6,6 +6,8 @@ root=$(CDPATH= cd -- "$here/../.." && pwd)
 id=network.katzenpost.katzenqt
 epoch=1787647836
 timestamp=2026-08-25T08:50:36Z
+screenshot="$here/screenshots/katzenqt.png"
+media_url=https://dl.flathub.org/media/network/katzenpost/katzenqt/katzenqt.png
 
 build_all() {
 	cd "$root"
@@ -13,8 +15,10 @@ build_all() {
 	git archive --format=tar.gz -o "$here/katzenqt-src.tar.gz" HEAD
 	flatpak-builder --force-clean --override-source-date-epoch="$epoch" \
 		--repo=.flatpak-export .flatpak-build "packaging/flatpak/$id.yaml"
+	python3 "$here/mirror-screenshot.py" catalog .flatpak-build "$screenshot" "$media_url" "$timestamp"
 	flatpak build-export --update-appstream --timestamp="$timestamp" \
 		.flatpak-repo .flatpak-build master
+	python3 "$here/mirror-screenshot.py" repo .flatpak-repo "$screenshot" "$media_url" "$timestamp"
 	flatpak build-update-repo --no-update-appstream .flatpak-repo
 }
 
