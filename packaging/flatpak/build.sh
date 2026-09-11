@@ -12,7 +12,7 @@ media_url=https://dl.flathub.org/media/network/katzenpost/katzenqt/katzenqt.png
 build_all() {
 	cd "$root"
 	rm -rf .flatpak-build .flatpak-export .flatpak-repo
-	flatpak-builder --force-clean --override-source-date-epoch="$epoch" \
+	flatpak-builder --disable-rofiles-fuse --force-clean --override-source-date-epoch="$epoch" \
 		--repo=.flatpak-export .flatpak-build "packaging/flatpak/$id.yaml"
 	python3 "$here/mirror-screenshot.py" catalog .flatpak-build "$screenshot" "$media_url" "$timestamp"
 	flatpak build-export --update-appstream --timestamp="$timestamp" \

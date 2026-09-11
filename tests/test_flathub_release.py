@@ -123,6 +123,8 @@ def test_stage_contains_only_tagged_application_source(tmp_path, monkeypatch):
         "packaging/flatpak/flathub.json": b'{"skip-arches":["aarch64"]}',
         "packaging/flatpak/pyside6-sources.json": b"[]",
         "packaging/flatpak/python3-deps.json": b"{}",
+        "packaging/flatpak/rustic-audio-tool.json": b"audio-module",
+        "packaging/flatpak/rustic-audio-sources.json": b"audio-sources",
         f"packaging/flatpak/{release.APP_ID}.metainfo.xml": (
             b"https://raw.githubusercontent.com/katzenpost/katzenqt/main/"
             b"packaging/flatpak/screenshots/katzenqt.png"
@@ -135,6 +137,8 @@ def test_stage_contains_only_tagged_application_source(tmp_path, monkeypatch):
     }
     monkeypatch.setattr(release, "tagged_file", lambda tag, path: files[path])
     destination = release.stage("v0.0.1", tmp_path / "dist")
+    assert (destination / "rustic-audio-tool.json").read_bytes() == b"audio-module"
+    assert (destination / "rustic-audio-sources.json").read_bytes() == b"audio-sources"
     manifest = (destination / f"{release.APP_ID}.yaml").read_text()
     assert "https://example/v0.0.1.tar.gz" in manifest
     assert f"sha256: {'a' * 64}" in manifest
