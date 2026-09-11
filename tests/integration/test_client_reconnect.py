@@ -154,10 +154,12 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         # leftover write-MixWAL row and delivers m1. Measured: m1 lands ~one
         # epoch after the bounce (epoch-aligned re-delivery), so bob3 must
         # stay alive that long -- an earlier exit would leave no live writer
-        # to ride m1 across the boundary. The subprocess timeout keeps the
-        # same 5x margin over the sleep that was measured comfortable at
-        # the docker mixnet's 2m epoch (120s sleep, 600s timeout).
-        bob3_sleep_s = epoch_duration_s()
+        # to ride m1 across the boundary. "~one epoch" is a measurement, not
+        # a guarantee, so a +100s margin is added on top (matching the
+        # margin test_watchdog_epoch_rollover.py uses for its own
+        # measured-epoch-boundary poll); the subprocess timeout keeps the
+        # same 5x margin over the sleep.
+        bob3_sleep_s = epoch_duration_s() + 100.0
         bob3 = _run_role(
             bob_state, "chat-session", "demo", f"SLEEP:{bob3_sleep_s:.0f}",
             timeout=bob3_sleep_s * 5.0,

@@ -32,6 +32,13 @@ _PYTHON = os.environ.get(
 # Opt-in per-phase timing for the slow-path investigation (REPORT.md) and the
 # per-hop daemon-leg table. Off by default so normal runs are unaffected.
 _TIMING = os.environ.get("KQT_INTEGRATION_TIMING") == "1"
+
+# Outer subprocess bound for the "send" verb: comfortably above
+# _send_one_gcm's own wall-clock budget (KQT_SEND_BUDGET_FLOOR_S, default
+# 120s; see katzenqt.headless._actions._send_one_gcm), so raising that
+# floor for CI can't silently eat this margin again.
+_SEND_TIMEOUT_S = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0")) + 180.0
+
 _VOUCHER_MARKERS = (
     " returned after ",
     " not present yet after ",
@@ -94,12 +101,19 @@ def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subpr
     )
 
 
-def _spawn_role(role_state: Path, *cli_args: str) -> subprocess.Popen:
+def _spawn_role(
+    role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path,
+) -> subprocess.Popen:
     """Launch a role subprocess without waiting for it to finish. Used to keep
-    a joiner's ``voucher-await`` poll alive while the inductor writes box 1."""
+    a joiner's ``voucher-await`` poll alive while the inductor writes box 1.
+    Stdout/stderr go to files rather than pipes to avoid the 64KB
+    pipe-buffer deadlock (see _bounce_helpers.spawn_role, which this
+    mirrors)."""
     return subprocess.Popen(
         _role_command(role_state, *cli_args), env=_role_env(role_state),
-        cwd=str(_REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=str(_REPO_ROOT),
+        stdout=open(stdout_path, "w"),
+        stderr=open(stderr_path, "w"),
         text=True,
     )
 
@@ -171,14 +185,14 @@ def test_voucher_handshake_then_bidirectional(kpclientd_endpoint, tmp_path_facto
     assert "JOINED" in _output(joined)
 
     # Alice -> Bob: Bob holds Alice's read cap from the WhoReply.
-    _assert_ok(_timed_run("alice send", alice_state, "send", "demo", "hello from alice", timeout=300.0), "alice send")
+    _assert_ok(_timed_run("alice send", alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
     read_bob = _timed_run("bob read", bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
     _assert_ok(read_bob, "bob read")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
     # Bob -> Alice on the salt-mutated stream: Alice holds Bob's mutated
     # read cap from induction. This is the cross-mutation crux.
-    _assert_ok(_timed_run("bob send", bob_state, "send", "demo", "hello from bob", timeout=300.0), "bob send")
+    _assert_ok(_timed_run("bob send", bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
     read_alice = _timed_run("alice read", alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
     _assert_ok(read_alice, "alice read")
     assert _expect_token(read_alice, "RECV=") == "hello from bob"
@@ -227,6 +241,9 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     never returned."""
     alice_state = tmp_path_factory.mktemp("alice_olap") / "state"
     carol_state = tmp_path_factory.mktemp("carol_olap") / "state"
+    log_dir = tmp_path_factory.mktemp("carol_await_logs")
+    await_out = log_dir / "await.out"
+    await_err = log_dir / "await.err"
 
     _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
     _assert_ok(_run_role(carol_state, "create-conv", "demo", "carol"), "carol create-conv")
@@ -237,7 +254,10 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     assert voucher, "empty voucher"
 
     # Start the joiner's poll first; it rides out an unwritten box 1.
-    await_proc = _spawn_role(carol_state, "voucher-await", "demo")
+    await_proc = _spawn_role(
+        carol_state, "voucher-await", "demo",
+        stdout_path=await_out, stderr_path=await_err,
+    )
     t_spawn = time.perf_counter()
     try:
         # Give the poll time to reach the daemon and span at least one PKI
@@ -261,13 +281,13 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
                 f"[KQT-TIMING] overlap induct: {time.perf_counter() - t_induct:.2f}s",
                 flush=True,
             )
-        out, err = await_proc.communicate(timeout=300.0)
+        await_proc.wait(timeout=300.0)
     finally:
         if await_proc.poll() is None:
             await_proc.kill()
-            await_proc.communicate()
+            await_proc.wait()
 
-    output = out + err
+    output = await_out.read_text() + await_err.read_text()
     assert await_proc.returncode == 0, (
         f"overlapping await failed (rc={await_proc.returncode}):\n{output}"
     )
@@ -307,12 +327,12 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(joined_bob, "bob voucher-await")
     assert "JOINED" in _output(joined_bob)
 
-    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", timeout=300.0), "alice send")
+    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
     read_bob = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
     _assert_ok(read_bob, "bob read alice")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
-    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", timeout=300.0), "bob send")
+    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
     read_alice_bob = _run_role(alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
     _assert_ok(read_alice_bob, "alice read bob")
     assert _expect_token(read_alice_bob, "RECV=") == "hello from bob"
@@ -332,7 +352,7 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(joined_carol, "carol voucher-await")
     assert "JOINED" in _output(joined_carol)
 
-    _assert_ok(_run_role(carol_state, "send", "demo", "hello from carol", timeout=300.0), "carol send")
+    _assert_ok(_run_role(carol_state, "send", "demo", "hello from carol", timeout=_SEND_TIMEOUT_S), "carol send")
     read_bob_carol = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from carol", timeout=_read_timeout_s())
     _assert_ok(read_bob_carol, "bob read carol")
     assert _expect_token(read_bob_carol, "RECV=") == "hello from carol"

@@ -7,10 +7,12 @@ network.py's on_new_pki_document and _await_read_reply).
 All waits below are sized off the mixnet's actual epoch_duration (see
 _bounce_helpers.epoch_duration_s()) rather than the docker mixnet's 2m
 default, so this test also works unmodified against a network with a
-longer epoch -- just proportionally slower to run. Touches no containers
-at all -- purely a timing scenario -- so it's safe to run alongside the
-other integration files, though it's still slow enough (one full epoch's
-wait) to run on its own.
+longer epoch -- just proportionally slower to run -- with one deliberate
+exception: alice_proc's final wait() is a fixed fail-fast bound, not
+epoch-derived (see its own comment below). Touches no containers at all
+-- purely a timing scenario -- so it's safe to run alongside the other
+integration files, though it's still slow enough (one full epoch's wait)
+to run on its own.
 
 Skipped unless KATZENQT_DOCKER_INTEGRATION=1 (see conftest.py).
 """
