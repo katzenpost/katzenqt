@@ -48,9 +48,9 @@ KQT_INTEGRATION_PARALLEL ?= 4
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	clean clean-venv deps
+	clean clean-venv deps deps-audio
 
-deps: default_uv_setup
+deps: deps-audio default_uv_setup
 
 default: default_uv_setup
 
@@ -113,6 +113,9 @@ install-debian-packages:
 
 install-uv:
 	@pipx install -f uv >/dev/null
+
+deps-audio:
+	@sudo apt install -y libasound2-dev cargo >/dev/null
 
 setup:
 	@$(MAKE) setup-status

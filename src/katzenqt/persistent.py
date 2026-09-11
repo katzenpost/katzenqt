@@ -164,10 +164,8 @@ xdg_data_home.mkdir(parents=True,exist_ok=True)
 app_data = xdg_data_home / "katzenqt"
 app_data.mkdir(exist_ok=True, mode=0o700)
 
-if not (state_file := os.getenv("KQT_STATE", "")):
-    state_file = "katzen"
-state_file += ".sqlite3"
-state_file = app_data / state_file
+_state_name = os.getenv("KQT_STATE", "") or "katzen"
+state_file: Path = app_data / f"{_state_name}.sqlite3"
 _sql_url = f"sqlite+aiosqlite:///{ state_file }"
 logger.info("sql url: %s", _sql_url)
 # pool_size is generous on purpose: sqlite itself serialises actual writes
