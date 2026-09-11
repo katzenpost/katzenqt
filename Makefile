@@ -44,9 +44,22 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
+	flatpak-build flatpak-install flatpak-run flatpak-system-deps \
 	clean clean-venv deps deps-audio
 
 deps: deps-audio default_uv_setup
+
+flatpak-build:
+	@packaging/flatpak/build.sh
+
+flatpak-install:
+	@packaging/flatpak/install.sh
+
+flatpak-run:
+	@packaging/flatpak/run.sh
+
+flatpak-system-deps:
+	@packaging/flatpak/system-deps.sh
 
 default: default_uv_setup
 
@@ -86,6 +99,12 @@ help:
 		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
 		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
+		'' \
+		'Flatpak:' \
+		'  make flatpak-system-deps   Install podman and flatpak (changes the system)' \
+		'  make flatpak-build         Build the flatpak in podman (lints, checks, and validates)' \
+		'  make flatpak-install       Install the built flatpak for this user' \
+		'  make flatpak-run           Run the installed flatpak' \
 		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \

@@ -18,3 +18,8 @@ dist/
 
 .demo-state/
 .kpclientd-build-revision
+.flatpak-build/
+.flatpak-builder/
+.flatpak-export/
+.flatpak-repo/
+packaging/flatpak/katzenqt-src.tar.gz
