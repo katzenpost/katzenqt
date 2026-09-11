@@ -247,11 +247,17 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     - bump send_resendable,
     - bump drain_mixwal
     """
-    try:
-      conv_id = await _rpc_racing_connection_life(
+    async def resolve_counter(index: bytes) -> int:
+      return await _rpc_racing_connection_life(
           bacap_uuid=mw.bacap_stream,
-          what="mark_sent",
-          rpc_factory=lambda: asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue)),
+          what="get_message_box_index_counter",
+          rpc_factory=lambda: connection.get_message_box_index_counter(index),
+          backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+      )
+
+    try:
+      conv_id = await persistent.SentLog.mark_sent(
+          connection, mw, __resend_queue, resolve_counter=resolve_counter,
       )
     except ConnectionLifeInterruptedError:
       # The courier ACK for this envelope is already secured; mark_sent only
@@ -341,7 +347,8 @@ class ConnectionLifeInterruptedError(Exception):
 
 async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                                       backstop_s: float = READ_WATCHDOG_SECONDS,
-                                      grace_s: "float | None" = None):
+                                      grace_s: "float | None" = None,
+                                      reconnect_marker=None, epoch_marker=None):
     """Run the RPC returned by ``rpc_factory``, racing it against a daemon
     reconnect or a PKI epoch rollover rather than a flat clock.
 
@@ -361,8 +368,10 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
     """
     if grace_s is None:
         grace_s = _RECONNECT_GRACE_SECONDS
-    reconnect_marker = _reconnect_event
-    epoch_marker = _epoch_event
+    if reconnect_marker is None:
+        reconnect_marker = _reconnect_event
+    if epoch_marker is None:
+        epoch_marker = _epoch_event
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
@@ -404,12 +413,14 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
             f"{backstop_s} s"
         )
     finally:
-        reconnect_wait.cancel()
-        epoch_wait.cancel()
+        for owned in (task, reconnect_wait, epoch_wait):
+            owned.cancel()
+        await asyncio.gather(task, reconnect_wait, epoch_wait, return_exceptions=True)
 
 
 async def _await_read_reply(connection, *, read_watchdog_s: float,
-                             reconnect_grace_s: float, bacap_uuid, **kwargs):
+                             reconnect_grace_s: float, bacap_uuid,
+                             reconnect_marker=None, epoch_marker=None, **kwargs):
     """Await start_resending_encrypted_message, racing it against a daemon
     reconnect or a PKI epoch rollover rather than a flat clock.
 
@@ -432,10 +443,12 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
     try:
         return await _rpc_racing_connection_life(
             bacap_uuid=bacap_uuid,
-            what="start_resending_encrypted_message",
+            what="wait",
             rpc_factory=lambda: connection.start_resending_encrypted_message(**kwargs),
             backstop_s=read_watchdog_s,
             grace_s=reconnect_grace_s,
+            reconnect_marker=reconnect_marker,
+            epoch_marker=epoch_marker,
         )
     except ConnectionLifeInterruptedError as exc:
         raise asyncio.TimeoutError() from exc
@@ -654,14 +667,21 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     __mixwal_updated.set()
     return
 
+  reconnect_marker = _reconnect_event
+  epoch_marker = _epoch_event
   try:
-    rcr = await asyncio.wait_for(
-        connection.encrypt_read(
+    rcr = await _rpc_racing_connection_life(
+        bacap_uuid=bacap_uuid,
+        what="encrypt_read",
+        rpc_factory=lambda: connection.encrypt_read(
             read_cap=rcw_read_cap, message_box_index=mw.current_message_index,
         ),
-        timeout=_DAEMON_RPC_TIMEOUT_SECONDS,
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+        grace_s=reconnect_grace_s,
+        reconnect_marker=reconnect_marker,
+        epoch_marker=epoch_marker,
     )
-  except (TimeoutError, ThinClientOfflineError, OSError) as exc:
+  except (ConnectionLifeInterruptedError, TimeoutError, ThinClientOfflineError, OSError) as exc:
     logger.warning("Read setup failed for %s; retrying: %s", bacap_uuid, exc)
     await asyncio.sleep(5)
     give_up()
@@ -670,6 +690,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   try:
     resp = await _await_read_reply(
         connection,
+        reconnect_marker=reconnect_marker,
+        epoch_marker=epoch_marker,
         read_watchdog_s=read_watchdog_s,
         reconnect_grace_s=reconnect_grace_s,
         bacap_uuid=bacap_uuid,
@@ -969,10 +991,19 @@ async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool
         return False
     if __mixnet_connected.is_set():
         return True
-    await asyncio.wait((
+    waiters = (
         create_task(__mixnet_connected.wait()),
         create_task(__should_quit.wait()),
-    ), timeout=(idle_retry_s or None), return_when=asyncio.FIRST_COMPLETED)
+    )
+    try:
+        await asyncio.wait(
+            waiters, timeout=(idle_retry_s or None),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        for waiter in waiters:
+            waiter.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
     return not __should_quit.is_set()
 
 
@@ -1303,7 +1334,10 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
         # write path forever.
         if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
-        _, _ = await asyncio.wait((create_task(resendable_event.wait()),), timeout=60)
+        try:
+            await asyncio.wait_for(resendable_event.wait(), timeout=_ARMING_SWEEP_S)
+        except TimeoutError:
+            pass
         if __should_quit.is_set():
             continue
         resendable_event.clear()

@@ -381,13 +381,13 @@ class TestDrainMixwalWriteSingle:
         orig_mark_sent = persistent.SentLog.mark_sent
         fail = {"armed": True}
 
-        async def flaky_mark_sent(connection, mw, resend_queue):
+        async def flaky_mark_sent(connection, mw, resend_queue, **kwargs):
             if fail["armed"]:
                 fail["armed"] = False
                 raise OperationalError(
                     "INSERT INTO sentlog", {}, Exception("database is locked"),
                 )
-            return await orig_mark_sent(connection, mw, resend_queue)
+            return await orig_mark_sent(connection, mw, resend_queue, **kwargs)
 
         monkeypatch.setattr(persistent.SentLog, "mark_sent", flaky_mark_sent)
         async with persistent.asession() as sess:
@@ -585,7 +585,7 @@ class TestDrainMixwalWriteSingle:
         )
         await reconnector
         assert setup["bacap_stream"] not in draining
-        assert fake_thinclient.call_count("start_resending_encrypted_message") == 0
+        assert fake_thinclient.call_count("start_resending_encrypted_message") == 1
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
 
@@ -699,6 +699,12 @@ class TestDrainMixwalWriteSingle:
         # Un-hang the orphaned call: the re-cast (or, here, the in-flight
         # shielded task) finalizes the ACK and prunes the MW.
         held.set()
+
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            assert (await sess.exec(select(persistent.SentLog))).all() == []
+        draining.add(setup["bacap_stream"])
+        await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
 
         async def finalized():
             async with persistent.asession() as sess:
