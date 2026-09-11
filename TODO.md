@@ -15,6 +15,10 @@ Keep it up to date as part of the working session:
   stay uncommitted until the session ends.
 - Commit messages should be short and match the repo's existing style
   (imperative, lowercase-ish, e.g. `add TODO.md: ...`, `update TODO.md: ...`).
+- Keep TODO.md commits **separate** from commits that change other files
+  (code, tests, etc.). When completing an item, first commit the work itself,
+  then commit the TODO.md status update. This keeps the non-TODO commits
+  cherry-pickable on their own.
 
 State as of 2026-09-11. Session context: recovering from a proxy-sweep storm in a
 5-replica katzenpost mixnet while debugging the delivery of Bob's
@@ -233,24 +237,48 @@ the whole file arrives. Feature request (addition, not a bugfix):
 
 ---
 
-## 5. Review branch `fix/readarm-drain-race` for relevance (do NOT start yet)
+## 5. Review branch `fix/readarm-drain-race` for relevance — DONE (assessed as unrelated to storm, PR-worthwhile but not a fix for items 1/3)
 
 There is a local (currently unmerged) branch `fix/readarm-drain-race`
-(also `fix/readarm-latch-wedge` exists — likely related). It has NOT been
-reviewed yet and may or may not be relevant to the bugs above.
+(also `fix/readarm-latch-wedge` exists — its parent, but on the audio branch;
+still unexamined, ignore for now).
 
-- First step: `git -C /home/kpdev/katzenqt log --oneline main..fix/readarm-drain-race`
-  (and the same for `fix/readarm-latch-wedge`) to see the commit set vs the
-  branch we are on (`deckard-webtop`). The current branch commit is `da4276d`.
-- Read the diff, focusing on any changes to the read-drain paths named in items
-  2-4 (`network.py` drain loops, `draining_right_now`, `readables_to_mixwal`,
-  `drain_mixwal_read_single`, and anything touching read-cap cursor advances
-  that could relate to the "not advancing idx ... we probably already handled
-  this?" race at `network.py:645-654`).
-- Assess: does it address any of (a) the dead-substream infinite ride-out, (b)
-  the duplicate/stale read cursor race, (c) anything that would have prevented
-  the operational wedges we hit? Report findings back; **do not merge**.
+REVIEW OUTCOME (2026-09-11):
 
-> Note: reviewing this branch is task 5; it has deliberately been placed AFTER
-> the two bug tasks (1,3) and the feature (4) so review conclusions can be
+- Branch = 2 commits on `b7cc1028` (ancestor of `deckard-dev`, so it applies
+  onto our HEAD cleanly; `git merge-tree --write-tree da4276d fix/readarm-drain-race`
+  shows a clean merge). Files touched: `src/katzenqt/network.py` (+270, -59
+  roughly) and `tests/test_network_fake.py` (+349). No replica/Go code.
+  ~70 tests pass on the branch (ran `pytest tests/test_network_fake.py` in the
+  existing worktree `/home/kpdev/katzenqt.readarm`).
+- What it actually fixes:
+  1. `b3f1d10` races the drain RPCs (`get_message_box_index_counter`,
+     `start_resending_encrypted_message`, `encrypt_read`, `mark_sent`) against
+     `_reconnect_event` / `_epoch_event`, raising `ConnectionLifeInterruptedError`;
+     `drain_mixwal_read_single` catches it and `give_up()` (leaves MW for
+     idempotent re-send) instead of wedging the stream on an orphaned RPC reply
+     after a daemon bounce.
+  2. `54ca382` bounds `_wait_for_connection_or_shutdown` with
+     `_CONNECTION_IDLE_RETRY_S` and adds an `_ARMING_SWEEP_S` re-arm pass so
+     `readables_to_mixwal` / `send_resendable_plaintexts` don't strand forever
+     if `__mixnet_connected` is cleared and never re-set on a full kpclientd restart.
+- **Relevance vs the session's bugs:**
+  - NOT the replica proxy-sweep storm (item 1) — that is Go-side
+    (`/home/kpdev/katzenpost`), this branch is Python client-side only.
+  - NOT a fix for the dead-substream infinite BoxIDNotFound ride-out (item 3a);
+    `no_retry_on_box_id_not_found=False` + "readably alive" peers still ride
+    outcome-nonfatal reads forever.
+  - NOT the idx-mismatch/duplicate read-cursor race that forced DB surgery
+    (item 3b) — none of the "not advancing idx ... already handled?" logic at
+    `network.py:645-654` is touched.
+  - BUT it does harden the exact failure family we hit operationally
+    (client stream wedges / stranded read-arm loops after bounce). It would NOT
+    have saved the delivery on its own; the storm was replica-side.
+- **Recommendation (drafted, awaiting user go/no-go):** worth a PR to main as a
+  general robustness improvement (clean, well-tested, targets daemon-bounce
+  wedges), but it does NOT address TODO items 1 or 3. **Do not merge as a
+  "fix our storm"** — treat as orthogonal hardening.
+
+> Note: reviewing this branch was task 5; it was deliberately weighted AFTER
+> the two bug tasks (1,3) and the feature (4) so review conclusions could be
 > weighed against what we now know operationally.
