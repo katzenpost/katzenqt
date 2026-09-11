@@ -25,6 +25,7 @@ def test_closure_builds_from_source_not_prebuilt_binaries():
     assert "python3-pycrdt" in body
     assert "python3-katzenpost-thinclient" in body
     assert "python3-rustic-audio-tool" in body
+    assert "SOURCE_DATE_EPOCH" in body
     assert "$RUSTIC_AUDIO_URL" in body and "$RUSTIC_AUDIO_REV" in body
 
 
