@@ -473,25 +473,38 @@ class SentLog(SQLModel, table=True):
                 # MW to do it: in the crash-then-relaunch case (write drain
                 # died mid-commit) no later MW exists, and without this the
                 # message resends forever.
-                async with _MARK_SENT_THREAD_SEM:
-                    conversation_id = await _finish_thread(
-                        _finalize_stale_ack, mw.id, mw.plaintextwal,
-                    )
-                resend_queue.discard(mw.bacap_stream)
+                try:
+                    async with _MARK_SENT_THREAD_SEM:
+                        conversation_id = await _finish_thread(
+                            _finalize_stale_ack, mw.id, mw.plaintextwal,
+                        )
+                finally:
+                    # _finish_thread re-raises CancelledError (after the
+                    # thread write has already committed) rather than
+                    # swallowing it, so a cancellation landing here must
+                    # not skip this: the write is done regardless, and
+                    # skipping the discard would strand bacap_stream in
+                    # resend_queue forever.
+                    resend_queue.discard(mw.bacap_stream)
                 return conversation_id
         # Resolve the diagnostic counters once so the commit-time print is
         # as cheap as a tuple format rather than two more thinclient calls.
         new_idx = our_next if precheck_next_blob is not None else (
             await resolve_counter(mw.next_message_index)
         )
-        async with _MARK_SENT_THREAD_SEM:
-            conversation_id = await _finish_thread(
-                _mark_sent_txn,
-                mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
-                mw.next_message_index, new_idx,
-                real_next if precheck_next_blob is not None else None,
-            )
-        resend_queue.discard(mw.bacap_stream)
+        try:
+            async with _MARK_SENT_THREAD_SEM:
+                conversation_id = await _finish_thread(
+                    _mark_sent_txn,
+                    mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
+                    mw.next_message_index, new_idx,
+                    real_next if precheck_next_blob is not None else None,
+                )
+        finally:
+            # Same reasoning as the stale-ACK branch above: the write has
+            # already committed by the time _finish_thread could re-raise
+            # CancelledError, so the discard must still happen.
+            resend_queue.discard(mw.bacap_stream)
         return conversation_id
 
 
