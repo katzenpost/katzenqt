@@ -718,6 +718,47 @@ class TestDrainMixwalWriteSingle:
             pytest.fail("mark_sent did not finalize the ACK after un-hanging")
 
 
+@pytest.mark.asyncio
+async def test_reconnect_marker_swap_sets_the_old_and_leaves_the_new_unset():
+    """The swap-on-transition pattern _rpc_racing_connection_life callers
+    rely on: on_connection_status sets the previously-captured Event and
+    replaces the module global with a fresh, unset one. A caller that
+    captures the marker once (e.g. at the top of a function covering two
+    sequential RPC races) and reuses that same reference for a later race
+    would see it as permanently "already done" after a reconnect --
+    re-reading the current global right before each race is what avoids
+    that (see drain_mixwal_read_single's second race)."""
+    network._last_connected = None
+    stale = network._reconnect_event
+    assert not stale.is_set()
+
+    await network.on_connection_status({"is_connected": False, "err": None})
+    await network.on_connection_status({"is_connected": True, "err": None})
+
+    assert stale.is_set(), "the captured-before-swap reference must be set"
+    assert network._reconnect_event is not stale
+    assert not network._reconnect_event.is_set(), (
+        "a fresh read of the global must NOT see it as already reconnected"
+    )
+
+
+@pytest.mark.asyncio
+async def test_epoch_marker_swap_sets_the_old_and_leaves_the_new_unset():
+    """Same swap-on-transition pattern as _reconnect_event, for PKI epoch
+    rollovers via on_new_pki_document."""
+    network._last_epoch = None
+    stale = network._epoch_event
+    assert not stale.is_set()
+
+    await network.on_new_pki_document({"payload": cbor2.dumps({"Epoch": 1})})
+
+    assert stale.is_set(), "the captured-before-swap reference must be set"
+    assert network._epoch_event is not stale
+    assert not network._epoch_event.is_set(), (
+        "a fresh read of the global must NOT see it as already rolled over"
+    )
+
+
 # ---------------------------------------------------------------------------
 # drain_mixwal_read_single
 # ---------------------------------------------------------------------------

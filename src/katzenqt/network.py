@@ -688,10 +688,18 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     return
 
   try:
+    # Re-read the current globals rather than reuse the markers captured
+    # above: if a reconnect or epoch rollover fired during the encrypt_read
+    # race just above, on_connection_status/on_new_pki_document already
+    # .set() that captured Event and swapped in a fresh one for future
+    # waiters. Reusing the stale (permanently-set) reference here would make
+    # this second race see it as already-done and wrongly truncate this
+    # wait to the short reconnect grace period instead of the intended
+    # read_watchdog_s.
     resp = await _await_read_reply(
         connection,
-        reconnect_marker=reconnect_marker,
-        epoch_marker=epoch_marker,
+        reconnect_marker=_reconnect_event,
+        epoch_marker=_epoch_event,
         read_watchdog_s=read_watchdog_s,
         reconnect_grace_s=reconnect_grace_s,
         bacap_uuid=bacap_uuid,
