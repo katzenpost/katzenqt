@@ -1160,7 +1160,11 @@ class MainWindow(QMainWindow):
             return
         code = voucher_code(token)
         if show:
-            VoucherDialog(self, code).exec()
+            # Deferred, like generate_voucher's VoucherDialog: .exec() right
+            # inside the coroutine's resumption from run_in_io's cross-thread
+            # wakeup risks the same QtAsyncio reentrancy wedge tracked for
+            # this handshake's QInputDialog elsewhere.
+            QTimer.singleShot(0, lambda: VoucherDialog(self, code).exec())
         else:
             QApplication.clipboard().setText(code)
             self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
