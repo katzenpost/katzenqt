@@ -78,6 +78,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -265,7 +266,19 @@ async def _action_voucher_await(args):
         await _shutdown(bg, connection)
 
 
-async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
+def _positive_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number") from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number")
+    return timeout
+
+
+async def _send_one_gcm(
+    conv_name: str, gcm: "models.GroupChatMessage", *, timeout: float | None = None,
+) -> int:
     """Common send path for ``_action_send`` and ``_action_send_file``.
 
     Serialises ``gcm`` into the conversation's outgoing BACAP stream,
@@ -309,7 +322,7 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
             sess.add(obj)
         await sess.commit()
 
-    budget_s = max(120.0, num_pwals * 60.0)
+    budget_s = max(120.0, num_pwals * 60.0) if timeout is None else timeout
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
@@ -335,7 +348,7 @@ async def _action_send(args):
     gcm = models.GroupChatMessage(
         version=0, membership_hash=b"TODO" * 8, text=args.text,
     )
-    return await _send_one_gcm(args.conv_name, gcm)
+    return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
 async def _action_send_file(args):
@@ -358,7 +371,7 @@ async def _action_send_file(args):
     gcm = models.GroupChatMessage(
         version=0, membership_hash=b"TODO" * 8, file_upload=file_upload,
     )
-    return await _send_one_gcm(args.conv_name, gcm)
+    return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
 async def _action_read_file(args):
@@ -1083,6 +1096,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_send = sub.add_parser("send", parents=[conn])
     p_send.add_argument("conv_name")
     p_send.add_argument("text")
+    p_send.add_argument(
+        "--timeout", type=_positive_timeout, default=None,
+        help="seconds to wait for delivery; default scales with message size",
+    )
     p_send.set_defaults(func=_action_send)
 
     p_multi = sub.add_parser("multi-send", parents=[conn])
@@ -1109,6 +1126,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_send_file.add_argument("path", help="path to the file to send")
     p_send_file.add_argument("--basename", default=None)
     p_send_file.add_argument("--filetype", default=None)
+    p_send_file.add_argument(
+        "--timeout", type=_positive_timeout, default=None,
+        help="seconds to wait for delivery; default scales with message size",
+    )
     p_send_file.set_defaults(func=_action_send_file)
 
     p_read_file = sub.add_parser("read-file", parents=[conn])

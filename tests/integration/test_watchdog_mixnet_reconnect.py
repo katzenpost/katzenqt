@@ -41,6 +41,7 @@ def _poll_for(path, needle: str, deadline_s: float) -> bool:
 
 
 @pytest.mark.integration
+@pytest.mark.serial_docker
 def test_read_recovers_promptly_after_mixnet_reconnect(
     kpclientd_endpoint, tmp_path_factory, monkeypatch,
 ):
