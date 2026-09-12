@@ -1124,17 +1124,19 @@ class MainWindow(QMainWindow):
         parent = item.parent()
         return getattr(parent, "conversation_id", None) if parent is not None else None
 
-    def contacts_context_menu(self, pos) -> None:
+    @async_cb
+    async def contacts_context_menu(self, pos) -> None:
         index = self.ui.contacts_treeWidget.indexAt(pos)
         if not index.isValid():
             return
         conversation_id = self._conversation_id_at(index)
         if conversation_id is None:
             return
+        muted = await self.iothread.run_in_io(persistent.is_muted(conversation_id))
         menu = QMenu(self)
         mute_action = menu.addAction("Mute notifications")
         mute_action.setCheckable(True)
-        mute_action.setChecked(persistent.is_muted(conversation_id))
+        mute_action.setChecked(muted)
         copy_action = menu.addAction("Copy voucher")
         show_action = menu.addAction("Show voucher...")
         chosen = menu.exec(
@@ -1143,7 +1145,9 @@ class MainWindow(QMainWindow):
         if chosen is None:
             return
         if chosen is mute_action:
-            persistent.set_muted(conversation_id, mute_action.isChecked())
+            await self.iothread.run_in_io(
+                persistent.set_muted(conversation_id, mute_action.isChecked())
+            )
             return
         ensure_future(
             self._voucher_menu_action(conversation_id, chosen is show_action)
@@ -1353,7 +1357,7 @@ class MainWindow(QMainWindow):
             # TODO we should bump "unread message" counter
 
         # if the main window is not in focus, we should issue a notification:
-        if not persistent.is_muted(conversation_id):
+        if not await self.iothread.run_in_io(persistent.is_muted(conversation_id)):
             if not self.app.focusWidget():
                 self.app.alert(self)
             if self.systray:
