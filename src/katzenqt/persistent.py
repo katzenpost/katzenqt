@@ -269,7 +269,17 @@ def init_and_migrate():
 
     This MUST be called on application startup.
     """
-    alembic.command.upgrade(_alembic_cfg, "head")
+    # The migrations create and populate the sqlite file under the process's
+    # ambient umask; on a permissive one (e.g. 022) it would be briefly
+    # group/world-readable -- holding BACAP caps, signing keys, and message
+    # plaintext -- for the whole upgrade run, before _restrict_state_file_perms
+    # ever gets a chance to fix it up afterward. Restrict the umask for the
+    # duration instead.
+    old_umask = os.umask(0o077)
+    try:
+        alembic.command.upgrade(_alembic_cfg, "head")
+    finally:
+        os.umask(old_umask)
     _restrict_state_file_perms(state_file)
 
 def id_field(table_name: str):
