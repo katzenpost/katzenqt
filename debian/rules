@@ -16,9 +16,14 @@ override_dh_auto_install:
 	    -e 's|%h/.local/katzenpost/client.toml|/etc/kpclientd/client.toml|' \
 	    src/katzenqt/data/kpclientd.service \
 	    > debian/katzenqt/usr/lib/systemd/user/kpclientd.service
-	install -d debian/katzenqt/usr/lib/systemd/user-preset
-	printf '%s\n' 'enable kpclientd.service' \
-	    > debian/katzenqt/usr/lib/systemd/user-preset/90-katzenqt.preset
+	# No user-preset here on purpose: kpclientd is a mixnet-dialing daemon
+	# and must stay opt-in per user (see postinst and --no-enable below). A
+	# preset defaulting the unit to enabled would be dead weight through
+	# this package's own install path but a live footgun the moment
+	# anything runs `systemctl --user preset-all` /
+	# `systemctl --global preset-all` against a system with this package
+	# installed -- that reads exactly such a file and would silently
+	# enable the daemon for every user.
 
 override_dh_installsystemduser:
 	dh_installsystemduser --no-enable

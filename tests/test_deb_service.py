@@ -12,10 +12,17 @@ def test_service_installed_as_user_unit_but_not_enabled():
     assert "dh_installsystemduser --no-enable" in rules
 
 
-def test_user_preset_enables_by_default_per_user():
+def test_no_user_preset_ships():
+    """kpclientd must stay opt-in per user (see --no-enable and the postinst
+    prompt below). A shipped user-preset saying "enable kpclientd.service"
+    is inert through this package's own install path but a live footgun the
+    moment anything runs `systemctl --user preset-all` /
+    `systemctl --global preset-all` against a system with this package
+    installed -- that reads exactly such a file and would silently enable a
+    mixnet-dialing daemon for every user."""
     rules = (DEBIAN / "rules").read_text()
-    assert "usr/lib/systemd/user-preset" in rules
-    assert "enable kpclientd.service" in rules
+    assert "usr/lib/systemd/user-preset" not in rules
+    assert "enable kpclientd.service" not in rules
 
 
 def test_postinst_prompts_only_when_interactive():
