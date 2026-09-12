@@ -1,6 +1,10 @@
 import asyncio
+from typing import TYPE_CHECKING
 
 from katzenpost_thinclient import ThinClient as BaseThinClient
+
+if TYPE_CHECKING:
+    import socket
 
 # Matches network.py's _DAEMON_RPC_TIMEOUT_SECONDS. asyncio.TimeoutError is a
 # builtins.TimeoutError subclass (Python 3.11+), which is itself an OSError
@@ -13,21 +17,24 @@ _HANDSHAKE_TIMEOUT_SECONDS = 30.0
 class ThinClient(BaseThinClient):
     """Handle interleaved events during the 0.0.24 session handshake."""
 
-    _handshake_reads = None
+    _handshake_reads: "int | None" = None
 
-    async def start(self, loop):
+    async def start(self, loop: "asyncio.AbstractEventLoop") -> None:
         self._handshake_reads = 0
         try:
-            return await super().start(loop)
+            await super().start(loop)
         finally:
             self._handshake_reads = None
 
-    def _create_socket(self):
+    def _create_socket(self) -> "socket.socket":
         self._handshake_reads = 0
-        return super()._create_socket()
+        sock: "socket.socket" = super()._create_socket()
+        return sock
 
-    async def recv(self, loop):
-        response = await super().recv(loop)
+    async def recv(
+        self, loop: "asyncio.AbstractEventLoop",
+    ) -> "dict[str, object]":
+        response: "dict[str, object]" = await super().recv(loop)
         if self._handshake_reads == 2:
             response = await asyncio.wait_for(
                 self._drain_until_session_token_reply(loop, response),
@@ -39,7 +46,10 @@ class ThinClient(BaseThinClient):
                 self._handshake_reads = None
         return response
 
-    async def _drain_until_session_token_reply(self, loop, response):
+    async def _drain_until_session_token_reply(
+        self, loop: "asyncio.AbstractEventLoop",
+        response: "dict[str, object]",
+    ) -> "dict[str, object]":
         """Handle interleaved events (connection_status, pki_doc, ...) sent
         before session_token_reply during the handshake's third read."""
         while response.get("session_token_reply") is None:
