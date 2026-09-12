@@ -1,0 +1,75 @@
+name: Debian packages (Debian 13 + Ubuntu 26.04)
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:13", "ubuntu:26.04"]
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install build tools
+        run: |
+          apt update
+          apt install -y --no-install-recommends \
+            build-essential debhelper dh-python python3-all pybuild-plugin-pyproject flit \
+            dpkg-dev golang-go git ca-certificates systemd pkg-config cmake \
+            python3-dev python3-venv python3-pip cargo rustc unzip libasound2-dev pkg-config
+
+      - name: Build the from-source Python closure (.debs)
+        run: packaging/container/pydeps-build.sh /tmp/debs
+
+      - name: Build the kpclientd .deb
+        run: packaging/container/kpclientd-build.sh /tmp/debs
+
+      - name: Build the katzenqt .deb
+        run: |
+          packaging/debian/build.sh
+          cp dist/katzenqt_*.deb /tmp/debs/
+
+      - name: Install the whole stack with apt (no pip)
+        run: |
+          apt install -y \
+            /tmp/debs/python3-pprintpp_*.deb \
+            /tmp/debs/python3-pycrdt_*.deb \
+            /tmp/debs/python3-rustic-audio-tool_*.deb \
+            /tmp/debs/python3-katzenpost-thinclient_*.deb \
+            /tmp/debs/kpclientd_0.0.1_*.deb \
+            /tmp/debs/katzenqt_0.0.1_all.deb
+
+      - name: Smoke test and assert the service is installed but not enabled
+        run: |
+          set -eu
+          katzenqt-headless --help >/dev/null
+          python3 -c "import pycrdt, katzenpost_thinclient"
+          test -x /usr/bin/kpclientd
+          test -f /etc/kpclientd/client.toml
+          test -f /usr/lib/systemd/user/kpclientd.service
+          if find /etc/systemd/user /usr/lib/systemd/user /root/.config/systemd/user \
+               -path '*.wants/kpclientd.service' 2>/dev/null | grep -q .; then
+            echo "error: kpclientd.service is enabled; it must be opt-in per user" >&2
+            exit 1
+          fi
+
+      - name: Verify the katzenqt .deb builds reproducibly
+        run: |
+          set -eu
+          # Compare against the exact artifact already installed and
+          # smoke-tested above, not two fresh rebuilds of each other --
+          # otherwise this proves nothing about what was actually shipped.
+          a=$(sha256sum /tmp/debs/katzenqt_*.deb | cut -d' ' -f1)
+          rm -rf /tmp/rb
+          cp -a . /tmp/rb
+          ( cd /tmp/rb && rm -rf dist && packaging/debian/build.sh >/dev/null )
+          b=$(sha256sum /tmp/rb/dist/katzenqt_*.deb | cut -d' ' -f1)
+          test "$a" = "$b"

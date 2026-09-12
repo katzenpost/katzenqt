@@ -1,0 +1,15 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: katzenqt
+Source: https://github.com/katzenpost/katzenqt
+
+Files: *
+Copyright: 2026 Katzenpost
+License: public-domain
+ The project declares Public Domain in pyproject.toml.
+ The file-specific license below is retained.
+
+Files: src/katzenqt/theme.py
+Copyright: 2026 David Stainton
+License: AGPL-3
+ This file retains its GNU Affero General Public License version 3 notice.
+ The complete license is available at https://www.gnu.org/licenses/agpl-3.0.txt.
