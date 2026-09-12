@@ -49,6 +49,16 @@ def alive(path: str) -> bool:
         return False
 
 
+def tcp_alive(address: str) -> bool:
+    """Return whether a host:port address accepts a TCP connection."""
+    host, _, port = address.rpartition(":")
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.2):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
 def thin(address: str | Path, network: Literal["Unix", "Tcp"] = "Unix") -> Path:
     """Write a private thin-client configuration for the selected endpoint."""
     if network not in ("Unix", "Tcp"):
@@ -121,9 +131,12 @@ def main() -> None:
     if tcp:
         if not networked():
             raise SystemExit("Docker kpclientd requires Flatpak network access")
+        reachable = tcp_alive(tcp)
         if mode == "--status":
-            print("docker")
+            print("docker" if reachable else "unavailable")
             return
+        if not reachable:
+            raise SystemExit(f"kpclientd is unavailable; nothing is listening at {tcp}")
         os.environ["KATZENQT_THINCLIENT_CONFIG"] = str(thin(tcp, "Tcp"))
         if FLATPAK:
             os.chdir("/app/share/katzenqt")
@@ -139,7 +152,12 @@ def main() -> None:
         )
         return
     installed = False
-    if not address and not FLATPAK:
+    auto_install = not os.environ.get("KATZENQT_NO_AUTO_INSTALL")
+    if not address and not FLATPAK and auto_install:
+        # A plain launch with no daemon reachable installs and starts a
+        # persistent host service -- a real, opt-out-able side effect, not
+        # just a read-only failure. Set KATZENQT_NO_AUTO_INSTALL=1 to get
+        # the old read-only behavior (a clear error) instead.
         installed = install_service()
         if installed:
             for _ in range(600):
@@ -152,6 +170,8 @@ def main() -> None:
             hint = "install the native service and retry"
         elif installed:
             hint = "check 'systemctl --user status kpclientd'"
+        elif not auto_install:
+            hint = "install kpclientd with 'make kpclientd.service' and retry"
         else:
             hint = "install kpclientd with 'make install-kpclient' and retry"
         raise SystemExit(f"kpclientd is unavailable; {hint}")

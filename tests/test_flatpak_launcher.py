@@ -101,12 +101,34 @@ def test_networked_true_outside_flatpak(launcher, monkeypatch):
     assert launcher.networked() is True
 
 
-def test_tcp_status_reports_docker(launcher, monkeypatch, capsys):
+def test_tcp_status_reports_docker_when_reachable(launcher, monkeypatch, capsys):
     monkeypatch.setenv("KATZENQT_KPCLIENTD_TCP", "127.0.0.1:64331")
     monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setattr(launcher, "tcp_alive", lambda address: True)
     monkeypatch.setattr(sys, "argv", ["launcher", "--status"])
     launcher.main()
     assert capsys.readouterr().out.strip() == "docker"
+
+
+def test_tcp_status_reports_unavailable_when_unreachable(launcher, monkeypatch, capsys):
+    monkeypatch.setenv("KATZENQT_KPCLIENTD_TCP", "127.0.0.1:64331")
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setattr(launcher, "tcp_alive", lambda address: False)
+    monkeypatch.setattr(sys, "argv", ["launcher", "--status"])
+    launcher.main()
+    assert capsys.readouterr().out.strip() == "unavailable"
+
+
+def test_tcp_launch_fails_fast_when_unreachable(launcher, monkeypatch):
+    monkeypatch.setenv("KATZENQT_KPCLIENTD_TCP", "127.0.0.1:64331")
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setattr(launcher, "tcp_alive", lambda address: False)
+    monkeypatch.setattr(
+        launcher.subprocess, "call", lambda *_: pytest.fail("GUI started")
+    )
+    monkeypatch.setattr(sys, "argv", ["launcher"])
+    with pytest.raises(SystemExit, match="kpclientd is unavailable"):
+        launcher.main()
 
 
 def test_tcp_requires_network_in_flatpak(launcher, monkeypatch):
@@ -203,3 +225,15 @@ def test_dev_mode_installs_service_then_launches(launcher, monkeypatch):
         launcher.main()
     assert calls["install"] == 1
     assert launched
+
+
+def test_no_auto_install_env_var_opts_out(launcher, monkeypatch):
+    monkeypatch.setenv("KATZENQT_NO_AUTO_INSTALL", "1")
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setattr(launcher, "endpoint", lambda: None)
+    monkeypatch.setattr(
+        launcher, "install_service", lambda: pytest.fail("should not install")
+    )
+    monkeypatch.setattr(sys, "argv", ["launcher"])
+    with pytest.raises(SystemExit, match="kpclientd is unavailable"):
+        launcher.main()
