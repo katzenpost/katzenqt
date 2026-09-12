@@ -428,7 +428,7 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
                 )
             else:
                 _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
-                added.append(please_add.display_name)
+                added.append(_sanitize_peer_name(please_add.display_name))
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
@@ -564,7 +564,7 @@ async def derive_read_and_induct(
 
     await _publish_box(connection, derived.voucher_write_cap, box1_index, induct.sealed_reply)
 
-    joiner_name = induct.display_name or peer_name
+    joiner_name = _sanitize_peer_name(induct.display_name or peer_name)
     already_inducted = False
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
