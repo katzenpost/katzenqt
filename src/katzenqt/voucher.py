@@ -214,11 +214,22 @@ async def list_used_vouchers() -> "list[tuple]":
 async def _finish_pending_voucher(sess, conversation, pending_row) -> None:
     """Complete a handshake in one commit: mark the conversation's voucher used
     and delete the in-flight PendingVoucher row. Callers own the surrounding
-    session and commit."""
+    session and commit.
+
+    Raises if pending_row is already gone (e.g. the user cancelled this
+    voucher between the network reply landing and this call): silently
+    marking the conversation joined anyway would let a cancelled join
+    complete behind the user's back. The caller's commit is never reached,
+    so nothing else added earlier in the same transaction is persisted
+    either."""
+    if pending_row is None:
+        raise RuntimeError(
+            f"pending voucher for conversation {conversation.id} is gone "
+            "(cancelled?); refusing to mark it used"
+        )
     conversation.voucher_used = True
     sess.add(conversation)
-    if pending_row is not None:
-        await sess.delete(pending_row)
+    await sess.delete(pending_row)
 
 
 async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, payload: bytes) -> bytes:
