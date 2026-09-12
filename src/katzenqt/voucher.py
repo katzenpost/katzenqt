@@ -566,12 +566,20 @@ async def derive_read_and_induct(
 
     joiner_name = _sanitize_peer_name(induct.display_name or peer_name)
     already_inducted = False
+    at_capacity = False
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if not await persistent.peer_has_read_cap(
             sess, conversation_id, induct.mutated_message_read_cap,
         ):
-            _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
+            if await _active_member_count(sess, conversation_id) >= MAX_GROUP_MEMBERS:
+                at_capacity = True
+                logger.warning(
+                    "conversation %d reached its member limit; refusing to "
+                    "induct %r", conversation_id, joiner_name,
+                )
+            else:
+                _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
         else:
             # Already inducted (a failed post-commit ack made a naive retry
             # re-run the handshake); re-adding would duplicate the member
@@ -587,7 +595,7 @@ async def derive_read_and_induct(
         await sess.delete(row)
         await sess.commit()
 
-    if already_inducted:
+    if already_inducted or at_capacity:
         return None
 
     await send_introduction_message(
