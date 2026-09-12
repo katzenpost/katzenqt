@@ -82,6 +82,23 @@ def test_arrival_states_change_only_where_membership_grows() -> None:
     assert states[ids[1]] == states[ids[2]]
 
 
+def test_later_deactivation_does_not_repaint_earlier_messages() -> None:
+    """A peer deactivated after joining (e.g. a corrupt-chunk substream)
+    must not retroactively change the arrival membership hash of messages
+    that arrived while they were still active."""
+    ids = _seed()
+    before = dict(arrival_membership_states(_CONVO))
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        peer = sess.get(persistent.ConversationPeer, 2)
+        peer.active = False
+        sess.add(peer)
+        sess.commit()
+
+    after = arrival_membership_states(_CONVO)
+    assert after == before
+
+
 def test_model_serves_epoch_color_and_boundary() -> None:
     ids = _seed()
     assert len(ids) == 3

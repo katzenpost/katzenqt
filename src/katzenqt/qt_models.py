@@ -268,7 +268,12 @@ def arrival_membership_states(conversation_id: int) -> "dict[str, bytes]":
                    == conversation_id)
         ).all()
         for peer in peers:
-            if peer.id == conv.own_peer_id or not peer.active:
+            # peer.active is CURRENT read-routing state (e.g. cleared when a
+            # substream yields a corrupt chunk), not a historical fact -- an
+            # already-arrived message's local membership hash must not
+            # change retroactively just because a peer was later
+            # deactivated, so this reconstruction does not filter on it.
+            if peer.id == conv.own_peer_id:
                 continue
             if peer.name.startswith(models.SUBSTREAM_NAME_PREFIX):
                 continue
