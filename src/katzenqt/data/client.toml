@@ -4,6 +4,7 @@ WireKEMScheme = "KYBER768-X25519"
 [Listen]
   [Listen.Unix]
     Address = "@katzenpost"
+    Addresses = ["$XDG_RUNTIME_DIR/katzenpost/kpclientd.sock"]
 
 [Logging]
   Disable = false
