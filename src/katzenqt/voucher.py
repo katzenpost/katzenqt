@@ -24,6 +24,7 @@ from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
 )
+from sqlalchemy import func
 from sqlmodel import select
 
 from . import models, persistent
@@ -47,6 +48,8 @@ def _brief(b: "bytes | None") -> str:
     if not b:
         return "None"
     return b[:8].hex() + ".." + b[-8:].hex()
+
+MAX_GROUP_MEMBERS = 256
 
 
 class AlreadyJoinedError(Exception):
@@ -240,6 +243,40 @@ async def _conversation_write_cap(sess, conversation_id: int) -> persistent.Writ
     return wcw
 
 
+def _sanitize_peer_name(name: str) -> str:
+    """A peer-supplied display name, made safe to store as a ConversationPeer
+    name. Strips C0/C1 control characters (which could break the substream
+    name parse or spoof the display) and neutralises the reserved
+    ``:substream:`` prefix so a peer cannot masquerade as a synthetic
+    substream peer and have their messages routed onto another peer's log.
+
+    Pure and total: never raises, always returns a non-empty string.
+    """
+    cleaned = "".join(
+        ch for ch in (name or "") if not (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F)
+    )
+    while cleaned.startswith(_SUBSTREAM_NAME_PREFIX):
+        cleaned = cleaned[len(_SUBSTREAM_NAME_PREFIX):]
+    return cleaned or "unnamed"
+
+
+async def _active_member_count(
+    sess: persistent.AsyncSession, conversation_id: int,
+) -> int:
+    """Count active member streams without loading relationships."""
+    statement = (
+        select(func.count())
+        .select_from(persistent.ConversationPeer)
+        .join(persistent.ConversationPeerLink)
+        .where(
+            persistent.ConversationPeerLink.conversation_id == conversation_id,
+            persistent.ConversationPeer.active.is_(True),
+            ~persistent.ConversationPeer.name.startswith(_SUBSTREAM_NAME_PREFIX),
+        )
+    )
+    return (await sess.exec(statement)).one()
+
+
 def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
     if not read_cap or len(read_cap) != _INDEX_LEN + 32:
         # 136 bytes total: a 32-byte public key plus the 104-byte index. A
@@ -257,7 +294,8 @@ def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
     )
     sess.add(rcw)
     sess.add(persistent.ConversationPeer(
-        name=name, read_cap_id=rcw.id, active=True, conversation=conversation,
+        name=_sanitize_peer_name(name), read_cap_id=rcw.id, active=True,
+        conversation=conversation,
     ))
 
 
@@ -365,6 +403,10 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         wcw.next_index = opened.mutated_message_write_cap[-_INDEX_LEN:]
         sess.add(wcw)
         added = []
+        remaining = max(0, MAX_GROUP_MEMBERS - await _active_member_count(
+            sess, conversation_id,
+        ))
+        capped = False
         for please_add in reply_who.please_adds:
             if await persistent.peer_has_read_cap(
                 sess, conversation_id, please_add.read_cap,
@@ -372,16 +414,25 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
                 # This member was already added by an earlier run of this
                 # open (or an announcement that beat it here); adding a
                 # second peer for the same read cap would read their
-                # stream twice.
+                # stream twice. A duplicate doesn't consume capacity, so it
+                # doesn't count against `remaining` below.
                 logger.warning(
                     "await_and_open: %r already holds read cap %s on "
                     "conversation %d; skipping duplicate _add_peer",
                     please_add.display_name, _brief(please_add.read_cap),
                     conversation_id,
                 )
-            else:
-                _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
-                added.append(please_add.display_name)
+                continue
+            if len(added) >= remaining:
+                capped = True
+                break
+            _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
+            added.append(_sanitize_peer_name(please_add.display_name))
+        if capped:
+            logger.warning(
+                "voucher reply named %d members; capping intake at %d",
+                len(reply_who.please_adds), remaining,
+            )
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
@@ -395,7 +446,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
         version=0, membership_hash=b"TODO" * 8,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(
-            display_name=display_name, read_cap=read_cap,
+            display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,
         ),
     )
     async with persistent.conversation_log_order_lock(conversation_id):
@@ -517,14 +568,22 @@ async def derive_read_and_induct(
 
     await _publish_box(connection, derived.voucher_write_cap, box1_index, induct.sealed_reply)
 
-    joiner_name = induct.display_name or peer_name
+    joiner_name = _sanitize_peer_name(induct.display_name or peer_name)
     already_inducted = False
+    at_capacity = False
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if not await persistent.peer_has_read_cap(
             sess, conversation_id, induct.mutated_message_read_cap,
         ):
-            _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
+            if await _active_member_count(sess, conversation_id) >= MAX_GROUP_MEMBERS:
+                at_capacity = True
+                logger.warning(
+                    "conversation %d reached its member limit; refusing to "
+                    "induct %r", conversation_id, joiner_name,
+                )
+            else:
+                _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
         else:
             # Already inducted (a failed post-commit ack made a naive retry
             # re-run the handshake); re-adding would duplicate the member
@@ -540,7 +599,7 @@ async def derive_read_and_induct(
         await sess.delete(row)
         await sess.commit()
 
-    if already_inducted:
+    if already_inducted or at_capacity:
         return None
 
     await send_introduction_message(

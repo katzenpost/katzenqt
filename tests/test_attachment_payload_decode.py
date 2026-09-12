@@ -234,3 +234,24 @@ def test_attachment_role_value_maps_each_role() -> None:
     assert q._attachment_role_value(info, q.ROLE_CHAT_ATTACHMENT_REL_PATH) == "r"
     assert q._attachment_role_value(info, q.ROLE_CHAT_PICTURE_PATH) == "p"
     assert q._attachment_role_value(info, 0x999) is None
+
+
+def test_oversized_inline_text_is_clamped_before_display():
+    from katzenqt.models import MAX_MESSAGE_CHARS, _TEXT_TRUNCATION_MARKER
+
+    huge = "q" * (MAX_MESSAGE_CHARS + 10000)
+    gcm = GroupChatMessage(version=0, membership_hash=b"TODO" * 8, text=huge)
+    info = _decode_group_chat_payload(b"F" + gcm.to_cbor())
+    assert info.kind == "text"
+    assert len(info.display) == MAX_MESSAGE_CHARS + len(_TEXT_TRUNCATION_MARKER)
+    assert info.display.endswith(_TEXT_TRUNCATION_MARKER)
+
+
+def test_oversized_pre_protocol_text_is_clamped():
+    from katzenqt.models import MAX_MESSAGE_CHARS, _TEXT_TRUNCATION_MARKER
+
+    huge = ("p" * (MAX_MESSAGE_CHARS + 10000)).encode()
+    info = _decode_group_chat_payload(huge)
+    assert info.kind == "text"
+    assert len(info.display) == MAX_MESSAGE_CHARS + len(_TEXT_TRUNCATION_MARKER)
+    assert info.display.endswith(_TEXT_TRUNCATION_MARKER)

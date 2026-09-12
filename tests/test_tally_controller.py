@@ -61,9 +61,10 @@ async def test_vote_is_keyed_to_the_authenticated_sender():
         await ctrl.create_local(sess, convo, survey_id, "lunch?", Mode.APPROVAL, ["a", "b"])
         await ctrl.handle_event(sess, peers["alice"], events.build_vote(survey_id, {"s0": "yes"}))
         await ctrl.handle_event(sess, peers["bob"], events.build_vote(survey_id, {"s1": "yes"}))
+        convo_id = convo.id
         await sess.commit()
 
-    doc = ctrl.get(survey_id)
+    doc = ctrl.get(convo_id, survey_id)
     keys = set(votes_map(doc).keys())
     assert keys == {
         voter_id_from_read_cap(ALICE_CAP).hex(),
@@ -88,9 +89,10 @@ async def test_one_peer_cannot_overwrite_anothers_vote():
         # Alice votes the opposite. The payload carries no voter id, so the
         # controller can only ever write Alice's own key; Bob's stands.
         await ctrl.handle_event(sess, peers["alice"], events.build_vote(survey_id, {"s0": "no"}))
+        convo_id = convo.id
         await sess.commit()
 
-    doc = ctrl.get(survey_id)
+    doc = ctrl.get(convo_id, survey_id)
     vmap = votes_map(doc)
     bob_key = voter_id_from_read_cap(BOB_CAP).hex()
     assert vmap[bob_key]["s0"] == "yes"
@@ -105,11 +107,12 @@ async def test_state_persists_and_a_fresh_controller_reloads_it():
         ctrl = TallyController()
         await ctrl.create_local(sess, convo, survey_id, "t", Mode.AVAILABILITY, ["a", "b"])
         await ctrl.handle_event(sess, peers["alice"], events.build_vote(survey_id, {"s0": "maybe"}))
+        convo_id = convo.id
         await sess.commit()
 
     reloaded = TallyController()
     await reloaded.load_all()
-    res = engine.tally(reloaded.get(survey_id))
+    res = engine.tally(reloaded.get(convo_id, survey_id))
     assert res.n_voters == 1
     assert res.slots[0].maybe == 1
 
@@ -156,7 +159,7 @@ async def test_creator_can_close_but_non_creator_cannot_locally():
         # We created it, so we may close it.
         await ctrl.create_local(sess, convo, survey_id, "x", Mode.APPROVAL, ["a"])
         assert await ctrl.close_local(sess, convo, survey_id) is True
-        assert engine.tally(ctrl.get(survey_id)).status == "closed"
+        assert engine.tally(ctrl.get(convo.id, survey_id)).status == "closed"
 
         # A survey whose creator is Alice: our local user must not close it.
         other = uuid.uuid4().bytes
@@ -164,7 +167,7 @@ async def test_creator_can_close_but_non_creator_cannot_locally():
             other, "y", Mode.APPROVAL, ["a"], creator=voter_id_from_read_cap(ALICE_CAP)))
         await ctrl.handle_event(sess, peers["alice"], events.build_create(other, blob))
         assert await ctrl.close_local(sess, convo, other) is False
-        assert engine.tally(ctrl.get(other)).status == "open"
+        assert engine.tally(ctrl.get(convo.id, other)).status == "open"
 
 
 @pytest.mark.asyncio
@@ -179,9 +182,81 @@ async def test_close_event_honoured_only_from_the_creator():
 
         # A close from Alice (not the creator) is ignored.
         await ctrl.handle_event(sess, peers["alice"], events.build_close(survey_id))
-        assert engine.tally(ctrl.get(survey_id)).status == "open"
+        assert engine.tally(ctrl.get(convo.id, survey_id)).status == "open"
 
         # A close from the creator's read cap is honoured.
         await ctrl.handle_event(sess, peers["creator"], events.build_close(survey_id))
-        assert engine.tally(ctrl.get(survey_id)).status == "closed"
+        assert engine.tally(ctrl.get(convo.id, survey_id)).status == "closed"
         await sess.commit()
+
+
+@pytest.mark.asyncio
+async def test_cross_conversation_apply_is_isolated():
+    """A survey created in conversation A cannot be seized or perturbed by a
+    peer in conversation B who reuses its survey id."""
+    from katzenqt.tally import controller as controller_mod
+
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo_a, _own_a, peers_a = await _make_convo(sess, "a", OWN_CAP, {"alice": ALICE_CAP})
+        convo_b, _own_b, peers_b = await _make_convo(sess, "b", bytes([0x04]) * 136, {"bob": BOB_CAP})
+
+        blob = sync.full_state(schema.new_survey_doc(survey_id, "t", Mode.APPROVAL, ["a"]))
+        await ctrl.handle_event(sess, peers_a["alice"], events.build_create(survey_id, blob))
+        await ctrl.handle_event(sess, peers_a["alice"], events.build_vote(survey_id, {"s0": "yes"}))
+
+        other_blob = sync.full_state(schema.new_survey_doc(survey_id, "hijack", Mode.APPROVAL, ["a"]))
+        assert await ctrl.handle_event(sess, peers_b["bob"], events.build_create(survey_id, other_blob)) is False
+        assert await ctrl.handle_event(sess, peers_b["bob"], events.build_vote(survey_id, {"s0": "no"})) is False
+
+        a_id, b_id = convo_a.id, convo_b.id
+        await sess.commit()
+
+    assert ctrl.get(b_id, survey_id) is None
+    a_doc = ctrl.get(a_id, survey_id)
+    assert engine.tally(a_doc).slots[0].yes == 1
+
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.TallyState, survey_id)
+        assert row.conversation_id == a_id
+
+
+@pytest.mark.asyncio
+async def test_oversized_survey_id_is_dropped():
+    ctrl = TallyController()
+    huge_id = b"\x01" * (controller_max_survey_id() + 1)
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
+        blob = sync.full_state(schema.new_survey_doc(huge_id, "t", Mode.APPROVAL, ["a"]))
+        assert await ctrl.handle_event(sess, peers["alice"], events.build_create(huge_id, blob)) is False
+        convo_id = convo.id
+        await sess.commit()
+
+    assert ctrl.get(convo_id, huge_id) is None
+    async with persistent.asession() as sess:
+        assert await sess.get(persistent.TallyState, huge_id) is None
+
+
+@pytest.mark.asyncio
+async def test_oversized_crdt_blob_is_dropped():
+    from katzenqt.tally import controller as controller_mod
+
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
+        giant = b"\x00" * (controller_mod._MAX_CRDT_BLOB + 1)
+        assert await ctrl.handle_event(sess, peers["alice"], events.build_create(survey_id, giant)) is False
+        convo_id = convo.id
+        await sess.commit()
+
+    assert ctrl.get(convo_id, survey_id) is None
+    async with persistent.asession() as sess:
+        assert await sess.get(persistent.TallyState, survey_id) is None
+
+
+def controller_max_survey_id() -> int:
+    from katzenqt.tally import controller as controller_mod
+
+    return controller_mod._MAX_SURVEY_ID_LEN
