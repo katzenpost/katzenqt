@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from importlib.resources import files
 from pathlib import Path
@@ -14,7 +15,20 @@ from typing import Literal
 APP = "network.katzenpost.katzenqt"
 DATA = files("katzenqt") / "data"
 FLATPAK = Path("/.flatpak-info").exists()
-RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+
+
+def _runtime_dir() -> Path:
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        return Path(xdg)
+    if hasattr(os, "getuid"):
+        return Path(f"/run/user/{os.getuid()}")
+    # os.getuid doesn't exist on Windows; this launcher's Unix-socket paths
+    # are meaningless there anyway, but importing the module must not crash.
+    return Path(tempfile.gettempdir())
+
+
+RUNTIME = _runtime_dir()
 ROOT = RUNTIME / ("app" if FLATPAK else "") / APP
 HOST = RUNTIME / "katzenpost" / "kpclientd.sock"
 SOCKET = ROOT / "kpclientd.sock"

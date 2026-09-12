@@ -268,7 +268,12 @@ def arrival_membership_states(conversation_id: int) -> "dict[str, bytes]":
                    == conversation_id)
         ).all()
         for peer in peers:
-            if peer.id == conv.own_peer_id or not peer.active:
+            # peer.active is CURRENT read-routing state (e.g. cleared when a
+            # substream yields a corrupt chunk), not a historical fact -- an
+            # already-arrived message's local membership hash must not
+            # change retroactively just because a peer was later
+            # deactivated, so this reconstruction does not filter on it.
+            if peer.id == conv.own_peer_id:
                 continue
             if peer.name.startswith(models.SUBSTREAM_NAME_PREFIX):
                 continue
@@ -330,6 +335,16 @@ def lru_cache_for_data_roles(maxsize=10000):
                 if ret != 1:  # received or sent, but not "pending"
                     indices_with_stable_network_status[index] = ret
                 return ret
+        def cache_clear():
+            # A display index is cached by row, not by the conversation_order
+            # it currently maps to; under a non-default ordering strategy
+            # that mapping can change (a later message reshuffles it), so
+            # the cache must be dropped whenever the order/epoch caches are,
+            # not just left to evict by size.
+            cached_func.cache_clear()
+            indices_with_stable_network_status.clear()
+        wrapper.cache_clear = cache_clear
+        wrapper.cache_info = cached_func.cache_info
         return wrapper
     return decorator
 
@@ -457,6 +472,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self.row_count += 1
         self._order_cache = None
         self._epoch_cache = None
+        self.data.cache_clear()
         self.endInsertRows()
 
     def redraw_network_status(self):
