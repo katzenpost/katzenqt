@@ -9,8 +9,7 @@ import os
 import tempfile
 
 
-# Only override if the caller hasn't set one explicitly (so `KQT_STATE=foo
-# pytest` still works for ad-hoc runs).
-if not os.environ.get("KQT_STATE"):
+# Workers need separate databases; serial runs honor an explicit KQT_STATE.
+if os.environ.get("PYTEST_XDIST_WORKER") or not os.environ.get("KQT_STATE"):
     _tmp_root = tempfile.mkdtemp(prefix="katzenqt-test-")
     os.environ["KQT_STATE"] = os.path.join(_tmp_root, f"test-{os.getpid()}")
