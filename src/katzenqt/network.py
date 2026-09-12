@@ -341,8 +341,19 @@ READ_WATCHDOG_SECONDS = 1200.0
 # to a query_id whose original listener (this call) already gave up
 # waiting on the old connection; an epoch rollover makes the courier
 # reject the (now-stale) envelope outright.
-_RECONNECT_GRACE_SECONDS = 30.0
-_DAEMON_RPC_TIMEOUT_SECONDS = 30.0
+#
+# 30s was too tight for encrypt_read/encrypt_write/new_keypair/
+# get_message_box_index_counter under real contention: the docker
+# integration suite runs 4 parallel workers against one shared kpclientd,
+# and these "should be fast, local" RPCs can legitimately queue behind
+# each other's concurrent requests for longer than that -- confirmed by CI
+# (encrypt_write and the pre-existing encrypt_read backstop both tripped
+# in the same run, PR #66's docker-integration job). Both values raised to
+# give real headroom for that contention while staying far short of
+# READ_WATCHDOG_SECONDS above, which is sized for a genuine network
+# round-trip rather than these local calls.
+_RECONNECT_GRACE_SECONDS = 90.0
+_DAEMON_RPC_TIMEOUT_SECONDS = 90.0
 
 # Upper bound on how long readables_to_mixwal() and
 # send_resendable_plaintexts() park at the __mixnet_connected gate when the
