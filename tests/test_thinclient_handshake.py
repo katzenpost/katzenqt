@@ -5,6 +5,7 @@ import cbor2
 import pytest
 from katzenpost_thinclient import Config
 
+from katzenqt import _thinclient
 from katzenqt._thinclient import ThinClient
 
 
@@ -79,6 +80,58 @@ async def test_session_handshake_preserves_events_on_start_and_reconnect(
                 reply = await asyncio.wait_for(client.response_queues[b"pending"].get(), 1)
                 assert reply["reply"] == "ready"
         assert client._handshake_reads is None
+    finally:
+        client._stopping = True
+        client.socket.close()
+        if hasattr(client, 'task'):
+            client.task.cancel()
+            await asyncio.gather(client.task, return_exceptions=True)
+        server.close()
+        await server.wait_closed()
+        await asyncio.gather(*handlers)
+
+
+@pytest.mark.asyncio
+async def test_handshake_drain_times_out_if_session_token_reply_never_arrives(
+    tmp_path, monkeypatch,
+):
+    """A daemon that sends interleaved events but never completes the
+    handshake must not hang recv() forever -- that would also block the
+    base client's own _reconnect() retry/backoff loop from regaining
+    control."""
+    monkeypatch.setattr(_thinclient, "_HANDSHAKE_TIMEOUT_SECONDS", 0.2)
+    handlers = []
+
+    async def serve(reader, writer):
+        handlers.append(asyncio.current_task())
+
+        async def send(response):
+            payload = cbor2.dumps(response)
+            writer.write(struct.pack('>I', len(payload)) + payload)
+            await writer.drain()
+
+        try:
+            await send({"connection_status_event": {"is_connected": True}})
+            await send({"new_pki_document_event": {"payload": cbor2.dumps({"Epoch": 1})}})
+            size = struct.unpack('>I', await reader.readexactly(4))[0]
+            await reader.readexactly(size)
+            # Send one interleaved event, then go silent -- never send
+            # session_token_reply.
+            await send({"connection_status_event": {"is_connected": False}})
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(serve, '127.0.0.1', 0)
+    port = server.sockets[0].getsockname()[1]
+    config = tmp_path / 'thinclient.toml'
+    config.write_text(f'[Dial.Tcp]\nAddress = "127.0.0.1:{port}"\nNetwork = "tcp"\n')
+    client = ThinClient(Config(str(config)))
+    loop = asyncio.get_running_loop()
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(client.start(loop), 2)
     finally:
         client._stopping = True
         client.socket.close()
