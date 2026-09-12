@@ -57,3 +57,32 @@ def test_data_exposes_attachment_roles_from_a_persisted_row() -> None:
     assert model.data(index, ROLE_CHAT_MESSAGE_ID) == str(mid)
     # A role outside the exposed set short-circuits to None.
     assert model.data(index, 0xDEAD) is None
+
+
+def test_increment_row_count_clears_the_data_cache() -> None:
+    """data() is cached by row index, not by the conversation_order a row
+    currently maps to; under a non-default ordering strategy that mapping
+    can change, so the cache must be dropped whenever a new row arrives
+    invalidates the order/epoch caches, not just left to evict by size."""
+    mid = uuid.uuid4()
+    payload = b"F" + cbor2.dumps({
+        "v": 0, "kind": "file_marker", "basename": "note.opus",
+        "filetype": "audio/opus", "size": 1,
+        "rel_path": "attachments/901/x.opus",
+        "sha256": b"\x00" * 32, "membership_hash": b"m",
+    })
+    with persistent.Session(persistent._engine_sync) as sess:
+        sess.add(persistent.ConversationLog(
+            id=mid, conversation_id=901, conversation_peer_id=1,
+            conversation_order=0, payload=payload,
+        ))
+        sess.commit()
+
+    model = ConversationLogModel(convo_id=901)
+    model.row_count = 1
+    index = model.createIndex(0, 0)
+    model.data(index, ROLE_CHAT_ATTACHMENT_BASENAME)
+    assert model.data.cache_info().currsize > 0
+
+    model.increment_row_count()
+    assert model.data.cache_info().currsize == 0

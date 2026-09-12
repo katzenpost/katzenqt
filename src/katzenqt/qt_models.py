@@ -11,7 +11,9 @@ from typing import Any, NamedTuple
 
 import cbor2
 
-from . import attachment_images, persistent
+from sqlmodel import Session, col, select
+
+from . import attachment_images, ordering, persistent
 
 import functools
 from functools import lru_cache
@@ -53,6 +55,8 @@ ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
 ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save visibility
 ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
 ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
+ROLE_CHAT_EPOCH_COLOR = 0x109
+ROLE_CHAT_EPOCH_BOUNDARY = 0x10A
 
 
 class AttachmentDisplay(NamedTuple):
@@ -199,6 +203,103 @@ def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
     return AttachmentDisplay("", None, None, False, "text", None)
 
 
+def _sender_epoch_of(payload: bytes) -> "bytes | None":
+    """The membership hash the SENDER stamped on a row's payload, normalized
+    (sentinel/absent -> None). Used only for epoch-anchored ordering; hostile
+    input, so it is decoded defensively and never trusted beyond comparison."""
+    if payload[:1] != b"F":
+        return None
+    body = payload[1:]
+    try:
+        decoded = cbor2.loads(body)
+    except Exception:
+        decoded = None
+    if isinstance(decoded, dict) and "membership_hash" in decoded:
+        mh = decoded.get("membership_hash")
+        return ordering.normalize_membership_hash(mh if isinstance(mh, bytes)
+                                                  else None)
+    try:
+        from .models import GroupChatMessage
+        gm = GroupChatMessage.from_cbor(body)
+    except Exception:
+        return None
+    return ordering.normalize_membership_hash(gm.membership_hash)
+
+
+def _introduction_read_cap(payload: bytes) -> "bytes | None":
+    """The read cap an INTRODUCTION row announces (the member it adds), or None
+    for any other row. Same defensive framing as the other payload decoders."""
+    if payload[:1] != b"F":
+        return None
+    try:
+        from .models import GroupChatMessage, GroupChatTypeEnum
+        gm = GroupChatMessage.from_cbor(payload[1:])
+    except Exception:
+        return None
+    if gm.msg_type != GroupChatTypeEnum.INTRODUCTION or gm.introduction is None:
+        return None
+    cap: bytes = gm.introduction.read_cap
+    return cap
+
+
+def arrival_membership_states(conversation_id: int) -> "dict[str, bytes]":
+    """Map each message id to the LOCAL membership hash in effect when it
+    arrived, reconstructed by replaying INTRODUCTION rows in conversation_order
+    (a member counts from the row that announced it; members learned at join
+    count from the start). Purely local -- no wire field, leaks no reading
+    progress -- so it is the colour source, unlike the sender-stamped hash.
+    Reconstructs local membership at each message."""
+    from . import models
+    states: "dict[str, bytes]" = {}
+    with Session(persistent._engine_sync) as sess:
+        conv = sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return states
+        own_cap = b""
+        wcw = sess.get(persistent.WriteCapWAL, conv.write_cap)
+        if wcw is not None and wcw.write_cap is not None:
+            own_cap = wcw.write_cap[32:]
+        peer_caps: list[bytes] = []
+        peers = sess.exec(
+            select(persistent.ConversationPeer)
+            .where(persistent.ConversationPeer.id
+                   == persistent.ConversationPeerLink.conversation_peer_id)
+            .where(persistent.ConversationPeerLink.conversation_id
+                   == conversation_id)
+        ).all()
+        for peer in peers:
+            # peer.active is CURRENT read-routing state (e.g. cleared when a
+            # substream yields a corrupt chunk), not a historical fact -- an
+            # already-arrived message's local membership hash must not
+            # change retroactively just because a peer was later
+            # deactivated, so this reconstruction does not filter on it.
+            if peer.id == conv.own_peer_id:
+                continue
+            if peer.name.startswith(models.SUBSTREAM_NAME_PREFIX):
+                continue
+            rcw = sess.get(persistent.ReadCapWAL, peer.read_cap_id)
+            if rcw is not None and rcw.read_cap is not None:
+                peer_caps.append(rcw.read_cap)
+        rows = sess.exec(
+            select(persistent.ConversationLog)
+            .where(persistent.ConversationLog.conversation_id == conversation_id)
+            .order_by(col(persistent.ConversationLog.conversation_order))
+        ).all()
+        joined_at: "dict[bytes, int]" = {}
+        for row in rows:
+            cap = _introduction_read_cap(row.payload)
+            if cap is not None and cap not in joined_at:
+                joined_at[cap] = row.conversation_order
+        for row in rows:
+            k = row.conversation_order
+            caps = [own_cap] if own_cap else []
+            for cap in peer_caps:
+                if joined_at.get(cap, 0) <= k:
+                    caps.append(cap)
+            states[str(row.id)] = models.canonical_membership_hash(caps)
+    return states
+
+
 def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
     """Map a decoded payload to the value for one attachment/display role."""
     if role == 0:
@@ -234,6 +335,16 @@ def lru_cache_for_data_roles(maxsize=10000):
                 if ret != 1:  # received or sent, but not "pending"
                     indices_with_stable_network_status[index] = ret
                 return ret
+        def cache_clear():
+            # A display index is cached by row, not by the conversation_order
+            # it currently maps to; under a non-default ordering strategy
+            # that mapping can change (a later message reshuffles it), so
+            # the cache must be dropped whenever the order/epoch caches are,
+            # not just left to evict by size.
+            cached_func.cache_clear()
+            indices_with_stable_network_status.clear()
+        wrapper.cache_clear = cache_clear
+        wrapper.cache_info = cached_func.cache_info
         return wrapper
     return decorator
 
@@ -250,6 +361,64 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
+        self.row_count: int = 0
+        self._order_cache: "list[int] | None" = None
+        self._order_cache_count: int = -1
+        self._epoch_cache: "dict[int, ordering.EpochRow] | None" = None
+        self._epoch_cache_count: int = -1
+
+    def _message_metas(self) -> "list[ordering.MessageMeta]":
+        """Every row's ordering + colouring metadata for this conversation.
+        arrival_epoch is the receiver-local membership hash (colour source);
+        sender_epoch is the wire-stamped hash (epoch-anchored ordering)."""
+        arrival = arrival_membership_states(self.convo_id)
+        metas: "list[ordering.MessageMeta]" = []
+        with persistent.Session(persistent._engine_sync) as sess:
+            rows = sess.query(persistent.ConversationLog).filter(
+                persistent.ConversationLog.conversation_id == self.convo_id
+            ).all()
+            for row in rows:
+                peer = row.conversation_peer
+                message_id = str(row.id)
+                metas.append(ordering.MessageMeta(
+                    conversation_order=row.conversation_order,
+                    peer_id=row.conversation_peer_id,
+                    author=peer.name if peer is not None else "",
+                    message_id=message_id,
+                    arrival_epoch=arrival.get(message_id),
+                    sender_epoch=_sender_epoch_of(row.payload),
+                ))
+        return metas
+
+    def _epoch_annotations(self) -> "dict[int, ordering.EpochRow]":
+        """conversation_order -> EpochRow (arrival colour + divider boundary),
+        computed over the active display order and cached against row_count."""
+        if (self._epoch_cache is not None
+                and self._epoch_cache_count == self.row_count):
+            return self._epoch_cache
+        metas = self._message_metas()
+        order = ordering.active_strategy().order(metas)
+        by_co = {m.conversation_order: m for m in metas}
+        ordered = [by_co[co] for co in order if co in by_co]
+        rows = ordering.annotate_epochs(ordered)
+        self._epoch_cache = {r.conversation_order: r for r in rows}
+        self._epoch_cache_count = self.row_count
+        return self._epoch_cache
+
+    def _display_order(self) -> "list[int] | None":
+        """conversation_order values in display position, or None for the
+        identity map (the insertion default -- no DB pass, no behaviour change).
+        Cached against row_count so a non-default strategy pays one pass per
+        change, not one per rendered row."""
+        strat = ordering.active_strategy()
+        if strat.name == "insertion":
+            return None
+        if (self._order_cache is not None
+                and self._order_cache_count == self.row_count):
+            return self._order_cache
+        self._order_cache = strat.order(self._message_metas())
+        self._order_cache_count = self.row_count
+        return self._order_cache
 
     def roleNames(self):
         """These map names used in QML to ints used in QAbstractItemModel
@@ -272,6 +441,8 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND: QByteArray(b'attachment_kind'),
             ROLE_CHAT_ATTACHMENT_REL_PATH: QByteArray(b'attachment_rel_path'),
             ROLE_CHAT_PICTURE_PATH: QByteArray(b'picture_path'),
+            ROLE_CHAT_EPOCH_COLOR: QByteArray(b'epoch_color'),
+            ROLE_CHAT_EPOCH_BOUNDARY: QByteArray(b'epoch_boundary'),
         }
 
     @lru_cache(maxsize=10000)
@@ -299,6 +470,9 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         qmi = QModelIndex()
         self.beginInsertRows(qmi, self.row_count-1, self.row_count-1)
         self.row_count += 1
+        self._order_cache = None
+        self._epoch_cache = None
+        self.data.cache_clear()
         self.endInsertRows()
 
     def redraw_network_status(self):
@@ -328,18 +502,33 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND,
             ROLE_CHAT_ATTACHMENT_REL_PATH,
             ROLE_CHAT_PICTURE_PATH,
+            ROLE_CHAT_EPOCH_COLOR,
+            ROLE_CHAT_EPOCH_BOUNDARY,
         ):
             return None
         index_row : int = index.row()
         #print("DATA: INDEX ROW IS", index_row, repr(index))
-        # TODO we definitely want to paginate this stuff for performance reasons,
-        # and when we do we want order by:
-        # sa_relationship_kwargs={"order_by": "conversation_order", "lazy": "dynamic"},
+        order = self._display_order()
+        if order is None:
+            target = index_row
+        elif 0 <= index_row < len(order):
+            target = order[index_row]
+        else:
+            return None
+
+        if role == ROLE_CHAT_EPOCH_COLOR:
+            er = self._epoch_annotations().get(target)
+            return er.color if er is not None else None
+        if role == ROLE_CHAT_EPOCH_BOUNDARY:
+            er = self._epoch_annotations().get(target)
+            return bool(er.is_boundary) if er is not None else False
 
         with persistent.Session(persistent._engine_sync) as sess:
                 cl = sess.query(persistent.ConversationLog).filter(
                     persistent.ConversationLog.conversation_id == self.convo_id).filter(
-                        persistent.ConversationLog.conversation_order==index_row).first()
+                        persistent.ConversationLog.conversation_order==target).first()
+                if cl is None:
+                    return None
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
                     if cl.network_status == 1:
