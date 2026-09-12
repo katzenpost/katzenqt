@@ -39,7 +39,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
-from . import attachment_images
+from . import attachment_images, conversation_handlers
 from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
@@ -1150,7 +1150,14 @@ class MainWindow(QMainWindow):
         if not msg.strip():
             return
 
-        group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(
+                convo_state.conversation_id
+            )
+        )
+        group_chat_message = GroupChatMessage(
+            version=0, membership_hash=membership_hash, text=msg
+        )
 
         # TODO: this is general code that should live in a shared place:
         send_op = SendOperation(
@@ -1326,6 +1333,9 @@ class MainWindow(QMainWindow):
         convo = self.convo_state()
         print("should send files", convo.attached_files)
 
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(convo.conversation_id)
+        )
         voice_note_drafts = []
         audio = getattr(self, "_ptt_audio", None)
         # One SendOperation per file; unserialize() only decodes one GCM.
@@ -1357,7 +1367,7 @@ class MainWindow(QMainWindow):
             upload = GroupChatFileUpload.from_path(f_path)
             gcm = GroupChatMessage(
                 version=0,
-                membership_hash=b"TODO" * (32 // 4),  # TODO: convo_state.group_chat_state.membership_hash
+                membership_hash=membership_hash,
                 file_upload=upload,
             )
 
