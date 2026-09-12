@@ -77,7 +77,7 @@ def test_multi_os_ci_covers_both_targets_and_invokes_the_scripts():
     wf = (ROOT / ".github" / "workflows" / "deb-multi-os.yml").read_text()
     assert "debian:13" in wf
     assert "ubuntu:26.04" in wf
-    assert "dpkg-buildpackage" in wf
+    assert "packaging/debian/build.sh" in wf
     assert "packaging/container/pydeps-build.sh" in wf
     assert "packaging/container/kpclientd-build.sh" in wf
     assert "python3-rustic-audio-tool" in wf

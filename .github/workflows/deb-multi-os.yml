@@ -34,8 +34,8 @@ jobs:
 
       - name: Build the katzenqt .deb
         run: |
-          dpkg-buildpackage -b -uc -us
-          mv ../katzenqt_*.deb /tmp/debs/
+          packaging/debian/build.sh
+          cp dist/katzenqt_*.deb /tmp/debs/
 
       - name: Install the whole stack with apt (no pip)
         run: |
@@ -64,11 +64,12 @@ jobs:
       - name: Verify the katzenqt .deb builds reproducibly
         run: |
           set -eu
-          rm -rf /tmp/ra /tmp/rb
-          cp -a . /tmp/ra
+          # Compare against the exact artifact already installed and
+          # smoke-tested above, not two fresh rebuilds of each other --
+          # otherwise this proves nothing about what was actually shipped.
+          a=$(sha256sum /tmp/debs/katzenqt_*.deb | cut -d' ' -f1)
+          rm -rf /tmp/rb
           cp -a . /tmp/rb
-          ( cd /tmp/ra && rm -rf dist && packaging/debian/build.sh >/dev/null )
           ( cd /tmp/rb && rm -rf dist && packaging/debian/build.sh >/dev/null )
-          a=$(sha256sum /tmp/ra/dist/katzenqt_*.deb | cut -d' ' -f1)
           b=$(sha256sum /tmp/rb/dist/katzenqt_*.deb | cut -d' ' -f1)
           test "$a" = "$b"
