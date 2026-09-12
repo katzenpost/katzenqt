@@ -270,10 +270,16 @@ class PendingVouchersDialog(QDialog):
         self.list_widget.takeItem(self.list_widget.row(item))
 
 
+# Fixed, not theme-driven: theme.py has no semantic "status" color yet, and
+# both read at a contrast that stays legible against either palette.
+_MIXNET_CONNECTED_COLOR = "#268bd2"
+_MIXNET_OFFLINE_COLOR = "#dc322f"
+
+
 def mixnet_status_text(connected: bool) -> "tuple[str, str]":
     if connected:
-        return ("Mixnet: connected", "#268bd2")
-    return ("Mixnet: offline", "#dc322f")
+        return ("Mixnet: connected", _MIXNET_CONNECTED_COLOR)
+    return ("Mixnet: offline", _MIXNET_OFFLINE_COLOR)
 
 
 class MainWindow(QMainWindow):
@@ -436,6 +442,15 @@ class MainWindow(QMainWindow):
         format to plain text to keep a hostile name from spoofing the dialog.
         """
         box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.exec()
+
+    def _info_plain(self, title: str, text: str) -> None:
+        """Show an informational dialog with the message rendered as plain
+        text, for the same reason _warn_attachment is: the text can embed a
+        peer-chosen display name, which must not be interpreted as HTML.
+        """
+        box = QMessageBox(QMessageBox.Icon.Information, title, text, parent=self)
         box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         box.exec()
 
@@ -1727,8 +1742,8 @@ class MainWindow(QMainWindow):
             convo.contacts_standard_item.appendRow(QStandardItem(name))
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(added) or "(none)"
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
 
     async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
@@ -1801,8 +1816,8 @@ class MainWindow(QMainWindow):
         convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
         ))
 
     @async_cb

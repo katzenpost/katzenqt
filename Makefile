@@ -315,7 +315,9 @@ kpclientd-podman:
 install-kpclient: $(KPCLIENTD_BIN)
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
-	@install -m 0600 src/katzenqt/data/client.toml ~/.local/katzenpost/client.toml
+	@sed "s|[$$]XDG_RUNTIME_DIR|$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}|g" \
+		src/katzenqt/data/client.toml > ~/.local/katzenpost/client.toml
+	@chmod 0600 ~/.local/katzenpost/client.toml
 	@install -m 0600 src/katzenqt/data/thinclient.toml ~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
