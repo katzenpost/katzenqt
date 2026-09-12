@@ -168,6 +168,12 @@ class TallyController:
     async def _apply_full_or_update(self, sess, conversation_id: int, survey_id: bytes, crdt: "bytes | None") -> None:
         """Load a fresh Doc from ``crdt`` or merge it into the existing one, then
         persist, all keyed by ``(conversation_id, survey_id)``."""
+        if crdt is None:
+            logger.warning(
+                "tally message for survey %s has no crdt payload; dropping",
+                survey_id.hex(),
+            )
+            return
         doc = self._docs.get((conversation_id, survey_id))
         if doc is None:
             self._docs[(conversation_id, survey_id)] = sync.load_doc(crdt)
