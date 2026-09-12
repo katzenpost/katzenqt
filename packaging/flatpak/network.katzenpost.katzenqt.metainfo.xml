@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>network.katzenpost.katzenqt</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-Public-Domain</project_license>
+  <name>katzenqt</name>
+  <summary>Experimental group chat for Katzenpost developers</summary>
+  <developer id="network.katzenpost">
+    <name>Katzenpost</name>
+  </developer>
+  <description>
+    <p>katzenqt is an experimental desktop group chat client for developers working with the Katzenpost mix network.</p>
+    <p>Do not rely on it for security, anonymity, privacy, reliability, message delivery, or data retention.</p>
+  </description>
+  <url type="homepage">https://katzenpost.network/</url>
+  <url type="bugtracker">https://github.com/katzenpost/katzenqt/issues</url>
+  <launchable type="desktop-id">network.katzenpost.katzenqt.desktop</launchable>
+  <provides>
+    <binary>katzenqt</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+  </categories>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/katzenpost/katzenqt/main/packaging/flatpak/screenshots/katzenqt.png</image>
+      <caption>katzenqt conversation window</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.0.1" date="2026-09-11"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

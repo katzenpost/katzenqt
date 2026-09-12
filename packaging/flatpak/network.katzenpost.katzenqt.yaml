@@ -1,0 +1,61 @@
+app-id: network.katzenpost.katzenqt
+runtime: org.kde.Platform
+runtime-version: '6.9'
+sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: katzenqt
+
+finish-args:
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --filesystem=xdg-run/katzenpost:ro
+  - --env=GIO_USE_VFS=local
+
+modules:
+  - python3-deps.json
+
+  - name: pyside6
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-warn-script-location
+        --ignore-installed --no-index --find-links="file://${PWD}/pip-cache"
+        pyside6==6.9.3
+    sources:
+      - pyside6-sources.json
+
+  - rustic-audio-tool.json
+
+  - name: katzenqt
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-deps --no-index
+        --no-build-isolation --no-warn-script-location .
+      - mv /app/bin/katzenqt /app/bin/katzenqt-bin
+      - mv /app/bin/katzenqt-launcher /app/bin/katzenqt
+      - install -d /app/share/katzenqt
+      - cp -a resources /app/share/katzenqt/
+      - install -Dm644 network.katzenpost.katzenqt.desktop
+        /app/share/applications/network.katzenpost.katzenqt.desktop
+      - desktop-file-edit --set-icon=network.katzenpost.katzenqt
+        /app/share/applications/network.katzenpost.katzenqt.desktop
+      - install -Dm644 network.katzenpost.katzenqt.metainfo.xml
+        /app/share/metainfo/network.katzenpost.katzenqt.metainfo.xml
+      - install -Dm644 resources/echomix_icon.svg
+        /app/share/icons/hicolor/scalable/apps/network.katzenpost.katzenqt.svg
+      - install -Dm644 LICENSE.flatpak
+        /app/share/licenses/network.katzenpost.katzenqt/katzenqt/LICENSE
+    sources:
+      - type: archive
+        path: katzenqt-src.tar.gz
+        strip-components: 0
+      - type: file
+        path: network.katzenpost.katzenqt.metainfo.xml
+      - type: file
+        path: ../network.katzenpost.katzenqt.desktop
+      - type: file
+        path: LICENSE
+        dest-filename: LICENSE.flatpak

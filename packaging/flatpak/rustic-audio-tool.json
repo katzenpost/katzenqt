@@ -1,0 +1,25 @@
+{
+    "name": "rustic-audio-tool",
+    "buildsystem": "simple",
+    "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin"
+    },
+    "build-commands": [
+        "pip3 install --prefix=/app --no-deps --no-index --find-links=. maturin==1.8.2",
+        "maturin build --offline --locked --release --compatibility linux --interpreter python3",
+        "pip3 install --prefix=/app --no-deps --no-index target/wheels/rustic_audio_tool-*.whl"
+    ],
+    "sources": [
+        {
+            "type": "git",
+            "url": "https://github.com/katzenpost/Rustic_Audio_PyO3",
+            "commit": "2158e2a5cc5e58f430b4c0bf2f5603d8909becc6"
+        },
+        "rustic-audio-sources.json",
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/03/94/b9cb42cb5706389692b24f4691645e0b980708e46c9f008e89f4bb92a497/maturin-1.8.2-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl",
+            "sha256": "b408093e49d6d4ab98066eefd0fac64b01eb7af639e9b3151660c5fa96ce147c"
+        }
+    ]
+}
