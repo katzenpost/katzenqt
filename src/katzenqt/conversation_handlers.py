@@ -29,7 +29,17 @@ async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[in
     be poked for, and, if a newcomer peer was added, their
     ``(conversation_id, display_name)`` for the caller to announce to the UI
     *after* its commit succeeds (see _handle_introduction)."""
-    await _verify_membership_advisory(sess, peer, gcm)
+    try:
+        await _verify_membership_advisory(sess, peer, gcm)
+    except Exception:
+        # Advisory: a bug here must never stop the message itself from being
+        # handled. Without this, an exception leaves the MixWAL row
+        # uncommitted, so the same message is re-read and re-raises
+        # identically on every retry -- an infinite loop that permanently
+        # stalls this peer's stream.
+        logger.exception(
+            "membership_hash advisory check raised; continuing without it"
+        )
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
 
