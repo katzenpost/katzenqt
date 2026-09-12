@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, TypeVar
 from .katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
@@ -267,7 +267,17 @@ def init_and_migrate():
 
     This MUST be called on application startup.
     """
-    alembic.command.upgrade(_alembic_cfg, "head")
+    # The migrations create and populate the sqlite file under the process's
+    # ambient umask; on a permissive one (e.g. 022) it would be briefly
+    # group/world-readable -- holding BACAP caps, signing keys, and message
+    # plaintext -- for the whole upgrade run, before _restrict_state_file_perms
+    # ever gets a chance to fix it up afterward. Restrict the umask for the
+    # duration instead.
+    old_umask = os.umask(0o077)
+    try:
+        alembic.command.upgrade(_alembic_cfg, "head")
+    finally:
+        os.umask(old_umask)
     _restrict_state_file_perms(state_file)
 
 def id_field(table_name: str):
@@ -419,10 +429,32 @@ class PendingVoucher(SQLModel, table=True):
 _MARK_SENT_THREAD_SEM = asyncio.Semaphore(8)
 
 
+_ThreadResult = TypeVar("_ThreadResult")
+
+
+async def _finish_thread(
+    work: Callable[..., _ThreadResult], *args: object,
+) -> _ThreadResult:
+    task = asyncio.create_task(asyncio.to_thread(work, *args))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
     @classmethod
-    async def mark_sent(cls, connection, mw:MixWAL, resend_queue) -> int:
+    async def mark_sent(
+        cls, connection, mw: MixWAL, resend_queue, *,
+        resolve_counter: Callable[[bytes], Awaitable[int]] | None = None,
+    ) -> int:
         """Add SentLog entry, delete corresponding MixWAL and PlaintextWAL entries.
         Also bump index so we don't just keep writing to the same index??
 
@@ -433,6 +465,8 @@ class SentLog(SQLModel, table=True):
         Returns the Conversation.id for the MixWAL entry so UI can be updated.
         """
         conversation_id = None
+        if resolve_counter is None:
+            resolve_counter = connection.get_message_box_index_counter
         # Unconditional regression guard: another drain may have already
         # advanced wcw.next_index past our mw.next_message_index (e.g., a
         # retransmission's ACK arriving after a later message's ACK).
@@ -447,12 +481,12 @@ class SentLog(SQLModel, table=True):
         # I/O here (with its fsync commits) would stall every other task on
         # the loop regardless of the busy timeout's size.
         async with _MARK_SENT_THREAD_SEM:
-            precheck_next_blob = await asyncio.to_thread(
+            precheck_next_blob = await _finish_thread(
                 _read_wcw_precheck, mw.bacap_stream,
             )
         if precheck_next_blob is not None:
-            real_next = await connection.get_message_box_index_counter(precheck_next_blob)
-            our_next = await connection.get_message_box_index_counter(mw.next_message_index)
+            real_next = await resolve_counter(precheck_next_blob)
+            our_next = await resolve_counter(mw.next_message_index)
             if real_next >= our_next:
                 logger.warning(
                     "mark_sent: skipping stale ACK for bacap_stream=%s "
@@ -467,25 +501,38 @@ class SentLog(SQLModel, table=True):
                 # MW to do it: in the crash-then-relaunch case (write drain
                 # died mid-commit) no later MW exists, and without this the
                 # message resends forever.
-                async with _MARK_SENT_THREAD_SEM:
-                    conversation_id = await asyncio.to_thread(
-                        _finalize_stale_ack, mw.id, mw.plaintextwal,
-                    )
-                resend_queue.discard(mw.bacap_stream)
+                try:
+                    async with _MARK_SENT_THREAD_SEM:
+                        conversation_id = await _finish_thread(
+                            _finalize_stale_ack, mw.id, mw.plaintextwal,
+                        )
+                finally:
+                    # _finish_thread re-raises CancelledError (after the
+                    # thread write has already committed) rather than
+                    # swallowing it, so a cancellation landing here must
+                    # not skip this: the write is done regardless, and
+                    # skipping the discard would strand bacap_stream in
+                    # resend_queue forever.
+                    resend_queue.discard(mw.bacap_stream)
                 return conversation_id
         # Resolve the diagnostic counters once so the commit-time print is
         # as cheap as a tuple format rather than two more thinclient calls.
         new_idx = our_next if precheck_next_blob is not None else (
-            await connection.get_message_box_index_counter(mw.next_message_index)
+            await resolve_counter(mw.next_message_index)
         )
-        async with _MARK_SENT_THREAD_SEM:
-            conversation_id = await asyncio.to_thread(
-                _mark_sent_txn,
-                mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
-                mw.next_message_index, new_idx,
-                real_next if precheck_next_blob is not None else None,
-            )
-        resend_queue.discard(mw.bacap_stream)
+        try:
+            async with _MARK_SENT_THREAD_SEM:
+                conversation_id = await _finish_thread(
+                    _mark_sent_txn,
+                    mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
+                    mw.next_message_index, new_idx,
+                    real_next if precheck_next_blob is not None else None,
+                )
+        finally:
+            # Same reasoning as the stale-ACK branch above: the write has
+            # already committed by the time _finish_thread could re-raise
+            # CancelledError, so the discard must still happen.
+            resend_queue.discard(mw.bacap_stream)
         return conversation_id
 
 
@@ -918,4 +965,3 @@ class TallyState(SQLModel, table=True):
     survey_id: bytes = Field(primary_key=True, min_length=1)
     conversation_id: int = Field(foreign_key="conversation.id", index=True)
     doc_state: bytes
-
