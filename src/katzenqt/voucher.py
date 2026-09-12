@@ -406,29 +406,33 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         remaining = max(0, MAX_GROUP_MEMBERS - await _active_member_count(
             sess, conversation_id,
         ))
-        please_adds = reply_who.please_adds[:remaining]
-        if len(reply_who.please_adds) > remaining:
-            logger.warning(
-                "voucher reply named %d members; capping intake at %d",
-                len(reply_who.please_adds), remaining,
-            )
-        for please_add in please_adds:
+        capped = False
+        for please_add in reply_who.please_adds:
             if await persistent.peer_has_read_cap(
                 sess, conversation_id, please_add.read_cap,
             ):
                 # This member was already added by an earlier run of this
                 # open (or an announcement that beat it here); adding a
                 # second peer for the same read cap would read their
-                # stream twice.
+                # stream twice. A duplicate doesn't consume capacity, so it
+                # doesn't count against `remaining` below.
                 logger.warning(
                     "await_and_open: %r already holds read cap %s on "
                     "conversation %d; skipping duplicate _add_peer",
                     please_add.display_name, _brief(please_add.read_cap),
                     conversation_id,
                 )
-            else:
-                _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
-                added.append(_sanitize_peer_name(please_add.display_name))
+                continue
+            if len(added) >= remaining:
+                capped = True
+                break
+            _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
+            added.append(_sanitize_peer_name(please_add.display_name))
+        if capped:
+            logger.warning(
+                "voucher reply named %d members; capping intake at %d",
+                len(reply_who.please_adds), remaining,
+            )
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await sess.delete(row)
         await sess.commit()
