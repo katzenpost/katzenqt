@@ -19,6 +19,7 @@ restarts. All cap and key material is opaque bytes; the daemon does the crypto.
 import asyncio
 import logging
 import uuid
+from base64 import b64encode
 
 from katzenpost_thinclient import (
     ThinClient, BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
@@ -32,6 +33,25 @@ from .katzen_util import create_task
 from .network import _SUBSTREAM_NAME_PREFIX, check_for_new, conversation_update_queue
 
 logger = logging.getLogger("katzen.voucher")
+
+
+def voucher_code(token: bytes) -> str:
+    """The shareable base64 text of a voucher token; pure and total."""
+    return b64encode(token).decode()
+
+
+async def pending_voucher_token(conversation_id: int) -> "bytes | None":
+    """The joiner's minted voucher token for this conversation while the join
+    is still pending, so the UI can copy it again instead of losing it. Returns
+    ``None`` once no joiner voucher is pending for the conversation."""
+    async with persistent.asession() as sess:
+        row = (await sess.exec(
+            select(persistent.PendingVoucher).where(
+                persistent.PendingVoucher.conversation_id == conversation_id,
+                persistent.PendingVoucher.role == "joiner",
+            )
+        )).first()
+        return row.voucher if row is not None else None
 
 STEP_MINTED = "minted"
 STEP_AWAITING = "awaiting"

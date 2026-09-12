@@ -294,6 +294,36 @@ class AppSetting(SQLModel, table=True):
     type: str = Field(nullable=False)  # "str" or "int", I guess
     value: str = Field(nullable=True)  # value or NULL
 
+MUTE_SETTING_PREFIX = "mute:"
+
+def _mute_key(conversation_id: int) -> str:
+    return f"{MUTE_SETTING_PREFIX}{conversation_id}"
+
+async def set_muted(conversation_id: int, muted: bool) -> None:
+    """Mute state is purely local GUI preference, but is read from the
+    message-receive hot path (once per incoming message, via
+    is_muted below), so it goes through the async engine like everything
+    else on that path -- never the GUI-thread sync engine, which risks the
+    same "database is locked" contention documented on _set_sqlite_pragmas.
+    Callers must route this through run_in_io."""
+    key = _mute_key(conversation_id)
+    async with asession() as sess:
+        row = await sess.get(AppSetting, key)
+        if muted:
+            if row is None:
+                row = AppSetting(id=key)
+            row.type = "str"
+            row.value = "1"
+            sess.add(row)
+        elif row is not None:
+            await sess.delete(row)
+        await sess.commit()
+
+async def is_muted(conversation_id: int) -> bool:
+    async with asession() as sess:
+        row = await sess.get(AppSetting, _mute_key(conversation_id))
+    return row is not None and row.value == "1"
+
 class MixWAL(SQLModel, table=True):
     """
     Stores EncryptWriteResult/EncryptReadResult from ThinClient.encrypt_read() and encrypt_write()

@@ -860,7 +860,7 @@ QTabWidget::pane &gt; QWidget &gt; QWidget &gt; QFrame { /* The tab widget frame
                     </font>
                    </property>
                    <property name="toolTip">
-                    <string>Generate an invitation code for this conversation</string>
+                    <string>Generate a voucher to hand to a member who will induct you</string>
                    </property>
                    <property name="styleSheet">
                     <string notr="true">
