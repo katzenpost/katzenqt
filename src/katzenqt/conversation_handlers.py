@@ -29,7 +29,17 @@ async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[in
     be poked for, and, if a newcomer peer was added, their
     ``(conversation_id, display_name)`` for the caller to announce to the UI
     *after* its commit succeeds (see _handle_introduction)."""
-    await _verify_membership_advisory(sess, peer, gcm)
+    try:
+        await _verify_membership_advisory(sess, peer, gcm)
+    except Exception:
+        # Advisory: a bug here must never stop the message itself from being
+        # handled. Without this, an exception leaves the MixWAL row
+        # uncommitted, so the same message is re-read and re-raises
+        # identically on every retry -- an infinite loop that permanently
+        # stalls this peer's stream.
+        logger.exception(
+            "membership_hash advisory check raised; continuing without it"
+        )
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
 
@@ -130,12 +140,14 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
         conv = peer.conversation
         own_cap = await persistent.own_read_cap(sess, conv)
         if own_cap != intro.read_cap and not await _already_has(sess, conv.id, intro):
-            from .voucher import MAX_GROUP_MEMBERS, _active_member_count, _add_peer
+            from .voucher import (
+                MAX_GROUP_MEMBERS, _active_member_count, _add_peer, _sanitize_peer_name,
+            )
             if await _active_member_count(sess, conv.id) >= MAX_GROUP_MEMBERS:
                 logger.warning("conversation %s reached its member limit", conv.id)
             else:
                 _add_peer(sess, conv, intro.display_name, intro.read_cap)
-                peer_added = (conv.id, intro.display_name)
+                peer_added = (conv.id, _sanitize_peer_name(intro.display_name))
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
     return True, False, peer_added
 

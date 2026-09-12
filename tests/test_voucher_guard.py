@@ -509,3 +509,18 @@ async def test_pending_transitions_to_used_on_finish():
     assert (conv_id, "demo") in await voucher.list_used_vouchers()
 
     assert await voucher.voucher_used_for(other_id) is False
+
+
+@pytest.mark.asyncio
+async def test_finish_raises_when_pending_row_already_gone():
+    """A user cancelling a pending voucher deletes its PendingVoucher row.
+    If the network reply then lands and _finish_pending_voucher is called
+    with pending_row=None, it must not silently complete the join."""
+    conv_id = await _make_conversation()
+
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conv_id)
+        with pytest.raises(RuntimeError):
+            await voucher._finish_pending_voucher(sess, conv, None)
+
+    assert await voucher.voucher_used_for(conv_id) is False

@@ -192,6 +192,10 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout=250")
     cursor.close()
+    # journal_mode=WAL lazily creates the -wal/-shm sidecars on first write,
+    # under the process umask rather than inheriting the main file's 0600 —
+    # restrict them too, now that they're guaranteed to exist.
+    _restrict_state_file_perms(state_file)
 
 
 sa.event.listens_for(_engine.sync_engine, "connect")(_set_sqlite_pragmas)
@@ -240,18 +244,22 @@ async def asession() -> "AsyncContextManager[sqlmodel.ext.asyncio.session.AsyncS
             raise
 
 def _restrict_state_file_perms(path: Path) -> None:
-    """Tighten the on-disk state database to owner-only (0600).
+    """Tighten the on-disk state database, and its WAL/SHM sidecars if
+    present, to owner-only (0600).
 
-    The state directory is already 0700, but the database file itself is
-    created with the process umask, so on a permissive umask it can be group-
-    or world-readable. It holds BACAP caps, signing keys, and message
-    plaintext, so clamp it to 0600. Best-effort: a missing file or a
-    filesystem that does not honour chmod is not fatal to startup."""
-    try:
-        if path.is_file():
-            os.chmod(path, 0o600)
-    except OSError as exc:  # pragma: no cover - platform/filesystem dependent
-        logger.warning("could not restrict permissions on %s: %s", path, exc)
+    The state directory is already 0700, but each file is created with the
+    process umask, so on a permissive umask any of them can be group- or
+    world-readable. journal_mode=WAL means uncheckpointed writes -- BACAP
+    caps, signing keys, message plaintext -- can sit in the -wal/-shm
+    sidecars, not just the main file, so all three need clamping. Best-
+    effort: a missing file or a filesystem that does not honour chmod is not
+    fatal to startup."""
+    for candidate in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        try:
+            if candidate.is_file():
+                os.chmod(candidate, 0o600)
+        except OSError as exc:  # pragma: no cover - platform/filesystem dependent
+            logger.warning("could not restrict permissions on %s: %s", candidate, exc)
 
 
 def init_and_migrate():
@@ -281,10 +289,16 @@ MUTE_SETTING_PREFIX = "mute:"
 def _mute_key(conversation_id: int) -> str:
     return f"{MUTE_SETTING_PREFIX}{conversation_id}"
 
-def set_muted(conversation_id: int, muted: bool) -> None:
+async def set_muted(conversation_id: int, muted: bool) -> None:
+    """Mute state is purely local GUI preference, but is read from the
+    message-receive hot path (once per incoming message, via
+    is_muted below), so it goes through the async engine like everything
+    else on that path -- never the GUI-thread sync engine, which risks the
+    same "database is locked" contention documented on _set_sqlite_pragmas.
+    Callers must route this through run_in_io."""
     key = _mute_key(conversation_id)
-    with Session(_engine_sync) as sess:
-        row = sess.get(AppSetting, key)
+    async with asession() as sess:
+        row = await sess.get(AppSetting, key)
         if muted:
             if row is None:
                 row = AppSetting(id=key)
@@ -292,12 +306,12 @@ def set_muted(conversation_id: int, muted: bool) -> None:
             row.value = "1"
             sess.add(row)
         elif row is not None:
-            sess.delete(row)
-        sess.commit()
+            await sess.delete(row)
+        await sess.commit()
 
-def is_muted(conversation_id: int) -> bool:
-    with Session(_engine_sync) as sess:
-        row = sess.get(AppSetting, _mute_key(conversation_id))
+async def is_muted(conversation_id: int) -> bool:
+    async with asession() as sess:
+        row = await sess.get(AppSetting, _mute_key(conversation_id))
     return row is not None and row.value == "1"
 
 class MixWAL(SQLModel, table=True):

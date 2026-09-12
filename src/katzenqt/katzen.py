@@ -301,10 +301,16 @@ class VoucherDialog(QDialog):
         layout.addWidget(buttons)
 
 
+# Fixed, not theme-driven: theme.py has no semantic "status" color yet, and
+# both read at a contrast that stays legible against either palette.
+_MIXNET_CONNECTED_COLOR = "#268bd2"
+_MIXNET_OFFLINE_COLOR = "#dc322f"
+
+
 def mixnet_status_text(connected: bool) -> "tuple[str, str]":
     if connected:
-        return ("Mixnet: connected", "#268bd2")
-    return ("Mixnet: offline", "#dc322f")
+        return ("Mixnet: connected", _MIXNET_CONNECTED_COLOR)
+    return ("Mixnet: offline", _MIXNET_OFFLINE_COLOR)
 
 
 class MainWindow(QMainWindow):
@@ -467,6 +473,15 @@ class MainWindow(QMainWindow):
         format to plain text to keep a hostile name from spoofing the dialog.
         """
         box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.exec()
+
+    def _info_plain(self, title: str, text: str) -> None:
+        """Show an informational dialog with the message rendered as plain
+        text, for the same reason _warn_attachment is: the text can embed a
+        peer-chosen display name, which must not be interpreted as HTML.
+        """
+        box = QMessageBox(QMessageBox.Icon.Information, title, text, parent=self)
         box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         box.exec()
 
@@ -1114,17 +1129,19 @@ class MainWindow(QMainWindow):
         parent = item.parent()
         return getattr(parent, "conversation_id", None) if parent is not None else None
 
-    def contacts_context_menu(self, pos) -> None:
+    @async_cb
+    async def contacts_context_menu(self, pos) -> None:
         index = self.ui.contacts_treeWidget.indexAt(pos)
         if not index.isValid():
             return
         conversation_id = self._conversation_id_at(index)
         if conversation_id is None:
             return
+        muted = await self.iothread.run_in_io(persistent.is_muted(conversation_id))
         menu = QMenu(self)
         mute_action = menu.addAction("Mute notifications")
         mute_action.setCheckable(True)
-        mute_action.setChecked(persistent.is_muted(conversation_id))
+        mute_action.setChecked(muted)
         copy_action = menu.addAction("Copy voucher")
         show_action = menu.addAction("Show voucher...")
         chosen = menu.exec(
@@ -1133,7 +1150,9 @@ class MainWindow(QMainWindow):
         if chosen is None:
             return
         if chosen is mute_action:
-            persistent.set_muted(conversation_id, mute_action.isChecked())
+            await self.iothread.run_in_io(
+                persistent.set_muted(conversation_id, mute_action.isChecked())
+            )
             return
         ensure_future(
             self._voucher_menu_action(conversation_id, chosen is show_action)
@@ -1150,7 +1169,11 @@ class MainWindow(QMainWindow):
             return
         code = voucher_code(token)
         if show:
-            VoucherDialog(self, code).exec()
+            # Deferred, like generate_voucher's VoucherDialog: .exec() right
+            # inside the coroutine's resumption from run_in_io's cross-thread
+            # wakeup risks the same QtAsyncio reentrancy wedge tracked for
+            # this handshake's QInputDialog elsewhere.
+            QTimer.singleShot(0, lambda: VoucherDialog(self, code).exec())
         else:
             QApplication.clipboard().setText(code)
             self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
@@ -1354,7 +1377,7 @@ class MainWindow(QMainWindow):
             # TODO we should bump "unread message" counter
 
         # if the main window is not in focus, we should issue a notification:
-        if not persistent.is_muted(conversation_id):
+        if not await self.iothread.run_in_io(persistent.is_muted(conversation_id)):
             if not self.app.focusWidget():
                 self.app.alert(self)
             if self.systray:
@@ -1846,8 +1869,8 @@ class MainWindow(QMainWindow):
             convo.contacts_standard_item.appendRow(QStandardItem(name))
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(added) or "(none)"
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
 
     async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
@@ -1920,8 +1943,8 @@ class MainWindow(QMainWindow):
         convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
         ))
 
     @async_cb

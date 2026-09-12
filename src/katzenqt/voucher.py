@@ -234,11 +234,22 @@ async def list_used_vouchers() -> "list[tuple]":
 async def _finish_pending_voucher(sess, conversation, pending_row) -> None:
     """Complete a handshake in one commit: mark the conversation's voucher used
     and delete the in-flight PendingVoucher row. Callers own the surrounding
-    session and commit."""
+    session and commit.
+
+    Raises if pending_row is already gone (e.g. the user cancelled this
+    voucher between the network reply landing and this call): silently
+    marking the conversation joined anyway would let a cancelled join
+    complete behind the user's back. The caller's commit is never reached,
+    so nothing else added earlier in the same transaction is persisted
+    either."""
+    if pending_row is None:
+        raise RuntimeError(
+            f"pending voucher for conversation {conversation.id} is gone "
+            "(cancelled?); refusing to mark it used"
+        )
     conversation.voucher_used = True
     sess.add(conversation)
-    if pending_row is not None:
-        await sess.delete(pending_row)
+    await sess.delete(pending_row)
 
 
 async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, payload: bytes) -> bytes:
@@ -520,29 +531,33 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         remaining = max(0, MAX_GROUP_MEMBERS - await _active_member_count(
             sess, conversation_id,
         ))
-        please_adds = reply_who.please_adds[:remaining]
-        if len(reply_who.please_adds) > remaining:
-            logger.warning(
-                "voucher reply named %d members; capping intake at %d",
-                len(reply_who.please_adds), remaining,
-            )
-        for please_add in please_adds:
+        capped = False
+        for please_add in reply_who.please_adds:
             if await persistent.peer_has_read_cap(
                 sess, conversation_id, please_add.read_cap,
             ):
                 # This member was already added by an earlier run of this
                 # open (or an announcement that beat it here); adding a
                 # second peer for the same read cap would read their
-                # stream twice.
+                # stream twice. A duplicate doesn't consume capacity, so it
+                # doesn't count against `remaining` below.
                 logger.warning(
                     "await_and_open: %r already holds read cap %s on "
                     "conversation %d; skipping duplicate _add_peer",
                     please_add.display_name, _brief(please_add.read_cap),
                     conversation_id,
                 )
-            else:
-                _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
-                added.append(please_add.display_name)
+                continue
+            if len(added) >= remaining:
+                capped = True
+                break
+            _add_peer(sess, conv, please_add.display_name, please_add.read_cap)
+            added.append(_sanitize_peer_name(please_add.display_name))
+        if capped:
+            logger.warning(
+                "voucher reply named %d members; capping intake at %d",
+                len(reply_who.please_adds), remaining,
+            )
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await _finish_pending_voucher(sess, conv, row)
         await sess.commit()
@@ -688,14 +703,22 @@ async def derive_read_and_induct(
                 await sess.commit()
         raise
 
-    joiner_name = induct.display_name or peer_name
+    joiner_name = _sanitize_peer_name(induct.display_name or peer_name)
     already_inducted = False
+    at_capacity = False
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if not await persistent.peer_has_read_cap(
             sess, conversation_id, induct.mutated_message_read_cap,
         ):
-            _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
+            if await _active_member_count(sess, conversation_id) >= MAX_GROUP_MEMBERS:
+                at_capacity = True
+                logger.warning(
+                    "conversation %d reached its member limit; refusing to "
+                    "induct %r", conversation_id, joiner_name,
+                )
+            else:
+                _add_peer(sess, conv, joiner_name, induct.mutated_message_read_cap)
         else:
             # Already inducted (a failed post-commit ack made a naive retry
             # re-run the handshake); re-adding would duplicate the member
@@ -711,7 +734,7 @@ async def derive_read_and_induct(
         await _finish_pending_voucher(sess, conv, row)
         await sess.commit()
 
-    if already_inducted:
+    if already_inducted or at_capacity:
         return None
 
     await send_introduction_message(
