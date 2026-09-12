@@ -795,10 +795,18 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
   logger.debug(f"got reply for outbound read mw {resp}")
   assert resp is not None, "outbound read reply is None, but ought to be retrying"
+  async def _box_index_counter(index: bytes) -> int:
+    return await _rpc_racing_connection_life(
+        bacap_uuid=bacap_uuid,
+        what="get_message_box_index_counter",
+        rpc_factory=lambda: connection.get_message_box_index_counter(index),
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+    )
+
   async with persistent.asession() as sess:
     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-    idx_old = await connection.get_message_box_index_counter(rcw.next_index)
-    idx_new = await connection.get_message_box_index_counter(rcr.next_message_box_index)
+    idx_old = await _box_index_counter(rcw.next_index)
+    idx_new = await _box_index_counter(rcr.next_message_box_index)
     if idx_old >= idx_new:
       logger.warning(f"not advancing idx to {idx_new} from old {idx_old}, we probably already handled this? ought to not be possible.")
       try:
@@ -1193,7 +1201,14 @@ async def provision_read_caps(connection: ThinClient):
                              rcw.id, wcw.id)
                 if wcw.write_cap is None:
                     try:
-                        keypair_res = await connection.new_keypair(seed=secrets.token_bytes(32))
+                        keypair_res = await _rpc_racing_connection_life(
+                            bacap_uuid=wcw.id,
+                            what="new_keypair",
+                            rpc_factory=lambda: connection.new_keypair(
+                                seed=secrets.token_bytes(32),
+                            ),
+                            backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+                        )
                     except Exception as e:
                         logger.warning("new_keypair did not work: %s", e)
                         continue
@@ -1419,9 +1434,16 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # - encrypt the message
     # - persist that to MixWAL
 
-    wcr : "EncryptWriteResult" = await connection.encrypt_write(write_cap=wc.write_cap,
-          message_box_index=wc.next_index,
-          plaintext=pwal.bacap_payload)
+    wcr : "EncryptWriteResult" = await _rpc_racing_connection_life(
+        bacap_uuid=pwal.bacap_stream,
+        what="encrypt_write",
+        rpc_factory=lambda: connection.encrypt_write(
+            write_cap=wc.write_cap,
+            message_box_index=wc.next_index,
+            plaintext=pwal.bacap_payload,
+        ),
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+    )
 
     next_message_index = wcr.next_message_box_index
 
