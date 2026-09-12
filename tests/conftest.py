@@ -23,13 +23,11 @@ from tests.fakes.thinclient import FakeThinClient
 
 
 @pytest.fixture(autouse=True)
-def _fresh_tables():
-    """Drop + recreate all tables before every test.
-
-    We skip alembic (it would try to read the repo's migrations/) and use
-    sqlmodel's metadata directly, which is the source of truth the test
-    subjects (MixWAL, PlaintextWAL, etc.) are actually defined against.
-    """
+def _fresh_tables(request):
+    """Reset unit-test tables; integration subprocesses own their state."""
+    if request.node.get_closest_marker("integration"):
+        yield
+        return
     SQLModel.metadata.drop_all(persistent._engine_sync)
     SQLModel.metadata.create_all(persistent._engine_sync)
     yield
