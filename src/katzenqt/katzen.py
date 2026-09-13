@@ -270,7 +270,21 @@ class PendingVouchersDialog(QDialog):
         self.list_widget.takeItem(self.list_widget.row(item))
 
 
+# Fixed, not theme-driven: theme.py has no semantic "status" color yet, and
+# both read at a contrast that stays legible against either palette.
+_MIXNET_CONNECTED_COLOR = "#268bd2"
+_MIXNET_OFFLINE_COLOR = "#dc322f"
+
+
+def mixnet_status_text(connected: bool) -> "tuple[str, str]":
+    if connected:
+        return ("Mixnet: connected", _MIXNET_CONNECTED_COLOR)
+    return ("Mixnet: offline", _MIXNET_OFFLINE_COLOR)
+
+
 class MainWindow(QMainWindow):
+    mixnet_status_changed = Signal(bool)
+
     def X_keyPressEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key pressed", key)
@@ -1039,6 +1053,27 @@ class MainWindow(QMainWindow):
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
 
+        self.mixnet_status_label = QLabel()
+        self.ui.statusbar.addPermanentWidget(self.mixnet_status_label)
+        self.mixnet_status_changed.connect(self.render_mixnet_status)
+        status_listener = self.mixnet_status_changed.emit
+        network.add_status_listener(status_listener)
+        self.destroyed.connect(
+            lambda *_: network.remove_status_listener(status_listener)
+        )
+        self.render_mixnet_status(network.mixnet_connected())
+
+    @Slot(bool)
+    def render_mixnet_status(self, connected: bool) -> None:
+        text, color = mixnet_status_text(connected)
+        self.mixnet_status_label.setText(text)
+        self.mixnet_status_label.setStyleSheet(f"color: {color};")
+        menu = self.ui.menuMixnetStatus
+        menu.setEnabled(True)
+        menu.clear()
+        current = menu.addAction(text)
+        current.setEnabled(False)
+
     async def _enqueue_outgoing_gcm(
         self,
         convo_state: "ConversationUIState",
@@ -1219,7 +1254,8 @@ class MainWindow(QMainWindow):
         if not self.app.focusWidget():
             self.app.alert(self)
             # self.app.beep()
-        self.systray.has_new_messages() # TODO move this into block above
+        if self.systray:
+            self.systray.has_new_messages() # TODO move this into block above
 
     async def peer_added_listener(self):
         """Append members announced via INTRODUCTION to the contacts tree in
@@ -1557,7 +1593,8 @@ class MainWindow(QMainWindow):
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
 
-        self.systray.has_read_messages()
+        if self.systray:
+            self.systray.has_read_messages()
 
     def do_we_even_have_unread_messages(self) -> bool:
         """
