@@ -915,10 +915,6 @@ class ConversationLog(SQLModel, table=True):
     # TODO: should we store a cached "type" here?
 
     conversation_order: int = Field(index=True)
-    # This is the relative order of messages within a Conversation
-    # TODO: that will show messages in the order they are received, not in logical order
-    # TODO: but we don't have a good way to establish a logical clock for a conversation with
-    # TODO: multiple peers.
 
     # this thing here needs to turn into
     # conversation_log.setModel(cl)

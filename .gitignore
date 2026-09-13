@@ -15,4 +15,6 @@ katzenpost/
 .hypothesis/
 .go-cache/
 dist/
+
+.demo-state/
 .kpclientd-build-revision

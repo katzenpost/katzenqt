@@ -1052,6 +1052,11 @@ class MainWindow(QMainWindow):
         self.theme = theme.ThemeManager(self.app, self)
         self.theme.restore()
         self.ui.action_testme.triggered.connect(self.testme)
+        self.ui.menuAbout.setEnabled(True)
+        self.action_about = QAction(f"About {APP_NAME}", self)
+        self.action_about.setMenuRole(QAction.MenuRole.AboutRole)
+        self.ui.menuAbout.addAction(self.action_about)
+        self.action_about.triggered.connect(self.show_about_dialog)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
@@ -1172,6 +1177,21 @@ class MainWindow(QMainWindow):
         else:
             QApplication.clipboard().setText(code)
             self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
+
+    def show_about_dialog(self) -> None:
+        import importlib.metadata
+        try:
+            version = importlib.metadata.version("katzenqt")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {APP_NAME}")
+        box.setText(
+            f"<b>{APP_NAME}</b><br>"
+            "Katzenpost group chat, Qt/KDE edition<br>"
+            f"Version {version}"
+        )
+        box.exec()
 
     async def _enqueue_outgoing_gcm(
         self,
@@ -2049,9 +2069,17 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     )
     window.conversation_state_by_id[convo.id] = convo_state
 
+    seen_peer_names: dict[str, int] = {}
     for peer in convo.peers:
-        #ptwi = QTreeWidgetItem([peer.name])
-        ptwi = QStandardItem(peer.name)
+        if peer.name.startswith(network._SUBSTREAM_NAME_PREFIX):
+            continue
+        if peer.id == convo.own_peer_id:
+            continue
+        label = peer.name
+        seen_peer_names[peer.name] = seen_peer_names.get(peer.name, 0) + 1
+        if seen_peer_names[peer.name] > 1:
+            label = "%s #%s" % (peer.name, str(peer.read_cap_id)[:6])
+        ptwi = QStandardItem(label)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
     async with persistent.asession() as sess:
@@ -2216,7 +2244,13 @@ def cli():
     # reliably everywhere; set QT_QUICK_BACKEND yourself to override. Must be
     # set before the QApplication is constructed.
     os.environ.setdefault("QT_QUICK_BACKEND", "software")
+    _res_root = Path(__file__).resolve().parent.parent.parent
+    if (_res_root / "resources").is_dir():
+        os.chdir(_res_root)
     app = QApplication(sys.argv)
+    app.setDesktopFileName("network.katzenpost.katzenqt")
+    if (_res_root / "resources" / "echomix_256.png").is_file():
+        app.setWindowIcon(QIcon("resources/echomix_256.png"))
     parser = argparse.ArgumentParser()
     add_log_args(parser)
     args = parser.parse_args()
