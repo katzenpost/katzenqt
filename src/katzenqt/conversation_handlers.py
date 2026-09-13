@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import logging
 
-from . import persistent
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from . import models, persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
 from .tally import controller as tally_controller
 
@@ -26,8 +29,85 @@ async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[in
     be poked for, and, if a newcomer peer was added, their
     ``(conversation_id, display_name)`` for the caller to announce to the UI
     *after* its commit succeeds (see _handle_introduction)."""
+    try:
+        await _verify_membership_advisory(sess, peer, gcm)
+    except Exception:
+        # Advisory: a bug here must never stop the message itself from being
+        # handled. Without this, an exception leaves the MixWAL row
+        # uncommitted, so the same message is re-read and re-raises
+        # identically on every retry -- an infinite loop that permanently
+        # stalls this peer's stream.
+        logger.exception(
+            "membership_hash advisory check raised; continuing without it"
+        )
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
+
+
+async def _conversation_peers(
+    sess: AsyncSession, conv_id: int
+) -> "list[persistent.ConversationPeer]":
+    rows = (await sess.exec(
+        select(persistent.ConversationPeer)
+        .where(
+            persistent.ConversationPeer.id
+            == persistent.ConversationPeerLink.conversation_peer_id
+        )
+        .where(persistent.ConversationPeerLink.conversation_id == conv_id)
+    )).all()
+    return list(rows)
+
+
+async def local_membership_hash(
+    sess: AsyncSession, conv: persistent.Conversation
+) -> bytes:
+    """Our own view of the conversation membership as the canonical hash
+    (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
+    plus ourself as ``write_cap[32:]`` rather than the possibly stale own-peer
+    read cap."""
+    peers = await _conversation_peers(sess, conv.id)
+    caps: "set[bytes]" = set()
+    for p in peers:
+        if p.id == conv.own_peer_id:
+            continue
+        if not p.active or p.name.startswith(models.SUBSTREAM_NAME_PREFIX):
+            continue
+        rcw = await sess.get(persistent.ReadCapWAL, p.read_cap_id)
+        if rcw is not None and rcw.read_cap is not None:
+            caps.add(rcw.read_cap)
+    wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
+    if wcw is not None and wcw.write_cap is not None:
+        caps.add(wcw.write_cap[32:])
+    return models.canonical_membership_hash(caps)
+
+
+async def membership_hash_for(conversation_id: int) -> bytes:
+    """Convenience for the send choke points: open a session (on the io loop,
+    reached via ``iothread.run_in_io`` -- never the Qt loop), load the
+    conversation, and return its current local membership hash."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        return await local_membership_hash(sess, conv)
+
+
+async def _verify_membership_advisory(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+) -> None:
+    """Advisory membership check: a sender that computed a real hash and
+    disagrees with our view is logged, never dropped. Every shipping client
+    still sends a sentinel, so this does no work until a real hash appears."""
+    got = gcm.membership_hash
+    if models.is_membership_sentinel(got):
+        return
+    local = await local_membership_hash(sess, peer.conversation)
+    if got != local:
+        logger.info(
+            "membership_hash mismatch on conversation %s (advisory): peer "
+            "sent %s, local view %s", peer.conversation.id, got.hex()[:16],
+            local.hex()[:16],
+        )
 
 
 async def _handle_chat(sess, peer, gcm, full_payload) -> "tuple[bool, bool, None]":

@@ -321,7 +321,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         # update the UX:
         create_task(conversation_update_queue.put((conv_id, True)))
 
-_SUBSTREAM_NAME_PREFIX = ":substream:"
+_SUBSTREAM_NAME_PREFIX = models.SUBSTREAM_NAME_PREFIX
 
 # Backstop bound on how long a single read's stop-and-wait ARQ may block with
 # NO other signal before we abort it at the daemon and re-cast the box. This

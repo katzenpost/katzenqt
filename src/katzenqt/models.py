@@ -9,8 +9,34 @@ import io
 from . import persistent
 import hashlib
 from base64 import b64encode, b64decode
+from collections.abc import Iterable
 from typing import List
 from pathlib import Path
+
+
+SUBSTREAM_NAME_PREFIX = ":substream:"
+
+MEMBERSHIP_DOMAIN = b"KP:membership:v1"
+
+MEMBERSHIP_SENTINELS = (b"TODO" * 8, bytes(32))
+
+
+def is_membership_sentinel(digest: bytes) -> bool:
+    """Whether ``digest`` is a 'no membership hash' sentinel accepted
+    without comparison during the migration window."""
+    return digest in MEMBERSHIP_SENTINELS
+
+
+def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
+    """Order-independent membership hash of a set of member read caps:
+    dedupe, sort byte-wise, concatenate, SHA-256 under
+    :data:`MEMBERSHIP_DOMAIN`. The caller represents itself as
+    ``write_cap[32:]``."""
+    digest = hashlib.sha256()
+    digest.update(MEMBERSHIP_DOMAIN)
+    for cap in sorted(set(read_caps)):
+        digest.update(cap)
+    return digest.digest()
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every

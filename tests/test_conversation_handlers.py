@@ -156,3 +156,25 @@ async def test_introduction_respects_member_limit(monkeypatch):
         )
         assert added is None
         assert not await persistent.peer_has_read_cap(sess, conv_id, cap)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_survives_a_broken_membership_advisory_check(monkeypatch):
+    """A bug in the advisory check must not stop the message itself from
+    being handled -- otherwise the MixWAL row is never committed, and the
+    same message re-raises identically on every retry."""
+    async def _broken(sess, peer, gcm):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(conversation_handlers, "_verify_membership_advisory", _broken)
+    async with persistent.asession() as sess:
+        conv_id, own_id, _ = await _make_conversation(sess)
+        peer = await sess.get(persistent.ConversationPeer, own_id)
+        gcm = models.GroupChatMessage(
+            version=0, membership_hash=b"0" * 32,
+            msg_type=models.GroupChatTypeEnum.TEXT, text="hello",
+        )
+        convlog_added, _, _ = await conversation_handlers.dispatch(
+            sess, peer, gcm, b"F" + gcm.to_cbor(),
+        )
+        assert convlog_added is True
