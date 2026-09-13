@@ -1026,7 +1026,7 @@ class Ui_MainWindow(object):
 #endif // QT_CONFIG(whatsthis)
         self.ContactName.setText(QCoreApplication.translate("MainWindow", u"You have no conversations yet. Click \"New conversation\" to get started.", None))
 #if QT_CONFIG(tooltip)
-        self.invite_contact_toolButton.setToolTip(QCoreApplication.translate("MainWindow", u"Generate an invitation code for this conversation", None))
+        self.invite_contact_toolButton.setToolTip(QCoreApplication.translate("MainWindow", u"Generate a voucher to hand to a member who will induct you", None))
 #endif // QT_CONFIG(tooltip)
         self.invite_contact_toolButton.setText(QCoreApplication.translate("MainWindow", u"  Generate voucher", None))
 #if QT_CONFIG(tooltip)

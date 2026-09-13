@@ -48,7 +48,8 @@ from katzenpost_thinclient import ThinClientOfflineError
 from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
-                     pending_joiner_join_conversation_ids, pending_voucher_for)
+                     pending_joiner_join_conversation_ids, pending_voucher_for,
+                     pending_voucher_token, voucher_code)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (GroupChatFileUpload,
@@ -268,6 +269,36 @@ class PendingVouchersDialog(QDialog):
             return
         self.cancelled.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
         self.list_widget.takeItem(self.list_widget.row(item))
+
+
+class VoucherDialog(QDialog):
+    """Shows a voucher code with a copy button. Purely presentational: it is
+    handed the finished code text, so it can be reopened any time to re-copy a
+    voucher instead of losing it."""
+    def __init__(self, parent, code: str, *, display_name: "str | None" = None):
+        super().__init__(parent)
+        self.setWindowTitle("Contact voucher")
+        layout = QVBoxLayout(self)
+        intro = f"Voucher for {display_name}." if display_name else "Contact voucher."
+        layout.addWidget(QLabel(
+            intro + " Hand it to an existing member out of band; they induct "
+            "you. You can reopen it any time by right-clicking the conversation, "
+            "so it is never lost."
+        ))
+        code_label = QLabel(code)
+        code_label.setWordWrap(True)
+        code_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        code_label.setStyleSheet("font-family: monospace;")
+        layout.addWidget(code_label)
+        copy_btn = QPushButton("Copy to clipboard")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(code))
+        layout.addWidget(copy_btn)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
 
 
 # Fixed, not theme-driven: theme.py has no semantic "status" color yet, and
@@ -1051,6 +1082,12 @@ class MainWindow(QMainWindow):
         # inputMethodEvent
         #self.ui.contacts_treeWidget.keyboardSearch.connect(lambda: print("KB search")) # TODO not a signal, but when user starts typing here we want to set the focus to contactFilterLineEdit instead
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
+        self.ui.contacts_treeWidget.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.ui.contacts_treeWidget.customContextMenuRequested.connect(
+            self.contacts_context_menu
+        )
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
 
         self.mixnet_status_label = QLabel()
@@ -1073,6 +1110,68 @@ class MainWindow(QMainWindow):
         menu.clear()
         current = menu.addAction(text)
         current.setEnabled(False)
+
+    def _conversation_id_at(self, index: QModelIndex) -> "int | None":
+        """The conversation id for a contacts-tree row: the conversation item's
+        own id, or its parent's when a peer row is targeted."""
+        source = self.ui.contacts_treeWidget.model().mapToSource(index)
+        item = self.all_contacts.itemFromIndex(source)
+        if item is None:
+            return None
+        own = getattr(item, "conversation_id", None)
+        if own is not None:
+            return own
+        parent = item.parent()
+        return getattr(parent, "conversation_id", None) if parent is not None else None
+
+    @async_cb
+    async def contacts_context_menu(self, pos) -> None:
+        index = self.ui.contacts_treeWidget.indexAt(pos)
+        if not index.isValid():
+            return
+        conversation_id = self._conversation_id_at(index)
+        if conversation_id is None:
+            return
+        muted = await self.iothread.run_in_io(persistent.is_muted(conversation_id))
+        menu = QMenu(self)
+        mute_action = menu.addAction("Mute notifications")
+        mute_action.setCheckable(True)
+        mute_action.setChecked(muted)
+        copy_action = menu.addAction("Copy voucher")
+        show_action = menu.addAction("Show voucher...")
+        chosen = menu.exec(
+            self.ui.contacts_treeWidget.viewport().mapToGlobal(pos)
+        )
+        if chosen is None:
+            return
+        if chosen is mute_action:
+            await self.iothread.run_in_io(
+                persistent.set_muted(conversation_id, mute_action.isChecked())
+            )
+            return
+        ensure_future(
+            self._voucher_menu_action(conversation_id, chosen is show_action)
+        )
+
+    async def _voucher_menu_action(self, conversation_id: int, show: bool) -> None:
+        token = await self.iothread.run_in_io(
+            pending_voucher_token(conversation_id)
+        )
+        if token is None:
+            self.ui.statusbar.showMessage(
+                "No voucher pending for this conversation", 3000
+            )
+            return
+        code = voucher_code(token)
+        if show:
+            # Deferred, like generate_voucher's VoucherDialog: .exec() right
+            # inside the coroutine's resumption from run_in_io's cross-thread
+            # wakeup risks the same QtAsyncio reentrancy wedge tracked for
+            # this handshake's QInputDialog elsewhere.
+            QTimer.singleShot(0, lambda: VoucherDialog(self, code).exec())
+        else:
+            QApplication.clipboard().setText(code)
+            self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
 
     async def _enqueue_outgoing_gcm(
         self,
@@ -1258,11 +1357,11 @@ class MainWindow(QMainWindow):
             # TODO we should bump "unread message" counter
 
         # if the main window is not in focus, we should issue a notification:
-        if not self.app.focusWidget():
-            self.app.alert(self)
-            # self.app.beep()
-        if self.systray:
-            self.systray.has_new_messages() # TODO move this into block above
+        if not await self.iothread.run_in_io(persistent.is_muted(conversation_id)):
+            if not self.app.focusWidget():
+                self.app.alert(self)
+            if self.systray:
+                self.systray.has_new_messages()
 
     async def peer_added_listener(self):
         """Append members announced via INTRODUCTION to the contacts tree in
@@ -1722,12 +1821,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        code = b64encode(voucher).decode()
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Voucher: {APP_NAME}",
-            f"Here is your voucher, {display_name}.\nHand it out of band to an "
-            f"existing member, who will induct you:\n\n{code}",
-        ))
+        code = voucher_code(voucher)
+        QTimer.singleShot(0, lambda: VoucherDialog(
+            self, code, display_name=display_name
+        ).exec())
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
