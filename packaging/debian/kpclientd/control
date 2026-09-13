@@ -1,0 +1,12 @@
+Package: kpclientd
+Version: 0.0.1
+Architecture: amd64
+Maintainer: Katzenpost <katzenqt@katzenpost.network>
+Depends: libc6
+Section: net
+Priority: optional
+Description: Katzenpost thin-client daemon (kpclientd)
+ The kpclientd daemon for the Katzenpost mix network, built from a pinned
+ upstream revision. Ships /usr/bin/kpclientd and a default namenlos client
+ configuration at /etc/kpclientd/client.toml. Run it as a systemd user
+ service (see the katzenqt package) or directly.

@@ -1,0 +1,11 @@
+ARG BASE=docker.io/ubuntu:26.04
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update \
+	&& apt install -y --no-install-recommends \
+		golang-go git ca-certificates dpkg-dev \
+		build-essential pkg-config cmake \
+	&& rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
