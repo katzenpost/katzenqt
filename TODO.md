@@ -205,8 +205,8 @@ important thing to understand before touching item 1.
 
 ### Open questions / likely fix surfaces
 
-RESOLVED DURING REVIEW (2026-09-11) — the design is confirmed and item 3 is
-being implemented this session:
+RESOLVED DURING REVIEW (2026-09-11) and IMPLEMENTED (2026-09-13, commit
+`3bba25a`):
 
 - **What the writer's ACK means (answered from Go code):** a write completes on
   the courier's ACK — "a single mixnet round trip" (`client/thin/pigeonhole.go:452`,
@@ -240,6 +240,16 @@ being implemented this session:
   ride-out behavior.
 - Are the items above (deactivate/keep-RP/retry primitive) consistent with item
   5's per-peer pause/resume? Yes — pause/deactivate share the same machinery.
+
+DONE in `3bba25a`: `drain_mixwal_read_single` sets
+`no_retry_on_box_id_not_found=True` for substream peers and on the first
+`BoxIDNotFoundError`/`TombstoneError` deactivates `cp.active`, deletes the
+is_read MixWAL row, cancels the in-flight read ARQ + drain task (per-
+`bacap_stream` registry `_inflight_reads`), discards from `draining_right_now`,
+and WARNING-logs; `InvalidEpochError` added to the transient-recover catch
+(needed because `no_retry=True` surfaces it as a `ReplicaError` subclass that
+was previously uncaught). Normal conversation peers keep the 5s ride-out.
+ReadCapWAL + ReceivedPiece rows are kept so item 5's resume can re-arm.
 
 ---
 
@@ -295,3 +305,20 @@ per-peer pause/resume:
   re-armed via Resume.
 - Note: `a3d2e2bc44b` (see item 2) touches peer-name/substream handling and
   should be reviewed/possibly merged before implementation planning here.
+
+DONE in `3bba25a`:
+- Network level: `pause_peer_reads(bacap_stream)` / `resume_peer_reads(bacap_stream)` —
+  pause cancels the in-flight drain task (via `_inflight_reads` registry) and ARQ
+  (`cancel_resending_encrypted_message`), deletes the is_read MixWAL rows, sets
+  `cp.active=False`, discards from `_inflight_reads`/`__resend_queue`, pokes the
+  events; resume sets `active=True` and pokes `readables_to_mixwal_event` so the
+  read re-arms from the saved ReadCapWAL `next_index`.
+- GUI: `add_conversation`/`_process_peer_added` tag peer `QStandardItem`s with
+  `peer_read_cap_id` + `peer_is_own`; `contacts_treeWidget` context menu
+  (`peer_context_menu`) offers "Do not read from X any more" / "Resume reading
+  from X" (own-peer row excluded and skipped).
+- Tests: `TestPauseResumePeerReads` (cancel-in-flight, deactivate-without-task,
+  resume-rearms-from-saved-index); full suite 307 passed / 14 skipped.
+
+Item 4's pause/cancel (substream download progress in GUI) remains open — only
+the per-peer machinery it needs is now in place.
