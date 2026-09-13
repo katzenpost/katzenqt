@@ -46,9 +46,28 @@ KQT_INTEGRATION_PARALLEL ?= 4
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
+	flatpak-build flatpak-install flatpak-run flatpak-test flatpak-release flatpak-system-deps \
 	clean clean-venv deps deps-audio
 
 deps: deps-audio default_uv_setup
+
+flatpak-build:
+	@packaging/flatpak/build.sh
+
+flatpak-install:
+	@packaging/flatpak/install.sh
+
+flatpak-run:
+	@packaging/flatpak/run.sh
+
+flatpak-test:
+	@packaging/flatpak/test.sh
+
+flatpak-release:
+	@TAG="$(TAG)" packaging/flatpak/release.sh
+
+flatpak-system-deps:
+	@packaging/flatpak/system-deps.sh
 
 default: default_uv_setup
 
@@ -88,6 +107,14 @@ help:
 		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
 		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
+		'' \
+		'Flatpak:' \
+		'  make flatpak-system-deps   Install podman and flatpak (changes the system)' \
+		'  make flatpak-build         Build the flatpak in podman (lints, checks, and validates)' \
+		'  make flatpak-install       Install the built flatpak for this user' \
+		'  make flatpak-run           Run the installed flatpak' \
+		'  make flatpak-test          Test the installed flatpak against the docker testnet' \
+		'  make flatpak-release TAG=vX.Y.Z  Validate a tag and open the Flathub pull request' \
 		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \
@@ -319,10 +346,7 @@ install-kpclient: $(KPCLIENTD_BIN)
 	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
-	@install -d -m 0700 ~/.config/systemd/user
-	@install -m 0644 src/katzenqt/data/kpclientd.service ~/.config/systemd/user/kpclientd.service
-	@systemctl --user daemon-reload
-	@systemctl --user enable --now kpclientd >/dev/null 2>&1
+	@$(VENV)/bin/python -m katzenqt.launcher --install-service
 
 alembic-check-uv:
 	@state=$$(mktemp -d); \

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+state=$(printf %s "$KQT_STATE" | sha256sum | cut -d' ' -f1)
+exec flatpak run --die-with-parent --share=network --filesystem=/tmp --command=python3 --env=KQT_STATE=integration-$state network.katzenpost.katzenqt "$@"
