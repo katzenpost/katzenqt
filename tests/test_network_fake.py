@@ -49,6 +49,21 @@ def _make_F_payload(text: str = "hello") -> bytes:
     return b"F" + gcm.to_cbor()
 
 
+async def _poll_until(predicate, *, timeout: float = 5.0) -> None:
+    """Poll ``predicate()`` until it returns truthy or ``timeout`` elapses."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    tcalls = 0
+    while True:
+        if await predicate():
+            return
+        tcalls += 1
+        if asyncio.get_event_loop().time() >= deadline:
+            raise asyncio.TimeoutError(
+                f"predicate not satisfied after {tcalls} polls"
+            )
+        await asyncio.sleep(0.02)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -366,13 +381,13 @@ class TestDrainMixwalWriteSingle:
         orig_mark_sent = persistent.SentLog.mark_sent
         fail = {"armed": True}
 
-        async def flaky_mark_sent(connection, mw, resend_queue):
+        async def flaky_mark_sent(connection, mw, resend_queue, **kwargs):
             if fail["armed"]:
                 fail["armed"] = False
                 raise OperationalError(
                     "INSERT INTO sentlog", {}, Exception("database is locked"),
                 )
-            return await orig_mark_sent(connection, mw, resend_queue)
+            return await orig_mark_sent(connection, mw, resend_queue, **kwargs)
 
         monkeypatch.setattr(persistent.SentLog, "mark_sent", flaky_mark_sent)
         async with persistent.asession() as sess:
@@ -526,6 +541,222 @@ class TestDrainMixwalWriteSingle:
         assert network.conversation_update_queue.qsize() >= 1
         first = await network.conversation_update_queue.get()
         assert first == (setup["conversation_id"], True)
+
+    @pytest.mark.asyncio
+    async def test_counter_probe_interrupted_by_reconnect_gives_up(
+        self, fake_thinclient, monkeypatch,
+    ):
+        monkeypatch.setattr(network, "_RECONNECT_GRACE_SECONDS", 0.05)
+        """A daemon disconnect mid-`get_message_box_index_counter` can leave
+        the RPC awaiting forever (the reply is dropped with its query id, and
+        reconnect-replay never restores it); the wait must be raced against a
+        reconnect marker so the write drain releases the stream instead of
+        wedging it, leaving the MixWAL row for an idempotent re-send."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        probe_started = asyncio.Event()
+        held = asyncio.Event()
+
+        async def hang_counter(message_box_index):
+            probe_started.set()
+            await held.wait()  # never set in this test
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(
+            fake_thinclient, "get_message_box_index_counter", hang_counter,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+
+        async def simulate_reconnect():
+            # Gate on the probe having started: on_connection_status(True)
+            # swaps in a fresh _reconnect_event and sets the old one, so the
+            # reconnect must NOT have completed before the helper captured
+            # its marker (else it would wait on a reconnect that already
+            # happened -- the fast_asyncio_sleep baseline can otherwise
+            # zoom past the whole drain before the helper even starts).
+            await asyncio.wait_for(probe_started.wait(), timeout=5.0)
+            await network.on_connection_status({"is_connected": False, "err": None})
+            await network.on_connection_status({"is_connected": True, "err": None})
+
+        reconnector = asyncio.create_task(simulate_reconnect())
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, draining,
+        )
+        await reconnector
+        assert setup["bacap_stream"] not in draining
+        assert fake_thinclient.call_count("start_resending_encrypted_message") == 1
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+
+    @pytest.mark.asyncio
+    async def test_resend_interrupted_by_reconnect_gives_up(self, fake_thinclient, monkeypatch):
+        monkeypatch.setattr(network, "_RECONNECT_GRACE_SECONDS", 0.05)
+        """Same orphaned-RPC protection for the `start_resending` step
+        itself: a stuck ACK (never answers, never raises) must not wedge the
+        write; a reconnect marker releases the stream for an idempotent
+        re-send without ever touching mark_sent."""
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.hold_ack(setup["wcr"].envelope_hash)
+        resend_started = asyncio.Event()
+        orig_resend = fake_thinclient.start_resending_encrypted_message
+
+        async def held_resend(
+            read_cap: "bytes | None" = None,
+            write_cap: "bytes | None" = None,
+            message_box_index: "bytes | None" = None,
+            reply_index: "int | None" = None,
+            envelope_descriptor: "bytes | None" = None,
+            message_ciphertext: "bytes | None" = None,
+            envelope_hash: "bytes | None" = None,
+            no_retry_on_box_id_not_found: bool = False,
+            no_idempotent_box_already_exists: bool = False,
+        ):
+            resend_started.set()
+            return await orig_resend(
+                read_cap=read_cap,
+                write_cap=write_cap,
+                message_box_index=message_box_index,
+                reply_index=reply_index,
+                envelope_descriptor=envelope_descriptor,
+                message_ciphertext=message_ciphertext,
+                envelope_hash=envelope_hash,
+                no_retry_on_box_id_not_found=no_retry_on_box_id_not_found,
+                no_idempotent_box_already_exists=no_idempotent_box_already_exists,
+            )
+
+        monkeypatch.setattr(
+            fake_thinclient, "start_resending_encrypted_message", held_resend,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+
+        async def simulate_reconnect():
+            # Fire only once the resend is truly in flight (see the marker
+            # swap caveat in test_counter_probe_interrupted_by_reconnect_gives_up).
+            await asyncio.wait_for(resend_started.wait(), timeout=5.0)
+            await network.on_connection_status({"is_connected": False, "err": None})
+            await network.on_connection_status({"is_connected": True, "err": None})
+
+        reconnector = asyncio.create_task(simulate_reconnect())
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, draining,
+        )
+        await reconnector
+        assert setup["bacap_stream"] not in draining
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            assert (await sess.exec(select(persistent.SentLog))).all() == []
+
+    @pytest.mark.asyncio
+    async def test_ack_bookkeeping_interrupted_by_reconnect_gives_up(
+        self, fake_thinclient, monkeypatch,
+    ):
+        monkeypatch.setattr(network, "_RECONNECT_GRACE_SECONDS", 0.05)
+        """The courier ACK is secured before mark_sent runs; if a reconnect
+        orphans mark_sent's own thinclient call, the drain must leave the MW
+        for the next pass (re-send is idempotent) rather than wedge the
+        stream on an un-raiseable await. A mark_sent that un-hangs later
+        still finalizes the ACK instead of leaking a zombie task."""
+        setup = await _set_up_write_flow(fake_thinclient, plaintext=b"Fhello")
+        held = asyncio.Event()
+        mark_sent_started = asyncio.Event()
+        calls = {"n": 0}
+        orig_counter = fake_thinclient.get_message_box_index_counter
+
+        async def hang_after_probe(message_box_index):
+            calls["n"] += 1
+            if calls["n"] > 1:  # first call is the drain's own probe
+                mark_sent_started.set()
+                await held.wait()  # mark_sent's counter RPC
+            return await orig_counter(message_box_index)
+
+        monkeypatch.setattr(
+            fake_thinclient, "get_message_box_index_counter", hang_after_probe,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+
+        async def simulate_reconnect():
+            # Fire only once mark_sent's own RPC is in flight (see the
+            # marker swap caveat in test_counter_probe_interrupted_by_reconnect_gives_up).
+            await asyncio.wait_for(mark_sent_started.wait(), timeout=5.0)
+            await network.on_connection_status({"is_connected": False, "err": None})
+            await network.on_connection_status({"is_connected": True, "err": None})
+
+        reconnector = asyncio.create_task(simulate_reconnect())
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, draining,
+        )
+        await reconnector
+        # give_up: MW kept, stream released, no SentLog yet.
+        assert setup["bacap_stream"] not in draining
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            assert (await sess.exec(select(persistent.SentLog))).all() == []
+        # Un-hang the orphaned call: the re-cast (or, here, the in-flight
+        # shielded task) finalizes the ACK and prunes the MW.
+        held.set()
+
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            assert (await sess.exec(select(persistent.SentLog))).all() == []
+        draining.add(setup["bacap_stream"])
+        await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
+
+        async def finalized():
+            async with persistent.asession() as sess:
+                mw_gone = await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+                sled = (await sess.exec(select(persistent.SentLog))).all()
+                return mw_gone and len(sled) >= 1
+
+        try:
+            await asyncio.wait_for(_poll_until(finalized), timeout=5.0)
+        except asyncio.TimeoutError:
+            pytest.fail("mark_sent did not finalize the ACK after un-hanging")
+
+
+@pytest.mark.asyncio
+async def test_reconnect_marker_swap_sets_the_old_and_leaves_the_new_unset():
+    """The swap-on-transition pattern _rpc_racing_connection_life callers
+    rely on: on_connection_status sets the previously-captured Event and
+    replaces the module global with a fresh, unset one. A caller that
+    captures the marker once (e.g. at the top of a function covering two
+    sequential RPC races) and reuses that same reference for a later race
+    would see it as permanently "already done" after a reconnect --
+    re-reading the current global right before each race is what avoids
+    that (see drain_mixwal_read_single's second race)."""
+    network._last_connected = None
+    stale = network._reconnect_event
+    assert not stale.is_set()
+
+    await network.on_connection_status({"is_connected": False, "err": None})
+    await network.on_connection_status({"is_connected": True, "err": None})
+
+    assert stale.is_set(), "the captured-before-swap reference must be set"
+    assert network._reconnect_event is not stale
+    assert not network._reconnect_event.is_set(), (
+        "a fresh read of the global must NOT see it as already reconnected"
+    )
+
+
+@pytest.mark.asyncio
+async def test_epoch_marker_swap_sets_the_old_and_leaves_the_new_unset():
+    """Same swap-on-transition pattern as _reconnect_event, for PKI epoch
+    rollovers via on_new_pki_document."""
+    network._last_epoch = None
+    stale = network._epoch_event
+    assert not stale.is_set()
+
+    await network.on_new_pki_document({"payload": cbor2.dumps({"Epoch": 1})})
+
+    assert stale.is_set(), "the captured-before-swap reference must be set"
+    assert network._epoch_event is not stale
+    assert not network._epoch_event.is_set(), (
+        "a fresh read of the global must NOT see it as already rolled over"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1310,66 @@ class TestDrainMixwalReadSingle:
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
         assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_lost_encrypt_read_is_recovered_after_reconnect(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """The fresh encrypt_read inside the drain is just as exposed to a
+        daemon disconnect mid-RPC as the start_resending wait after it: the
+        request goes out, the daemon dies with the reply in flight, the reply
+        is dropped (query_id with no listener), and the await never unpends.
+        That wedged the read stream before the ARQ was even dispatched --
+        nothing to cancel, so the raced reconnect marker must release the
+        stream for a fresh re-encrypt on the reconnected client."""
+        payload = _make_F_payload("hang on encrypt then reconnect")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        # _set_up_read_flow consumed one (real) encrypt_read for arming; hold
+        # the drain's re-encrypt (which always runs) so it orphans.
+        held = asyncio.Event()
+        reencrypt_started = asyncio.Event()
+        recorded = {"n": 0}
+
+        async def hanging_encrypt_read(read_cap, message_box_index):
+            recorded["n"] += 1
+            reencrypt_started.set()
+            await held.wait()  # never set in this test
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(
+            fake_thinclient, "encrypt_read", hanging_encrypt_read,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+
+        async def simulate_reconnect():
+            # Fire only once the fresh encrypt_read is in flight (see the
+            # marker swap caveat in test_counter_probe_interrupted_by_reconnect_gives_up).
+            await asyncio.wait_for(reencrypt_started.wait(), timeout=5.0)
+            await network.on_connection_status({"is_connected": False, "err": None})
+            await network.on_connection_status({"is_connected": True, "err": None})
+
+        reconnector = asyncio.create_task(simulate_reconnect())
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now=draining,
+            read_watchdog_s=60.0,
+            reconnect_grace_s=0.05,
+        )
+        await reconnector
+        assert recorded["n"] == 1
+        # Nothing was dispatched, so nothing to cancel at the daemon; the
+        # stream is merely released for a fresh re-encrypt on re-cast.
+        assert fake_thinclient.call_count("cancel_resending_encrypted_message") == 0
+        assert setup["bacap_stream"] not in draining
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.next_index == setup["first_message_index"]
+            assert (await sess.exec(select(persistent.ConversationLog))).all() == []
 
 
 # ---------------------------------------------------------------------------
@@ -1772,6 +2063,111 @@ class TestDisconnectPauseAndResume:
                 loop_task.cancel()
 
     @pytest.mark.asyncio
+    async def test_readables_to_mixwal_retries_after_idle_bound_while_latch_unset(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """A full kpclientd restart can clear __mixnet_connected without any
+        later is_connected=True report ever re-setting it (the thin client
+        reconnects below the on_connection_status callback layer). The gate
+        is bounded by _CONNECTION_IDLE_RETRY_S for exactly that case: the
+        loop must proceed and attempt an arming pass anyway rather than
+        stranding the sole read-arming path forever."""
+        await _insert_write_setup(fake_thinclient)
+        getattr(network, "__resend_queue_populated").set()  # loop prelude
+        monkeypatch.setattr(network, "_CONNECTION_IDLE_RETRY_S", 0.05)
+        monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.05)
+        # Latch cleared once (restart), and no reconnect ever reports in.
+        await network.on_connection_status({"is_connected": False, "err": None})
+        getattr(network, "readables_to_mixwal_event").set()
+        loop_task = asyncio.create_task(
+            network.readables_to_mixwal(fake_thinclient),
+        )
+        try:
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_read") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_read") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_readables_to_mixwal_rearms_on_sweep_when_event_never_fires(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """readables_to_mixwal_event is how the arming loop gets poked, but
+        after a kpclientd restart nothing re-pokes it (deliveries and writes
+        -- the usual pokes -- stop while the daemon is down). The loop must
+        run an arming pass on its _ARMING_SWEEP_S cadence even when the
+        event never fires again, or rows whose MixWAL entries were consumed
+        would stay un-armed forever."""
+        await _insert_write_setup(fake_thinclient)
+        getattr(network, "__resend_queue_populated").set()  # loop prelude
+        monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.05)
+        # Mixnet connected, latch set; event starts clear and stays clear.
+        await network.on_connection_status({"is_connected": True, "err": None})
+        event = getattr(network, "readables_to_mixwal_event")
+        event.clear()
+        loop_task = asyncio.create_task(
+            network.readables_to_mixwal(fake_thinclient),
+        )
+        try:
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_read") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_read") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_send_resendable_retries_after_idle_bound_while_latch_unset(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """Same bounded-gate behaviour for the write path: with the latch
+        cleared and never re-set (restart below the callback layer), the
+        loop must still dispatch pending plaintext after the idle bound
+        rather than stranding resends forever."""
+        setup = await _insert_write_setup(fake_thinclient)
+        async with persistent.asession() as sess:
+            pwal = persistent.PlaintextWAL(
+                bacap_stream=setup["bacap_stream"],
+                conversation_id=setup["conversation_id"],
+                bacap_payload=b"Fstill here",
+            )
+            sess.add(pwal)
+            await sess.commit()
+        monkeypatch.setattr(network, "_CONNECTION_IDLE_RETRY_S", 0.05)
+        await network.on_connection_status({"is_connected": False, "err": None})
+        getattr(network, "resendable_event").set()
+        loop_task = asyncio.create_task(
+            network.send_resendable_plaintexts(fake_thinclient),
+        )
+        try:
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0)
+                if fake_thinclient.call_count("encrypt_write") >= 1:
+                    break
+            assert fake_thinclient.call_count("encrypt_write") >= 1
+        finally:
+            network.shutdown()
+            try:
+                await asyncio.wait_for(loop_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                loop_task.cancel()
+
+    @pytest.mark.asyncio
     async def test_drain_mixwal_write_single_swallows_offline_mid_call(
         self, fake_thinclient,
     ):
@@ -1795,23 +2191,18 @@ class TestDisconnectPauseAndResume:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
 
     @pytest.mark.asyncio
-    async def test_drain_mixwal_write_single_swallows_counter_offline_mid_call(
-        self, fake_thinclient,
-    ):
-        """Same as the offline mid-call test, but the socket drop lands
-        on the `get_message_box_index_counter` probe rather than the
-        resend call. This pin used to kill the fire-and-forget write task
-        (the probe ran before the offline try/except), stranding the stream
-        in draining_right_now forever — the silently-vanished write."""
+    async def test_write_dispatch_has_no_counter_probe(self, fake_thinclient):
         setup = await _set_up_write_flow(fake_thinclient)
         fake_thinclient.inject_error(
-            "get_message_box_index_counter", ThinClientOfflineError(),
+            "start_resending_encrypted_message", ThinClientOfflineError(),
         )
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         await network.drain_mixwal_write_single(
             fake_thinclient, mw, {setup["bacap_stream"]},
         )
+        assert fake_thinclient.call_count("get_message_box_index_counter") == 0
+        assert fake_thinclient.call_count("start_resending_encrypted_message") == 1
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
 
@@ -1887,6 +2278,7 @@ class TestReconnect:
             def __init__(self, *args, **kwargs):
                 self.args = args
                 self.kwargs = kwargs
+                assert kwargs["on_daemon_disconnected"] is network.on_daemon_disconnected
 
         monkeypatch.setattr(network, "ThinClientConfig", _StubConfig)
         monkeypatch.setattr(network, "ThinClient", lambda cfg: fake_thinclient)
@@ -2117,3 +2509,135 @@ class TestDoneCallbackPrimitive:
 
         assert isinstance(rec.errors[0], RuntimeError)
         assert str(rec.errors[0]) == "nope"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect", [False, True])
+async def test_initial_read_setup_recovers_without_advancing(
+    fake_thinclient, monkeypatch, disconnect,
+):
+    setup = await _insert_write_setup(fake_thinclient)
+    original = fake_thinclient.encrypt_read
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    calls = 0
+
+    async def encrypt_read(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return await original(**kwargs)
+
+    monkeypatch.setattr(fake_thinclient, "encrypt_read", encrypt_read)
+    monkeypatch.setattr(network, "_DAEMON_RPC_TIMEOUT_SECONDS", 0.05)
+    await network.on_connection_status({"is_connected": True})
+    getattr(network, "__resend_queue_populated").set()
+    task = asyncio.create_task(network.readables_to_mixwal(fake_thinclient))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        if disconnect:
+            await network.on_daemon_disconnected({"is_graceful": False})
+            await network.on_connection_status({"is_connected": True})
+        await asyncio.wait_for(cancelled.wait(), 2)
+
+        async def armed():
+            while True:
+                async with persistent.asession() as sess:
+                    rows = (await sess.exec(select(persistent.MixWAL))).all()
+                    if rows:
+                        rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+                        assert len(rows) == 1
+                        assert rows[0].current_message_index == setup["first_message_index"]
+                        assert rcw.next_index == setup["first_message_index"]
+                        return
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(armed(), 2)
+        assert calls == 2
+        assert fake_thinclient.call_count("get_message_box_index_counter") == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_retry_read_setup_timeout_preserves_pending_read(fake_thinclient, monkeypatch):
+    payload = _make_F_payload("retry setup")
+    setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+    original = fake_thinclient.encrypt_read
+    cancelled = asyncio.Event()
+
+    async def stalled(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(fake_thinclient, "encrypt_read", stalled)
+    monkeypatch.setattr(network, "_DAEMON_RPC_TIMEOUT_SECONDS", 0.02)
+    async with persistent.asession() as sess:
+        mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+    draining = {setup["bacap_stream"]}
+    await asyncio.wait_for(network.drain_mixwal_read_single(
+        connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+        mw=mw, draining_right_now=draining,
+    ), 2)
+    assert cancelled.is_set()
+    assert not draining
+    assert fake_thinclient.call_count("cancel_resending_encrypted_message") == 0
+    async with persistent.asession() as sess:
+        assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+        assert rcw.next_index == setup["first_message_index"]
+    monkeypatch.setattr(fake_thinclient, "encrypt_read", original)
+    draining.add(setup["bacap_stream"])
+    await network.drain_mixwal_read_single(
+        connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+        mw=mw, draining_right_now=draining,
+    )
+    async with persistent.asession() as sess:
+        assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+        logs = (await sess.exec(select(persistent.ConversationLog))).all()
+        assert len(logs) == 1 and logs[0].payload == payload
+
+
+@pytest.mark.asyncio
+async def test_daemon_restart_signals_read_recovery():
+    await network.on_connection_status({"is_connected": True})
+    marker = network._reconnect_event
+    await network.on_daemon_disconnected({"is_graceful": False})
+    assert not getattr(network, "__mixnet_connected").is_set()
+    await network.on_connection_status({"is_connected": True})
+    assert marker.is_set()
+    assert not network._reconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_read_reply_cancellation_joins_owned_tasks(fake_thinclient, monkeypatch):
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def stalled(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(fake_thinclient, "start_resending_encrypted_message", stalled)
+    baseline = asyncio.all_tasks()
+    task = asyncio.create_task(network._await_read_reply(
+        fake_thinclient, read_watchdog_s=60, reconnect_grace_s=30,
+        bacap_uuid=uuid.uuid4(),
+    ))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stopped.is_set()
+    assert asyncio.all_tasks() == baseline

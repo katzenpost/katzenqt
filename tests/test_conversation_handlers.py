@@ -134,3 +134,25 @@ class TestHandleIntroductionSelfRecognition:
             )
             assert added is True
             assert peer_added == (conv_id, "carol")
+
+
+@pytest.mark.asyncio
+async def test_introduction_respects_member_limit(monkeypatch):
+    from katzenqt import voucher
+
+    monkeypatch.setattr(voucher, "MAX_GROUP_MEMBERS", 1)
+    async with persistent.asession() as sess:
+        conv_id, own_id, _ = await _make_conversation(sess)
+        await _add_active_peer(sess, conv_id, name="alice", read_cap=_read_cap())
+        peer = await sess.get(persistent.ConversationPeer, own_id)
+        cap = _read_cap()
+        gcm = models.GroupChatMessage(
+            version=0, membership_hash=b"0" * 32,
+            msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+            introduction=models.GroupChatPleaseAdd(display_name="bob", read_cap=cap),
+        )
+        _, _, added = await conversation_handlers._handle_introduction(
+            sess, peer, gcm, b"F" + gcm.to_cbor(),
+        )
+        assert added is None
+        assert not await persistent.peer_has_read_cap(sess, conv_id, cap)

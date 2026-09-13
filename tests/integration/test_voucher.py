@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._process import run_logged
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -51,20 +52,23 @@ def _role_env(role_state: Path) -> dict:
 
 
 def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        _role_command(role_state, *cli_args), env=_role_env(role_state),
-        cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=timeout,
+    return run_logged(
+        role_state, _role_command(role_state, *cli_args), env=_role_env(role_state),
+        cwd=str(_REPO_ROOT), timeout=timeout,
     )
 
 
-def _spawn_role(role_state: Path, *cli_args: str) -> subprocess.Popen:
-    """Launch a role subprocess without waiting for it to finish. Used to keep
-    a joiner's ``voucher-await`` poll alive while the inductor writes box 1."""
-    return subprocess.Popen(
-        _role_command(role_state, *cli_args), env=_role_env(role_state),
-        cwd=str(_REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True,
-    )
+def _spawn_role(
+    role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path,
+) -> subprocess.Popen:
+    """Keep a role running with file output so full pipes cannot block it."""
+    with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open(
+        "w", encoding="utf-8"
+    ) as err:
+        return subprocess.Popen(
+            _role_command(role_state, *cli_args), env=_role_env(role_state),
+            cwd=str(_REPO_ROOT), stdout=out, stderr=err, text=True,
+        )
 
 
 def _output(proc: subprocess.CompletedProcess) -> str:
@@ -190,6 +194,9 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     never returned."""
     alice_state = tmp_path_factory.mktemp("alice_olap") / "state"
     carol_state = tmp_path_factory.mktemp("carol_olap") / "state"
+    log_dir = tmp_path_factory.mktemp("carol_await_logs")
+    await_out = log_dir / "await.out"
+    await_err = log_dir / "await.err"
 
     _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
     _assert_ok(_run_role(carol_state, "create-conv", "demo", "carol"), "carol create-conv")
@@ -200,19 +207,21 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     assert voucher, "empty voucher"
 
     # Start the joiner's poll first; it rides out an unwritten box 1.
-    await_proc = _spawn_role(carol_state, "voucher-await", "demo")
+    await_proc = _spawn_role(
+        carol_state, "voucher-await", "demo",
+        stdout_path=await_out, stderr_path=await_err,
+    )
     try:
-        # Give the poll time to reach the daemon before the reply appears.
         time.sleep(250)
         induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=300.0)
         _assert_ok(induct, "alice voucher-induct carol")
-        out, err = await_proc.communicate(timeout=300.0)
+        await_proc.wait(timeout=300.0)
     finally:
         if await_proc.poll() is None:
             await_proc.kill()
-            await_proc.communicate()
+            await_proc.wait()
 
-    output = out + err
+    output = await_out.read_text(encoding="utf-8") + await_err.read_text(encoding="utf-8")
     assert await_proc.returncode == 0, (
         f"overlapping await failed (rc={await_proc.returncode}):\n{output}"
     )

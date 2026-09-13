@@ -1,28 +1,4 @@
-"""Live confirmation that a pending read survives a full kpclientd process
-restart (podman stop/start), not just a mixnet-level connectivity blip.
-
-This was originally written to confirm the reconnect-triggered read
-watchdog (_await_read_reply racing on_connection_status's
-_reconnect_event); empirically it does NOT exercise that path. A full
-daemon restart never fires on_connection_status at all here -- the
-thin_client library reconnects the client's local socket to the new
-daemon process below the callback layer, with no disconnected/reconnected
-transition surfaced to the app (only its own "Attempting to reconnect to
-daemon" debug line). See test_watchdog_mixnet_reconnect.py for the
-scenario that DOES exercise on_connection_status and the watchdog's
-grace-period path: pausing the gateway so the daemon process keeps
-running but loses its mixnet route, which is what on_connection_status's
-pre-existing "disconnected from mixnet" line is actually about.
-
-What this test still confirms, and is worth keeping for: the read-drain
-loop (give_up()/OSError handling/prompt-retry fixes in this branch) does
-not hang or crash across a full daemon restart, recovering via its
-pre-existing exception-handling paths.
-
-Bounces the SHARED kpclientd daemon; run serial, not concurrently with
-the other integration files. Skipped unless KATZENQT_DOCKER_INTEGRATION=1
-(see conftest.py).
-"""
+"""Verify delivery after restarting the shared daemon; run serially."""
 from __future__ import annotations
 
 import time
@@ -36,6 +12,7 @@ from tests.integration._bounce_helpers import (
 
 
 @pytest.mark.integration
+@pytest.mark.serial_docker
 def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path_factory):
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
@@ -76,19 +53,6 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         container_stopped = False
         wait_reachable(120.0)
 
-        # Bob's send happens only AFTER the daemon is back, while Alice's
-        # read task is still pending. Note this does NOT force the
-        # reconnect-watchdog grace branch: a full daemon restart never
-        # fires on_connection_status (see the module docstring), so the
-        # read recovers via the read-drain loop's exception-handling
-        # paths instead.
-        #
-        # wait_reachable above only confirms the TCP port is listening
-        # again, not that the daemon has finished re-attaching to the
-        # mixnet gateway (also up to ~9 min); run_role's own timeout must
-        # stay comfortably above the chat-session SEND step's internal
-        # 600s deadline (see _action_chat_session), or the outer kill can
-        # fire before that inner retry ever gets a chance to succeed.
         send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=900.0)
         assert send.returncode == 0, send.stdout + send.stderr
 
@@ -116,8 +80,3 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
     assert "SESSION_DONE" in alice_all, (
         f"clean-shutdown sentinel missing\n{alice_err.read_text()[-3000:]}"
     )
-    # NOT asserted here: "daemon reconnected mid-wait for bacap_stream=".
-    # A full daemon restart doesn't fire on_connection_status at all (see
-    # the module docstring), so the read recovers via the pre-existing
-    # exception-handling paths, not the reconnect watchdog. That path is
-    # confirmed separately in test_watchdog_mixnet_reconnect.py.

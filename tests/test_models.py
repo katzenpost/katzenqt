@@ -117,3 +117,25 @@ def test_serialize_assigns_non_null_id_to_every_pwal():
     # ambiguous row.
     ids = [p.id for p in pwals]
     assert len(set(ids)) == len(ids), f"duplicate PWAL ids: {ids}"
+
+
+def test_clamp_message_text_leaves_normal_messages_untouched():
+    msg = "a normal chat message"
+    assert models.clamp_message_text(msg) == msg
+    exact = "x" * models.MAX_MESSAGE_CHARS
+    assert models.clamp_message_text(exact) == exact
+
+
+def test_clamp_message_text_truncates_oversized_and_marks_it():
+    oversized = "y" * (models.MAX_MESSAGE_CHARS + 5000)
+    clamped = models.clamp_message_text(oversized)
+    assert len(clamped) == models.MAX_MESSAGE_CHARS + len(models._TEXT_TRUNCATION_MARKER)
+    assert clamped.startswith("y" * models.MAX_MESSAGE_CHARS)
+    assert clamped.endswith(models._TEXT_TRUNCATION_MARKER)
+
+
+def test_clamp_message_text_is_idempotent():
+    oversized = "z" * (models.MAX_MESSAGE_CHARS * 3)
+    once = models.clamp_message_text(oversized)
+    twice = models.clamp_message_text(once)
+    assert once == twice

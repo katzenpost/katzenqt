@@ -18,10 +18,11 @@ from katzenqt import persistent
 from katzenqt.katzen import MainWindow, _AttachmentError, _ResolvedAttachment
 
 
-def _insert_payload(payload: bytes) -> str:
+def _insert_payload(payload: bytes, network_status: int = 0) -> str:
     """Persist a ConversationLog row carrying ``payload`` and return its
     string message id. FK columns point at synthetic ids; SQLite does not
-    enforce the constraints in the test schema."""
+    enforce the constraints in the test schema. ``network_status`` defaults
+    to 0 (received); pass 2 to model a row we authored (a sent attachment)."""
     message_uuid = uuid.uuid4()
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.ConversationLog(
@@ -30,6 +31,7 @@ def _insert_payload(payload: bytes) -> str:
             conversation_peer_id=1,
             conversation_order=0,
             payload=payload,
+            network_status=network_status,
         ))
         sess.commit()
     return str(message_uuid)
@@ -131,7 +133,7 @@ def test_file_outgoing_resolves_to_src_path(tmp_path: Path) -> None:
         "size": 10,
         "src_path": str(src),
     })
-    message_id = _insert_payload(payload)
+    message_id = _insert_payload(payload, network_status=2)
 
     resolved = _resolve(message_id)
     assert isinstance(resolved, _ResolvedAttachment)
@@ -148,7 +150,7 @@ def test_file_outgoing_empty_src_path_returns_none() -> None:
         "size": 512,
         "src_path": "",
     })
-    message_id = _insert_payload(payload)
+    message_id = _insert_payload(payload, network_status=2)
 
     assert _resolve(message_id) is None
 
@@ -169,7 +171,7 @@ def test_file_outgoing_audio_resolves_to_cached_clip(tmp_path: Path) -> None:
         "size": clip.stat().st_size,
         "src_path": str(clip),
     })
-    message_id = _insert_payload(payload)
+    message_id = _insert_payload(payload, network_status=2)
 
     resolved = _resolve(message_id)
     assert isinstance(resolved, _ResolvedAttachment)
@@ -203,5 +205,43 @@ def test_file_marker_rejects_path_traversal() -> None:
         "membership_hash": b"TODO" * 8,
     })
     message_id = _insert_payload(payload)
+    with pytest.raises(_AttachmentError):
+        _resolve(message_id)
+
+
+def test_received_file_outgoing_marker_is_refused() -> None:
+    secret = persistent.state_file.parent / "katzen.sqlite3"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_bytes(b"pretend secret caps")
+
+    payload = b"F" + cbor2.dumps({
+        "v": 0,
+        "kind": "file_outgoing",
+        "basename": "cat.jpg",
+        "filetype": "image/jpeg",
+        "size": 10,
+        "src_path": str(secret),
+    })
+    message_id = _insert_payload(payload, network_status=0)
+
+    with pytest.raises(_AttachmentError):
+        _resolve(message_id)
+
+
+def test_received_file_marker_without_sha256_is_refused() -> None:
+    rel_path = "katzen.sqlite3"
+    (persistent.state_file.parent / rel_path).write_bytes(b"pretend secret caps")
+
+    payload = b"F" + cbor2.dumps({
+        "v": 0,
+        "kind": "file_marker",
+        "basename": "cat.jpg",
+        "filetype": "image/jpeg",
+        "size": 10,
+        "rel_path": rel_path,
+        "membership_hash": b"TODO" * 8,
+    })
+    message_id = _insert_payload(payload, network_status=0)
+
     with pytest.raises(_AttachmentError):
         _resolve(message_id)

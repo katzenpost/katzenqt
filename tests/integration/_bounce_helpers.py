@@ -22,6 +22,8 @@ import sys
 import time
 from pathlib import Path
 
+from tests.integration._process import run_logged
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = REPO_ROOT / ".venv" / "bin" / "python3"
 PYTHON = os.environ.get(
@@ -44,9 +46,8 @@ def run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
     env["KQT_STATE"] = str(role_state)
     env["PYTHONUNBUFFERED"] = "1"
     cmd = [PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *CONN_ARGS]
-    return subprocess.run(
-        cmd, env=env, cwd=str(REPO_ROOT),
-        capture_output=True, text=True, timeout=timeout,
+    return run_logged(
+        role_state, cmd, env=env, cwd=str(REPO_ROOT), timeout=timeout,
     )
 
 

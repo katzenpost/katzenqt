@@ -19,6 +19,21 @@ from pathlib import Path
 # It now lives in ``katzenqt.qt_models``; import it from there if you
 # need it.
 
+MAX_MESSAGE_CHARS = 16 * 1024
+_TEXT_TRUNCATION_MARKER = "\n[message truncated]"
+
+
+def clamp_message_text(text: str) -> str:
+    """Clamp ``text`` to :data:`MAX_MESSAGE_CHARS`, appending a short marker
+    when it is truncated. Idempotent: because the slice happens before the
+    marker is appended, clamping an already-clamped string returns the same
+    result, so an ingest-time clamp and a render-time clamp compose without
+    stacking markers."""
+    if len(text) <= MAX_MESSAGE_CHARS:
+        return text
+    return text[:MAX_MESSAGE_CHARS] + _TEXT_TRUNCATION_MARKER
+
+
 class GroupChatTEXT(BaseModel):
     model_config = {
         'validate_assignment': True }

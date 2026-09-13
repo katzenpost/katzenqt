@@ -50,7 +50,7 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      list_pending_vouchers, mint_and_publish,
                      pending_joiner_join_conversation_ids, pending_voucher_for)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
-from .katzen_util import create_task
+from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
@@ -77,6 +77,7 @@ class _ResolvedAttachment(NamedTuple):
     basename: str
     filetype: str | None
     path: Path
+    received: bool = True
 
 # Bound on how long receive_msg_listener/peer_added_listener wait for a
 # conversation_id to appear in conversation_state_by_id before giving up on
@@ -419,6 +420,26 @@ class MainWindow(QMainWindow):
         convo.attached_files.discard(str(path))
         self.refresh_attached_files_for_conversation(convo)
 
+    def _warn_attachment(self, text: str) -> None:
+        """Show an attachment warning with the message rendered as plain text.
+
+        The text embeds a peer-chosen basename; QMessageBox defaults to
+        Qt::AutoText, which would render HTML in that basename, so pin the
+        format to plain text to keep a hostile name from spoofing the dialog.
+        """
+        box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.exec()
+
+    def _info_plain(self, title: str, text: str) -> None:
+        """Show an informational dialog with the message rendered as plain
+        text, for the same reason _warn_attachment is: the text can embed a
+        peer-chosen display name, which must not be interpreted as HTML.
+        """
+        box = QMessageBox(QMessageBox.Icon.Information, title, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.exec()
+
     def _resolve_attachment(self, message_id: str) -> "_ResolvedAttachment | None":
         """Rehydrate an attachment to a concrete on-disk path.
 
@@ -447,6 +468,7 @@ class MainWindow(QMainWindow):
             if conversation_log is None or conversation_log.payload[:1] != b"F":
                 return None
             body = conversation_log.payload[1:]  # strip framing byte shared with wire format
+            authored = conversation_log.network_status != 0
 
         state_root = persistent.state_file.parent
 
@@ -484,16 +506,24 @@ class MainWindow(QMainWindow):
                         f"The received file for {basename} is missing on disk."
                     )
                 marker_sha = decoded.get("sha256")
-                if marker_sha is not None:
-                    actual_sha = hashlib.sha256(abs_path.read_bytes()).digest()
-                    if actual_sha != marker_sha:
-                        raise _AttachmentError(
-                            f"Checksum mismatch for {basename}; the file may be "
-                            "corrupt."
-                        )
+                if not isinstance(marker_sha, bytes):
+                    raise _AttachmentError(
+                        f"{basename} has no checksum and cannot be verified."
+                    )
+                actual_sha = hashlib.sha256(abs_path.read_bytes()).digest()
+                if actual_sha != marker_sha:
+                    raise _AttachmentError(
+                        f"Checksum mismatch for {basename}; the file may be "
+                        "corrupt."
+                    )
                 return _ResolvedAttachment(basename, filetype, abs_path)
 
             if kind == "file_outgoing":
+                if not authored:
+                    raise _AttachmentError(
+                        f"{basename} refers to a local file but was received "
+                        "from a peer; refusing to open it."
+                    )
                 src_path = decoded.get("src_path") or ""
                 if not src_path:
                     # Voice-note draft was discarded after sending; nothing to
@@ -505,7 +535,7 @@ class MainWindow(QMainWindow):
                         f"The original file for {basename} is no longer "
                         f"available at {src_path}."
                     )
-                return _ResolvedAttachment(basename, filetype, abs_path)
+                return _ResolvedAttachment(basename, filetype, abs_path, received=False)
 
             return None
 
@@ -550,7 +580,7 @@ class MainWindow(QMainWindow):
         try:
             resolved = self._resolve_attachment(message_id)
         except _AttachmentError as exc:
-            QMessageBox.warning(self, APP_NAME, str(exc))
+            self._warn_attachment(str(exc))
             return
         if resolved is None:
             QMessageBox.information(
@@ -584,7 +614,7 @@ class MainWindow(QMainWindow):
         try:
             resolved = self._resolve_attachment(message_id)
         except _AttachmentError as exc:
-            QMessageBox.warning(self, APP_NAME, str(exc))
+            self._warn_attachment(str(exc))
             return
         if resolved is None:
             QMessageBox.information(
@@ -592,7 +622,37 @@ class MainWindow(QMainWindow):
                 "This attachment is not available locally yet.",
             )
             return
+        if resolved.received and not self._confirm_open_attachment(resolved):
+            return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.path)))
+
+    def _confirm_open_attachment(self, resolved: "_ResolvedAttachment") -> bool:
+        """Ask the user before opening a peer-supplied file with the desktop
+        handler. Returns True only on an explicit Yes."""
+        filetype = resolved.filetype or "unknown type"
+        lines = [
+            "Open this attachment received from a peer with your desktop "
+            "application?",
+            "",
+            f"Name: {resolved.basename}",
+            f"Type: {filetype}",
+        ]
+        if is_risky_attachment_extension(resolved.basename):
+            lines += [
+                "",
+                "Warning: files of this kind can open in a browser, document "
+                "viewer, or other program that may run content the sender "
+                "controls. Only open it if you trust the sender.",
+            ]
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, APP_NAME, "\n".join(lines), parent=self,
+        )
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     @Slot(str)
     def saveAttachment(self, message_id: str) -> None:
@@ -600,7 +660,7 @@ class MainWindow(QMainWindow):
         try:
             resolved = self._resolve_attachment(message_id)
         except _AttachmentError as exc:
-            QMessageBox.warning(self, APP_NAME, str(exc))
+            self._warn_attachment(str(exc))
             return
         if resolved is None:
             QMessageBox.information(
@@ -1645,8 +1705,8 @@ class MainWindow(QMainWindow):
             convo.contacts_standard_item.appendRow(QStandardItem(name))
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(added) or "(none)"
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
 
     async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
@@ -1719,8 +1779,8 @@ class MainWindow(QMainWindow):
         convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
         ))
 
     @async_cb
