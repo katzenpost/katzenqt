@@ -1264,6 +1264,97 @@ class TestDrainMixwalReadSingle:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
         assert setup["bacap_stream"] not in draining
 
+    @pytest.mark.parametrize("benign", [
+        BoxIDNotFoundError("box ID not found"),
+        TombstoneError("tombstone"),
+    ])
+    @pytest.mark.asyncio
+    async def test_substream_not_found_deactivates_peer(self, fake_thinclient, monkeypatch, benign):
+        """A substream read that hits BoxIDNotFound/Tombstone on its FIRST
+        attempt must fail fast (no_retry_on_box_id_not_found=True) and
+        deactivate the peer: the I-chunk is gated by after_stream so the
+        reader only learns of the substream after every box was written;
+        a not-found means the courier's async replica dispatch failed and
+        nothing will resurrect the box. Deactivating + deleting the MixWAL
+        stops the drain loop re-casting the dead read forever."""
+        setup = await _set_up_read_flow(
+            fake_thinclient, peer_name=":substream:2:abc",
+        )
+        # Record the no_retry flag (the fake's call_log omits it).
+        recorded = {}
+        orig = fake_thinclient.start_resending_encrypted_message
+
+        async def recording_resend(*args, **kwargs):
+            recorded["no_retry_on_box_id_not_found"] = kwargs.get(
+                "no_retry_on_box_id_not_found",
+            )
+            return await orig(*args, **kwargs)
+
+        monkeypatch.setattr(
+            fake_thinclient, "start_resending_encrypted_message",
+            recording_resend,
+        )
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", benign,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        assert recorded["no_retry_on_box_id_not_found"] is True
+        async with persistent.asession() as sess:
+            # Peer deactivated AND its MixWAL row gone, so the drain loop
+            # can never re-cast this dead read.
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is False
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_normal_peer_not_found_rides_out(self, fake_thinclient, monkeypatch):
+        """A normal conversation read keeps the ride-out behaviour: a
+        BoxIDNotFound is a benign 'no further data yet' for an ordinary
+        peer, so it is cast with no_retry_on_box_id_not_found=False and must
+        NOT deactivate the peer or drop its MixWAL."""
+        setup = await _set_up_read_flow(fake_thinclient, peer_name="self")
+        recorded = {}
+        orig = fake_thinclient.start_resending_encrypted_message
+
+        async def recording_resend(*args, **kwargs):
+            recorded["no_retry_on_box_id_not_found"] = kwargs.get(
+                "no_retry_on_box_id_not_found",
+            )
+            return await orig(*args, **kwargs)
+
+        monkeypatch.setattr(
+            fake_thinclient, "start_resending_encrypted_message",
+            recording_resend,
+        )
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            BoxIDNotFoundError("box ID not found"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        assert recorded["no_retry_on_box_id_not_found"] is False
+        async with persistent.asession() as sess:
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is True
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+
     @pytest.mark.asyncio
     async def test_lost_encrypt_read_is_recovered_after_reconnect(
         self, fake_thinclient, monkeypatch,
@@ -1323,6 +1414,158 @@ class TestDrainMixwalReadSingle:
             rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
             assert rcw.next_index == setup["first_message_index"]
             assert (await sess.exec(select(persistent.ConversationLog))).all() == []
+
+
+class TestPauseResumePeerReads:
+    """TODO item 5: per-peer pause/resume. A user-initiated pause on a
+    dead substream must cancel the in-flight read ARQ (otherwise the
+    daemon keeps retransmitting into the void), delete the is_read
+    MixWAL row (otherwise drain_mixwal2's 15s sweep re-casts it forever,
+    since that loop reads MixWAL regardless of active), and deactivate
+    the peer so readables_to_mixwal never re-arms it. Resume must flip
+    active back on and poke the re-arm event."""
+
+    @pytest.mark.asyncio
+    async def test_pause_cancels_inflight_read(self, fake_thinclient, monkeypatch):
+        setup = await _set_up_read_flow(fake_thinclient, peer_name=":substream:2:abc")
+        # Hold the drain inside the reply race so there is a genuine
+        # in-flight ARQ to cancel (rcr is set, so the CancelledError
+        # handler must cancel it at the daemon).
+        replay_arrived = asyncio.Event()
+        stuck_forever = asyncio.Event()
+
+        async def stuck_resend(*args, **kwargs):
+            replay_arrived.set()
+            await stuck_forever.wait()  # never set in this test
+
+        monkeypatch.setattr(
+            fake_thinclient, "start_resending_encrypted_message", stuck_resend,
+        )
+        cancels = []
+        orig_cancel = fake_thinclient.cancel_resending_encrypted_message
+
+        async def recording_cancel(envelope_hash):
+            cancels.append(envelope_hash)
+            return await orig_cancel(envelope_hash)
+
+        monkeypatch.setattr(
+            fake_thinclient, "cancel_resending_encrypted_message", recording_cancel,
+        )
+        # The drain re-encrypts fresh (network.py:670), and the fake's
+        # encrypt_read mints a NEW envelope_hash each call, so capture the
+        # drain's envelope rather than comparing against setup["rcr"].
+        fresh_encrypts = []
+        orig_encrypt = fake_thinclient.encrypt_read
+
+        async def recording_encrypt(*args, **kwargs):
+            r = await orig_encrypt(*args, **kwargs)
+            fresh_encrypts.append(r.envelope_hash)
+            return r
+
+        monkeypatch.setattr(
+            fake_thinclient, "encrypt_read", recording_encrypt,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        read_task = asyncio.create_task(network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        ))
+        # Mirror drain_mixwal2's registry entry AND its done-callback so a
+        # pause can reach the task and the callback releases the stream.
+        network._inflight_reads[setup["bacap_stream"]] = read_task
+
+        def _on_read_done(*_args):
+            network._inflight_reads.pop(setup["bacap_stream"], None)
+            draining.discard(setup["bacap_stream"])
+
+        read_task.add_done_callback(_on_read_done)
+        await asyncio.wait_for(replay_arrived.wait(), timeout=5.0)
+
+        await network.pause_peer_reads(bacap_stream=setup["bacap_stream"])
+
+        assert read_task.cancelled()
+        assert cancels == fresh_encrypts and len(fresh_encrypts) == 1
+        async with persistent.asession() as sess:
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is False
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+        # The done-callback released the stream from draining_right_now.
+        assert setup["bacap_stream"] not in draining
+        await asyncio.sleep(0)  # let the done-callback run
+        assert network._inflight_reads.get(setup["bacap_stream"]) is None
+
+    @pytest.mark.asyncio
+    async def test_pause_with_no_inflight_read_still_deactivates(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """A pause on a stream with no registered in-flight task (the read
+        completed on its own, or we are pausing before the loop ever armed
+        it) must still drop the MW row and deactivate the peer -- the two
+        things that keep the sweep from re-casting the dead read forever."""
+        setup = await _set_up_read_flow(fake_thinclient, peer_name=":substream:2:abc")
+        async with persistent.asession() as sess:
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is True
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+
+        await network.pause_peer_reads(bacap_stream=setup["bacap_stream"])
+
+        async with persistent.asession() as sess:
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is False
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+        # Resume must run on a paused stream even though the drain loop
+        # re-arms it (fresh MW) only when a connection is present.
+        await network.resume_peer_reads(bacap_stream=setup["bacap_stream"])
+        async with persistent.asession() as sess:
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is True
+
+    @pytest.mark.asyncio
+    async def test_resume_rearms_read_from_saved_index(self, fake_thinclient):
+        """After a pause deletes the MW row but keeps the ReadCapWAL
+        next_index cursor, resume + a readables_to_mixwal pass must arm a
+        FRESH is_read MW from the saved index (the exact message_index the
+        paused read was on), not restart from the beginning."""
+        payload = _make_F_payload("resume re-arms from saved index")
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        await network.pause_peer_reads(bacap_stream=setup["bacap_stream"])
+        await network.resume_peer_reads(bacap_stream=setup["bacap_stream"])
+
+        # Prerequisites for readables_to_mixwal's loop to enter its body.
+        await network.on_connection_status({"is_connected": True, "err": None})
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "readables_to_mixwal_event").set()
+
+        async def rearmed():
+            async with persistent.asession() as sess:
+                rows = (await sess.exec(select(persistent.MixWAL).where(
+                    persistent.MixWAL.is_read,
+                ))).all()
+                return len(rows) == 1 and rows[0].bacap_stream == setup["bacap_stream"]
+
+        await _run_loop_until(
+            network.readables_to_mixwal(fake_thinclient),
+            rearmed,
+            timeout=5.0,
+        )
+        async with persistent.asession() as sess:
+            rows = (await sess.exec(select(persistent.MixWAL).where(
+                persistent.MixWAL.is_read,
+            ))).all()
+        assert len(rows) == 1
+        assert rows[0].bacap_stream == setup["bacap_stream"]
+        assert rows[0].current_message_index == setup["first_message_index"]
 
 
 # ---------------------------------------------------------------------------

@@ -977,6 +977,13 @@ class MainWindow(QMainWindow):
         # inputMethodEvent
         #self.ui.contacts_treeWidget.keyboardSearch.connect(lambda: print("KB search")) # TODO not a signal, but when user starts typing here we want to set the focus to contactFilterLineEdit instead
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
+        # Per-peer pause/resume (TODO item 5): right-click a peer row under
+        # a conversation to stop/resume reading that one stream. Killed
+        # substream peers otherwise keep getting re-cast every 15s forever.
+        self.ui.contacts_treeWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.ui.contacts_treeWidget.customContextMenuRequested.connect(
+            self.peer_context_menu
+        )
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
 
     async def _enqueue_outgoing_gcm(
@@ -1194,8 +1201,73 @@ class MainWindow(QMainWindow):
         )
         if already:
             return
-        item.appendRow(QStandardItem(name))
+        new_item = QStandardItem(name)
+        # Tag like add_conversation's peers so the per-peer pause/resume
+        # context menu (TODO item 5) works on dynamically-announced members
+        # too. The queue only carries (conversation_id, name); resolve the
+        # read cap/own-ness from the DB.
+        async with persistent.asession() as _sess:
+            peer_row = (await _sess.exec(
+                select(persistent.ConversationPeer)
+                .where(persistent.ConversationPeer.name == name)
+            )).first()
+        if peer_row is not None:
+            new_item.peer_read_cap_id = peer_row.read_cap_id
+            new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
+        item.appendRow(new_item)
         logger.debug("added announced contact %r to conversation %d", name, conversation_id)
+
+    @async_cb
+    async def peer_context_menu(self, pos) -> None:
+        """Per-peer pause/resume (TODO item 5): right-clicking a peer row
+        under a conversation offers Pause/Resume for exactly that peer's
+        read stream. A dead substream otherwise keeps the drain loop
+        re-casting its BoxIDNotFound read every 15s forever; pausing the
+        peer stops the re-reads (and cancels any in-flight ARQ) without
+        touching the rest of the conversation. Our own row (we never read
+        from ourselves, active=False) and the conversation rows get no
+        menu."""
+        tree = self.ui.contacts_treeWidget
+        idx = tree.indexAt(pos)
+        if not idx.isValid():
+            return
+        # The contacts tree shows a FilterProxyModel over all_contacts: map
+        # the click back to the source row and require a peer (child) row.
+        src_idx = tree.model().mapToSource(idx)
+        if not src_idx.isValid() or not src_idx.parent().isValid():
+            return
+        item = self.all_contacts.itemFromIndex(src_idx)
+        if item is None or item.parent() is None:
+            return
+        # Skip rows tagged as our own (or untagged, e.g. an own row).
+        if getattr(item, "peer_is_own", True):
+            return
+        read_cap_id = getattr(item, "peer_read_cap_id", None)
+        if read_cap_id is None:
+            return
+        # Read the peer's current active state from the DB: pause(n) means
+        # "stop reading", resume(n) means "start again from next_index".
+        with persistent.Session(persistent._engine_sync) as sess:
+            solo = (sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == read_cap_id,
+                )
+            )).first()
+        active = bool(solo.active) if solo is not None else True
+        # A throwaway menu so we never clobber the tray's contextMenu().
+        api = QMenu(tree)
+        pgm = api.addAction(f"Do not read from {item.text()} any more")
+        rgm = api.addAction(f"Resume reading from {item.text()}")
+        rgm.setEnabled(not active)
+        chosen = api.exec(tree.viewport().mapToGlobal(pos))
+        if chosen is pgm and active:
+            await self.iothread.run_in_io(
+                network.pause_peer_reads(bacap_stream=read_cap_id),
+            )
+        elif chosen is rgm and not active:
+            await self.iothread.run_in_io(
+                network.resume_peer_reads(bacap_stream=read_cap_id),
+            )
 
     def convo_state(self) -> ConversationUIState:
         convo = self.convo_state_or_none()
@@ -1848,6 +1920,12 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     for peer in convo.peers:
         #ptwi = QTreeWidgetItem([peer.name])
         ptwi = QStandardItem(peer.name)
+        # The peer row is the per-peer pause/resume target (TODO item 5):
+        # tag it with its read cap (the bacap_stream the drain reads on) so
+        # the contacts-tree context menu can resolve the right stream, and
+        # mark our own row so the menu can refuse to "pause" ourselves.
+        ptwi.peer_read_cap_id = peer.read_cap_id
+        ptwi.peer_is_own = (peer.id == convo.own_peer_id)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
     async with persistent.asession() as sess:

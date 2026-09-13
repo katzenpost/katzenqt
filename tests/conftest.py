@@ -80,6 +80,7 @@ def _reset_network_module_state():
             setattr(network, name, asyncio.Event())
         getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
+        network._inflight_reads.clear()
         # Per-conversation log-order locks are plain threading.Locks keyed
         # by conversation_id, and the test session's conversation ids
         # restart at 1 after each `_fresh_tables` wipe. Without this reset,
