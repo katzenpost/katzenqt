@@ -41,6 +41,17 @@ conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`
 # path; the GUI appends the name to the contacts tree in its own listener.
 peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 
+# TODO item 4: substream file-transfer progress for the GUI Transfers panel.
+# Events are ``(kind, rcw_id, *extra)``:
+#   ("started", rcw_id, conversation_id, total_or_None, parent_name)
+#   ("piece",    rcw_id, count_or_None)      # count is pieces received so far
+#   ("completed", rcw_id)
+#   ("paused",   rcw_id)
+#   ("resumed",  rcw_id)
+# Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
+# written; the GUI's transfers_listener drains it and updates DownloadsModel.
+substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
+
 __resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
 
@@ -944,6 +955,19 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 chunk=chunk_body,
             ))
 
+    # TODO item 4: substream progress events, held until the transaction
+    # commits and fired for the GUI's transfers_listener. count() runs in
+    # the same (unflushed) transaction, so it already includes the row
+    # just added above -- matching the ReceivedPiece count the Transfers
+    # panel shows.
+    substream_progress = []
+    if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+        piece_count = (await sess.exec(
+            select(persistent.sa.func.count()).select_from(persistent.ReceivedPiece)
+            .where(persistent.ReceivedPiece.read_cap == mw.bacap_stream)
+        )).one()
+        substream_progress.append(("piece", mw.bacap_stream, int(piece_count)))
+
     assembled = await _try_assemble(
         sess, mw.bacap_stream, mw.current_message_index[:8],
     )
@@ -1007,6 +1031,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     cp.active = False
                     sess.add(cp)
                     convlog_added = added
+                    # TODO item 4: the transfer is complete (terminal F
+                    # assembled and routed). Held until commit.
+                    substream_progress.append(("completed", mw.bacap_stream))
                 else:
                     # Top-level F (single-box or contiguous on the parent stream):
                     # route by message type, chat into the log, tally into the
@@ -1053,6 +1080,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     conversation=cp.conversation,
                 )
                 sess.add(substream_peer)
+                # TODO item 4: announce the new download. Held until commit.
+                substream_progress.append((
+                    "started", new_rcw.id, cp.conversation.id,
+                    new_rcw.substream_total_chunks,
+                    cp.name,
+                ))
 
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
@@ -1084,6 +1117,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # OperationalError retry that rolls the peer-add back and re-adds it.
     peer_added_queue.put_nowait(peer_added)
     readables_to_mixwal_event.set()
+
+  if substream_progress:
+    # TODO item 4: fire held substream events for the GUI Transfers panel,
+    # after the commit so listeners never observe uncommitted pieces.
+    for event in substream_progress:
+      substream_progress_queue.put_nowait(event)
 
   if signal_send:
     # A tally sync request staged a reply on the outgoing stream; poke the
@@ -1132,9 +1171,15 @@ async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         if cp is not None:
             cp.active = False
             sess.add(cp)
+            is_substream = cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+        else:
+            is_substream = False
         await sess.commit()
     readables_to_mixwal_event.set()
     __mixwal_updated.set()
+    if is_substream:
+        # TODO item 4: the Transfers panel mirrors pause state.
+        substream_progress_queue.put_nowait(("paused", bacap_stream))
 
 
 async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
@@ -1150,8 +1195,14 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         if cp is not None:
             cp.active = True
             sess.add(cp)
-            await sess.commit()
+            is_substream = cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+        else:
+            is_substream = False
+        await sess.commit()
     readables_to_mixwal_event.set()
+    if is_substream:
+        # TODO item 4: the Transfers panel mirrors resume state.
+        substream_progress_queue.put_nowait(("resumed", bacap_stream))
 
 
 async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool:
