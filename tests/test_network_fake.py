@@ -2185,6 +2185,59 @@ class TestSendResendablePlaintexts:
             assert row is not None
             assert row.bacap_payload == expected
 
+    @pytest.mark.asyncio
+    async def test_indirection_pwal_prepends_total_chunk_count_when_known(
+        self, fake_thinclient,
+    ):
+        """TODO item 4: when the target ReadCapWAL carries a known
+        substream_total_chunks (set by models.serialize on a multi-chunk
+        file), the filled-in I-chunk is b'I' + 4-byte BE count + read_cap
+        so the reader can render download progress as n/total."""
+        target = await _insert_write_setup(
+            fake_thinclient, conv_name="target", peer_name="target_self",
+            seed=b"\xab" * 32,
+        )
+        async with persistent.asession() as sess:
+            rcw = await sess.get(persistent.ReadCapWAL, target["bacap_stream"])
+            rcw.substream_total_chunks = 3  # two C-chunks + final F
+            sess.add(rcw)
+            await sess.commit()
+        host = await _insert_write_setup(
+            fake_thinclient, conv_name="host", peer_name="host_self",
+            seed=b"\xcd" * 32,
+        )
+        async with persistent.asession() as sess:
+            release = persistent.PlaintextWAL(
+                bacap_stream=host["bacap_stream"],
+                conversation_id=host["conversation_id"],
+                bacap_payload=b"",
+                indirection=target["bacap_stream"],
+            )
+            sess.add(release)
+            await sess.commit()
+            await sess.refresh(release)
+            release_id = release.id
+        getattr(network, "__mixnet_connected").set()
+        getattr(network, "resendable_event").set()
+
+        def encrypt_write_seen():
+            return fake_thinclient.call_count("encrypt_write") >= 1
+
+        await _run_loop_until(
+            network.send_resendable_plaintexts(fake_thinclient),
+            encrypt_write_seen,
+            timeout=5.0,
+        )
+        assert encrypt_write_seen()
+        expected = b"I" + (3).to_bytes(4, "big") + target["read_cap"]
+        last = fake_thinclient.last_call("encrypt_write")
+        assert last["plaintext"] == expected
+        assert len(expected) == 1 + 4 + 136
+        async with persistent.asession() as sess:
+            row = await sess.get(persistent.PlaintextWAL, release_id)
+            assert row is not None
+            assert row.bacap_payload == expected
+
 
 # ---------------------------------------------------------------------------
 # disconnect / reconnect ride-through

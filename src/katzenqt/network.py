@@ -1019,11 +1019,32 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         elif assembled is not None and assembled[0] == "I":
             _, substream_read_cap, _ = assembled
             if len(substream_read_cap) == 136:
+                # Legacy 136-byte I-chunk: no total carried; the download
+                # renders with an indeterminate denominator.
                 new_rcw = persistent.ReadCapWAL(
                     id=uuid.uuid4(),
                     read_cap=substream_read_cap,
                     next_index=substream_read_cap[-104:],
                 )
+            elif len(substream_read_cap) == 140:
+                # Extended I-chunk (TODO item 4): bytes 0-3 carry the total
+                # plaintext chunk count (C-chunks + final F), bytes 4-139 are
+                # the 136-byte read cap. Parse defensively: an out-of-range
+                # count still just means indeterminate progress, never a crash.
+                total_chunks = struct.unpack(">I", substream_read_cap[:4])[0]
+                read_cap_bytes = substream_read_cap[4:]
+                new_rcw = persistent.ReadCapWAL(
+                    id=uuid.uuid4(),
+                    read_cap=read_cap_bytes,
+                    next_index=read_cap_bytes[-104:],
+                    substream_total_chunks=total_chunks,
+                )
+            else:
+                logger.warning(
+                    "ignoring indirection with malformed read cap length %d",
+                    len(substream_read_cap),
+                )
+            if len(substream_read_cap) in (136, 140):
                 sess.add(new_rcw)
                 substream_peer = persistent.ConversationPeer(
                     name=f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:{secrets.token_hex(2)}",
@@ -1032,11 +1053,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     conversation=cp.conversation,
                 )
                 sess.add(substream_peer)
-            else:
-                logger.warning(
-                    "ignoring indirection with malformed read cap length %d",
-                    len(substream_read_cap),
-                )
 
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
@@ -1543,7 +1559,17 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                         row.id, row.indirection,
                     )
                     rcw = await sess.get(persistent.ReadCapWAL, row.indirection)
-                    payload = b'I' + rcw.read_cap
+                    # TODO item 4: extended I-chunk carries the total plaintext
+                    # chunk count (C-chunks + final F) as a 4-byte big-endian
+                    # prefix, so the reader can render progress n/total. rcw is
+                    # the sender's indirection ReadCapWAL created in
+                    # models.serialize(); when it predates the column this
+                    # falls back to a legacy 136-byte I-chunk.
+                    total = rcw.substream_total_chunks if rcw is not None else None
+                    if total is None:
+                        payload = b'I' + rcw.read_cap
+                    else:
+                        payload = b'I' + struct.pack(">I", total) + rcw.read_cap
                     pwal_orm = await sess.get(persistent.PlaintextWAL, row.id)
                     if pwal_orm is not None:
                         pwal_orm.bacap_payload = payload
