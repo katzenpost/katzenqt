@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tests.integration._bounce_helpers import epoch_duration_s
+from tests.integration._process import run_logged
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -95,27 +96,23 @@ def _role_env(role_state: Path) -> dict:
 
 
 def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        _role_command(role_state, *cli_args), env=_role_env(role_state),
-        cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=timeout,
+    return run_logged(
+        role_state, _role_command(role_state, *cli_args), env=_role_env(role_state),
+        cwd=str(_REPO_ROOT), timeout=timeout,
     )
 
 
 def _spawn_role(
     role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path,
 ) -> subprocess.Popen:
-    """Launch a role subprocess without waiting for it to finish. Used to keep
-    a joiner's ``voucher-await`` poll alive while the inductor writes box 1.
-    Stdout/stderr go to files rather than pipes to avoid the 64KB
-    pipe-buffer deadlock (see _bounce_helpers.spawn_role, which this
-    mirrors)."""
-    return subprocess.Popen(
-        _role_command(role_state, *cli_args), env=_role_env(role_state),
-        cwd=str(_REPO_ROOT),
-        stdout=open(stdout_path, "w"),
-        stderr=open(stderr_path, "w"),
-        text=True,
-    )
+    """Keep a role running with file output so full pipes cannot block it."""
+    with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open(
+        "w", encoding="utf-8"
+    ) as err:
+        return subprocess.Popen(
+            _role_command(role_state, *cli_args), env=_role_env(role_state),
+            cwd=str(_REPO_ROOT), stdout=out, stderr=err, text=True,
+        )
 
 
 def _output(proc: subprocess.CompletedProcess) -> str:
@@ -287,7 +284,7 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
             await_proc.kill()
             await_proc.wait()
 
-    output = await_out.read_text() + await_err.read_text()
+    output = await_out.read_text(encoding="utf-8") + await_err.read_text(encoding="utf-8")
     assert await_proc.returncode == 0, (
         f"overlapping await failed (rc={await_proc.returncode}):\n{output}"
     )

@@ -47,7 +47,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc # tip of main as of 2026-09-08
+ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc # tip of main as of 2026-09-08
           path: katzenqt/katzenpost
 
       - name: Set up Docker Buildx
@@ -83,8 +83,6 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin || true
 
-      # Build kpclientd + start the mixnet via katzenpost's own docker
-      # Makefile. `make wait` blocks until the dirauths reach consensus.
       - name: Build and start the docker mixnet
         id: start_mixnet
         working-directory: katzenqt/katzenpost/docker
@@ -93,11 +91,6 @@ jobs:
       - name: Brief pause so the mixnet is fully ready
         run: sleep 30
 
-      # Create the venv and install katzenqt in editable mode — matches
-      # what `make docker-integration` does locally, minus the Makefile's
-      # apt/pipx bootstrap which the GitHub runner doesn't need.
-      # rustic-audio-tool's maturin build needs ALSA headers and cargo, which
-      # make deps installs elsewhere but this job skips.
       - name: Install audio build deps
         run: |
           sudo apt-get update
@@ -135,34 +128,37 @@ jobs:
           KQT_INTEGRATION_PARALLEL: "4"
           KQT_SEND_BUDGET_FLOOR_S: "240"
         run: |
-          .venv/bin/pytest tests/integration -vv -n "${KQT_INTEGRATION_PARALLEL}" \
-            --dist loadscope -m "not serial_docker"
+          mkdir -p integration-results
+          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+            --dist loadscope -m "not serial_docker" \
+            --basetemp=integration-results/parallel \
+            --junitxml=integration-results/parallel.xml
 
       - name: Run serial watchdog integration tests
         working-directory: katzenqt
-        # Always run the @pytest.mark.serial_docker watchdog tests even when
-        # the parallel phase above fails, so the state of the shared
-        # kpclientd/gateway containers is still probed on every CI run --
-        # but only once the mixnet is actually up and deps are installed;
-        # skip cleanly rather than probing a mixnet that never started or
-        # a missing venv, and skip on cancellation like every other step.
         if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' && steps.install_deps.outcome == 'success' }}
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
-          .venv/bin/pytest tests/integration -vv -m serial_docker
+          mkdir -p integration-results
+          .venv/bin/pytest tests/integration --no-cov -vv -m serial_docker \
+            --basetemp=integration-results/serial \
+            --junitxml=integration-results/serial.xml
 
       - name: Stop the mixnet
         if: always()
         working-directory: katzenqt/katzenpost/docker
         run: make stop
 
-      - name: Upload mixnet logs
+      - name: Upload integration and mixnet logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mixnet-${{ github.run_id }}-${{ github.job }}
           path: |
+            katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.out
+            katzenqt/integration-results/**/*.err
             katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
             katzenqt/katzenpost/docker/mixnet-alpine/*/*/*.log

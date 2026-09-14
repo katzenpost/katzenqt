@@ -141,10 +141,13 @@ _DECODE_CACHE_SIZE = 512
 def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
     # Keep ConversationLog as the source of truth and derive renderer-friendly
     # roles lazily so audio rows can share the same persistence format as text.
+    from .models import clamp_message_text
+
     if payload[:1] != b"F":
         # Pre-protocol rows: raw UTF-8 text, no CBOR wrapper.
         return AttachmentDisplay(
-            payload.decode(errors="replace"), None, None, False, "text", None,
+            clamp_message_text(payload.decode(errors="replace")),
+            None, None, False, "text", None,
         )
 
     body = payload[1:]
@@ -167,12 +170,13 @@ def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
         group_message = GroupChatMessage.from_cbor(body)
     except Exception:
         return AttachmentDisplay(
-            payload.decode(errors="replace"), None, None, False, "text", None,
+            clamp_message_text(payload.decode(errors="replace")),
+            None, None, False, "text", None,
         )
 
     if group_message.text:
         return AttachmentDisplay(
-            group_message.text, None, None, False, "text", None,
+            clamp_message_text(group_message.text), None, None, False, "text", None,
         )
 
     if group_message.file_upload is not None:

@@ -1,7 +1,7 @@
 import secrets
 import katzenpost_thinclient
 from katzenpost_thinclient import (
-    ThinClient, ThinClientOfflineError,
+    ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
     DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
     CourierError, InvalidEpochError,
@@ -26,6 +26,7 @@ from pathlib import Path
 import cbor2
 
 from .katzen_util import create_task
+from ._thinclient import ThinClient
 from pydantic.dataclasses import dataclass
 from . import attachment_images, conversation_handlers, models, persistent
 from sqlmodel import select
@@ -208,12 +209,6 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
     try:
-      mw_current_idx = await _rpc_racing_connection_life(
-          bacap_uuid=mw.bacap_stream,
-          what="get_message_box_index_counter",
-          rpc_factory=lambda: connection.get_message_box_index_counter(mw.current_message_index),
-      )
-      logger.info(f"TX_SINGLE idx:{mw_current_idx} ")
       resp = await _rpc_racing_connection_life(
           bacap_uuid=mw.bacap_stream,
           what="start_resending_encrypted_message",
@@ -257,11 +252,17 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     - bump send_resendable,
     - bump drain_mixwal
     """
-    try:
-      conv_id = await _rpc_racing_connection_life(
+    async def resolve_counter(index: bytes) -> int:
+      return await _rpc_racing_connection_life(
           bacap_uuid=mw.bacap_stream,
-          what="mark_sent",
-          rpc_factory=lambda: asyncio.shield(persistent.SentLog.mark_sent(connection, mw, __resend_queue)),
+          what="get_message_box_index_counter",
+          rpc_factory=lambda: connection.get_message_box_index_counter(index),
+          backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+      )
+
+    try:
+      conv_id = await persistent.SentLog.mark_sent(
+          connection, mw, __resend_queue, resolve_counter=resolve_counter,
       )
     except ConnectionLifeInterruptedError:
       # The courier ACK for this envelope is already secured; mark_sent only
@@ -319,7 +320,19 @@ READ_WATCHDOG_SECONDS = 1200.0
 # to a query_id whose original listener (this call) already gave up
 # waiting on the old connection; an epoch rollover makes the courier
 # reject the (now-stale) envelope outright.
-_RECONNECT_GRACE_SECONDS = 30.0
+#
+# 30s was too tight for encrypt_read/encrypt_write/new_keypair/
+# get_message_box_index_counter under real contention: the docker
+# integration suite runs 4 parallel workers against one shared kpclientd,
+# and these "should be fast, local" RPCs can legitimately queue behind
+# each other's concurrent requests for longer than that -- confirmed by CI
+# (encrypt_write and the pre-existing encrypt_read backstop both tripped
+# in the same run, PR #66's docker-integration job). Both values raised to
+# give real headroom for that contention while staying far short of
+# READ_WATCHDOG_SECONDS above, which is sized for a genuine network
+# round-trip rather than these local calls.
+_RECONNECT_GRACE_SECONDS = 90.0
+_DAEMON_RPC_TIMEOUT_SECONDS = 90.0
 
 # Upper bound on how long readables_to_mixwal() and
 # send_resendable_plaintexts() park at the __mixnet_connected gate when the
@@ -350,7 +363,8 @@ class ConnectionLifeInterruptedError(Exception):
 
 async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                                       backstop_s: float = READ_WATCHDOG_SECONDS,
-                                      grace_s: "float | None" = None):
+                                      grace_s: "float | None" = None,
+                                      reconnect_marker=None, epoch_marker=None):
     """Run the RPC returned by ``rpc_factory``, racing it against a daemon
     reconnect or a PKI epoch rollover rather than a flat clock.
 
@@ -370,8 +384,10 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
     """
     if grace_s is None:
         grace_s = _RECONNECT_GRACE_SECONDS
-    reconnect_marker = _reconnect_event
-    epoch_marker = _epoch_event
+    if reconnect_marker is None:
+        reconnect_marker = _reconnect_event
+    if epoch_marker is None:
+        epoch_marker = _epoch_event
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
@@ -413,19 +429,14 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
             f"{backstop_s} s"
         )
     finally:
-        reconnect_wait.cancel()
-        epoch_wait.cancel()
-        # If the outer coroutine is cancelled (e.g. a peer pause), abandon
-        # the in-flight RPC too: leaving it pending would leak its query
-        # listener into the thinclient. No-op when the RPC already finished
-        # (done/cancelled futures are unaffected by cancel()). The drain's
-        # CancelledError handler separately cancels the ARQ at the daemon.
-        if not task.done():
-            task.cancel()
+        for owned in (task, reconnect_wait, epoch_wait):
+            owned.cancel()
+        await asyncio.gather(task, reconnect_wait, epoch_wait, return_exceptions=True)
 
 
 async def _await_read_reply(connection, *, read_watchdog_s: float,
-                             reconnect_grace_s: float, bacap_uuid, **kwargs):
+                             reconnect_grace_s: float, bacap_uuid,
+                             reconnect_marker=None, epoch_marker=None, **kwargs):
     """Await start_resending_encrypted_message, racing it against a daemon
     reconnect or a PKI epoch rollover rather than a flat clock.
 
@@ -448,13 +459,34 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
     try:
         return await _rpc_racing_connection_life(
             bacap_uuid=bacap_uuid,
-            what="start_resending_encrypted_message",
+            what="wait",
             rpc_factory=lambda: connection.start_resending_encrypted_message(**kwargs),
             backstop_s=read_watchdog_s,
             grace_s=reconnect_grace_s,
+            reconnect_marker=reconnect_marker,
+            epoch_marker=epoch_marker,
         )
     except ConnectionLifeInterruptedError as exc:
         raise asyncio.TimeoutError() from exc
+
+async def _substream_parent(
+    sess: persistent.AsyncSession, name: str,
+) -> persistent.ConversationPeer | None:
+    """Resolve the parent ConversationPeer a substream peer belongs to.
+
+    A synthetic substream peer is named ``:substream:<parent_id>:<nonce>``.
+    Returns the parent peer, or None when the name is malformed or the parent
+    no longer exists, so the caller can retire the peer instead of raising in
+    the read loop (a non-integer id used to crash it on every restart).
+    """
+    parts = name.split(":")
+    if len(parts) < 4:
+        return None
+    try:
+        parent_id = int(parts[2])
+    except ValueError:
+        return None
+    return await sess.get(persistent.ConversationPeer, parent_id)
 
 # Cap on attachment size after reassembly. Anything larger is
 # logged at WARNING, the bytes are discarded, and a
@@ -662,6 +694,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     __mixwal_updated.set()
     return
 
+  reconnect_marker = _reconnect_event
+  epoch_marker = _epoch_event
   try:
     # Re-encrypt fresh every call rather than reusing mw's persisted
     # envelope: start_resending_encrypted_message's envelope is only valid
@@ -680,11 +714,30 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         rpc_factory=lambda: connection.encrypt_read(
             read_cap=rcw_read_cap, message_box_index=mw.current_message_index,
         ),
-        backstop_s=read_watchdog_s,
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
         grace_s=reconnect_grace_s,
+        reconnect_marker=reconnect_marker,
+        epoch_marker=epoch_marker,
     )
+  except (ConnectionLifeInterruptedError, TimeoutError, ThinClientOfflineError, OSError) as exc:
+    logger.warning("Read setup failed for %s; retrying: %s", bacap_uuid, exc)
+    await asyncio.sleep(5)
+    give_up()
+    return
+
+  try:
+    # Re-read the current globals rather than reuse the markers captured
+    # above: if a reconnect or epoch rollover fired during the encrypt_read
+    # race just above, on_connection_status/on_new_pki_document already
+    # .set() that captured Event and swapped in a fresh one for future
+    # waiters. Reusing the stale (permanently-set) reference here would make
+    # this second race see it as already-done and wrongly truncate this
+    # wait to the short reconnect grace period instead of the intended
+    # read_watchdog_s.
     resp = await _await_read_reply(
         connection,
+        reconnect_marker=_reconnect_event,
+        epoch_marker=_epoch_event,
         read_watchdog_s=read_watchdog_s,
         reconnect_grace_s=reconnect_grace_s,
         bacap_uuid=bacap_uuid,
@@ -844,10 +897,18 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
   logger.debug(f"got reply for outbound read mw {resp}")
   assert resp is not None, "outbound read reply is None, but ought to be retrying"
+  async def _box_index_counter(index: bytes) -> int:
+    return await _rpc_racing_connection_life(
+        bacap_uuid=bacap_uuid,
+        what="get_message_box_index_counter",
+        rpc_factory=lambda: connection.get_message_box_index_counter(index),
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+    )
+
   async with persistent.asession() as sess:
     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-    idx_old = await connection.get_message_box_index_counter(rcw.next_index)
-    idx_new = await connection.get_message_box_index_counter(rcr.next_message_box_index)
+    idx_old = await _box_index_counter(rcw.next_index)
+    idx_new = await _box_index_counter(rcr.next_message_box_index)
     if idx_old >= idx_new:
       logger.warning(f"not advancing idx to {idx_new} from old {idx_old}, we probably already handled this? ought to not be possible.")
       try:
@@ -901,51 +962,57 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         assembled is not None and assembled[0] == "F"
         and cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
     ):
-        parent_peer = await sess.get(
-            persistent.ConversationPeer, int(cp.name.split(":")[2]),
-        )
-        notify_conv_id = parent_peer.conversation.id
+        parent_peer = await _substream_parent(sess, cp.name)
+        if parent_peer is not None:
+            notify_conv_id = parent_peer.conversation.id
 
     try:
       async with persistent.conversation_log_order_lock(notify_conv_id):
         if assembled is not None and assembled[0] == "F":
             _, chunks, chain, gcm = assembled
-            if gcm.file_upload is not None:
-                target_conv_id = (
-                    parent_peer.conversation.id
-                    if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
-                    else cp.conversation.id
-                )
-                full_payload = _spill_attachment(
-                    gcm.file_upload, gcm.membership_hash, target_conv_id,
-                )
-            else:
-                full_payload = b"F" + b"".join(body for _kind, body in chunks)
-            if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
-                # Substream's terminal F: commit the assembled message into the
-                # parent peer's ConversationLog, prune the parent's indirection
-                # piece, and retire this synthetic peer.
-                added, sig, pa = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
-                signal_send = signal_send or sig
-                peer_added = peer_added or pa
-                parent_i = (await sess.exec(
-                    select(persistent.ReceivedPiece).where(
-                        persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
-                        persistent.ReceivedPiece.chunk_type == b"I",
-                        persistent.ReceivedPiece.chunk == rcw.read_cap,
-                    )
-                )).first()
-                if parent_i is not None:
-                    await sess.delete(parent_i)
+            if cp.name.startswith(_SUBSTREAM_NAME_PREFIX) and parent_peer is None:
+                logger.warning("retiring substream with no parent: %r", cp.name)
                 cp.active = False
                 sess.add(cp)
-                convlog_added = added
             else:
-                # Top-level F (single-box or contiguous on the parent stream):
-                # route by message type, chat into the log, tally into the
-                # controller.
-                convlog_added, sig, peer_added = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
-                signal_send = signal_send or sig
+                if gcm.file_upload is not None:
+                    target_conv_id = (
+                        parent_peer.conversation.id
+                        if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+                        else cp.conversation.id
+                    )
+                    full_payload = _spill_attachment(
+                        gcm.file_upload, gcm.membership_hash, target_conv_id,
+                    )
+                else:
+                    if gcm.text is not None:
+                        gcm.text = models.clamp_message_text(gcm.text)
+                    full_payload = b"F" + gcm.to_cbor()
+                if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+                    # Substream's terminal F: commit the assembled message into the
+                    # parent peer's ConversationLog, prune the parent's indirection
+                    # piece, and retire this synthetic peer.
+                    added, sig, pa = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
+                    signal_send = signal_send or sig
+                    peer_added = peer_added or pa
+                    parent_i = (await sess.exec(
+                        select(persistent.ReceivedPiece).where(
+                            persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
+                            persistent.ReceivedPiece.chunk_type == b"I",
+                            persistent.ReceivedPiece.chunk == rcw.read_cap,
+                        )
+                    )).first()
+                    if parent_i is not None:
+                        await sess.delete(parent_i)
+                    cp.active = False
+                    sess.add(cp)
+                    convlog_added = added
+                else:
+                    # Top-level F (single-box or contiguous on the parent stream):
+                    # route by message type, chat into the log, tally into the
+                    # controller.
+                    convlog_added, sig, peer_added = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
+                    signal_send = signal_send or sig
             for rp in chain:
                 await sess.delete(rp)
 
@@ -1092,10 +1159,19 @@ async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool
         return False
     if __mixnet_connected.is_set():
         return True
-    await asyncio.wait((
+    waiters = (
         create_task(__mixnet_connected.wait()),
         create_task(__should_quit.wait()),
-    ), timeout=(idle_retry_s or None), return_when=asyncio.FIRST_COMPLETED)
+    )
+    try:
+        await asyncio.wait(
+            waiters, timeout=(idle_retry_s or None),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        for waiter in waiters:
+            waiter.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
     return not __should_quit.is_set()
 
 
@@ -1283,11 +1359,18 @@ async def provision_read_caps(connection: ThinClient):
         wait = 5
         async with persistent.asession() as sess:
             for (rcw, wcw) in await sess.exec(sa.select(persistent.ReadCapWAL,persistent.WriteCapWAL).where(persistent.ReadCapWAL.read_cap == None).where(persistent.ReadCapWAL.write_cap_id==persistent.WriteCapWAL.id)): #  &
-                logger.debug("provision_read_caps UPDATING rcw=%s wcw=%s write_cap=%s next_index=%s",
-                             rcw, wcw, wcw.write_cap, wcw.next_index)
+                logger.debug("provision_read_caps UPDATING rcw_id=%s wcw_id=%s",
+                             rcw.id, wcw.id)
                 if wcw.write_cap is None:
                     try:
-                        keypair_res = await connection.new_keypair(seed=secrets.token_bytes(32))
+                        keypair_res = await _rpc_racing_connection_life(
+                            bacap_uuid=wcw.id,
+                            what="new_keypair",
+                            rpc_factory=lambda: connection.new_keypair(
+                                seed=secrets.token_bytes(32),
+                            ),
+                            backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+                        )
                     except Exception as e:
                         logger.warning("new_keypair did not work: %s", e)
                         continue
@@ -1315,8 +1398,10 @@ async def readables_to_mixwal(connection):
     global __resend_queue
     await __resend_queue_populated.wait()
     async def process_box(cpeer:persistent.ConversationPeer, rcw:persistent.ReadCapWAL) -> persistent.MixWAL:
-        logger.debug("process box cpeer-rcw:", cpeer, await connection.get_message_box_index_counter(rcw.next_index))
-        rcreply: "EncryptReadResult" = await connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index)
+        rcreply = await asyncio.wait_for(
+            connection.encrypt_read(read_cap=rcw.read_cap, message_box_index=rcw.next_index),
+            timeout=_DAEMON_RPC_TIMEOUT_SECONDS,
+        )
         logger.debug("process_box got this from encrypt_read: %s", rcreply)
         mw = persistent.MixWAL(
             bacap_stream=rcw.id,
@@ -1342,7 +1427,10 @@ async def readables_to_mixwal(connection):
         if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
         logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
-        _, _ = await asyncio.wait([create_task(readables_to_mixwal_event.wait())], timeout=_ARMING_SWEEP_S)
+        try:
+            await asyncio.wait_for(readables_to_mixwal_event.wait(), timeout=_ARMING_SWEEP_S)
+        except TimeoutError:
+            pass
         if __should_quit.is_set():
             continue
         readables_to_mixwal_event.clear()
@@ -1354,6 +1442,7 @@ async def readables_to_mixwal(connection):
         # ~60s of the daemon coming back, exactly as drain_mixwal2's sweep
         # keeps re-casting rows it already has.
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
+        retry_needed = False
         async with persistent.asession() as sess:
             # TODO are these guaranteed to be distinct?
             readable_peers = (await sess.exec(select(
@@ -1371,10 +1460,8 @@ async def readables_to_mixwal(connection):
                 try:
                   mw = await process_box(cpeer, rcw)
                 except Exception as e:
-                  # Expected when a pass sneaks in during a daemon
-                  # bounce/reattach (the bounded gate above now allows
-                  # these); ride out and retry next pass.
-                  logger.warning(f"process_box failed: {e}")
+                  logger.warning("Read setup failed; retrying: %s", e)
+                  retry_needed = True
                   continue
                 sess.add(mw)
                 logger.debug("finished one peer: %s", cpeer.name)
@@ -1384,6 +1471,9 @@ async def readables_to_mixwal(connection):
         if len(readable_peers):
             __mixwal_updated.set()
             logger.debug("__mixwal_updated.set() from readables_to_mixwal")
+        if retry_needed:
+            await asyncio.sleep(5)
+            readables_to_mixwal_event.set()
 
 def on_error(task, func, *args, **kwargs):
     """Attach ``func(*args, **kwargs)`` to ``task``'s completion, firing only
@@ -1421,7 +1511,10 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
         # write path forever.
         if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
-        _, _ = await asyncio.wait((create_task(resendable_event.wait()),), timeout=60)
+        try:
+            await asyncio.wait_for(resendable_event.wait(), timeout=_ARMING_SWEEP_S)
+        except TimeoutError:
+            pass
         if __should_quit.is_set():
             continue
         resendable_event.clear()
@@ -1503,9 +1596,16 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # - encrypt the message
     # - persist that to MixWAL
 
-    wcr : "EncryptWriteResult" = await connection.encrypt_write(write_cap=wc.write_cap,
-          message_box_index=wc.next_index,
-          plaintext=pwal.bacap_payload)
+    wcr : "EncryptWriteResult" = await _rpc_racing_connection_life(
+        bacap_uuid=pwal.bacap_stream,
+        what="encrypt_write",
+        rpc_factory=lambda: connection.encrypt_write(
+            write_cap=wc.write_cap,
+            message_box_index=wc.next_index,
+            plaintext=pwal.bacap_payload,
+        ),
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+    )
 
     next_message_index = wcr.next_message_box_index
 
@@ -1528,6 +1628,10 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # Next up is something needs to actually resend, reading from MixWAL
     # and issuing ThinClient.start_resending_encrypted_message
     __mixwal_updated.set()
+
+async def on_daemon_disconnected(event):
+    await on_connection_status({"is_connected": False})
+
 
 async def on_connection_status(status:"Dict[str,Any]"):
     global _last_connected, _reconnect_event
@@ -1661,6 +1765,7 @@ async def reconnect(config_path: "str | Path | None" = None) -> ThinClient:
         on_message_reply=on_message_reply,
         on_message_sent=on_message_sent,
         on_connection_status=on_connection_status,
+        on_daemon_disconnected=on_daemon_disconnected,
         on_new_pki_document=on_new_pki_document,
     )
     client = ThinClient(cfg)

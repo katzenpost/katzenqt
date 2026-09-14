@@ -3,6 +3,25 @@ import logging
 
 logger = logging.getLogger("katzen.util")
 
+_RISKY_ATTACHMENT_EXTENSIONS = frozenset({
+    "html", "htm", "xhtml", "shtml", "mhtml", "mht",
+    "svg", "svgz", "xml", "xsl", "xslt",
+    "pdf", "ps", "eps",
+    "js", "mjs", "jar", "desktop", "sh", "bash", "command",
+    "exe", "msi", "bat", "cmd", "com", "scr", "ps1", "vbs",
+})
+
+
+def is_risky_attachment_extension(basename: str) -> bool:
+    """True if ``basename``'s extension names a format whose desktop handler is
+    a rich parser/renderer that peer-chosen content could exploit. Pure and
+    Qt-free so it can be unit-tested in isolation."""
+    if not basename or "." not in basename:
+        return False
+    ext = basename.rsplit(".", 1)[-1].strip().lower()
+    return ext in _RISKY_ATTACHMENT_EXTENSIONS
+
+
 def create_task(coro):
     """Wrapper around asyncio.create_task() that logs exceptions"""
     def throw_if_needed(task):
