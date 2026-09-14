@@ -369,6 +369,21 @@ Shipped surface (per decisions on 2026-09-14):
   warning-and-ignore. `substream_total_chunks` persisted on the receiver's
   new_rcw for the GUI denominator.
 
+### Step 2.2 — progress events queue (DONE in `11cd56c`, 2026-09-14)
+
+- New module-level `network.substream_progress_queue` (network.py:92) holding
+  post-commit events as `(kind, ...)` tuples:
+  `("started", rcw_id, conv_id, total_or_None, parent_name)`,
+  `("piece", rcw_id, count)`, `("completed", rcw_id)`, `("paused", rcw_id)`,
+  `("resumed", rcw_id)`.
+- Push sites: I-branch create (`started`), per-substream ReceivedPiece insert
+  (`piece`, via a `COUNT(ReceivedPiece WHERE read_cap == mw.bacap_stream)` in
+  the same unflushed transaction), substream terminal-F retire (`completed`),
+  and `pause_peer_reads`/`resume_peer_reads` when the peer is a substream.
+- All events are held until the commit succeeds, so listeners never observe
+  uncommitted pieces (OperationalError retries roll back both the rows and
+  the pending events).
+
 ---
 
 ## 5. Feature: per-peer pause/resume (and the retry primitive for dead substreams)
