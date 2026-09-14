@@ -169,23 +169,25 @@ The synthetic substream peers appear in the contact/user list in the GUI.
   `voucher.py:77` and `headless/_actions.py:750-753`. Optionally also
   delete/tombstone retired substream peers instead of leaving
   `active=False` rows forever (see item 3's DB-surgery lessons).
+  **Landed in `d8f943d`** — filter code complete; tests in progress (step B).
 
-### Plan (2026-09-14, in progress)
+### Status (step A — filter code landed, 2026-09-14)
 
-- Extract a module-level predicate `_peer_is_displayable()` in katzen.py and
-  apply it in:
-  - `add_conversation` peer loop (`katzen.py:1980`) — primary fix,
-  - `_process_peer_added` (`katzen.py:1253-1278`, before `appendRow`:1277)
-    — defensive,
-  - `_await_voucher_join` (`katzen.py:1777`) and `induct_via_voucher`
-    (`katzen.py:1851`) — defensive.
-- Also filter the same prefix out of `voucher._build_who_reply`
-  (`voucher.py:676`) so an in-progress active substream peer can't be offered
-  to a newcomer's who-reply.
-- Tests: `tests/test_substream_gui_filter.py` (predicate + who-reply).
-- NOTE: filtering substream rows removes today's only GUI handle for pausing
-  dead substreams; TODO item 4's Transfers panel replaces that handle (see
-  item 4 plan below).
+DONE in `d8f943d`:
+- Extracted module-level `_peer_is_displayable()` (katzen.py:73) keyed on
+  `network._SUBSTREAM_NAME_PREFIX`; applied in `add_conversation` peer loop
+  (katzen.py:1992).
+- Defensive prefix guard in `_process_peer_added` (katzen.py:1261), the
+  `_await_voucher_join` appendRow (katzen.py:1794), and
+  `induct_via_voucher` appendRow (katzen.py:1871).
+- `voucher._build_who_reply` (voucher.py:677) now skips substream peers.
+- Tests pending (step B below).
+
+### Tests (step B — in progress)
+
+- `tests/test_substream_gui_filter.py` — unit-test `_peer_is_displayable`
+  with `SimpleNamespace` peers + who-reply filter via existing DB fixtures.
+- Ruff, full suite regression check.
 
 ---
 
