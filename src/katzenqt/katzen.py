@@ -67,6 +67,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
 
+
+def _peer_is_displayable(peer) -> bool:
+    """Whether a ConversationPeer belongs in the contacts tree.
+
+    Synthetic substream peers (``:substream:<parent>:<nonce>``; created on
+    I-chunk receive in network.py) are internal download machinery and must
+    not leak into the user-visible contact list. See TODO item 2. Their
+    download progress lives in the Transfers panel (TODO item 4) instead.
+    """
+    return not peer.name.startswith(network._SUBSTREAM_NAME_PREFIX)
+
 class _AttachmentError(Exception):
     """User-facing attachment problem (missing file, checksum mismatch,
     oversized body that was dropped on receive)."""
@@ -1251,6 +1262,10 @@ class MainWindow(QMainWindow):
                 )
 
     async def _process_peer_added(self, conversation_id, name) -> None:
+        # Defensive (TODO item 2): a dynamically-announced peer could be a
+        # synthetic substream; never render those into the contacts tree.
+        if name.startswith(network._SUBSTREAM_NAME_PREFIX):
+            return
         if not await self._wait_for_conversation_state(conversation_id, what="peer_added_listener"):
             return
         convo_state = self.conversation_state_by_id[conversation_id]
@@ -1774,9 +1789,14 @@ class MainWindow(QMainWindow):
             ))
             return
         for name in added:
+            # Defensive (TODO item 2): never render synthetic substream peers.
+            if name.startswith(network._SUBSTREAM_NAME_PREFIX):
+                continue
             convo.contacts_standard_item.appendRow(QStandardItem(name))
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
-        joined = ", ".join(added) or "(none)"
+        joined = ", ".join(
+            n for n in added if not n.startswith(network._SUBSTREAM_NAME_PREFIX)
+        ) or "(none)"
         QTimer.singleShot(0, lambda: self._info_plain(
             f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
@@ -1848,7 +1868,9 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
+        # Defensive (TODO item 2): never render synthetic substream peers.
+        if not joiner_name.startswith(network._SUBSTREAM_NAME_PREFIX):
+            convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         QTimer.singleShot(0, lambda: self._info_plain(
@@ -1979,6 +2001,8 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
 
     for peer in convo.peers:
         #ptwi = QTreeWidgetItem([peer.name])
+        if not _peer_is_displayable(peer):
+            continue
         ptwi = QStandardItem(peer.name)
         # The peer row is the per-peer pause/resume target (TODO item 5):
         # tag it with its read cap (the bacap_stream the drain reads on) so
