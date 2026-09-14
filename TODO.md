@@ -159,16 +159,33 @@ The synthetic substream peers appear in the contact/user list in the GUI.
 - `a3d2e2bc44b` "Stop a peer name from spoofing a substream and crashing the
   reader" has been **merged into deckard-dev** via main's PR #66
   (`243422a`/merge `27fbe52`) as `_substream_parent` in network.py
-  (`network.py:467`) + `tests/test_substream_guard.py`. It stops a peer NAME
+  (`network.py:472`) + `tests/test_substream_guard.py`. It stops a peer NAME
   like `:substream:` from spoofing a substream — but it does NOT filter
   `:substream:` peers out of the GUI user list.
-- **Still open:** `add_conversation()` at `katzen.py:1979-1990` iterates ALL
+- **Still open:** `add_conversation()` at `katzen.py:1959-2016` iterates ALL
   `convo.peers` and renders `:substream:*` names into the contacts tree. The
   fix is to skip `peer.name.startswith(network._SUBSTREAM_NAME_PREFIX)` (and/or
   `not peer.active`) there, mirroring the exclusions already in
-  `voucher.py:77` and `headless/_actions.py:746`. Optionally also
+  `voucher.py:77` and `headless/_actions.py:750-753`. Optionally also
   delete/tombstone retired substream peers instead of leaving
   `active=False` rows forever (see item 3's DB-surgery lessons).
+
+### Plan (2026-09-14, in progress)
+
+- Extract a module-level predicate `_peer_is_displayable()` in katzen.py and
+  apply it in:
+  - `add_conversation` peer loop (`katzen.py:1980`) — primary fix,
+  - `_process_peer_added` (`katzen.py:1253-1278`, before `appendRow`:1277)
+    — defensive,
+  - `_await_voucher_join` (`katzen.py:1777`) and `induct_via_voucher`
+    (`katzen.py:1851`) — defensive.
+- Also filter the same prefix out of `voucher._build_who_reply`
+  (`voucher.py:676`) so an in-progress active substream peer can't be offered
+  to a newcomer's who-reply.
+- Tests: `tests/test_substream_gui_filter.py` (predicate + who-reply).
+- NOTE: filtering substream rows removes today's only GUI handle for pausing
+  dead substreams; TODO item 4's Transfers panel replaces that handle (see
+  item 4 plan below).
 
 ---
 
@@ -296,6 +313,39 @@ the whole file arrives. Feature request (addition, not a bugfix):
   the DB surgery in item 3, but done cleanly in-app; possibly also tombstone the
   substream's remaining boxes, which would require the write cap... likely out
   of scope).
+
+### Plan (2026-09-14, in progress)
+
+Two design facts from the 2026-09-14 review of the post-merge code:
+- **No denominator today.** The I-chunk wire body is only `b'I' + 136-byte read
+  cap` (`network.py:1546`); the sender computes the chunk count in
+  `models.serialize()` (`models.py:134-151`) but never transmits it, so
+  "pieces received vs total" is unknowable at read time. Fix: extend the
+  I-chunk to `b'I' + struct.pack(">I", total_chunks) + read_cap` (140-byte
+  body); receiver parses both the legacy 136-byte (total unknown →
+  indeterminate) and new 140-byte forms. Sender total count stored on the
+  indirection `ReadCapWAL` as a new nullable `substream_total_chunks` column
+  (needs an Alembic migration).
+- **Progress numerator already exists:** `COUNT(ReceivedPiece WHERE
+  read_cap == <substream rcw.id>` (`network.py:940-945` inserts one row per
+  box; `headless/_actions.py:772-774` already counts them).
+
+Shipped surface (per decisions on 2026-09-14):
+- **Transfers panel** (not in-chat rows): a new `DownloadsModel`-backed
+  `QTableView` under the contacts tree listing resumable substream downloads
+  (column: contact, status downloading/paused, `pieces/total` or
+  indeterminate), with a right-click Pause/Resume menu.
+- **Pause ONLY; Cancel deferred.** `pause_peer_reads` / `resume_peer_reads`
+  (item 5) already freeze/resume exactly one stream — cancel (prune
+  ReceivedPiece + retire peer + delete MixWAL) is out of scope for now.
+- **Network→GUI events** via a new module-level
+  `network.substream_progress_queue` (mirroring `conversation_update_queue`)
+  plus a `transfers_listener()` coroutine in katzen.py `main()`:
+  `started` / `piece` / `completed` / `paused` / `resumed` events keyed by
+  rcw_id. Startup seeds the panel from active-or-resumable substream
+  `ConversationPeer` rows (active OR has ReceivedPiece), which also replaces
+  the pause/resume handle for dead substreams that item 2's filter removes
+  from the contacts tree.
 
 ---
 
