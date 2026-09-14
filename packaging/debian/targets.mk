@@ -7,13 +7,21 @@ MATURIN_VER := 1.8.2
 RUSTIC_AUDIO_URL := https://github.com/katzenpost/Rustic_Audio_PyO3
 RUSTIC_AUDIO_REV := 2158e2a5cc5e58f430b4c0bf2f5603d8909becc6
 
-.PHONY: deb
+.PHONY: deb deb-ci deb-smoke
 
 deb:
 	@$(MAKE) -C packaging/debian
 
+deb-ci:
+	@packaging/debian/ci.sh
+
+deb-smoke:
+	@packaging/debian/smoke.sh
+
 PACKAGING_HELP += '' 'Debian packaging:' \
 	'  make deb                   Build the packages in a container' \
+	'  make deb-ci                Build, smoke test, check reproducibility' \
+	'  make deb-smoke             Install the built packages and run once' \
 	'  make -C packaging/debian   container, container-kpclientd,' \
 	'                             container-pydeps, container-all, repro,' \
 	'                             container-clean (DISTRO=, DISTROS=)'
