@@ -20,12 +20,21 @@ Keep it up to date as part of the working session:
   then commit the TODO.md status update. This keeps the non-TODO commits
   cherry-pickable on their own.
 
-State as of 2026-09-11. Session context: recovering from a proxy-sweep storm in a
+State as of 2026-09-14. Session context: recovering from a proxy-sweep storm in a
 5-replica katzenpost mixnet while debugging the delivery of Bob's
 `jamiroquai.webp` (37300 B) to Alice and Carol. **Delivery of Bob's second
 send of jamiroquai.webp has been CONFIRMED to both Alice and Carol** (MD5
 `00c8541c15e56ff317c15e755a97427e` verified identical to source). The items
 below remain open.
+
+Also as of 2026-09-14: deckard-dev merged `origin/main` (PR #66 "Harden peer
+input and local state", commit `243422a`) via merge commit `27fbe52`, taking
+main's reconnect/epoch-marker anti-race RPC guard (`_rpc_racing_connection_life`,
+mark_sent `resolve_counter`, pause/resume-friendly `rcr=None`), the voucher
+handshake's bounded daemon RPCs, `_substream_parent` + `test_substream_guard.py`
+(peer-name spoofing guard, see item 2), the `KQT_SEND_BUDGET_FLOOR_S` CI budget
+floor, and the junit/`--no-cov` CI reporting. Full suite: 403 passed / 14
+skipped.
 
 Quick orientation for a new session:
 
@@ -34,7 +43,7 @@ Quick orientation for a new session:
 - Client code of interest:
   - `src/katzenqt/network.py` — read/write drain loops, `_try_assemble`,
     `drain_mixwal_read_single`, substream handling, `_SUBSTREAM_NAME_PREFIX`
-    at `network.py:258`.
+    at `network.py:303`, `_substream_parent` at `network.py:472`.
   - `src/katzenqt/persistent.py` — MixWAL / PlaintextWAL / ReadCapWAL /
     ConversationPeer / ReceivedPiece models, `get_resendable()` gates
     (`after_id` / `after_stream` around `persistent.py:676-740`).
@@ -125,7 +134,7 @@ The synthetic substream peers appear in the contact/user list in the GUI.
 
 ### Where
 
-- `src/katzenqt/network.py:258` defines `_SUBSTREAM_NAME_PREFIX = ":substream:"`.
+- `src/katzenqt/network.py:303` defines `_SUBSTREAM_NAME_PREFIX = ":substream:"`.
 - Substream peers are created with names like `:substream:3:64c9` on I-chunk
   receive (`network.py:755-761`, `active=True`), and retired (`active=False`) on
   F-assembly (`network.py:734`), but are **never deleted** from the DB.
@@ -133,7 +142,7 @@ The synthetic substream peers appear in the contact/user list in the GUI.
   `katzen.py:1848-1851` iterates ALL `convo.peers` and thus shows
   `:substream:2:77ca`, `:substream:3:f8f2`, etc. in the user list of Alice's /
   Carol's GUI.
-- Contrast: `voucher.py:71` (`conversation_is_joined()`) and `_actions.py`
+- Contrast: `voucher.py:68` (`conversation_is_joined()`) and `_actions.py`
   correctly exclude `:substream:` names, so the leak is purely a display bug.
 
 ### Options
@@ -145,12 +154,21 @@ The synthetic substream peers appear in the contact/user list in the GUI.
   substream peer rows caused real damage; housekeeping here is non-trivial
   because the `active` flag is also used to stop reads.)
 
-### Related commit to review before planning implementation
+### Related commit (now merged) and post-merge state
 
 - `a3d2e2bc44b` "Stop a peer name from spoofing a substream and crashing the
-  reader" — not yet reviewed in this session. It may be relevant to this item
-  (peer-name handling around `:substream:`), so **review it and decide whether
-  to merge it before planning the fix here**.
+  reader" has been **merged into deckard-dev** via main's PR #66
+  (`243422a`/merge `27fbe52`) as `_substream_parent` in network.py
+  (`network.py:467`) + `tests/test_substream_guard.py`. It stops a peer NAME
+  like `:substream:` from spoofing a substream — but it does NOT filter
+  `:substream:` peers out of the GUI user list.
+- **Still open:** `add_conversation()` at `katzen.py:1979-1990` iterates ALL
+  `convo.peers` and renders `:substream:*` names into the contacts tree. The
+  fix is to skip `peer.name.startswith(network._SUBSTREAM_NAME_PREFIX)` (and/or
+  `not peer.active`) there, mirroring the exclusions already in
+  `voucher.py:77` and `headless/_actions.py:746`. Optionally also
+  delete/tombstone retired substream peers instead of leaving
+  `active=False` rows forever (see item 3's DB-surgery lessons).
 
 ---
 
@@ -303,8 +321,9 @@ per-peer pause/resume:
 - This is also the retry primitive item 4's download pause/cancel and the
   dead-substream resume button need — a deactivated substream (item 3) can be
   re-armed via Resume.
-- Note: `a3d2e2bc44b` (see item 2) touches peer-name/substream handling and
-  should be reviewed/possibly merged before implementation planning here.
+- Note: `a3d2e2bc44b` (see item 2) was merged via main's PR #66 and now
+  supplies `_substream_parent`, which the merged code already uses to route
+  substream reads back to their parent peer.
 
 DONE in `3bba25a`:
 - Network level: `pause_peer_reads(bacap_stream)` / `resume_peer_reads(bacap_stream)` —
