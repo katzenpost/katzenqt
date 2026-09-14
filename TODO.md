@@ -350,6 +350,25 @@ Shipped surface (per decisions on 2026-09-14):
   the pause/resume handle for dead substreams that item 2's filter removes
   from the contacts tree.
 
+### Step 2.1 — wire total (DONE in `346ba4f`, 2026-09-14)
+
+- `ReadCapWAL.substream_total_chunks: int | None` (persistent.py:353) +
+  Alembic migration `c4f1a8b2e9d7` (down_revision `d08418a855a1`). Verified
+  via `tests/migrations/test_upgrade.py` (all revisions reach head) and the
+  extension test in `tests/test_network_fake.py`.
+- `models.serialize()` sets `substream_total_chunks = C_chunk_count + 1` on
+  the indirection `ReadCapWAL` (models.py:158-165).
+- Send side (`network.py:1570-1573`): legacy 136-byte `b'I'+read_cap` when the
+  sender's rcw predates the column (total None); extended
+  `b'I' + struct.pack(">I", total) + read_cap` (140 B) otherwise. Existing
+  `test_indirection_pwal_fills_read_cap_before_dispatch` now pins the
+  fallback; new `test_indirection_pwal_prepends_total_chunk_count_when_known`
+  pins the extended form.
+- Receive side (`network.py:1030-1048`): accepts 136 (total unknown) and 140
+  (bytes 0-3 = total, bytes 4-139 = read cap) forms; malformed lengths still
+  warning-and-ignore. `substream_total_chunks` persisted on the receiver's
+  new_rcw for the GUI denominator.
+
 ---
 
 ## 5. Feature: per-peer pause/resume (and the retry primitive for dead substreams)
