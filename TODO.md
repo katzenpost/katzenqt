@@ -169,9 +169,9 @@ The synthetic substream peers appear in the contact/user list in the GUI.
   `voucher.py:77` and `headless/_actions.py:750-753`. Optionally also
   delete/tombstone retired substream peers instead of leaving
   `active=False` rows forever (see item 3's DB-surgery lessons).
-  **Landed in `d8f943d`** — filter code complete; tests in progress (step B).
+  **DONE in `d8f943d` (code) + `0510097` (tests)** — see status below.
 
-### Status (step A — filter code landed, 2026-09-14)
+### Status (complete, 2026-09-14)
 
 DONE in `d8f943d`:
 - Extracted module-level `_peer_is_displayable()` (katzen.py:73) keyed on
@@ -181,13 +181,14 @@ DONE in `d8f943d`:
   `_await_voucher_join` appendRow (katzen.py:1794), and
   `induct_via_voucher` appendRow (katzen.py:1871).
 - `voucher._build_who_reply` (voucher.py:677) now skips substream peers.
-- Tests pending (step B below).
 
-### Tests (step B — in progress)
+Tests DONE in `0510097` (`tests/test_substream_gui_filter.py`): predicate unit
+tests (normal yes / substream no / inactive substream no / near-miss name
+yes) + who-reply skips an active substream peer while keeping real members.
 
-- `tests/test_substream_gui_filter.py` — unit-test `_peer_is_displayable`
-  with `SimpleNamespace` peers + who-reply filter via existing DB fixtures.
-- Ruff, full suite regression check.
+NOTE: filtering substream rows removes today's only GUI handle for pausing
+dead substreams; TODO item 4's Transfers panel replaces that handle (see
+item 4 plan below).
 
 ---
 
