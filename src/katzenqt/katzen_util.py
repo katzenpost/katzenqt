@@ -1,7 +1,11 @@
 import asyncio
 import logging
+from collections.abc import Coroutine
+from typing import TypeVar
 
 logger = logging.getLogger("katzen.util")
+
+_T = TypeVar("_T")
 
 _RISKY_ATTACHMENT_EXTENSIONS = frozenset({
     "html", "htm", "xhtml", "shtml", "mhtml", "mht",
@@ -15,16 +19,24 @@ _RISKY_ATTACHMENT_EXTENSIONS = frozenset({
 def is_risky_attachment_extension(basename: str) -> bool:
     """True if ``basename``'s extension names a format whose desktop handler is
     a rich parser/renderer that peer-chosen content could exploit. Pure and
-    Qt-free so it can be unit-tested in isolation."""
+    Qt-free so it can be unit-tested in isolation.
+
+    >>> is_risky_attachment_extension("report.PDF")
+    True
+    >>> is_risky_attachment_extension("archive.tar.gz")
+    False
+    >>> is_risky_attachment_extension("noext")
+    False
+    """
     if not basename or "." not in basename:
         return False
     ext = basename.rsplit(".", 1)[-1].strip().lower()
     return ext in _RISKY_ATTACHMENT_EXTENSIONS
 
 
-def create_task(coro):
+def create_task(coro: "Coroutine[object, object, _T]") -> "asyncio.Task[_T]":
     """Wrapper around asyncio.create_task() that logs exceptions"""
-    def throw_if_needed(task):
+    def throw_if_needed(task: "asyncio.Task[_T]") -> None:
         if task.cancelled():
             return  # cancellation is expected on shutdown, not an error
         exc = task.exception()
