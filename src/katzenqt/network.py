@@ -736,7 +736,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     - If we get a response:
       - A message: We can progress
       - A box not found:
-        - We should: Resend at at later time (handled by kpclientd)
+        - We should: Resend after the local polling delay
   """
   assert mw.is_read
   assert len(rcw_read_cap) == 136
@@ -800,7 +800,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         envelope_descriptor=rcr.envelope_descriptor,
         envelope_hash=rcr.envelope_hash,
         message_ciphertext=rcr.message_ciphertext,
-        no_retry_on_box_id_not_found=False,
+        no_retry_on_box_id_not_found=True,
     )
   except ConnectionLifeInterruptedError as e:
     # The daemon reconnected (or the PKI epoch rolled over) while the fresh
@@ -852,8 +852,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   except (BoxIDNotFoundError, TombstoneError) as e:
     # Benign replica read outcomes, not failures (cf. the thin client's
     # is_expected_outcome). BoxIDNotFound means the stream simply has no
-    # further data yet; kpclientd normally rides this out for us while
-    # no_retry_on_box_id_not_found is False, so it rarely reaches here.
+    # further data yet; the local polling delay handles the next attempt.
     # Tombstone means the writer deleted this box. Neither warrants an
     # error to the user: release the stream and wait for more, rather than
     # wedging it (an uncaught one would strand the stream in

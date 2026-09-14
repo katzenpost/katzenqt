@@ -2904,3 +2904,47 @@ async def test_read_reply_cancellation_joins_owned_tasks(fake_thinclient, monkey
         await task
     assert stopped.is_set()
     assert asyncio.all_tasks() == baseline
+
+
+@pytest.mark.asyncio
+async def test_absent_box_returns_to_polling_without_advancing(monkeypatch, fake_thinclient):
+    setup = await _set_up_read_flow(fake_thinclient)
+    async with persistent.asession() as sess:
+        mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+
+    original_read = fake_thinclient.start_resending_encrypted_message
+
+    async def read(**kwargs):
+        if kwargs.get("no_retry_on_box_id_not_found"):
+            raise network.BoxIDNotFoundError()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fake_thinclient, "start_resending_encrypted_message", read)
+    draining = {mw.bacap_stream}
+    await asyncio.wait_for(network.drain_mixwal_read_single(
+        connection=fake_thinclient,
+        rcw_read_cap=setup["read_cap"],
+        mw=mw,
+        draining_right_now=draining,
+    ), 0.05)
+    assert not draining
+    async with persistent.asession() as sess:
+        stored = await sess.get(persistent.MixWAL, setup["mw_id"])
+        assert stored.current_message_index == mw.current_message_index
+        rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+        assert rcw.next_index == mw.current_message_index
+    monkeypatch.setattr(fake_thinclient, "start_resending_encrypted_message", original_read)
+    draining.add(mw.bacap_stream)
+    await network.drain_mixwal_read_single(
+        connection=fake_thinclient,
+        rcw_read_cap=setup["read_cap"],
+        mw=stored,
+        draining_right_now=draining,
+    )
+    assert not draining
+    async with persistent.asession() as sess:
+        assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+        rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+        assert rcw.next_index == setup["rcr"].next_message_box_index
+        rows = (await sess.exec(select(persistent.ConversationLog))).all()
+        assert len(rows) == 1 and rows[0].payload == _make_F_payload("hello")
