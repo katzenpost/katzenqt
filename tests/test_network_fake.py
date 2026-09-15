@@ -806,10 +806,11 @@ class TestDrainMixwalWriteSingle:
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
-    async def test_missing_plaintextwal_blocks_remint(self, fake_thinclient, caplog):
-        """A write MixWAL whose PlaintextWAL vanished cannot be re-minted:
-        keep the row, release the stream, and shout at CRITICAL so a human
-        sees the should-not-happen state."""
+    async def test_missing_plaintextwal_drops_the_row(self, fake_thinclient, caplog):
+        """A write MixWAL whose PlaintextWAL vanished can never be re-minted.
+        Drop it and shout at CRITICAL: bacap_stream is unique, so keeping it
+        would block every later write on the stream. ConversationLog stays
+        pending, so the message is not silently marked sent."""
         setup = await _set_up_write_flow(fake_thinclient)
         async with persistent.asession() as sess:
             pwal = await sess.get(persistent.PlaintextWAL, setup["pwal_id"])
@@ -826,9 +827,10 @@ class TestDrainMixwalWriteSingle:
             await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
         assert any(r.levelno == logging.CRITICAL for r in caplog.records)
         async with persistent.asession() as sess:
-            row = await sess.get(persistent.MixWAL, setup["mw_id"])
-            assert row is not None
-            assert row.envelope_hash == setup["wcr"].envelope_hash
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert all(e.network_status != 2 for e in log), "marked sent despite never sending"
+        assert setup["bacap_stream"] not in draining
         assert fake_thinclient.call_count("encrypt_write") == 1
         assert setup["bacap_stream"] not in draining
 

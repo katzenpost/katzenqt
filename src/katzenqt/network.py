@@ -214,9 +214,15 @@ async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, 
         async with persistent.asession() as sess:
             pwal = await sess.get(persistent.PlaintextWAL, mw.plaintextwal)
     if pwal is None:
+        # Must drop the row: bacap_stream is unique, so keeping one we can
+        # never re-mint blocks every later write on this stream.
         logger.critical(
-            "cannot re-mint write for stream %s: PlaintextWAL %s missing",
-            mw.bacap_stream, mw.plaintextwal)
+            "cannot re-mint write for stream %s: PlaintextWAL %s missing; "
+            "dropping the MixWAL row", mw.bacap_stream, mw.plaintextwal)
+        async with persistent.asession() as sess:
+            if row := await sess.get(persistent.MixWAL, mw.id):
+                await sess.delete(row)
+                await sess.commit()
         return False
     try:
         fresh = await _rpc_racing_connection_life(
