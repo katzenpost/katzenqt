@@ -23,13 +23,11 @@ from tests.fakes.thinclient import FakeThinClient
 
 
 @pytest.fixture(autouse=True)
-def _fresh_tables():
-    """Drop + recreate all tables before every test.
-
-    We skip alembic (it would try to read the repo's migrations/) and use
-    sqlmodel's metadata directly, which is the source of truth the test
-    subjects (MixWAL, PlaintextWAL, etc.) are actually defined against.
-    """
+def _fresh_tables(request):
+    """Reset unit-test tables; integration subprocesses own their state."""
+    if request.node.get_closest_marker("integration"):
+        yield
+        return
     SQLModel.metadata.drop_all(persistent._engine_sync)
     SQLModel.metadata.create_all(persistent._engine_sync)
     yield
@@ -52,6 +50,11 @@ def _reset_network_module_state():
         "__should_quit",
         "__mixnet_connected",
         "__resend_queue_populated",
+        # _await_read_reply() waits on both of these while every drain is
+        # in flight, so each must be a fresh, unset Event per test just
+        # like the rest.
+        "_reconnect_event",
+        "_epoch_event",
     )
 
     def restore() -> None:
@@ -63,6 +66,21 @@ def _reset_network_module_state():
             setattr(network, name, asyncio.Event())
         getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
+        # Per-conversation log-order locks are plain threading.Locks keyed
+        # by conversation_id, and the test session's conversation ids
+        # restart at 1 after each `_fresh_tables` wipe. Without this reset,
+        # a lock object left over from a previous test (e.g. still held
+        # because that test's critical section was interrupted) would be
+        # handed straight back out to a later test's conversation_id=1,
+        # which would then poll forever waiting for a release that will
+        # never come.
+        persistent.__conversation_log_order_locks = {}
+        # The reconnect/epoch watchdogs' module state must also start from
+        # "no prior signal" each test: _reconnect_event/_epoch_event are
+        # handled by the loop above; these are the flags that suppress
+        # transition-only logging and dedupe epoch bumps across tests.
+        setattr(network, "_last_connected", None)
+        setattr(network, "_last_epoch", None)
 
     restore()
     yield

@@ -11,17 +11,18 @@ requires-python = ">=3.11"
 version = "0.0.1"
 
 dependencies = [
-"pynacl==1.6.0",
-"pyside6~=6.9.3",
-"sqlmodel>=0",
-"alembic~=1.16.5",
-"aiosqlite~=0.21.0",
-"pydantic~=2.11.7",
-"cbor2~=5.6.5",
-"pycrdt~=0.13.1",
-# Keep in lockstep with the katzenpost daemon ref in
-# .github/workflows/test-integration-docker.yml.
-"katzenpost_thinclient==0.0.23"
+    "pynacl==1.6.0",
+    "pyside6~=6.9.3",
+    "sqlmodel>=0",
+    "alembic~=1.16.5",
+    "aiosqlite~=0.21.0",
+    "pydantic~=2.11.7",
+    "cbor2~=5.6.5",
+    "pycrdt~=0.13.1",
+    # Keep in lockstep with the katzenpost daemon ref in
+    # .github/workflows/test-integration-docker.yml.
+    "katzenpost-thinclient==0.0.24",
+    "rustic-audio-tool",
 ]
 
 [dependency-groups]
@@ -65,6 +66,9 @@ build-backend = "flit_core.buildapi"
 [tool.flit.module]
 name = "katzenqt"
 
+[tool.uv.sources]
+rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "2158e2a5cc5e58f430b4c0bf2f5603d8909becc6" }
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -79,6 +83,7 @@ testpaths = [
 markers = [
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
+    "serial_docker: bounces shared docker containers (kpclientd/gateway); run after and separately from the parallel workers",
 ]
 # We have to re-state the .hypothesis ignore that pytest defaults to,
 # because setting norecursedirs at all replaces the built-in list

@@ -108,6 +108,12 @@ prevent further votes, a ballot cast after a close is still counted. Enforcing
 "no votes after close" convergently across peers needs causal ordering and is
 future work.
 
+The tally protocol has documentation of its own: `docs/tally-api.md` is the API
+reference (the CRDT data model, the pure engine, the controller, the wire
+messages, and this CLI's verbs and exit codes), and `docs/tally-howto.md`
+is a task-by-task guide to using that API: creating a survey, casting and
+changing a vote, reading the counts, closing, and catching up.
+
 Every network step crosses the mixnet, so over a real network each can take from
 seconds to minutes (the docker mixnet is near-instant). The full set of verbs,
 `info`, `multi-send`, `send-file`, `read-file`, `chat-session`, `tally-list`, and

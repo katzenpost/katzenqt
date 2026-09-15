@@ -32,6 +32,9 @@ jobs:
           make deps
           uv sync --all-extras --dev --locked
 
+      - name: Verify the rust audio extension built
+        run: uv run python -c "import rustic_audio_tool as r; assert hasattr(r, 'PttAudioEngine')"
+
       - name: Run tests
         run: |
           uv run pytest

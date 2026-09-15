@@ -33,6 +33,8 @@ UV_LOCK := $(wildcard uv.lock)
 ALEMBIC_MSG ?=
 ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 
+KQT_INTEGRATION_PARALLEL ?= 4
+
 .PHONY: default default_uv_setup default_pip_setup help \
 	system-setup install-debian-packages install-uv clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
@@ -41,9 +43,9 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	clean clean-venv deps
+	clean clean-venv deps deps-audio
 
-deps: default_uv_setup
+deps: deps-audio default_uv_setup
 
 default: default_uv_setup
 
@@ -106,6 +108,9 @@ install-debian-packages:
 
 install-uv:
 	@pipx install -f uv >/dev/null
+
+deps-audio:
+	@sudo apt install -y libasound2-dev cargo >/dev/null
 
 setup:
 	@$(MAKE) setup-status
@@ -247,7 +252,15 @@ docker-integration: setup
 	fi
 	@# Bypass `uv run`'s lock-resync — it would re-resolve the git-pinned
 	@# thinclient and silently overwrite our editable install.
-	@KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv
+	@set +e; \
+	KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv \
+		-n "$(KQT_INTEGRATION_PARALLEL)" --dist loadscope -m "not serial_docker"; \
+	parallel_rc=$$?; \
+	KATZENQT_DOCKER_INTEGRATION=1 $(VENV)/bin/pytest tests/integration -vv -m serial_docker; \
+	serial_rc=$$?; \
+	set -e; \
+	if [[ $$parallel_rc -ne 0 ]]; then exit $$parallel_rc; fi; \
+	exit $$serial_rc
 .PHONY: docker-integration
 
 $(KATZENPOST_DIR):

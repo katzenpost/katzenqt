@@ -10,13 +10,29 @@ from . import persistent
 import hashlib
 from base64 import b64encode, b64decode
 from typing import List
+from pathlib import Path
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
-# importer of this module — including the headless integration runner
-# and pytest collection — to load PySide6 and the Qt runtime libraries.
+# importer of this module, including the headless integration runner
+# and pytest collection, to load PySide6 and the Qt runtime libraries.
 # It now lives in ``katzenqt.qt_models``; import it from there if you
 # need it.
+
+MAX_MESSAGE_CHARS = 16 * 1024
+_TEXT_TRUNCATION_MARKER = "\n[message truncated]"
+
+
+def clamp_message_text(text: str) -> str:
+    """Clamp ``text`` to :data:`MAX_MESSAGE_CHARS`, appending a short marker
+    when it is truncated. Idempotent: because the slice happens before the
+    marker is appended, clamping an already-clamped string returns the same
+    result, so an ingest-time clamp and a render-time clamp compose without
+    stacking markers."""
+    if len(text) <= MAX_MESSAGE_CHARS:
+        return text
+    return text[:MAX_MESSAGE_CHARS] + _TEXT_TRUNCATION_MARKER
+
 
 class GroupChatTEXT(BaseModel):
     model_config = {
@@ -166,6 +182,25 @@ class GroupChatFileUpload(BaseModel):
     filetype: str # "image, sound, arbitrary"
     basename: str
 
+    @classmethod
+    def from_path(cls, path: str | Path) -> "GroupChatFileUpload":
+        from . import attachment_images
+
+        file_path = Path(path)
+        # Voice notes reuse the generic file-upload transport, so the filetype
+        # tag is the only signal the renderer needs to switch to audio UI.
+        # Images get an image/* tag so the renderer can show a thumbnail;
+        # everything else falls back to the generic "arbitrary" marker.
+        if file_path.suffix.lower() == ".opus":
+            filetype = "audio/opus"
+        else:
+            filetype = attachment_images.guess_image_filetype(file_path)
+        return cls(
+            payload=file_path.read_bytes(),
+            filetype=filetype,
+            basename=file_path.name,
+        )
+
 class GroupChatTally(BaseModel):
     """The payload carried by every tally message. Which fields are populated
     follows from the message's ``msg_type``:
@@ -232,6 +267,16 @@ class GroupChatMessage(BaseModel):
     def _serialize_msg_type(self, value: GroupChatTypeEnum, _info):
         return value.value
 
+    @property
+    def as_introduction(self) -> "GroupChatPleaseAdd | None":
+        """The announcement payload if this is a well-formed INTRODUCTION
+        message, else None. Centralizes the (msg_type, introduction-present)
+        check otherwise duplicated across the row-rendering and headless
+        read-matching code paths."""
+        if self.msg_type == GroupChatTypeEnum.INTRODUCTION and self.introduction is not None:
+            return self.introduction
+        return None
+
     def to_cbor(self):
         """A group chat message consists of one CBOR messages potentially
         serialized over one or more BACAP boxes.
@@ -263,10 +308,10 @@ def unserialize(chunks) -> "GroupChatMessage | None":
     ordered by BACAP index. ``chunk_type`` is the single-byte framing
     marker emitted by :meth:`SendOperation.serialize`:
 
-    * ``b'C'`` — continuation; carries an interior slice of the
+    * ``b'C'``: continuation; carries an interior slice of the
       CBOR-encoded message,
-    * ``b'F'`` — final; carries the last slice, terminating the chain,
-    * ``b'I'`` — indirection; reserved for the network-layer coalescer
+    * ``b'F'``: final; carries the last slice, terminating the chain,
+    * ``b'I'``: indirection; reserved for the network-layer coalescer
       which follows the embedded read cap and feeds the substream's
       chunks back in. The data layer refuses to treat it as payload.
 
@@ -308,5 +353,5 @@ def unserialize(chunks) -> "GroupChatMessage | None":
     return None
 
 
-# ConversationUIState moved to katzenqt.qt_models — see banner near the
+# ConversationUIState moved to katzenqt.qt_models; see banner near the
 # top of this file for rationale.

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import struct
 
 import pytest
@@ -120,6 +121,18 @@ class TestEventSignals:
 
 
 class TestOnConnectionStatus:
+    @pytest.fixture(autouse=True)
+    def _reset_transition_state(self):
+        # on_connection_status tracks the previous report so it can log
+        # transitions only once; reset it so each test starts from "no
+        # prior report" rather than leaking state from test run order.
+        # Redundant with conftest._reset_network_module_state (which now
+        # nulls _last_connected module-wide before every test); kept as
+        # harmless defence-in-depth.
+        network._last_connected = None
+        yield
+        network._last_connected = None
+
     @pytest.mark.asyncio
     async def test_connected_sets_mixnet_connected(self):
         ev = getattr(network, "__mixnet_connected")
@@ -133,6 +146,36 @@ class TestOnConnectionStatus:
         ev.set()
         await on_connection_status({"is_connected": False, "err": None})
         assert not ev.is_set()
+
+    @pytest.mark.asyncio
+    async def test_disconnected_warns(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({"is_connected": False, "err": None})
+        assert any("disconnected" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_disconnected_warns_once_per_transition(self, caplog):
+        # A daemon retry loop reports the same disconnected state every
+        # ~15-30s during an outage; the warning must fire once, on the
+        # transition, not on every repeated report.
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({"is_connected": True, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+        warnings = [r for r in caplog.records if "disconnected" in r.message]
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_with_err_does_not_also_warn(self, caplog):
+        # A disconnect that also carries an err payload is fully captured by
+        # the ERROR log below; it must not also emit the plain WARNING for
+        # what is a single event.
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({
+                "is_connected": False, "err": {"Op": "read"},
+            })
+        assert not any("disconnected" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_err_payload_does_not_raise(self):
@@ -279,3 +322,35 @@ class TestOnError:
         with pytest.raises(ValueError):
             await task
         assert captured == [((1, 2), {"key": "value"})]
+
+    @pytest.mark.asyncio
+    async def test_failed_task_does_not_noise_the_event_loop(self):
+        # The done callback must NOT re-raise the task's exception: a
+        # callback raise only surfaces as a spurious "Exception in
+        # callback" traceback via the loop's exception handler (seen in
+        # the client-reconnect integration test when a resendable
+        # plaintext hit the dead link during a bounce).
+        loop = asyncio.get_running_loop()
+        fired = []
+        handler_calls = []
+        prev_handler = loop.get_exception_handler()
+
+        def stub_handler(loop_, context):
+            handler_calls.append(context)
+
+        loop.set_exception_handler(stub_handler)
+        try:
+            async def boom():
+                raise RuntimeError("nope")
+
+            task = asyncio.create_task(boom())
+            on_error(task, lambda: fired.append("fired"))
+            with pytest.raises(RuntimeError):
+                await task
+            # Let the done_callback run.
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(prev_handler)
+
+        assert fired == ["fired"]
+        assert handler_calls == []

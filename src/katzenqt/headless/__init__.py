@@ -118,9 +118,9 @@ def _configure_logging() -> None:
     warnings/errors are shown. Set ``KQT_LOG_LEVEL`` (e.g. ``INFO`` or
     ``DEBUG``) for the full verbose stream.
 
-    The SQLAlchemy statement echo is turned off on the engines in :func:`cli`,
-    because it logs through a per-engine logger that ignores logging levels and
-    so cannot be hushed here.
+    The SQLAlchemy statement echo is toggled on the engines in :func:`cli`
+    instead of here, because it logs through a per-engine logger that ignores
+    logging levels and so cannot be hushed (or enabled) at this level.
     """
     override = os.environ.get("KQT_LOG_LEVEL")
     if override:
@@ -170,11 +170,18 @@ def cli(argv: "list[str] | None" = None) -> int:
     chosen action.
     """
     args = _actions._build_parser().parse_args(argv)
-    if not os.environ.get("KQT_LOG_LEVEL"):
-        # The engines are created with echo=True, which logs every SQL
-        # statement through a per-engine logger that ignores logging levels.
-        # For the quiet default, turn it off at the source (before
-        # init_and_migrate, so its statements stay quiet too).
+    if os.environ.get("KQT_LOG_LEVEL"):
+        # Verbose mode: echo every SQL statement through the engines' own
+        # logger, which ignores our logging.basicConfig level, so it has to
+        # be set here to make good on _configure_logging's "full verbose
+        # stream" promise. Before init_and_migrate, so its statements are
+        # covered too.
+        persistent._engine.echo = True
+        persistent._engine_sync.echo = True
+    else:
+        # Quiet default. The engines don't default to echo=True, so this is
+        # currently a no-op, but stating it keeps this branch symmetric with
+        # the verbose one and defensive against a future default change.
         persistent._engine.echo = False
         persistent._engine_sync.echo = False
     # After init_and_migrate: Alembic's env.py runs fileConfig() from
