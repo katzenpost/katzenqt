@@ -1381,14 +1381,14 @@ class TestDrainMixwalReadSingle:
 
     @pytest.mark.asyncio
     async def test_courier_error_reschedules(self, fake_thinclient):
-        """A courier-side rejection (e.g. stale epoch) is distinct from a replica
-        error and must not wedge the stream: it leaves the MixWAL for retry and
-        releases the stream from draining_right_now. Guards against the former
-        collision where a stale epoch arrived as a replica database failure."""
+        """A courier-side rejection is distinct from a replica error and must
+        not wedge the stream: it leaves the MixWAL for retry and releases the
+        stream from draining_right_now. Guards against the former collision
+        where a courier error arrived as a replica database failure."""
         setup = await _set_up_read_flow(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message",
-            CourierInvalidEpochError("courier rejected envelope: replica epoch outside tolerance window"),
+            CourierError("courier rejected envelope"),
         )
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
