@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialog
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
                                QFormLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
-                               QTextBrowser, QToolButton, QTreeView,
+                               QTextBrowser, QTableView, QToolButton, QTreeView,
                                QTreeWidgetItem, QVBoxLayout)
 from sqlalchemy import func
 from sqlmodel import select
@@ -1057,6 +1057,24 @@ class MainWindow(QMainWindow):
         )
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
 
+        # TODO item 4: Transfers panel. Substream file downloads used to be
+        # visible (as :substream: peers) in the contacts tree; TODO item 2
+        # filters those out, so this dedicated table carries the in-progress /
+        # resumable downloads instead. Added programmatically under the
+        # contacts tree (gridLayout_2 row 2) to avoid regenerating the .ui.
+        self.transfers_model = DownloadsModel()  # noqa: F405
+        self.transfers_view = QTableView(self.ui.groupBox)
+        self.transfers_view.setModel(self.transfers_model)
+        self.transfers_view.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.transfers_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.transfers_view.customContextMenuRequested.connect(
+            self.transfers_context_menu
+        )
+        self.transfers_view.setMinimumHeight(80)
+        self.ui.gridLayout_2.addWidget(self.transfers_view, 2, 0, 1, 1)
+
     async def _enqueue_outgoing_gcm(
         self,
         convo_state: "ConversationUIState",
@@ -1343,6 +1361,70 @@ class MainWindow(QMainWindow):
             await self.iothread.run_in_io(
                 network.resume_peer_reads(bacap_stream=read_cap_id),
             )
+
+    @async_cb
+    async def transfers_context_menu(self, pos) -> None:
+        """Right-click a Transfers row: Pause / Resume that substream
+        download. Reuses the item-5 per-stream primitive (pause freezes the
+        BACAP cursor + cancels the in-flight ARQ; resume re-arms from the
+        saved next_index), so the main conversation keeps flowing either
+        way."""
+        view = self.transfers_view
+        idx = view.indexAt(pos)
+        if not idx.isValid():
+            return
+        rcw_id = view.model().data(
+            view.model().index(idx.row(), 0), ROLE_TRANSFER_RCW_ID,  # noqa: F405
+        )
+        if not rcw_id:
+            return
+        with persistent.Session(persistent._engine_sync) as sess:
+            solo = (sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == rcw_id,
+                )
+            )).first()
+        active = bool(solo.active) if solo is not None else True
+        api = QMenu(view)
+        pgm = api.addAction("Pause download")
+        rgm = api.addAction("Resume download")
+        rgm.setEnabled(not active)
+        chosen = api.exec(view.viewport().mapToGlobal(pos))
+        if chosen is pgm and active:
+            await self.iothread.run_in_io(
+                network.pause_peer_reads(bacap_stream=uuid.UUID(rcw_id)),
+            )
+        elif chosen is rgm and not active:
+            await self.iothread.run_in_io(
+                network.resume_peer_reads(bacap_stream=uuid.UUID(rcw_id)),
+            )
+
+    async def transfers_listener(self) -> None:
+        """Drain network.substream_progress_queue into the Transfers model.
+
+        Mirrors receive_msg_listener: this coroutine runs on the asyncio
+        loop, so queue.get() is the only network-level await; model mutation
+        happens directly (we are already on the Qt main thread).
+        """
+        while True:
+            event = await self.iothread.run_in_io(
+                network.substream_progress_queue.get,
+            )
+            kind = event[0]
+            rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]
+            if kind == "started":
+                _, _, conv_id, total, parent_name = event
+                self.transfers_model.start_transfer(
+                    rcw_id, conv_id, parent_name, total,
+                )
+            elif kind == "piece":
+                self.transfers_model.notify_piece(rcw_id, event[2])
+            elif kind == "completed":
+                self.transfers_model.complete_transfer(rcw_id)
+            elif kind == "paused":
+                self.transfers_model.set_paused(rcw_id, paused=True)
+            elif kind == "resumed":
+                self.transfers_model.set_paused(rcw_id, paused=False)
 
     def convo_state(self) -> ConversationUIState:
         convo = self.convo_state_or_none()
@@ -2094,6 +2176,8 @@ async def main(window: MainWindow):
     window.show()
     create_task(window.receive_msg_listener())
     create_task(window.peer_added_listener())
+    create_task(window.transfers_listener())
+    await window.transfers_model.seed_from_db()
 
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the

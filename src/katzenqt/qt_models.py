@@ -10,6 +10,7 @@ import uuid
 from typing import Any, NamedTuple
 
 import cbor2
+from sqlmodel import select
 
 from . import attachment_images, persistent
 
@@ -53,6 +54,188 @@ ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
 ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save visibility
 ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
 ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
+
+# TODO item 4: Transfers panel roles. The table is driven by DownloadsModel
+# below; these custom roles let a future delegate/QML entry fetch the
+# structured pieces/total rather than parsing the display text.
+ROLE_TRANSFER_RCW_ID = 0x200
+ROLE_TRANSFER_CONV_ID = 0x201
+ROLE_TRANSFER_PARENT_NAME = 0x202
+ROLE_TRANSFER_PIECES = 0x203
+ROLE_TRANSFER_TOTAL = 0x204
+ROLE_TRANSFER_ACTIVE = 0x205  # True = downloading, False = paused
+
+_TRANSFER_ROLES = {
+    ROLE_TRANSFER_RCW_ID: QByteArray(b"transfer_rcw_id"),
+    ROLE_TRANSFER_CONV_ID: QByteArray(b"transfer_conv_id"),
+    ROLE_TRANSFER_PARENT_NAME: QByteArray(b"transfer_parent_name"),
+    ROLE_TRANSFER_PIECES: QByteArray(b"transfer_pieces"),
+    ROLE_TRANSFER_TOTAL: QByteArray(b"transfer_total"),
+    ROLE_TRANSFER_ACTIVE: QByteArray(b"transfer_active"),
+}
+
+
+class DownloadsModel(QtCore.QAbstractTableModel):
+    """Rows of in-progress/resumable substream file transfers (TODO item 4).
+
+    Backs the Transfers QTableView. Columns: Contact, Progress, State, with
+    the substream's ReadCapWAL id carried as ROLE_TRANSFER_RCW_ID for the
+    Pause/Resume actions. Rows are added/updated by MainWindow's
+    transfers_listener (network.substream_progress_queue) and seeded from
+    the database at startup by seed_from_db().
+    """
+
+    def roleNames(self) -> dict[int, QByteArray]:
+        return _TRANSFER_ROLES
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: "dict[uuid.UUID, dict[str, object]]" = {}
+        self._order: "list[uuid.UUID]" = []
+
+    def rowCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:  # type: ignore[override]
+        if parent is not None and parent.isValid():
+            return 0
+        return len(self._order)
+
+    def columnCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:  # type: ignore[override]
+        return 3
+
+    def headerData(self, section: int, orientation: "QtCore.Qt.Orientation", role: int = 0) -> object:  # type: ignore[override]
+        if role != QtCore.Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation != QtCore.Qt.Orientation.Horizontal:
+            return None
+        return ("Contact", "Progress", "State")[section]
+
+    def data(self, index: "QtCore.QModelIndex", role: int = 0) -> object:  # type: ignore[override]
+        if not index.isValid() or not (0 <= index.row() < len(self._order)):
+            return None
+        rcw_id = self._order[index.row()]
+        row = self._rows[rcw_id]
+        if role in (QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.EditRole):
+            if index.column() == 0:
+                return row.get("parent_name")
+            if index.column() == 1:
+                pieces = int(row.get("pieces", 0))
+                total = row.get("total")
+                if total is None:
+                    return f"{pieces} pieces"
+                return f"{pieces}/{total}"
+            if index.column() == 2:
+                return "Paused" if not row.get("active", True) else "Downloading"
+            return None
+        if role == ROLE_TRANSFER_RCW_ID:
+            return str(rcw_id)
+        if role == ROLE_TRANSFER_CONV_ID:
+            return row.get("conversation_id")
+        if role == ROLE_TRANSFER_PARENT_NAME:
+            return row.get("parent_name")
+        if role == ROLE_TRANSFER_PIECES:
+            return row.get("pieces", 0)
+        if role == ROLE_TRANSFER_TOTAL:
+            return row.get("total")
+        if role == ROLE_TRANSFER_ACTIVE:
+            return row.get("active", True)
+        return None
+
+    # -- mutations (Qt-listener thread) ------------------------------------
+
+    def start_transfer(self, rcw_id: uuid.UUID, conversation_id, parent_name, total) -> None:
+        if rcw_id in self._rows:
+            # Already tracked; refresh the denominator if it became known.
+            if total is not None:
+                self._rows[rcw_id]["total"] = total
+                row = self._idx(rcw_id)
+                idx0 = self.index(row, 1)
+                self.dataChanged.emit(idx0, idx0)
+            return
+        self.beginInsertRows(QtCore.QModelIndex(), len(self._order), len(self._order))
+        self._rows[rcw_id] = {
+            "conversation_id": conversation_id,
+            "parent_name": parent_name,
+            "pieces": 0,
+            "total": total,
+            "active": True,
+        }
+        self._order.append(rcw_id)
+        self.endInsertRows()
+
+    def notify_piece(self, rcw_id: uuid.UUID, pieces) -> None:
+        if rcw_id not in self._rows:
+            return
+        self._rows[rcw_id]["pieces"] = pieces
+        row = self._idx(rcw_id)
+        idx0 = self.index(row, 1)
+        self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_PIECES])
+
+    def complete_transfer(self, rcw_id: uuid.UUID) -> None:
+        if rcw_id not in self._rows:
+            return
+        row = self._idx(rcw_id)
+        self.beginRemoveRows(QtCore.QModelIndex(), row, row)
+        del self._rows[rcw_id]
+        del self._order[row]
+        self.endRemoveRows()
+
+    def set_paused(self, rcw_id: uuid.UUID, paused: bool) -> None:
+        if rcw_id not in self._rows:
+            return
+        self._rows[rcw_id]["active"] = not paused
+        row = self._idx(rcw_id)
+        idx0 = self.index(row, 2)
+        self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_ACTIVE])
+
+    # -- startup seeding ----------------------------------------------------
+
+    async def seed_from_db(self) -> None:
+        """Populate rows for resumable substream transfers already on disk.
+
+        A substream is resumable when its peer is still active (currently
+        reading) *or* it has ReceivedPiece rows (paused mid-transfer). This
+        replaces the pause/resume handle that TODO item 2 removed from the
+        contacts tree for dead substreams.
+        """
+        async with persistent.asession() as sess:
+            from . import network
+            prefix = network._SUBSTREAM_NAME_PREFIX
+            streams = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.name.like(f"{prefix}%"),
+                )
+            )).all()
+            for cp in streams:
+                rcw = await sess.get(persistent.ReadCapWAL, cp.read_cap_id)
+                if rcw is None:
+                    continue
+                recv_count = (await sess.exec(
+                    select(persistent.sa.func.count()).select_from(persistent.ReceivedPiece)
+                    .where(persistent.ReceivedPiece.read_cap == rcw.id)
+                )).one()
+                parent = await _substream_parent_name(sess, cp)
+                # Resumable = active, or received something but not yet
+                # assembled to the terminal F (still has pieces outstanding).
+                if cp.active or int(recv_count):
+                    self.start_transfer(
+                        rcw.id, cp.conversation.id, parent,
+                        rcw.substream_total_chunks,
+                    )
+                    if int(recv_count):
+                        self.notify_piece(rcw.id, int(recv_count))
+                    if not cp.active:
+                        self.set_paused(rcw.id, paused=True)
+
+
+async def _substream_parent_name(sess, cp) -> str:
+    """Best-effort display name of a substream peer's parent, for the panel."""
+    from .network import _substream_parent
+    parent = await _substream_parent(sess, cp.name)
+    if parent is not None:
+        return parent.name
+    # Fall back to the conversation name; the substream peer itself is
+    # synthetic and must never surface (TODO item 2).
+    conv = await sess.get(persistent.Conversation, cp.conversation.id)
+    return conv.name if conv is not None else cp.name
 
 
 class AttachmentDisplay(NamedTuple):
