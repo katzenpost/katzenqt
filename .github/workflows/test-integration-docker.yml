@@ -12,9 +12,9 @@ name: Docker Mixnet Integration Tests
 
 on:
   pull_request:
-    branches: [main, master, resending_api2026_fix_decryption_bugs]
+    branches: [main]
   push:
-    branches: [main, master, resending_api2026_fix_decryption_bugs]
+    branches: [main]
 
 jobs:
   docker-integration:
