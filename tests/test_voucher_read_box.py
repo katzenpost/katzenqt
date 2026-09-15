@@ -91,3 +91,36 @@ class TestReadBoxRetriesOnTransientErrors:
                 with pytest.raises(asyncio.CancelledError):
                     await task
         assert any("still not present" in r.message for r in caplog.records)
+
+
+class TestPublishBoxRetriesOnTransientErrors:
+    @pytest.mark.asyncio
+    async def test_epoch_rollover_mid_publish_retries_at_same_index(
+        self, fake_thinclient
+    ):
+        write_cap, _read_cap, idx = await _make_write_read_pair(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            voucher.ConnectionLifeInterruptedError("epoch rolled over"),
+        )
+        nxt = await voucher._publish_box(fake_thinclient, write_cap, idx, b"payload")
+        assert nxt is not None
+        assert fake_thinclient.call_count("encrypt_write") == 2
+        assert fake_thinclient.last_call("encrypt_write")["message_box_index"] == idx
+
+    @pytest.mark.asyncio
+    async def test_publish_gives_up_at_the_deadline(
+        self, fake_thinclient, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(voucher, "_PUBLISH_DEADLINE_S", 0.0)
+        write_cap, _read_cap, idx = await _make_write_read_pair(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            voucher.ConnectionLifeInterruptedError("epoch rolled over"),
+        )
+        with caplog.at_level(logging.ERROR, logger="katzen.voucher"):
+            with pytest.raises(voucher.ConnectionLifeInterruptedError):
+                await voucher._publish_box(
+                    fake_thinclient, write_cap, idx, b"payload"
+                )
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
