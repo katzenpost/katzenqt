@@ -120,7 +120,7 @@ def test_serialize_assigns_non_null_id_to_every_pwal():
 
 
 def test_serialize_sets_substream_total_chunks_on_multi_chunk():
-    """TODO item 4: a multi-box send's indirection ReadCapWAL carries the
+    """A multi-box send's indirection ReadCapWAL carries the
     total plaintext chunk count (C-chunks + final F) so the Transfers panel
     can render progress as n/total over the substream's ReceivedPiece rows."""
     text = "X" * 4000  # forces multi-box split: several C + one F

@@ -842,14 +842,12 @@ class TestDrainMixwalReadSingle:
 
     @pytest.mark.asyncio
     async def test_lost_read_reply_is_recovered_after_reconnect(self, fake_thinclient):
-        # A reconnect mid-wait is the one concrete signal that a reply could
-        # have been orphaned (kpclientd's reconnect-replay delivering to a
-        # query_id whose original listener already gave up); the watchdog
-        # should give up promptly after observing one, well before the
-        # (much larger, and here never reached) flat backstop.
-        # Redundant with conftest._reset_network_module_state (which now
-        # nulls _last_connected before every test); kept defensively: it
-        # makes this test's precondition locally obvious.
+        # A reconnect mid-wait is the one concrete signal that a reply may be
+        # lost; the watchdog gives up promptly after observing one, well
+        # before the (much larger, and here never reached) flat backstop.
+        # Redundant with conftest._reset_network_module_state (which nulls
+        # _last_connected before every test); kept so this test's
+        # precondition is locally obvious.
         network._last_connected = None
         payload = _make_F_payload("hang then reconnect")
         setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
@@ -1091,7 +1089,7 @@ class TestDrainMixwalReadSingle:
     async def test_extended_i_chunk_creates_substream_with_total(
         self, fake_thinclient,
     ):
-        """TODO item 4 receive side: a 140-byte I-chunk (b'I' + 4-byte BE
+        """Receive side: a 140-byte I-chunk (b'I' + 4-byte BE
         total + 136-byte read cap) must spawn a substream ReadCapWAL that
         carries the total and a substream peer, and fire a ``started``
         event carrying the conversation id, total, and parent peer name."""
@@ -1138,7 +1136,7 @@ class TestDrainMixwalReadSingle:
     async def test_legacy_i_chunk_creates_substream_without_total(
         self, fake_thinclient,
     ):
-        """TODO item 4 receive side, legacy form: a plain 136-byte I-chunk
+        """Receive side, legacy form: a plain 136-byte I-chunk
         (no total prefix) still spawns the substream, but the ReadCapWAL's
         total stays None and the ``started`` event's total is None so the
         Transfers panel renders indeterminate progress."""
@@ -1169,7 +1167,7 @@ class TestDrainMixwalReadSingle:
     async def test_substream_piece_read_fires_piece_event(
         self, fake_thinclient,
     ):
-        """TODO item 4: reading a C-chunk on a substream peer queues a
+        """Reading a C-chunk on a substream peer queues a
         single ``piece`` event carrying the accumulated ReceivedPiece count
         for that substream (matching the Transfers panel's n/total)."""
         setup = await _set_up_read_flow(
@@ -1191,7 +1189,7 @@ class TestDrainMixwalReadSingle:
     async def test_substream_terminal_f_fires_completed_event(
         self, fake_thinclient,
     ):
-        """TODO item 4: assembling the substream's terminal F (through a
+        """Assembling the substream's terminal F (through a
         parent peer that resolves from the substream name) retires the
         substream and queues a single ``completed`` event so the Transfers
         panel drops the row."""
@@ -1611,13 +1609,12 @@ class TestDrainMixwalReadSingle:
 
 
 class TestPauseResumePeerReads:
-    """TODO item 5: per-peer pause/resume. A user-initiated pause on a
-    dead substream must cancel the in-flight read ARQ (otherwise the
-    daemon keeps retransmitting into the void), delete the is_read
-    MixWAL row (otherwise drain_mixwal2's 15s sweep re-casts it forever,
-    since that loop reads MixWAL regardless of active), and deactivate
-    the peer so readables_to_mixwal never re-arms it. Resume must flip
-    active back on and poke the re-arm event."""
+    """Per-peer pause/resume. A user-initiated pause on a
+    peer must cancel the in-flight read ARQ (so the daemon stops
+    retransmitting), delete the is_read MixWAL row (so the drain sweep
+    cannot re-cast it), and deactivate the peer so readables_to_mixwal
+    never re-arms it. Resume must flip active back on and poke the re-arm
+    event."""
 
     @pytest.mark.asyncio
     async def test_pause_cancels_inflight_read(self, fake_thinclient, monkeypatch):
@@ -1716,7 +1713,7 @@ class TestPauseResumePeerReads:
             ))).one()
             assert cp.active is False
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
-        # TODO item 4: the pause announces itself to the Transfers panel.
+        # The pause announces itself to the Transfers panel.
         event = network.substream_progress_queue.get_nowait()
         assert event[0] == "paused"
         assert event[1] == setup["bacap_stream"]
@@ -2095,12 +2092,9 @@ class TestDrainMixwal2:
     async def test_malformed_read_cap_does_not_kill_the_whole_drain_loop(
         self, fake_thinclient,
     ):
-        """A single corrupted ReadCapWAL row (wrong-length read_cap) used to
-        raise straight out of the loop body with nothing catching it inside
-        drain_mixwal2 itself; drain_mixwal's wrapper logs it CRITICAL and
-        simply returns, permanently ending every read AND write drain for
-        the rest of the process. One malformed row must only cost its own
-        stream, leaving every other stream (read or write) draining as
+        """A single corrupted ReadCapWAL row (wrong-length read_cap) must
+        fail only its own stream (logged CRITICAL by drain_mixwal's
+        wrapper); every other stream (read or write) keeps draining as
         normal."""
         healthy = await _set_up_read_flow(
             fake_thinclient, plaintext=_make_F_payload("hi"),
@@ -2343,7 +2337,7 @@ class TestSendResendablePlaintexts:
     async def test_indirection_pwal_prepends_total_chunk_count_when_known(
         self, fake_thinclient,
     ):
-        """TODO item 4: when the target ReadCapWAL carries a known
+        """When the target ReadCapWAL carries a known
         substream_total_chunks (set by models.serialize on a multi-chunk
         file), the filled-in I-chunk is b'I' + 4-byte BE count + read_cap
         so the reader can render download progress as n/total."""
@@ -2750,9 +2744,7 @@ class TestStartBackgroundThreads:
 
 # ---------------------------------------------------------------------------
 # Send-loop resilience: a stuck dispatched send must not wedge the
-# orchestrator or the other streams. Regression guard against the
-# historical "the whole send loop wedges" symptom, the most likely
-# culprit for which was the indirection bug repaired in 9606e5f.
+# orchestrator or the other streams.
 # ---------------------------------------------------------------------------
 
 

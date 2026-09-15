@@ -1,4 +1,4 @@
-"""TODO item 2: :substream: peers must never surface in user-facing lists.
+""":substream: peers must never surface in user-facing lists.
 
 - katzen._peer_is_displayable keeps synthetic substream peers out of the
   contacts tree (add_conversation, _process_peer_added, voucher inductors).

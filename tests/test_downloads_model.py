@@ -1,4 +1,4 @@
-"""Coverage for the TODO item 4 Transfers panel's DownloadsModel:
+"""Coverage for the Transfers panel's DownloadsModel:
 row management (start/piece/complete/pause), role exposure, and the
 startup seeding from persistent ReadCapWAL rows."""
 import os

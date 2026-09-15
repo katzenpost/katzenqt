@@ -80,7 +80,7 @@ def _reset_network_module_state():
             setattr(network, name, asyncio.Event())
         getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
-        # TODO item 4 transfers-listener events must not leak across tests.
+        # Transfers-panel events must not leak across tests.
         while not network.substream_progress_queue.empty():
             network.substream_progress_queue.get_nowait()
         network._inflight_reads.clear()

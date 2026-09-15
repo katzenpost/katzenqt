@@ -1,8 +1,7 @@
-"""The two UI listeners must survive a per-item error (log-and-continue).
+"""The UI listeners must survive a per-item error (log-and-continue).
 
-``receive_msg_listener`` and ``peer_added_listener`` are bare ``while True:``
-loops; any unexpected exception used to kill them until a full restart,
-silently freezing UI refresh. They now wrap the whole per-item unit
+``receive_msg_listener``, ``peer_added_listener``, and ``transfers_listener``
+are bare ``while True:`` loops; each wraps the whole per-item unit
 (queue-get through UI refresh) in try/except, re-raising only
 ``CancelledError``. Stub-based tests pin that a bad item is logged and the
 loop keeps serving the next one.
@@ -208,7 +207,7 @@ class TestPeerAddedDedups:
 
 
 class TestTransfersListenerDrainsEvents:
-    """TODO item 4: the Transfers listener turns each substream_progress_queue
+    """The Transfers listener turns each substream_progress_queue
     event into a DownloadsModel call, and survives a per-item error via
     log-and-continue like the other UI listeners."""
 
