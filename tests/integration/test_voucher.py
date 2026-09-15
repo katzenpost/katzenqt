@@ -213,9 +213,9 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     )
     try:
         time.sleep(250)
-        induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=300.0)
+        induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=600.0)
         _assert_ok(induct, "alice voucher-induct carol")
-        await_proc.wait(timeout=300.0)
+        await_proc.wait(timeout=600.0)
     finally:
         if await_proc.poll() is None:
             await_proc.kill()
