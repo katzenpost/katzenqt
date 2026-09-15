@@ -46,16 +46,13 @@ jobs:
           ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
           path: katzenqt/katzenpost
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Cache Docker layers
+      - name: Cache the mixnet build
         uses: actions/cache@v6
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          path: katzenqt/katzenpost/docker/cache
+          key: ${{ runner.os }}-mixnet-${{ hashFiles('katzenqt/katzenpost/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-buildx-
+            ${{ runner.os }}-mixnet-
 
       - name: Configure podman socket
         run: systemctl --user start podman.socket || true
@@ -79,23 +76,19 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin || true
 
-      - name: Build and start the docker mixnet
+      - name: Build the mixnet and install deps in parallel
         id: start_mixnet
-        working-directory: katzenqt/katzenpost/docker
-        run: make base_port=62331 start wait
+        run: |
+          set -euo pipefail
+          ( cd katzenqt/katzenpost/docker && make base_port=62331 start wait ) &
+          mixnet=$!
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev cargo
+          ( cd katzenqt && uv sync --all-extras --dev --locked )
+          wait "$mixnet"
 
       - name: Brief pause so the mixnet is fully ready
         run: sleep 30
-
-      - name: Install audio build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-
-      - name: Install katzenqt + dev deps
-        id: install_deps
-        working-directory: katzenqt
-        run: uv sync --all-extras --dev --locked
 
       - name: Run integration tests
         working-directory: katzenqt
