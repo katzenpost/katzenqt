@@ -219,10 +219,15 @@ async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, 
             mw.bacap_stream, mw.plaintextwal)
         return False
     try:
-        fresh = await connection.encrypt_write(
-            plaintext=pwal.bacap_payload,
-            write_cap=wcw.write_cap,
-            message_box_index=mw.current_message_index)
+        fresh = await _rpc_racing_connection_life(
+            bacap_uuid=mw.bacap_stream,
+            what="encrypt_write",
+            rpc_factory=lambda: connection.encrypt_write(
+                plaintext=pwal.bacap_payload,
+                write_cap=wcw.write_cap,
+                message_box_index=mw.current_message_index),
+            backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+        )
     except Exception as e:
         logger.warning("re-mint encrypt_write failed, will retry: %s", e)
         return False
