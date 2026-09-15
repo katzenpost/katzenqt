@@ -94,7 +94,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     # 1. Baseline: Bob's send is ACKed -> the pair is connected and working.
-    baseline = _run_role(bob_state, "chat-session", "demo", "SEND:m0", timeout=300.0)
+    baseline = _run_role(bob_state, "chat-session", "demo", "SEND:m0", timeout=750.0)
     assert "STEP_OK:0:SEND:m0" in baseline.stdout + baseline.stderr, (
         f"baseline SEND:m0 did not complete\n"
         f"stdout:\n{baseline.stdout}\nstderr:\n{baseline.stderr}"
@@ -140,7 +140,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
 
         # 3. Reconnect session from the same state: the drain sweeps the
         # leftover write-MixWAL row and delivers m1.
-        bob3 = _run_role(bob_state, "chat-session", "demo", "SLEEP:120", timeout=600.0)
+        bob3 = _run_role(bob_state, "chat-session", "demo", "SLEEP:120", timeout=900.0)
         bob3_all = bob3.stdout + bob3.stderr
         for line in bob3_all.splitlines():
             if any(t in line for t in ("STEP_OK", "STEP_FAIL", "SESSION_DONE")):

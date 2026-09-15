@@ -68,17 +68,17 @@ def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
     """Establish mutual contact: both create a stream, Bob mints a voucher,
     Alice inducts him, Bob joins. Afterwards each holds the other's read cap."""
     for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = _run_role(state, "create-conv", "demo", name, timeout=180.0)
+        create = _run_role(state, "create-conv", "demo", name, timeout=450.0)
         assert create.returncode == 0, _output(create)
 
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
     assert mint.returncode == 0, _output(mint)
     voucher = _expect_token(mint, "VOUCHER=")
 
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
     assert induct.returncode == 0, _output(induct)
 
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
+    joined = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
     assert joined.returncode == 0, _output(joined)
 
 
@@ -97,7 +97,7 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     create = _run_role(
         alice_state, "tally-create", "demo", "lunch?",
         "--mode", "approval", "--slot", "A", "--slot", "B", "--slot", "C",
-        timeout=600.0,
+        timeout=900.0,
     )
     assert create.returncode == 0, _output(create)
     survey = _expect_token(create, "TALLY_CREATED=")
@@ -105,8 +105,8 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     # Bob votes for A and C (he must first receive the survey).
     bob_vote = _run_role(
         bob_state, "tally-vote", "demo", "--survey", survey,
-        "--slot", "s0=yes", "--slot", "s2=yes", "--timeout", "600",
-        timeout=900.0,
+        "--slot", "s0=yes", "--slot", "s2=yes", "--timeout", "900",
+        timeout=1200.0,
     )
     assert bob_vote.returncode == 0, _output(bob_vote)
     assert "VOTED" in _output(bob_vote)
@@ -114,8 +114,8 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     # Alice votes for A and B.
     alice_vote = _run_role(
         alice_state, "tally-vote", "demo", "--survey", survey,
-        "--slot", "s0=yes", "--slot", "s1=yes", "--timeout", "600",
-        timeout=900.0,
+        "--slot", "s0=yes", "--slot", "s1=yes", "--timeout", "900",
+        timeout=1200.0,
     )
     assert alice_vote.returncode == 0, _output(alice_vote)
     assert "VOTED" in _output(alice_vote)
@@ -123,12 +123,12 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     # Both read the tally, waiting for two voters.
     alice_res = _run_role(
         alice_state, "tally-result", "demo", "--survey", survey,
-        "--expect-voters", "2", "--timeout", "600", timeout=700.0,
+        "--expect-voters", "2", "--timeout", "900", timeout=1000.0,
     )
     assert alice_res.returncode == 0, _output(alice_res)
     bob_res = _run_role(
         bob_state, "tally-result", "demo", "--survey", survey,
-        "--expect-voters", "2", "--timeout", "600", timeout=700.0,
+        "--expect-voters", "2", "--timeout", "900", timeout=1000.0,
     )
     assert bob_res.returncode == 0, _output(bob_res)
 

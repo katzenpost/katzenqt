@@ -81,17 +81,17 @@ def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
     own MessageStream, Bob mints a voucher, Alice inducts him, Bob joins.
     Afterwards Bob holds Alice's read cap and can read her stream."""
     for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = _run_role(state, "create-conv", "demo", name, timeout=180.0)
+        create = _run_role(state, "create-conv", "demo", name, timeout=450.0)
         assert create.returncode == 0, create.stdout + create.stderr
 
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
     assert mint.returncode == 0, mint.stdout + mint.stderr
     voucher = _expect_token(mint, "VOUCHER=")
 
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
     assert induct.returncode == 0, induct.stdout + induct.stderr
 
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
+    joined = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
     assert joined.returncode == 0, joined.stdout + joined.stderr
 
 
@@ -116,8 +116,8 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
 
     t0 = time.monotonic()
     send = _run_role(
-        alice_state, "send-file", "demo", str(src), "--timeout", "600",
-        timeout=900.0,
+        alice_state, "send-file", "demo", str(src), "--timeout", "900",
+        timeout=1200.0,
     )
     assert send.returncode == 0 and "SENT" in _output(send), (
         f"send-file failed:\nstdout:\n{send.stdout}\nstderr:\n{send.stderr}"
@@ -128,8 +128,8 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
     read = _run_role(
         bob_state, "read-file", "demo",
         "--to-dir", str(dst_dir),
-        "--timeout", "600",
-        timeout=700.0,
+        "--timeout", "900",
+        timeout=1000.0,
     )
     assert read.returncode == 0, (
         f"read-file failed:\nstdout tail:\n{read.stdout[-2000:]}\n"

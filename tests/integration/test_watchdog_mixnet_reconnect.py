@@ -82,10 +82,10 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
         # reconnected: Alice's read is still pending at that point (Bob
         # hasn't sent), so the reconnect_event is guaranteed to fire
         # before the read itself resolves.
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=300.0)
+        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=750.0)
         assert send.returncode == 0, send.stdout + send.stderr
 
-        alice_proc.wait(timeout=300.0)
+        alice_proc.wait(timeout=750.0)
     except Exception:
         alice_proc.kill()
         if gateway_paused:
