@@ -92,7 +92,7 @@ import sqlalchemy as sa
 from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
-from .. import models, network, persistent
+from .. import conversation_handlers, models, network, persistent
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
 from ..tally import schema as tally_schema
@@ -303,6 +303,9 @@ async def _send_one_gcm(
         # requires the PWAL's bacap_stream to match a fully-provisioned
         # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
         own_bacap_stream = convo.write_cap
+        gcm.membership_hash = await conversation_handlers.local_membership_hash(
+            sess, convo
+        )
 
     send_op = models.SendOperation(
         bacap_stream=own_bacap_stream, messages=[gcm],
@@ -463,8 +466,14 @@ async def _action_multi_send(args):
     texts = args.texts.split("|")
     final_pwal_ids: list = []
     for text in texts:
+        # Recompute per send: membership can change mid-session (an
+        # INTRODUCTION between sends), so the hash is fetched here, not once
+        # up front.
+        membership_hash = await conversation_handlers.membership_hash_for(
+            conversation_id
+        )
         gcm = models.GroupChatMessage(
-            version=0, membership_hash=b"TODO" * 8, text=text,
+            version=0, membership_hash=membership_hash, text=text,
         )
         send_op = models.SendOperation(
             bacap_stream=own_bacap_stream, messages=[gcm],
@@ -568,8 +577,12 @@ async def _action_chat_session(args):
         for step_idx, raw in enumerate(args.steps):
             kind, _, payload = raw.partition(":")
             if kind == "SEND":
+                # Recompute per send: membership can change mid-session (F3).
+                membership_hash = await conversation_handlers.membership_hash_for(
+                    conversation_id
+                )
                 gcm = models.GroupChatMessage(
-                    version=0, membership_hash=b"TODO" * 8, text=payload,
+                    version=0, membership_hash=membership_hash, text=payload,
                 )
                 send_op = models.SendOperation(
                     bacap_stream=own_bacap_stream, messages=[gcm],
