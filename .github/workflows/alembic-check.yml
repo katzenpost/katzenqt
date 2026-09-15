@@ -2,6 +2,7 @@ name: alembic (uv)
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
