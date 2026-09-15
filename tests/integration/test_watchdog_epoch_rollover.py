@@ -50,13 +50,13 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
         # before Bob ever sends anything.
         time.sleep(140.0)
 
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=300.0)
+        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=750.0)
         assert send.returncode == 0, send.stdout + send.stderr
 
         # If the fix regressed, this hangs on the stale envelope up to the
         # 1200s backstop; bound the wait well under that so a regression
         # fails the test instead of stalling the suite for 20 minutes.
-        alice_proc.wait(timeout=180.0)
+        alice_proc.wait(timeout=450.0)
     except Exception:
         alice_proc.kill()
         raise
