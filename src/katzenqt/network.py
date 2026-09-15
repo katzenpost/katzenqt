@@ -420,6 +420,10 @@ _CONNECTION_IDLE_RETRY_S = 60.0
 _ARMING_SWEEP_S = 60.0
 
 
+_EPOCH_LOSS_STREAK: "dict[object, int]" = {}
+_EPOCH_RACE_MAX_LOSSES = 3
+
+
 class ConnectionLifeInterruptedError(Exception):
     """An in-flight thinclient RPC raced against a daemon reconnect or a PKI
     epoch rollover and lost; the daemon may have died with the reply in
@@ -463,15 +467,26 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
         reconnect_marker = _reconnect_event
     if epoch_marker is None:
         epoch_marker = _epoch_event
+    losses = _EPOCH_LOSS_STREAK.get(bacap_uuid, 0)
+    race_epoch = losses < _EPOCH_RACE_MAX_LOSSES
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
+    racing = {task, reconnect_wait}
+    if race_epoch:
+        racing.add(epoch_wait)
+    else:
+        logger.warning(
+            "%s for bacap_stream=%s lost %d rollovers in a row; letting this "
+            "attempt run to the %s s backstop instead of racing the epoch",
+            what, bacap_uuid, losses, backstop_s,
+        )
     try:
         done, _pending = await asyncio.wait(
-            {task, reconnect_wait, epoch_wait}, timeout=backstop_s,
-            return_when=asyncio.FIRST_COMPLETED,
+            racing, timeout=backstop_s, return_when=asyncio.FIRST_COMPLETED,
         )
         if task in done:
+            _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
             return task.result()
         if reconnect_wait in done:
             logger.warning(
@@ -490,9 +505,13 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                 "as stale", what, bacap_uuid, grace_s,
             )
             try:
-                return await asyncio.wait_for(task, timeout=grace_s)
+                result = await asyncio.wait_for(task, timeout=grace_s)
             except asyncio.TimeoutError:
                 task.cancel()
+                _EPOCH_LOSS_STREAK[bacap_uuid] = losses + 1
+            else:
+                _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
+                return result
         else:
             # Backstop: backstop_s elapsed with no reply and no observed
             # reconnect or epoch rollover. Should be rare; treat it the same
