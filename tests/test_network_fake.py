@@ -971,7 +971,10 @@ class TestDrainMixwalReadSingle:
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
-    async def test_lost_read_reply_is_recovered_after_reconnect(self, fake_thinclient):
+    @pytest.mark.real_sleeps
+    async def test_lost_read_reply_is_recovered_after_reconnect(self, fake_thinclient, caplog):
+        # real_sleeps: otherwise the reconnect fires before the read arms and
+        # this passes on read_watchdog_s.
         # A reconnect mid-wait is the one concrete signal that a reply could
         # have been orphaned (kpclientd's reconnect-replay delivering to a
         # query_id whose original listener already gave up); the watchdog
@@ -994,6 +997,8 @@ class TestDrainMixwalReadSingle:
             await network.on_connection_status({"is_connected": True, "err": None})
 
         reconnector = asyncio.ensure_future(simulate_reconnect())
+        caplog.set_level(logging.WARNING, logger="katzen.network")
+        started = asyncio.get_running_loop().time()
         await network.drain_mixwal_read_single(
             connection=fake_thinclient,
             rcw_read_cap=setup["read_cap"],
@@ -1002,12 +1007,21 @@ class TestDrainMixwalReadSingle:
             read_watchdog_s=60.0,
             reconnect_grace_s=0.05,
         )
+        elapsed = asyncio.get_running_loop().time() - started
         await reconnector
         fake_thinclient.last_call("cancel_resending_encrypted_message")
         assert setup["bacap_stream"] not in draining
+        assert any("daemon reconnected mid-" in r.message for r in caplog.records), (
+            f"recovered some other way after {elapsed:.1f}s: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        assert elapsed < 30.0, f"took {elapsed:.1f}s, so this was read_watchdog_s"
 
     @pytest.mark.asyncio
-    async def test_lost_read_reply_is_recovered_after_epoch_rollover(self, fake_thinclient):
+    @pytest.mark.real_sleeps
+    async def test_lost_read_reply_is_recovered_after_epoch_rollover(self, fake_thinclient, caplog):
+        # real_sleeps: otherwise the rollover fires before the read arms and
+        # this passes on read_watchdog_s.
         # A PKI epoch rollover mid-wait makes start_resending_encrypted_message's
         # envelope stale for the courier; the watchdog should notice via
         # on_new_pki_document and give up promptly, same as a reconnect.
@@ -1027,6 +1041,8 @@ class TestDrainMixwalReadSingle:
             await network.on_new_pki_document(_pki_event(2))
 
         roller = asyncio.ensure_future(simulate_epoch_rollover())
+        caplog.set_level(logging.WARNING, logger="katzen.network")
+        started = asyncio.get_running_loop().time()
         await network.drain_mixwal_read_single(
             connection=fake_thinclient,
             rcw_read_cap=setup["read_cap"],
@@ -1035,9 +1051,15 @@ class TestDrainMixwalReadSingle:
             read_watchdog_s=60.0,
             reconnect_grace_s=0.05,
         )
+        elapsed = asyncio.get_running_loop().time() - started
         await roller
         fake_thinclient.last_call("cancel_resending_encrypted_message")
         assert setup["bacap_stream"] not in draining
+        assert any("PKI epoch rolled over mid-" in r.message for r in caplog.records), (
+            f"recovered some other way after {elapsed:.1f}s: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        assert elapsed < 30.0, f"took {elapsed:.1f}s, so this was read_watchdog_s"
 
     @pytest.mark.asyncio
     async def test_read_re_encrypts_a_fresh_envelope_every_call(self, fake_thinclient):
