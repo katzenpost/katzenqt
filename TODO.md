@@ -20,6 +20,28 @@ Keep it up to date as part of the working session:
   then commit the TODO.md status update. This keeps the non-TODO commits
   cherry-pickable on their own.
 
+## Code hygiene: comments and docstrings
+
+Applies to every comment and docstring added/changed while working the items
+below (exemplar: commit `103a209` "comments: describe current behavior, not
+the bugs they guarded").
+
+- Describe what the code **does now**, not the bug it guards against or the
+  implementation it replaced. Root-cause narratives, "used to ..." notes, and
+  tuning/justification history belong in **commit messages**, not in the code.
+- Never reference `TODO item N` (or the plan's item numbers) in code,
+  docstrings, tests, or migration headers. The numbers are bookkeeping for
+  this file alone and go stale as the plan moves; readers of the code in the
+  distant future should not need this file to understand it.
+- Write for a reader who sees only the current code: current behavior,
+  current invariants, current recovery contracts. A comment that only makes
+  sense alongside a past state is dead weight after the next refactor.
+- In tests, the docstring states the behavior under test. Where several tests
+  share a caveat (e.g. the reconnect-marker swap), state it once concisely;
+  do not cross-reference "as in test X".
+- Loose `TODO:` queries left with no plan number are fine where they mark a
+  genuine open question, but keep them specific and current.
+
 State as of 2026-09-14. Session context: recovering from a proxy-sweep storm in a
 5-replica katzenpost mixnet while debugging the delivery of Bob's
 `jamiroquai.webp` (37300 B) to Alice and Carol. **Delivery of Bob's second
