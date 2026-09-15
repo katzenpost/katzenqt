@@ -317,7 +317,7 @@ the whole file arrives. Feature request (addition, not a bugfix):
   substream's remaining boxes, which would require the write cap... likely out
   of scope).
 
-### Plan (2026-09-14, in progress)
+### Plan (2026-09-14, COMPLETE 2026-09-15)
 
 Two design facts from the 2026-09-14 review of the post-merge code:
 - **No denominator today.** The I-chunk wire body is only `b'I' + 136-byte read
