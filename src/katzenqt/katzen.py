@@ -73,8 +73,8 @@ def _peer_is_displayable(peer) -> bool:
 
     Synthetic substream peers (``:substream:<parent>:<nonce>``; created on
     I-chunk receive in network.py) are internal download machinery and must
-    not leak into the user-visible contact list. See TODO item 2. Their
-    download progress lives in the Transfers panel (TODO item 4) instead.
+    not leak into the user-visible contact list; their download progress
+    lives in the Transfers panel instead.
     """
     return not peer.name.startswith(network._SUBSTREAM_NAME_PREFIX)
 
@@ -1048,18 +1048,19 @@ class MainWindow(QMainWindow):
         # inputMethodEvent
         #self.ui.contacts_treeWidget.keyboardSearch.connect(lambda: print("KB search")) # TODO not a signal, but when user starts typing here we want to set the focus to contactFilterLineEdit instead
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
-        # Per-peer pause/resume (TODO item 5): right-click a peer row under
-        # a conversation to stop/resume reading that one stream. Killed
-        # substream peers otherwise keep getting re-cast every 15s forever.
+        # Per-peer pause/resume: right-click a peer row under
+        # a conversation to stop/resume reading that one stream. The
+        # Transfers panel and this menu give the user a handle on streams
+        # that the contacts tree does not render.
         self.ui.contacts_treeWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.ui.contacts_treeWidget.customContextMenuRequested.connect(
             self.peer_context_menu
         )
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
 
-        # TODO item 4: Transfers panel. Substream file downloads used to be
-        # visible (as :substream: peers) in the contacts tree; TODO item 2
-        # filters those out, so this dedicated table carries the in-progress /
+        # Transfers panel. Substream file downloads are not shown in the
+        # contacts tree (synthetic :substream: peers are filtered by
+        # _peer_is_displayable); this dedicated table carries the in-progress /
         # resumable downloads instead. Added programmatically under the
         # contacts tree (gridLayout_2 row 2) to avoid regenerating the .ui.
         self.transfers_model = DownloadsModel()  # noqa: F405
@@ -1280,8 +1281,8 @@ class MainWindow(QMainWindow):
                 )
 
     async def _process_peer_added(self, conversation_id, name) -> None:
-        # Defensive (TODO item 2): a dynamically-announced peer could be a
-        # synthetic substream; never render those into the contacts tree.
+        # A dynamically-announced peer could be a synthetic substream; never
+        # render those into the contacts tree.
         if name.startswith(network._SUBSTREAM_NAME_PREFIX):
             return
         if not await self._wait_for_conversation_state(conversation_id, what="peer_added_listener"):
@@ -1296,7 +1297,7 @@ class MainWindow(QMainWindow):
             return
         new_item = QStandardItem(name)
         # Tag like add_conversation's peers so the per-peer pause/resume
-        # context menu (TODO item 5) works on dynamically-announced members
+        # context menu works on dynamically-announced members
         # too. The queue only carries (conversation_id, name); resolve the
         # read cap/own-ness from the DB.
         async with persistent.asession() as _sess:
@@ -1312,14 +1313,12 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def peer_context_menu(self, pos) -> None:
-        """Per-peer pause/resume (TODO item 5): right-clicking a peer row
+        """Per-peer pause/resume: right-clicking a peer row
         under a conversation offers Pause/Resume for exactly that peer's
-        read stream. A dead substream otherwise keeps the drain loop
-        re-casting its BoxIDNotFound read every 15s forever; pausing the
-        peer stops the re-reads (and cancels any in-flight ARQ) without
-        touching the rest of the conversation. Our own row (we never read
-        from ourselves, active=False) and the conversation rows get no
-        menu."""
+        read stream. Pausing stops the re-reads (and cancels any in-flight
+        ARQ) without touching the rest of the conversation; our own row (we
+        never read from ourselves, active=False) and the conversation rows
+        get no menu."""
         tree = self.ui.contacts_treeWidget
         idx = tree.indexAt(pos)
         if not idx.isValid():
@@ -1881,7 +1880,7 @@ class MainWindow(QMainWindow):
             ))
             return
         for name in added:
-            # Defensive (TODO item 2): never render synthetic substream peers.
+            # Synthetic substream peers are never rendered.
             if name.startswith(network._SUBSTREAM_NAME_PREFIX):
                 continue
             convo.contacts_standard_item.appendRow(QStandardItem(name))
@@ -1960,7 +1959,7 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        # Defensive (TODO item 2): never render synthetic substream peers.
+        # Synthetic substream peers are never rendered.
         if not joiner_name.startswith(network._SUBSTREAM_NAME_PREFIX):
             convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
@@ -2096,7 +2095,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         if not _peer_is_displayable(peer):
             continue
         ptwi = QStandardItem(peer.name)
-        # The peer row is the per-peer pause/resume target (TODO item 5):
+        # The peer row is the per-peer pause/resume target:
         # tag it with its read cap (the bacap_stream the drain reads on) so
         # the contacts-tree context menu can resolve the right stream, and
         # mark our own row so the menu can refuse to "pause" ourselves.

@@ -155,7 +155,7 @@ class SendOperation(BaseModel):
 
         # Put the release in the original bacap stream:
         # 1. We need a ReadCapWal that points to the `agg_bacap_stream`:
-        #    substream_total_chunks (TODO item 4) counts the C-chunks plus the
+        #    substream_total_chunks counts the C-chunks plus the
         #    final F chunk, so the reader/GUI can render download progress as
         #    n/total over this substream's ReceivedPiece rows. None means a
         #    legacy (136-byte) I-chunk where the total is unknowable.

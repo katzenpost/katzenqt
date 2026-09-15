@@ -55,8 +55,8 @@ ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save
 ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
 ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
 
-# TODO item 4: Transfers panel roles. The table is driven by DownloadsModel
-# below; these custom roles let a future delegate/QML entry fetch the
+# Custom roles for the Transfers panel. The table is driven by DownloadsModel
+# below; these roles let a future delegate/QML entry fetch the
 # structured pieces/total rather than parsing the display text.
 ROLE_TRANSFER_RCW_ID = 0x200
 ROLE_TRANSFER_CONV_ID = 0x201
@@ -76,7 +76,7 @@ _TRANSFER_ROLES = {
 
 
 class DownloadsModel(QtCore.QAbstractTableModel):
-    """Rows of in-progress/resumable substream file transfers (TODO item 4).
+    """Rows of in-progress/resumable substream file transfers.
 
     Backs the Transfers QTableView. Columns: Contact, Progress, State, with
     the substream's ReadCapWAL id carried as ROLE_TRANSFER_RCW_ID for the
@@ -195,9 +195,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         """Populate rows for resumable substream transfers already on disk.
 
         A substream is resumable when its peer is still active (currently
-        reading) *or* it has ReceivedPiece rows (paused mid-transfer). This
-        replaces the pause/resume handle that TODO item 2 removed from the
-        contacts tree for dead substreams.
+        reading) *or* it has ReceivedPiece rows (paused mid-transfer). The
+        Transfers panel is where substream transfers are paused/resumed, so
+        this seeding keeps the panel populated across a GUI restart.
         """
         async with persistent.asession() as sess:
             from . import network
@@ -236,7 +236,7 @@ async def _substream_parent_name(sess, cp) -> str:
     if parent is not None:
         return parent.name
     # Fall back to the conversation name; the substream peer itself is
-    # synthetic and must never surface (TODO item 2).
+    # synthetic and must never surface.
     conv = await sess.get(persistent.Conversation, cp.conversation.id)
     return conv.name if conv is not None else cp.name
 

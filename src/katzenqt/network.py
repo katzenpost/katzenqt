@@ -41,7 +41,7 @@ conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`
 # path; the GUI appends the name to the contacts tree in its own listener.
 peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 
-# TODO item 4: substream file-transfer progress for the GUI Transfers panel.
+# Substream file-transfer progress for the GUI Transfers panel.
 # Events are ``(kind, rcw_id, *extra)``:
 #   ("started", rcw_id, conversation_id, total_or_None, parent_name)
 #   ("piece",    rcw_id, count_or_None)      # count is pieces received so far
@@ -56,7 +56,7 @@ __resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in Mi
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
 
 # in-flight drain_mixwal_read_single tasks keyed by bacap_stream, so an
-# external pause/cancel (TODO item 5) can stop just one peer's reads
+# external pause/cancel can stop just one peer's reads
 # instead of quitting the whole drain loop.
 _inflight_reads: "dict[uuid.UUID, asyncio.Task]" = {}
 
@@ -328,16 +328,10 @@ READ_WATCHDOG_SECONDS = 1200.0
 # waiting on the old connection; an epoch rollover makes the courier
 # reject the (now-stale) envelope outright.
 #
-# 30s was too tight for encrypt_read/encrypt_write/new_keypair/
-# get_message_box_index_counter under real contention: the docker
-# integration suite runs 4 parallel workers against one shared kpclientd,
-# and these "should be fast, local" RPCs can legitimately queue behind
-# each other's concurrent requests for longer than that -- confirmed by CI
-# (encrypt_write and the pre-existing encrypt_read backstop both tripped
-# in the same run, PR #66's docker-integration job). Both values raised to
-# give real headroom for that contention while staying far short of
-# READ_WATCHDOG_SECONDS above, which is sized for a genuine network
-# round-trip rather than these local calls.
+# These are local daemon RPCs that can legitimately queue behind other
+# workers sharing one kpclientd; the grace is sized to absorb that
+# contention while staying far short of READ_WATCHDOG_SECONDS, which is
+# for a genuine network round-trip.
 _RECONNECT_GRACE_SECONDS = 90.0
 _DAEMON_RPC_TIMEOUT_SECONDS = 90.0
 
@@ -469,8 +463,8 @@ async def _substream_parent(
 
     A synthetic substream peer is named ``:substream:<parent_id>:<nonce>``.
     Returns the parent peer, or None when the name is malformed or the parent
-    no longer exists, so the caller can retire the peer instead of raising in
-    the read loop (a non-integer id used to crash it on every restart).
+    no longer exists, so the caller retires the peer instead of raising
+    inside the read loop.
     """
     parts = name.split(":")
     if len(parts) < 4:
@@ -756,12 +750,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
   except asyncio.TimeoutError:
-    # A lost read reply can strand `_send_and_wait` forever: the thinclient's
-    # reconnect-replay may deliver the courier's reply to a query_id with no
-    # listener left (dropped), and the awaiting coroutine never sees an
-    # exception or cancel. The courier keeps the box and re-serves it, so
-    # abort the in-flight ARQ at the daemon and let the drain loop re-cast
-    # the same box with a fresh query id.
+    # No reply within the watchdog: the courier keeps the box and re-serves
+    # it, so abort the in-flight ARQ at the daemon and let the drain loop
+    # re-cast the same box with a fresh query id.
     logger.warning(
         "drain_mixwal_read_single: read for bacap_stream=%s exceeded watchdog"
         " (%s s); cancelling the in-flight ARQ and re-scheduling",
@@ -781,7 +772,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
   except asyncio.CancelledError:
-    # An external pause (TODO item 5) cancelled the drain task while the
+    # An external pause cancelled the drain task while the
     # read ARQ was in flight. Cancel the same in-flight ARQ at the daemon
     # so its retransmits stop too, then re-raise so the drain loop's
     # done-callback releases the stream from draining_right_now. The MW
@@ -934,7 +925,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 chunk=chunk_body,
             ))
 
-    # TODO item 4: substream progress events, held until the transaction
+    # Substream progress events, held until the transaction
     # commits and fired for the GUI's transfers_listener. count() runs in
     # the same (unflushed) transaction, so it already includes the row
     # just added above -- matching the ReceivedPiece count the Transfers
@@ -1010,7 +1001,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     cp.active = False
                     sess.add(cp)
                     convlog_added = added
-                    # TODO item 4: the transfer is complete (terminal F
+                    # The transfer is complete (terminal F
                     # assembled and routed). Held until commit.
                     substream_progress.append(("completed", mw.bacap_stream))
                 else:
@@ -1033,7 +1024,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     next_index=substream_read_cap[-104:],
                 )
             elif len(substream_read_cap) == 140:
-                # Extended I-chunk (TODO item 4): bytes 0-3 carry the total
+                # Extended I-chunk: bytes 0-3 carry the total
                 # plaintext chunk count (C-chunks + final F), bytes 4-139 are
                 # the 136-byte read cap. Parse defensively: an out-of-range
                 # count still just means indeterminate progress, never a crash.
@@ -1059,7 +1050,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     conversation=cp.conversation,
                 )
                 sess.add(substream_peer)
-                # TODO item 4: announce the new download. Held until commit.
+                # Announce the new download. Held until commit.
                 substream_progress.append((
                     "started", new_rcw.id, cp.conversation.id,
                     new_rcw.substream_total_chunks,
@@ -1098,7 +1089,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     readables_to_mixwal_event.set()
 
   if substream_progress:
-    # TODO item 4: fire held substream events for the GUI Transfers panel,
+    # Fire held substream events for the GUI Transfers panel,
     # after the commit so listeners never observe uncommitted pieces.
     for event in substream_progress:
       substream_progress_queue.put_nowait(event)
@@ -1115,7 +1106,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
 
 async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
-    """Stop reading a single peer (TODO item 5 pause): cancel the in-flight
+    """Stop reading a single peer: cancel the in-flight
     drain task (which also cancels its ARQ at the daemon), delete any
     pending is_read MixWAL row so the 15s drain sweep can never re-cast it,
     and set the peer inactive so readables_to_mixwal never re-arms it.
@@ -1157,16 +1148,16 @@ async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
     readables_to_mixwal_event.set()
     __mixwal_updated.set()
     if is_substream:
-        # TODO item 4: the Transfers panel mirrors pause state.
+        # The Transfers panel mirrors pause state.
         substream_progress_queue.put_nowait(("paused", bacap_stream))
 
 
 async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
-    """Resume reading a paused peer (TODO item 5): mark it active and poke
+    """Resume reading a paused peer: mark it active and poke
     readables_to_mixwal so a fresh is_read MixWAL row is armed from the
     saved ReadCapWAL.next_index. This is also the retry primitive for a
-    dead substream (TODO item 4): re-arming reads from the same index,
-    keeping Already-gathered ReceivedPiece rows."""
+    dead substream: re-arming reads from the same index,
+    keeping already-gathered ReceivedPiece rows."""
     async with persistent.asession() as sess:
         cp = (await sess.exec(select(persistent.ConversationPeer).where(
             persistent.ConversationPeer.read_cap_id == bacap_stream,
@@ -1180,7 +1171,7 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         await sess.commit()
     readables_to_mixwal_event.set()
     if is_substream:
-        # TODO item 4: the Transfers panel mirrors resume state.
+        # The Transfers panel mirrors resume state.
         substream_progress_queue.put_nowait(("resumed", bacap_stream))
 
 
@@ -1579,7 +1570,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                         row.id, row.indirection,
                     )
                     rcw = await sess.get(persistent.ReadCapWAL, row.indirection)
-                    # TODO item 4: extended I-chunk carries the total plaintext
+                    # Extended I-chunk carries the total plaintext
                     # chunk count (C-chunks + final F) as a 4-byte big-endian
                     # prefix, so the reader can render progress n/total. rcw is
                     # the sender's indirection ReadCapWAL created in

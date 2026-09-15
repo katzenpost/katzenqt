@@ -674,8 +674,8 @@ async def _build_who_reply(conversation_id: int) -> models.GroupChatReplyWho:
         for peer in conv.peers:
             if not peer.active or peer.id == conv.own_peer_id:
                 continue
-            # TODO item 2: never offer synthetic substream peers (internal
-            # download machinery) for a newcomer to add.
+            # Synthetic substream peers (internal download machinery) are never
+            # offered for a newcomer to add.
             if peer.name.startswith(_SUBSTREAM_NAME_PREFIX):
                 continue
             rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id)

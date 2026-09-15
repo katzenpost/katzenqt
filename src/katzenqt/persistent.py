@@ -345,7 +345,7 @@ class ReadCapWAL(SQLModel, table=True):
     write_cap_id : uuid.UUID | None = Field(foreign_key="writecapwal.id", index=True)
     read_cap: bytes | None = Field(None, min_length=136, max_length=136)
     next_index: bytes | None = Field(None, min_length=104, max_length=104)
-    # TODO item 4: sent on the extended I-chunk (wire bytes 1-4). Total
+    # Sent on the extended I-chunk (wire bytes 1-4). Total
     # plaintext chunks (C-chunks + final F) of a substream file transfer, only
     # set on the substream transfer's own ReadCapWAL. None means the peer sent
     # a legacy (136-byte) I-chunk, so the denominator is unknown and progress

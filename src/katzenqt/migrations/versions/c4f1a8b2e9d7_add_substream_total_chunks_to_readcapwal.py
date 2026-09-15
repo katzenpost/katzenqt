@@ -4,7 +4,7 @@ Revision ID: c4f1a8b2e9d7
 Revises: d08418a855a1
 
 Carries the total plaintext chunk count (C-chunks + final F) of a substream
-file transfer so the GUI can render download progress as n/total (TODO item 4).
+file transfer so the GUI can render download progress as n/total.
 NULL means the peer sent a legacy 136-byte I-chunk and the total is unknown.
 """
 from typing import Sequence, Union
