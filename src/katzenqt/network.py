@@ -4,7 +4,7 @@ from katzenpost_thinclient import (
     ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
     DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
-    CourierError, CourierInvalidEpochError,
+    CourierError, CourierInvalidEpochError, ReplicaError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -234,7 +234,7 @@ async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, 
                 message_box_index=mw.current_message_index),
             backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
         )
-    except Exception as e:
+    except _REMINT_TRANSIENT_ERRORS as e:
         logger.warning("re-mint encrypt_write failed, will retry: %s", e)
         return False
     return await _remint_mixwal(mw, fresh)
@@ -427,6 +427,12 @@ class ConnectionLifeInterruptedError(Exception):
     a transient failure: release the stream and let the drain loop re-cast
     (re-encrypting a fresh envelope for reads, re-sending the same
     idempotent envelope for writes)."""
+
+
+_REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
+    ThinClientOfflineError, BrokenPipeError, CourierError, ReplicaError,
+    StartResendingCancelledError, ConnectionLifeInterruptedError,
+)
 
 
 async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
