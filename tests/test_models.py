@@ -119,6 +119,26 @@ def test_serialize_assigns_non_null_id_to_every_pwal():
     assert len(set(ids)) == len(ids), f"duplicate PWAL ids: {ids}"
 
 
+def test_serialize_sets_substream_total_chunks_on_multi_chunk():
+    """TODO item 4: a multi-box send's indirection ReadCapWAL carries the
+    total plaintext chunk count (C-chunks + final F) so the Transfers panel
+    can render progress as n/total over the substream's ReceivedPiece rows."""
+    text = "X" * 4000  # forces multi-box split: several C + one F
+    m = models.GroupChatMessage(
+        version=0, membership_hash=b"a" * 32, text=text,
+    )
+    s = models.SendOperation(messages=[m], bacap_stream=uuid.uuid4())
+    _, ser = s.serialize(chunk_size=1530, conversation_id=123)
+
+    rcws = [e for e in ser if isinstance(e, persistent.ReadCapWAL)]
+    assert len(rcws) == 1, f"expected exactly one indirection ReadCapWAL, got {len(rcws)}"
+    c_count = sum(
+        1 for e in ser
+        if isinstance(e, persistent.PlaintextWAL) and e.bacap_payload[:1] == b"C"
+    )
+    assert rcws[0].substream_total_chunks == c_count + 1
+
+
 def test_clamp_message_text_leaves_normal_messages_untouched():
     msg = "a normal chat message"
     assert models.clamp_message_text(msg) == msg

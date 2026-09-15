@@ -1100,6 +1100,171 @@ class TestDrainMixwalReadSingle:
             assert pieces[0].chunk_type == b"I"
 
     @pytest.mark.asyncio
+    async def test_extended_i_chunk_creates_substream_with_total(
+        self, fake_thinclient,
+    ):
+        """TODO item 4 receive side: a 140-byte I-chunk (b'I' + 4-byte BE
+        total + 136-byte read cap) must spawn a substream ReadCapWAL that
+        carries the total and a substream peer, and fire a ``started``
+        event carrying the conversation id, total, and parent peer name."""
+        stub_read_cap = b"\xee" * 136
+        plaintext = b"I" + (7).to_bytes(4, "big") + stub_read_cap
+        assert len(plaintext) == 141
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=plaintext, peer_name="parent_alice",
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            substreams = (await sess.exec(
+                select(persistent.ReadCapWAL).where(
+                    persistent.ReadCapWAL.read_cap == stub_read_cap,
+                )
+            )).all()
+            assert len(substreams) == 1
+            rcw = substreams[0]
+            assert rcw.substream_total_chunks == 7
+            assert rcw.next_index == stub_read_cap[-104:]
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == rcw.id,
+                )
+            )).all()
+            assert len(peers) == 1
+            assert peers[0].name.startswith(network._SUBSTREAM_NAME_PREFIX)
+            assert peers[0].active is True
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "started"
+        _, started_rcw, conv_id, total, parent_name = event
+        assert started_rcw == rcw.id
+        assert conv_id == setup["conversation_id"]
+        assert total == 7
+        assert parent_name == "parent_alice"
+        assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_legacy_i_chunk_creates_substream_without_total(
+        self, fake_thinclient,
+    ):
+        """TODO item 4 receive side, legacy form: a plain 136-byte I-chunk
+        (no total prefix) still spawns the substream, but the ReadCapWAL's
+        total stays None and the ``started`` event's total is None so the
+        Transfers panel renders indeterminate progress."""
+        stub_read_cap = b"\xdd" * 136
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=b"I" + stub_read_cap,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            substreams = (await sess.exec(
+                select(persistent.ReadCapWAL).where(
+                    persistent.ReadCapWAL.read_cap == stub_read_cap,
+                )
+            )).all()
+            assert len(substreams) == 1
+            assert substreams[0].substream_total_chunks is None
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "started"
+        assert event[3] is None
+        assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_substream_piece_read_fires_piece_event(
+        self, fake_thinclient,
+    ):
+        """TODO item 4: reading a C-chunk on a substream peer queues a
+        single ``piece`` event carrying the accumulated ReceivedPiece count
+        for that substream (matching the Transfers panel's n/total)."""
+        setup = await _set_up_read_flow(
+            fake_thinclient, peer_name=":substream:2:abc", plaintext=b"Cchunk",
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "piece"
+        assert event[1] == setup["bacap_stream"]
+        assert event[2] == 1  # the C-chunk just stored counts as one piece
+        assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_substream_terminal_f_fires_completed_event(
+        self, fake_thinclient,
+    ):
+        """TODO item 4: assembling the substream's terminal F (through a
+        parent peer that resolves from the substream name) retires the
+        substream and queues a single ``completed`` event so the Transfers
+        panel drops the row."""
+        # Parent conversation + peer first (auto pk=2), so the substream
+        # name ":substream:2:abc" resolves during dispatch.
+        async with persistent.asession() as sess:
+            wcw_id = uuid.uuid4()
+            wcw = persistent.WriteCapWAL(
+                id=wcw_id, write_cap=b"\xab" * 168, next_index=b"\x00" * 104,
+            )
+            rcw = persistent.ReadCapWAL(
+                id=wcw_id, write_cap_id=wcw_id,
+                read_cap=b"\xac" * 136, next_index=b"\x00" * 104,
+            )
+            sess.add_all((wcw, rcw))
+            await sess.flush()
+            parent_peer = persistent.ConversationPeer(
+                name="carol",
+                read_cap_id=wcw_id,
+                active=True,
+            )
+            sess.add(parent_peer)
+            await sess.flush()
+            parent_id = parent_peer.id
+            await sess.commit()
+            parent_conv = persistent.Conversation(
+                name="carol-conv", own_peer_id=parent_id,
+                write_cap=wcw_id,
+            )
+            sess.add(parent_conv)
+            await sess.commit()
+            await sess.refresh(parent_conv)
+            link = persistent.ConversationPeerLink(
+                conversation_peer_id=parent_id,
+                conversation_id=parent_conv.id,
+            )
+            sess.add(link)
+            await sess.commit()
+            assert parent_id == 1
+
+        setup = await _set_up_read_flow(
+            fake_thinclient,
+            peer_name=f":substream:{parent_id}:abc",
+            plaintext=_make_F_payload("finalised"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "piece"
+        assert event[1] == setup["bacap_stream"]
+        assert event[2] == 1
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "completed"
+        assert event[1] == setup["bacap_stream"]
+        assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
     async def test_invalid_prefix_deactivates_peer(self, fake_thinclient):
         setup = await _set_up_read_flow(fake_thinclient, plaintext=b"Xunknown")
         async with persistent.asession() as sess:
@@ -1569,6 +1734,10 @@ class TestPauseResumePeerReads:
             ))).one()
             assert cp.active is False
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+        # TODO item 4: the pause announces itself to the Transfers panel.
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "paused"
+        assert event[1] == setup["bacap_stream"]
         # Resume must run on a paused stream even though the drain loop
         # re-arms it (fresh MW) only when a connection is present.
         await network.resume_peer_reads(bacap_stream=setup["bacap_stream"])
@@ -1577,6 +1746,9 @@ class TestPauseResumePeerReads:
                 persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
             ))).one()
             assert cp.active is True
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "resumed"
+        assert event[1] == setup["bacap_stream"]
 
     @pytest.mark.asyncio
     async def test_resume_rearms_read_from_saved_index(self, fake_thinclient):

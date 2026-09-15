@@ -186,6 +186,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         idx0 = self.index(row, 2)
         self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_ACTIVE])
 
+    def _idx(self, rcw_id: uuid.UUID) -> int:
+        return self._order.index(rcw_id)
+
     # -- startup seeding ----------------------------------------------------
 
     async def seed_from_db(self) -> None:

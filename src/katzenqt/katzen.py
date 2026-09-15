@@ -1407,24 +1407,34 @@ class MainWindow(QMainWindow):
         happens directly (we are already on the Qt main thread).
         """
         while True:
-            event = await self.iothread.run_in_io(
-                network.substream_progress_queue.get,
-            )
-            kind = event[0]
-            rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]
-            if kind == "started":
-                _, _, conv_id, total, parent_name = event
-                self.transfers_model.start_transfer(
-                    rcw_id, conv_id, parent_name, total,
+            try:
+                event = await self.iothread.run_in_io(
+                    network.substream_progress_queue.get,
                 )
-            elif kind == "piece":
-                self.transfers_model.notify_piece(rcw_id, event[2])
-            elif kind == "completed":
-                self.transfers_model.complete_transfer(rcw_id)
-            elif kind == "paused":
-                self.transfers_model.set_paused(rcw_id, paused=True)
-            elif kind == "resumed":
-                self.transfers_model.set_paused(rcw_id, paused=False)
+                kind = event[0]
+                rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]
+                if kind == "started":
+                    _, _, conv_id, total, parent_name = event
+                    self.transfers_model.start_transfer(
+                        rcw_id, conv_id, parent_name, total,
+                    )
+                elif kind == "piece":
+                    self.transfers_model.notify_piece(rcw_id, event[2])
+                elif kind == "completed":
+                    self.transfers_model.complete_transfer(rcw_id)
+                elif kind == "paused":
+                    self.transfers_model.set_paused(rcw_id, paused=True)
+                elif kind == "resumed":
+                    self.transfers_model.set_paused(rcw_id, paused=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: a malformed event must
+                # not kill the whole Transfers listener.
+                logger.error(
+                    "transfers_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
 
     def convo_state(self) -> ConversationUIState:
         convo = self.convo_state_or_none()
