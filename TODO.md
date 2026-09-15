@@ -384,6 +384,25 @@ Shipped surface (per decisions on 2026-09-14):
   uncommitted pieces (OperationalError retries roll back both the rows and
   the pending events).
 
+### Step 2.3 — Transfers panel (DONE in `b80e715`, 2026-09-15)
+
+- `qt_models.DownloadsModel(QAbstractTableModel)`: rows keyed by ReadCapWAL id;
+  columns Contact / Progress / State, plus structured roles
+  `ROLE_TRANSFER_RCW_ID` (0x200) and `ROLE_TRANSFER_*` for pieces/total/active.
+  Methods `start_transfer` (insert or refresh unknown total),
+  `notify_piece`, `complete_transfer` (remove row), `set_paused`.
+- `MainWindow.__init__` builds `transfers_model` + `transfers_view`
+  (QTableView, gridLayout_2 row 2, under the contacts tree) with a custom
+  context menu; `transfers_context_menu` toggles Pause/Resume via the item-5
+  `network.pause_peer_reads`/`resume_peer_reads` primitives.
+- `transfers_listener()` mirrors `receive_msg_listener` (queue.get on the IO
+  thread, model mutation on the Qt thread) and translates
+  started/piece/completed/paused/resumed events into model calls.
+- `main()` starts `transfers_listener()` and seeds the panel from the DB with
+  `await transfers_model.seed_from_db()` (resumable = active peer or
+  has ReceivedPiece rows; parent display name via `_substream_parent_name`,
+  hiding the synthetic `:substream:` peer name).
+
 ---
 
 ## 5. Feature: per-peer pause/resume (and the retry primitive for dead substreams)
