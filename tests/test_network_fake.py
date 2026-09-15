@@ -763,6 +763,10 @@ class TestDrainMixwalWriteSingle:
 
     @pytest.mark.asyncio
     async def test_write_remint_failure_keeps_row(self, fake_thinclient):
+        """A failed re-mint must leave the stored envelope alone and still
+        hand the stream back through give_up(), which always signals the
+        scheduler. The hot-retry guard is give_up()'s 5 s backoff, not a
+        withheld signal."""
         setup = await _set_up_write_flow(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message",
@@ -778,8 +782,9 @@ class TestDrainMixwalWriteSingle:
             row = await sess.get(persistent.MixWAL, setup["mw_id"])
             assert row is not None
             assert row.envelope_hash == setup["wcr"].envelope_hash
+            assert row.encrypted_payload == setup["wcr"].message_ciphertext
         assert setup["bacap_stream"] not in draining
-        assert not getattr(network, "__mixwal_updated").is_set()
+        assert getattr(network, "__mixwal_updated").is_set()
 
     @pytest.mark.asyncio
     async def test_generic_courier_error_releases_write_stream(self, fake_thinclient):
