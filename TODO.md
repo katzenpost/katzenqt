@@ -403,6 +403,37 @@ Shipped surface (per decisions on 2026-09-14):
   has ReceivedPiece rows; parent display name via `_substream_parent_name`,
   hiding the synthetic `:substream:` peer name).
 
+### Step 2.4 — tests (DONE in `08a253b`, 2026-09-15)
+
+- `tests/test_downloads_model.py` (8, offscreen QGuiApplication): inserts
+  unknown-total UI rows in proportion to `substream_total_chunks`, refresh
+  jumps to the larger denominator, `notify_piece` increments state text, the
+  final piece keeps the target visible, unknown ids are ignored, `complete`
+  removes rows, `set_paused` toggles the State column + active role,
+  column/role header metadata, and `seed_from_db` restores resumable transfers
+  (filters active peers / peers with ReceivedPiece rows).
+- `tests/test_network_fake.py` receive-side events: extended I-chunk (140 B)
+  persists `substream_total_chunks` and its `started` event carries
+  (rcw, conv_id, total, parent_name); legacy 136-byte `started` carries
+  total None; each substream C-chunk read fires `("piece", rcw, count)`; the
+  terminal F assembles through the parent peer resolved from the substream
+  name and fires `("completed", rcw)`. `TestPauseResumePeerReads` now asserts
+  the `paused`/`resumed` events.
+- `tests/test_listener_hardening.py` `TestTransfersListenerDrainsEvents`:
+  `transfers_listener` dispatches all five event kinds to `DownloadsModel`
+  and, like the other UI listeners, survives a per-item error (log-and-
+  continue). This test exposed two fixes shipped in `08a253b`: the missing
+  `DownloadsModel._idx` helper, and the missing try/except wrapper in
+  `transfers_listener` itself.
+- `tests/test_models.py` `test_serialize_sets_substream_total_chunks_on_multi_chunk`
+  pins the C-chunks+1 denominator on multi-box sends.
+- `tests/conftest.py`: the state-reset hook now drains
+  `network.substream_progress_queue` so module-level events cannot leak
+  across tests.
+- Still deferred to item 5: a GUI test driving the actual
+  `pause_peer_reads`/`resume_peer_reads` calls from the panel's context
+  menu.
+
 ---
 
 ## 5. Feature: per-peer pause/resume (and the retry primitive for dead substreams)
