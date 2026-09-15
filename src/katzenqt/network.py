@@ -120,7 +120,8 @@ async def on_new_pki_document(event: "Dict[str, Any]") -> None:
     epoch = doc.get("Epoch")
     if epoch is None or epoch == _last_epoch:
         return
-    _last_epoch = epoch
+    previous, _last_epoch = _last_epoch, epoch
+    logger.info("PKI epoch advanced to %s (from %s)", epoch, previous)
     old_event, _epoch_event = _epoch_event, asyncio.Event()
     old_event.set()
 
@@ -698,6 +699,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
 
+  read_started = asyncio.get_running_loop().time()
   try:
     # Re-read the current globals rather than reuse the markers captured
     # above: if a reconnect or epoch rollover fired during the encrypt_read
@@ -746,9 +748,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # abort the in-flight ARQ at the daemon and let the drain loop re-cast
     # the same box with a fresh query id.
     logger.warning(
-        "drain_mixwal_read_single: read for bacap_stream=%s exceeded watchdog"
-        " (%s s); cancelling the in-flight ARQ and re-scheduling",
-        bacap_uuid, read_watchdog_s,
+        "drain_mixwal_read_single: read for bacap_stream=%s gave up after"
+        " %.1f s (watchdog %s s); cancelling the in-flight ARQ and re-scheduling",
+        bacap_uuid, asyncio.get_running_loop().time() - read_started,
+        read_watchdog_s,
     )
     try:
         await asyncio.wait_for(
