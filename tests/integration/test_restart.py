@@ -270,11 +270,11 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
     timestamps the observation. Since both STEP_OK lines carry ts=,
     we can compute per-message gap "bob SENT ts" - "alice RECV ts".
 
-    Generous bounds are asserted on the latency: mean gap < 120s and
-    per-message gap < 240s. Observed values on a healthy local docker
-    mixnet sit around 20s mean / 25s max, so these limits exist mostly
-    to catch the failure mode where alice silently never reads — the
-    timestamps in the pytest log remain the actual diagnostic.
+    Generous bounds are asserted on the latency: mean gap < 240s and
+    per-message gap < 480s. A healthy local mixnet sits near 20s mean,
+    but CI has measured 23s to 63s on passing runs and a contended
+    runner scales the suite by 2.5x, so these are sized for CI. They
+    catch alice silently never reading; proc.wait(1200) catches a stall.
     """
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
@@ -349,12 +349,12 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
           f"mean={mean_gap:.2f}s")
     assert bob_proc.returncode == 0
     assert alice_proc.returncode == 0
-    assert mean_gap < 120.0, (
-        f"bob->alice mean read latency {mean_gap:.1f}s exceeds 120s ceiling; "
+    assert mean_gap < 240.0, (
+        f"bob->alice mean read latency {mean_gap:.1f}s exceeds 240s ceiling; "
         f"per-message gaps={[f'{g:.1f}' for g in gaps]}"
     )
-    assert max_gap < 240.0, (
-        f"bob->alice per-message read latency {max_gap:.1f}s exceeds 240s ceiling; "
+    assert max_gap < 480.0, (
+        f"bob->alice per-message read latency {max_gap:.1f}s exceeds 480s ceiling; "
         f"per-message gaps={[f'{g:.1f}' for g in gaps]}"
     )
 
