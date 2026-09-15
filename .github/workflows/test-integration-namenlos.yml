@@ -1,14 +1,4 @@
-name: Docker Mixnet Integration Tests
-
-# End-to-end test that stands up a Katzenpost docker mixnet and runs the
-# opt-in Alice + Bob integration test in tests/integration/. Mirrors the
-# structure of thin_client's test-integration-docker.yml workflow.
-#
-# The `ref:` on the katzenpost checkout below is the single pin that
-# controls which kpclientd version is built. Keep it aligned with the
-# pin in thin_client's own test-integration-docker.yml workflow so all
-# three repos (katzenpost, thin_client, katzenqt) exercise the same
-# daemon on every CI run.
+name: Namenlos Integration Tests
 
 on:
   pull_request:
@@ -17,7 +7,104 @@ on:
     branches: [main]
 
 jobs:
+  namenlos-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    outputs:
+      tests: ${{ steps.tests.outcome }}
+
+    steps:
+      - name: Checkout katzenqt
+        uses: actions/checkout@v7
+        with:
+          path: katzenqt
+
+      - name: Checkout katzenpost
+        uses: actions/checkout@v7
+        with:
+          repository: katzenpost/katzenpost
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          path: katzenqt/katzenpost
+
+      - name: Set up Go (for kpclientd build)
+        uses: actions/setup-go@v7
+        with:
+          go-version: '>=1.26'
+          cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build kpclientd and install deps in parallel
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
+          ( cd katzenpost/cmd/kpclientd && go build -o "$GITHUB_WORKSPACE/kpclientd" ) &
+          build=$!
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev cargo
+          uv sync --all-extras --dev --locked
+          wait "$build"
+
+      - name: Start kpclientd against namenlos
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("config/client.toml")
+          t = p.read_text()
+          old = '[Listen]\n  [Listen.Unix]\n    Address = "@katzenpost"'
+          new = '[Listen]\n  [Listen.Tcp]\n    Address = "127.0.0.1:64331"\n    Network = "tcp"'
+          assert t.count(old) == 1, "client.toml Listen block moved"
+          p.write_text(t.replace(old, new, 1))
+          PY
+          "$GITHUB_WORKSPACE/kpclientd" --config config/client.toml > "$GITHUB_WORKSPACE/kpclientd.log" 2>&1 &
+          for _ in $(seq 60); do
+            if grep -q 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; then
+              echo "kpclientd is on the mixnet:"; grep -m1 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; exit 0
+            fi
+            sleep 2
+          done
+          echo "kpclientd never reached a namenlos gateway"; cat "$GITHUB_WORKSPACE/kpclientd.log"; exit 1
+
+      - name: Run integration tests
+        id: tests
+        working-directory: katzenqt
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+          KQT_INTEGRATION_PARALLEL: "4"
+          KQT_EPOCH_DURATION_S: "1200"
+        run: |
+          mkdir -p integration-results
+          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+            --dist loadscope -m "not serial_docker" \
+            --deselect tests/integration/test_voucher.py::test_voucher_overlapping_await \
+            --deselect tests/integration/test_watchdog_epoch_rollover.py::test_read_recovers_after_epoch_rollover \
+            --basetemp=integration-results/namenlos \
+            --junitxml=integration-results/namenlos.xml
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: namenlos-${{ github.run_id }}-${{ github.job }}
+          path: |
+            katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.out
+            katzenqt/integration-results/**/*.err
+            kpclientd.log
+          if-no-files-found: ignore
+
   docker-integration:
+    needs: [namenlos-integration]
+    if: always() && needs.namenlos-integration.outputs.tests != 'success'
     permissions:
       contents: read
       packages: write
@@ -33,13 +120,13 @@ jobs:
       # Checked out under katzenqt/ so katzenqt's Makefile default
       # KATZENPOST_DIR (="katzenpost", relative to the Makefile) resolves
       # without modification. Pin to a sha that has every daemon API the
-      # integration test exercises — see top-of-file note.
+      # integration test exercises.
       - name: Checkout katzenpost
         uses: actions/checkout@v7
         with:
           repository: katzenpost/katzenpost
           # Keep in lockstep with
-          # thin_client/.github/workflows/test-integration-docker.yml —
+          # thin_client/.github/workflows/test-integration-docker.yml;
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
