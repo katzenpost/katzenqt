@@ -18,11 +18,19 @@ Skipped unless KATZENQT_DOCKER_INTEGRATION=1 (see conftest.py).
 """
 from __future__ import annotations
 
+import re
+
 import time
 
 import pytest
 
-from tests.integration._bounce_helpers import bootstrap_voucher, spawn_role, run_role
+from tests.integration._bounce_helpers import (
+    bootstrap_voucher, epoch_duration_s, run_role, spawn_role,
+)
+
+# Emitted by network.on_new_pki_document on every epoch advance, whatever
+# is in flight, so the poll below and the assertion cannot drift apart.
+_EPOCH_ADVANCE_RE = re.compile(r"PKI epoch advanced to \d+")
 
 
 @pytest.mark.integration
@@ -45,10 +53,20 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
     )
 
     try:
-        # Comfortably more than one docker-mixnet epoch (2m default), so
-        # Alice's read is guaranteed to have spanned at least one rollover
-        # before Bob ever sends anything.
-        time.sleep(140.0)
+        # Wait for a real epoch boundary to pass while Alice's read is
+        # outstanding, rather than sleeping a fixed span and hoping it
+        # covered one. Bounded at two epochs plus margin so a mixnet that
+        # never advances fails here instead of later.
+        deadline = time.time() + 2 * epoch_duration_s() + 30.0
+        while time.time() < deadline:
+            if _EPOCH_ADVANCE_RE.search(alice_err.read_text()):
+                break
+            time.sleep(1.0)
+        else:
+            raise AssertionError(
+                "no PKI epoch advance observed while alice's read was "
+                f"outstanding\n{alice_err.read_text()[-4000:]}"
+            )
 
         send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=750.0)
         assert send.returncode == 0, send.stdout + send.stderr
@@ -76,8 +94,7 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
     )
     # Alice's read spans the 140s sleep; assert a rollover really happened
     # rather than trusting that it still exceeds epoch_duration.
-    import re
-    assert re.search(r"PKI epoch advanced to \d+", alice_all), (
+    assert _EPOCH_ADVANCE_RE.search(alice_all), (
         "no epoch advance during alice's read, so no rollover was exercised\n"
         f"{alice_err.read_text()[-6000:]}"
     )
