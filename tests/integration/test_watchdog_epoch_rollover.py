@@ -4,6 +4,10 @@ peer ever sends anything must still complete promptly once they do,
 rather than hanging on a stale envelope (PR45 finding #5; see
 network.py's on_new_pki_document and _await_read_reply).
 
+The read re-polls locally instead of parking in the daemon's ride-out,
+so no single attempt need span a rollover and the epoch grace log is no
+longer reliable here; test_network_fake.py covers that path.
+
 Relies on the docker mixnet's short epoch_duration (2m by default) to
 observe a real rollover within a reasonable test time. Touches no
 containers at all -- purely a timing scenario -- so it's safe to run
@@ -70,14 +74,10 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
     assert "STEP_OK:0:READ:m1" in alice_all, (
         f"alice never read m1 after the epoch rollover\n{alice_err.read_text()[-6000:]}"
     )
-    # Alice's box doesn't exist until Bob's send below, so her read stays
-    # pending for the entire 140s sleep -- longer than one docker-mixnet
-    # epoch (120s) -- guaranteeing a rollover happened while it was
-    # in-flight. This is the direct confirmation on_new_pki_document fired
-    # and _await_read_reply's epoch-triggered grace path actually engaged.
-    assert "PKI epoch rolled over mid-wait for bacap_stream=" in alice_all, (
-        "the epoch-rollover watchdog path never engaged despite the read "
-        "spanning a full epoch_duration; either it recovered some other "
-        "way, or the fix regressed\n"
+    # Alice's read spans the 140s sleep; assert a rollover really happened
+    # rather than trusting that it still exceeds epoch_duration.
+    import re
+    assert re.search(r"PKI epoch advanced to \d+", alice_all), (
+        "no epoch advance during alice's read, so no rollover was exercised\n"
         f"{alice_err.read_text()[-6000:]}"
     )
