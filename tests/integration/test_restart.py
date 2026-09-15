@@ -376,10 +376,10 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     # Round 1: each sends one message, the other reads.
-    s1a = _run_role(alice_state, "send", "demo", "hello-from-alice", timeout=750.0)
+    s1a = _run_role(alice_state, "send", "demo", "hello-from-alice", "--timeout", "450", timeout=750.0)
     assert s1a.returncode == 0 and "SENT" in _combined(s1a), s1a.stdout + s1a.stderr
 
-    s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", timeout=750.0)
+    s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", "--timeout", "450", timeout=750.0)
     assert s1b.returncode == 0 and "SENT" in _combined(s1b), s1b.stdout + s1b.stderr
 
     r1b = _run_role(bob_state, "read", "demo", "900", "hello-from-alice", timeout=1000.0)
@@ -390,10 +390,10 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     print("[r1] bidirectional exchange complete")
 
     # Round 2 — restart scenario. Fresh subprocesses, state loaded from disk.
-    s2a = _run_role(alice_state, "send", "demo", "round2-from-alice", timeout=750.0)
+    s2a = _run_role(alice_state, "send", "demo", "round2-from-alice", "--timeout", "450", timeout=750.0)
     assert s2a.returncode == 0 and "SENT" in _combined(s2a), s2a.stdout + s2a.stderr
 
-    s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", timeout=750.0)
+    s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", "--timeout", "450", timeout=750.0)
     assert s2b.returncode == 0 and "SENT" in _combined(s2b), s2b.stdout + s2b.stderr
 
     r2b = _run_role(bob_state, "read", "demo", "900", "round2-from-alice", timeout=1000.0)
