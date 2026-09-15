@@ -53,7 +53,7 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         container_stopped = False
         wait_reachable(120.0)
 
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=900.0)
+        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=1200.0)
         assert send.returncode == 0, send.stdout + send.stderr
 
         alice_proc.wait(timeout=2100.0)

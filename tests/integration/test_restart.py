@@ -246,13 +246,13 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     send = _run_role(
-        alice_state, "multi-send", "demo", "m1|m2", timeout=600.0,
+        alice_state, "multi-send", "demo", "m1|m2", timeout=900.0,
     )
     assert send.returncode == 0 and "SENT" in _combined(send), send.stdout + send.stderr
 
     # Bob restarts fresh and must receive both in order.
     for expected in ("m1", "m2"):
-        r = _run_role(bob_state, "read", "demo", "360", expected, timeout=400.0)
+        r = _run_role(bob_state, "read", "demo", "900", expected, timeout=1000.0)
         assert r.returncode == 0, (
             f"bob failed to read {expected!r}:\n"
             f"stdout tail:\n{r.stdout[-3000:]}\nstderr tail:\n{r.stderr[-3000:]}"
@@ -270,11 +270,11 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
     timestamps the observation. Since both STEP_OK lines carry ts=,
     we can compute per-message gap "bob SENT ts" - "alice RECV ts".
 
-    Generous bounds are asserted on the latency: mean gap < 120s and
-    per-message gap < 240s. Observed values on a healthy local docker
-    mixnet sit around 20s mean / 25s max, so these limits exist mostly
-    to catch the failure mode where alice silently never reads — the
-    timestamps in the pytest log remain the actual diagnostic.
+    Generous bounds are asserted on the latency: mean gap < 240s and
+    per-message gap < 480s. A healthy local mixnet sits near 20s mean,
+    but CI has measured 23s to 63s on passing runs and a contended
+    runner scales the suite by 2.5x, so these are sized for CI. They
+    catch alice silently never reading; proc.wait(1200) catches a stall.
     """
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
@@ -349,12 +349,12 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
           f"mean={mean_gap:.2f}s")
     assert bob_proc.returncode == 0
     assert alice_proc.returncode == 0
-    assert mean_gap < 120.0, (
-        f"bob->alice mean read latency {mean_gap:.1f}s exceeds 120s ceiling; "
+    assert mean_gap < 240.0, (
+        f"bob->alice mean read latency {mean_gap:.1f}s exceeds 240s ceiling; "
         f"per-message gaps={[f'{g:.1f}' for g in gaps]}"
     )
-    assert max_gap < 240.0, (
-        f"bob->alice per-message read latency {max_gap:.1f}s exceeds 240s ceiling; "
+    assert max_gap < 480.0, (
+        f"bob->alice per-message read latency {max_gap:.1f}s exceeds 480s ceiling; "
         f"per-message gaps={[f'{g:.1f}' for g in gaps]}"
     )
 
@@ -376,30 +376,30 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     # Round 1: each sends one message, the other reads.
-    s1a = _run_role(alice_state, "send", "demo", "hello-from-alice", timeout=300.0)
+    s1a = _run_role(alice_state, "send", "demo", "hello-from-alice", "--timeout", "450", timeout=750.0)
     assert s1a.returncode == 0 and "SENT" in _combined(s1a), s1a.stdout + s1a.stderr
 
-    s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", timeout=300.0)
+    s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", "--timeout", "450", timeout=750.0)
     assert s1b.returncode == 0 and "SENT" in _combined(s1b), s1b.stdout + s1b.stderr
 
-    r1b = _run_role(bob_state, "read", "demo", "360", "hello-from-alice", timeout=400.0)
+    r1b = _run_role(bob_state, "read", "demo", "900", "hello-from-alice", timeout=1000.0)
     assert r1b.returncode == 0, f"bob read1 failed:\n{r1b.stdout}\n{r1b.stderr}"
 
-    r1a = _run_role(alice_state, "read", "demo", "360", "hello-from-bob", timeout=400.0)
+    r1a = _run_role(alice_state, "read", "demo", "900", "hello-from-bob", timeout=1000.0)
     assert r1a.returncode == 0, f"alice read1 failed:\n{r1a.stdout}\n{r1a.stderr}"
     print("[r1] bidirectional exchange complete")
 
     # Round 2 — restart scenario. Fresh subprocesses, state loaded from disk.
-    s2a = _run_role(alice_state, "send", "demo", "round2-from-alice", timeout=300.0)
+    s2a = _run_role(alice_state, "send", "demo", "round2-from-alice", "--timeout", "450", timeout=750.0)
     assert s2a.returncode == 0 and "SENT" in _combined(s2a), s2a.stdout + s2a.stderr
 
-    s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", timeout=300.0)
+    s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", "--timeout", "450", timeout=750.0)
     assert s2b.returncode == 0 and "SENT" in _combined(s2b), s2b.stdout + s2b.stderr
 
-    r2b = _run_role(bob_state, "read", "demo", "360", "round2-from-alice", timeout=400.0)
+    r2b = _run_role(bob_state, "read", "demo", "900", "round2-from-alice", timeout=1000.0)
     print(f"[r2] bob read2 stdout tail:\n{r2b.stdout[-2000:]}\nstderr tail:\n{r2b.stderr[-3000:]}")
     assert r2b.returncode == 0, "bob read2 did not find round2-from-alice"
 
-    r2a = _run_role(alice_state, "read", "demo", "360", "round2-from-bob", timeout=400.0)
+    r2a = _run_role(alice_state, "read", "demo", "900", "round2-from-bob", timeout=1000.0)
     print(f"[r2] alice read2 stdout tail:\n{r2a.stdout[-2000:]}\nstderr tail:\n{r2a.stderr[-3000:]}")
     assert r2a.returncode == 0, "alice read2 did not find round2-from-bob"
