@@ -2984,4 +2984,34 @@ class TestSafeBasename:
         got = network._safe_basename(raw)
         assert got == expected
         assert all(ord(c) < 128 for c in got)
-
+class TestUnprocessableContentDoesNotWedgeTheStream:
+    @pytest.mark.asyncio
+    async def test_a_raising_handler_advances_and_drops_the_row(
+        self, fake_thinclient, monkeypatch, caplog
+    ):
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("poison"),
+        )
+        async def boom(*_a, **_k):
+            raise ValueError("undecodable peer content")
+        monkeypatch.setattr(network.conversation_handlers, "dispatch", boom)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            before = (await sess.get(
+                persistent.ReadCapWAL, setup["bacap_stream"])).next_index
+        draining: set = {setup["bacap_stream"]}
+        with caplog.at_level(logging.ERROR, logger="katzen.network"):
+            await network.drain_mixwal_read_single(
+                connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now=draining,
+            )
+        assert any("dropping unprocessable message" in r.message
+                   for r in caplog.records), [r.message for r in caplog.records]
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None, (
+                "row retained: the stream is wedged, no later message arrives"
+            )
+            after = (await sess.get(
+                persistent.ReadCapWAL, setup["bacap_stream"])).next_index
+            assert after != before, "index did not advance past the poisoned box"
+        assert setup["bacap_stream"] not in draining

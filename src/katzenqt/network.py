@@ -1081,6 +1081,24 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       )
       give_up()
       return
+    except Exception as e:
+      logger.error(
+          "drain_mixwal_read_single: dropping unprocessable message on "
+          "bacap_stream=%s: %s: %s; advancing past it",
+          mw.bacap_stream, type(e).__name__, e,
+      )
+      await sess.rollback()
+      async with persistent.asession() as drop_sess:
+        rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+        if rcw_row is not None:
+          rcw_row.next_index = rcr.next_message_box_index
+          drop_sess.add(rcw_row)
+        mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
+        if mw_row is not None:
+          await drop_sess.delete(mw_row)
+        await drop_sess.commit()
+      give_up()
+      return
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
