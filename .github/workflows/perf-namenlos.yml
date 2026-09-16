@@ -2,29 +2,12 @@ name: Namenlos Perf Experiments
 
 on:
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
-  perf:
+  rtt-bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: 1-client-loadscope
-            clients: 1
-            dist: loadscope
-          - name: 1-client-load
-            clients: 1
-            dist: load
-          - name: 4-clients-load
-            clients: 4
-            dist: load
-          - name: 4-clients-loadscope
-            clients: 4
-            dist: loadscope
+    timeout-minutes: 70
 
     steps:
       - name: Checkout katzenqt
@@ -64,7 +47,7 @@ jobs:
           uv sync --all-extras --dev --locked
           wait "$build"
 
-      - name: Start ${{ matrix.clients }} kpclientd
+      - name: Start 3 kpclientd on distinct gateways
         id: connect
         continue-on-error: true
         working-directory: katzenqt
@@ -73,72 +56,63 @@ jobs:
           python3 tools/perf/kpclientd_set.py start \
             --config config/client.toml \
             --binary "$GITHUB_WORKSPACE/kpclientd" \
-            --count ${{ matrix.clients }} \
-            --base-port 64331 \
+            --count 3 --base-port 64331 \
             --out-dir "$GITHUB_WORKSPACE/clients"
 
-      - name: Run ${{ matrix.name }}
-        id: run
-        if: steps.connect.outcome == 'success'
-        continue-on-error: true
-        working-directory: katzenqt
-        env:
-          KATZENQT_DOCKER_INTEGRATION: "1"
-          KATZENQT_KPCLIENTD_PORT: "64331"
-          KATZENQT_KPCLIENTD_COUNT: ${{ matrix.clients }}
-          KQT_EPOCH_DURATION_S: "1200"
-        run: |
-          mkdir -p results
-          start=$SECONDS
-          .venv/bin/pytest tests/integration --no-cov -q -p no:randomly \
-            -n 4 --dist ${{ matrix.dist }} \
-            -m "not serial_docker and not epoch_driven" \
-            --basetemp=results/bt --junitxml=results/junit.xml
-          rc=$?
-          echo "PERF ${{ matrix.name }} wall=$((SECONDS-start))s rc=$rc"
-          exit $rc
-
-      - name: Profile one send
-        if: always() && steps.connect.outcome == 'success'
-        continue-on-error: true
-        working-directory: katzenqt
-        run: |
-          mkdir -p results
-          .venv/bin/python tools/perf/roundtrip_probe.py \
-            --state results/probe-state --address 127.0.0.1:64331 \
-            --json results/probe.json --label ${{ matrix.name }} \
-            -- create-conv perf probe
-
-      - name: Report
+      - name: Record run covariates
         if: always()
         working-directory: katzenqt
         run: |
-          python3 - <<'PY'
-          import json, pathlib, xml.etree.ElementTree as ET
-          name = "${{ matrix.name }}"
-          junit = pathlib.Path("results/junit.xml")
-          if junit.exists():
-              root = ET.parse(junit).getroot()
-              cases = list(root.iter("testcase"))
-              work = sum(float(c.get("time")) for c in cases)
-              slowest = max(((float(c.get("time")), c.get("name")) for c in cases), default=(0, "-"))
-              print(f"{name}: {len(cases)} tests, work={work:.0f}s, slowest={slowest[1]} {slowest[0]:.0f}s")
-          probe = pathlib.Path("results/probe.json")
-          if probe.exists():
-              d = json.loads(probe.read_text())
-              print(f"{name}: probe wall={d['wall_s']}s in_rpc={d['in_rpc_s']}s idle={d['idle_s']}s")
-              for rpc, v in d["rpcs"].items():
-                  print(f"    {rpc} n={v['count']} busy={v['busy_s']}s median={v['median_s']}s")
-          PY
+          mkdir -p results
+          {
+            echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "katzenpost=730d6cf458216cc1378fbafcf0e9f28c99ec83d5"
+            echo "katzenqt=${{ github.sha }}"
+            echo "runner=$(nproc)cpu"
+          } > results/covariates.txt
+          cat "$GITHUB_WORKSPACE/clients/manifest.json" >> results/covariates.txt || true
+          cat results/covariates.txt
+
+      - name: Join a pair
+        id: join
+        if: steps.connect.outcome == 'success'
+        continue-on-error: true
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
+          mkdir -p results/bench
+          run() { KQT_STATE="$1" .venv/bin/python -m katzenqt.integration_runner "${@:2}" \
+            --address 127.0.0.1:64331 --network tcp; }
+          run results/bench/alice create-conv demo alice
+          run results/bench/bob create-conv demo bob
+          run results/bench/bob voucher-mint demo bob 2> results/bench/mint.err
+          V=$(grep -hoE 'VOUCHER=[A-Za-z0-9+/=]+' results/bench/mint.err | head -1 | cut -d= -f2-)
+          test -n "$V"
+          run results/bench/alice voucher-induct demo bob "$V"
+          run results/bench/bob voucher-await demo
+
+      - name: Experiment - one client against three
+        id: bench
+        if: steps.join.outcome == 'success'
+        continue-on-error: true
+        working-directory: katzenqt
+        run: |
+          .venv/bin/python tools/perf/rtt_bench.py \
+            --alice-state results/bench/alice --bob-state results/bench/bob \
+            --a 127.0.0.1:64331 \
+            --b 127.0.0.1:64331,127.0.0.1:64332,127.0.0.1:64333 \
+            --pairs 8 --block 2 --repo . \
+            --python .venv/bin/python \
+            --json results/rtt_bench.json
 
       - name: Upload results
         uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: perf-${{ github.run_id }}-${{ matrix.name }}
+          name: perf-${{ github.run_id }}
           path: |
-            katzenqt/results/junit.xml
-            katzenqt/results/probe.json
+            katzenqt/results/rtt_bench.json
+            katzenqt/results/covariates.txt
             clients/manifest.json
             clients/logs/*.log
           if-no-files-found: ignore

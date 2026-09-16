@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p integration-results
           .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
-            --dist loadscope -m "not serial_docker and not epoch_driven" \
+            --dist load -m "not serial_docker and not epoch_driven" \
             --basetemp=integration-results/namenlos \
             --junitxml=integration-results/namenlos.xml
 
@@ -186,7 +186,7 @@ jobs:
         run: |
           mkdir -p integration-results
           .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
-            --dist loadscope -m "not serial_docker" \
+            --dist load -m "not serial_docker" \
             --basetemp=integration-results/parallel \
             --junitxml=integration-results/parallel.xml
 

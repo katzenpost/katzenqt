@@ -84,10 +84,14 @@ def main(argv=None) -> int:
                             stderr=subprocess.PIPE, text=True, bufsize=1)
     pending: "dict[str, collections.deque]" = collections.defaultdict(collections.deque)
     intervals: "dict[str, list[tuple[float, float]]]" = {}
+    ambiguous: "dict[str, int]" = collections.defaultdict(int)
     for line in proc.stderr:
         now = time.monotonic()
         if m := _SENT.search(line):
-            pending[m.group(1)].append(now)
+            name = m.group(1)
+            if pending[name]:
+                ambiguous[name] += 1
+            pending[name].append(now)
         elif m := _RECV.search(line):
             queue = pending.get(m.group(1))
             if queue:
@@ -95,6 +99,11 @@ def main(argv=None) -> int:
     rc = proc.wait()
     result = summarise(intervals, time.monotonic() - started)
     result["returncode"] = rc
+    if ambiguous:
+        result["ambiguous_pairings"] = dict(ambiguous)
+        result["pairing_trustworthy"] = False
+    else:
+        result["pairing_trustworthy"] = True
     result["label"] = args.label or " ".join(command[:2])
     if unanswered := sorted(n for n, q in pending.items() if q):
         result["unanswered"] = unanswered
