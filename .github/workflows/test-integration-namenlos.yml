@@ -83,13 +83,10 @@ jobs:
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
           KQT_INTEGRATION_PARALLEL: "4"
-          KQT_EPOCH_DURATION_S: "1200"
         run: |
           mkdir -p integration-results
           .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
-            --dist loadscope -m "not serial_docker" \
-            --deselect tests/integration/test_voucher.py::test_voucher_overlapping_await \
-            --deselect tests/integration/test_watchdog_epoch_rollover.py::test_read_recovers_after_epoch_rollover \
+            --dist loadscope -m "not serial_docker and not epoch_driven" \
             --basetemp=integration-results/namenlos \
             --junitxml=integration-results/namenlos.xml
 
