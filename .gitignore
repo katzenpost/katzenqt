@@ -12,6 +12,7 @@ build/
 katzenpost/
 .system-setup.stamp
 .coverage
+.coverage.*
 .hypothesis/
 
 # Local demo/test state (resumable chat); filterable by this path
