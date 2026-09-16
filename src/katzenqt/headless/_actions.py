@@ -847,7 +847,10 @@ async def _action_tally_create(args):
         blob = tally_sync.full_state(doc)
         await sess.commit()
 
-    rc = await _send_one_gcm(args.conv_name, tally_events.build_create(survey_id, blob))
+    rc = await _send_one_gcm(
+        args.conv_name, tally_events.build_create(survey_id, blob),
+        timeout=args.timeout,
+    )
     if rc == 0:
         logger.info("TALLY_CREATED=%s", survey_id.hex())
     return rc
@@ -1165,6 +1168,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--slot", action="append", required=True,
         help="descriptive text for one slot; repeat for each slot",
     )
+    p_tally_create.add_argument("--timeout", type=float, default=600.0)
     p_tally_create.set_defaults(func=_action_tally_create)
 
     p_tally_vote = sub.add_parser("tally-vote", parents=[conn])
