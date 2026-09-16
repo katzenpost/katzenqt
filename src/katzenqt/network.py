@@ -290,7 +290,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       # persistent (non-transient) failure of this kind backs off instead of
       # retrying in a tight loop.
       logger.warning("thin client is offline or resend cancelled, can't drain mixwal: %s", e)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_next_backoff(mw.bacap_stream))
       give_up()
       return
     except CourierInvalidEpochError as e:
@@ -301,14 +301,13 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
           "drain_mixwal_write_single: stale replica epoch (%s); re-minting envelope", e,
       )
       await _remint_write_envelope(connection, mw, wcw)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_next_backoff(mw.bacap_stream))
       give_up()
       return
     except CourierError as e:
       logger.warning(
           "drain_mixwal_write_single: courier rejected envelope (%s); will retry", e,
       )
-      await asyncio.sleep(5)
       give_up()
       return
 
@@ -330,6 +329,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       )
 
     try:
+      _reset_backoff(mw.bacap_stream)
       conv_id = await persistent.SentLog.mark_sent(
           connection, mw, __resend_queue, resolve_counter=resolve_counter,
       )
@@ -418,6 +418,22 @@ _CONNECTION_IDLE_RETRY_S = 60.0
 # _CONNECTION_IDLE_RETRY_S so a full kpclientd restart is recovered from
 # on the same timescale as the latch gate above.
 _ARMING_SWEEP_S = 60.0
+
+
+_BACKOFF_FIRST_S = 0.5
+_BACKOFF_CAP_S = 30.0
+_backoff_state: "dict[object, float]" = {}
+
+
+def _next_backoff(key: object) -> float:
+    previous = _backoff_state.get(key, 0.0)
+    ceiling = _BACKOFF_FIRST_S if previous <= 0.0 else min(_BACKOFF_CAP_S, previous * 2.0)
+    _backoff_state[key] = ceiling
+    return random.uniform(ceiling / 2.0, ceiling)
+
+
+def _reset_backoff(key: object) -> None:
+    _backoff_state.pop(key, None)
 
 
 _EPOCH_LOSS_STREAK: "dict[object, int]" = {}
@@ -798,7 +814,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     )
   except (ConnectionLifeInterruptedError, TimeoutError, ThinClientOfflineError, OSError) as exc:
     logger.warning("Read setup failed for %s; retrying: %s", bacap_uuid, exc)
-    await asyncio.sleep(5)
+    await asyncio.sleep(_next_backoff(bacap_uuid))
     give_up()
     return
 
@@ -866,14 +882,14 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         logger.warning("drain_mixwal_read_single: cancel ARQ did not answer for %s", bacap_uuid)
     except Exception as _cancele:  # pragma: no cover - defensive best-effort
         logger.debug("drain_mixwal_read_single: cancel ARQ best-effort: %s", _cancele)
-    await asyncio.sleep(1)
+    await asyncio.sleep(_next_backoff(bacap_uuid))
     give_up()
     return
   except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
           BACAPDecryptionFailedError, StartResendingCancelledError,
           ThinClientOfflineError, BrokenPipeError, OSError) as e:
     logger.warning("drain_mixwal_read_single giving up: %s", e)
-    await asyncio.sleep(5)
+    await asyncio.sleep(_next_backoff(bacap_uuid))
     give_up()
     return
   except (BoxIDNotFoundError, TombstoneError) as e:
@@ -885,7 +901,13 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # wedging it (an uncaught one would strand the stream in
     # draining_right_now exactly as DatabaseFailure once did).
     logger.debug("drain_mixwal_read_single: benign replica outcome, nothing to advance: %s", e)
-    await asyncio.sleep(5)
+    give_up()
+    return
+  except ReplicaError as e:
+    logger.warning(
+        "drain_mixwal_read_single: replica error (%s); backing off", e,
+    )
+    await asyncio.sleep(_next_backoff(bacap_uuid))
     give_up()
     return
   except DatabaseFailureError:
@@ -901,7 +923,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         "from its own backend store (not katzenqt's local SQLite); "
         "treating as transient and will retry"
     )
-    await asyncio.sleep(5)
     give_up()
     return
   except CourierError as e:
@@ -915,7 +936,6 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         "drain_mixwal_read_single: the courier rejected the read envelope (%s); "
         "will retry", e,
     )
-    await asyncio.sleep(5)
     give_up()
     return
 
@@ -944,6 +964,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
     logger.info(f"advancing read to idx {idx_new}")
+    _reset_backoff(bacap_uuid)
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = rcr.next_message_box_index
     sess.add(rcw)
@@ -1462,7 +1483,7 @@ async def readables_to_mixwal(connection):
             __mixwal_updated.set()
             logger.debug("__mixwal_updated.set() from readables_to_mixwal")
         if retry_needed:
-            await asyncio.sleep(5)
+            await asyncio.sleep(_next_backoff(readables_to_mixwal))
             readables_to_mixwal_event.set()
 
 def on_error(task, func, *args, **kwargs):
