@@ -7,7 +7,7 @@ on:
 jobs:
   rtt-bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 300
 
     steps:
       - name: Checkout katzenqt
@@ -103,7 +103,7 @@ jobs:
             --bob-state "$PWD/results/bench/bob" \
             --a 127.0.0.1:64331 \
             --b 127.0.0.1:64331,127.0.0.1:64332,127.0.0.1:64333 \
-            --pairs 4 --block 2 --repo . \
+            --pairs 12 --block 2 --repo . \
             --python .venv/bin/python \
             --json results/rtt_bench.json
 

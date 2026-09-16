@@ -107,7 +107,7 @@ def main(argv=None) -> int:
                 send = _run(alice, a_addr, ["send", "demo", f"m{idx}", "--timeout", "450"], repo, args.python)
                 read = _run(bob, b_addr, ["read", "demo", "450", f"m{idx}"], repo, args.python)
                 per_block.append({"send": send, "read": read})
-                results[arm].extend(send["durations"] + read["durations"])
+                results[arm].append(send["wall_s"] + read["wall_s"])
                 if args.json_path:
                     Path(args.json_path).write_text(json.dumps(
                         _summarise(arms, args, results, block_stats + [
