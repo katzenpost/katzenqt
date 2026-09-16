@@ -1,0 +1,144 @@
+name: Namenlos Perf Experiments
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 1-client-loadscope
+            clients: 1
+            dist: loadscope
+          - name: 1-client-load
+            clients: 1
+            dist: load
+          - name: 4-clients-load
+            clients: 4
+            dist: load
+          - name: 4-clients-loadscope
+            clients: 4
+            dist: loadscope
+
+    steps:
+      - name: Checkout katzenqt
+        uses: actions/checkout@v7
+        with:
+          path: katzenqt
+
+      - name: Checkout katzenpost
+        uses: actions/checkout@v7
+        with:
+          repository: katzenpost/katzenpost
+          ref: 730d6cf458216cc1378fbafcf0e9f28c99ec83d5
+          path: katzenqt/katzenpost
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '>=1.26'
+          cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build kpclientd and install deps in parallel
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
+          ( cd katzenpost/cmd/kpclientd && go build -o "$GITHUB_WORKSPACE/kpclientd" ) &
+          build=$!
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev cargo
+          uv sync --all-extras --dev --locked
+          wait "$build"
+
+      - name: Start ${{ matrix.clients }} kpclientd
+        id: connect
+        continue-on-error: true
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
+          python3 tools/perf/kpclientd_set.py start \
+            --config config/client.toml \
+            --binary "$GITHUB_WORKSPACE/kpclientd" \
+            --count ${{ matrix.clients }} \
+            --base-port 64331 \
+            --out-dir "$GITHUB_WORKSPACE/clients"
+
+      - name: Run ${{ matrix.name }}
+        id: run
+        if: steps.connect.outcome == 'success'
+        continue-on-error: true
+        working-directory: katzenqt
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+          KATZENQT_KPCLIENTD_PORT: "64331"
+          KATZENQT_KPCLIENTD_COUNT: ${{ matrix.clients }}
+          KQT_EPOCH_DURATION_S: "1200"
+        run: |
+          mkdir -p results
+          start=$SECONDS
+          .venv/bin/pytest tests/integration --no-cov -q -p no:randomly \
+            -n 4 --dist ${{ matrix.dist }} \
+            -m "not serial_docker and not epoch_driven" \
+            --basetemp=results/bt --junitxml=results/junit.xml
+          rc=$?
+          echo "PERF ${{ matrix.name }} wall=$((SECONDS-start))s rc=$rc"
+          exit $rc
+
+      - name: Profile one send
+        if: always() && steps.connect.outcome == 'success'
+        continue-on-error: true
+        working-directory: katzenqt
+        run: |
+          mkdir -p results
+          .venv/bin/python tools/perf/roundtrip_probe.py \
+            --state results/probe-state --address 127.0.0.1:64331 \
+            --json results/probe.json --label ${{ matrix.name }} \
+            -- create-conv perf probe
+
+      - name: Report
+        if: always()
+        working-directory: katzenqt
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, xml.etree.ElementTree as ET
+          name = "${{ matrix.name }}"
+          junit = pathlib.Path("results/junit.xml")
+          if junit.exists():
+              root = ET.parse(junit).getroot()
+              cases = list(root.iter("testcase"))
+              work = sum(float(c.get("time")) for c in cases)
+              slowest = max(((float(c.get("time")), c.get("name")) for c in cases), default=(0, "-"))
+              print(f"{name}: {len(cases)} tests, work={work:.0f}s, slowest={slowest[1]} {slowest[0]:.0f}s")
+          probe = pathlib.Path("results/probe.json")
+          if probe.exists():
+              d = json.loads(probe.read_text())
+              print(f"{name}: probe wall={d['wall_s']}s in_rpc={d['in_rpc_s']}s idle={d['idle_s']}s")
+              for rpc, v in d["rpcs"].items():
+                  print(f"    {rpc} n={v['count']} busy={v['busy_s']}s median={v['median_s']}s")
+          PY
+
+      - name: Upload results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: perf-${{ github.run_id }}-${{ matrix.name }}
+          path: |
+            katzenqt/results/junit.xml
+            katzenqt/results/probe.json
+            clients/manifest.json
+            clients/logs/*.log
+          if-no-files-found: ignore
