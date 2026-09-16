@@ -95,12 +95,13 @@ def main(argv=None) -> int:
     results = {"A": [], "B": []}
     block_stats = []
     done = 0
+    idx = 0
     while done < args.pairs:
         for arm in ("A", "B"):
             addrs = arms[arm]
             per_block = []
-            for i in range(args.block):
-                idx = done + i
+            for _ in range(args.block):
+                idx += 1
                 a_addr = addrs[idx % len(addrs)]
                 b_addr = addrs[(idx + 1) % len(addrs)]
                 send = _run(alice, a_addr, ["send", "demo", f"m{idx}", "--timeout", "450"], repo, args.python)
