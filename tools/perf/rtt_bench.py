@@ -108,9 +108,24 @@ def main(argv=None) -> int:
                 read = _run(bob, b_addr, ["read", "demo", "450", f"m{idx}"], repo, args.python)
                 per_block.append({"send": send, "read": read})
                 results[arm].extend(send["durations"] + read["durations"])
+                if args.json_path:
+                    Path(args.json_path).write_text(json.dumps(
+                        _summarise(arms, args, results, block_stats + [
+                            {"arm": arm, "pairs": per_block}], rng, partial=True), indent=2))
             block_stats.append({"arm": arm, "pairs": per_block})
         done += args.block
 
+    result = _summarise(arms, args, results, block_stats, rng, partial=False)
+    print(json.dumps(result, indent=2))
+    if args.json_path:
+        Path(args.json_path).write_text(json.dumps(result, indent=2))
+    if result["failures"] or not result["paired_block_median_diffs"]:
+        print("no usable samples", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _summarise(arms, args, results, block_stats, rng, *, partial: bool) -> dict:
     summary = {}
     for arm, values in results.items():
         summary[arm] = {
@@ -142,13 +157,8 @@ def main(argv=None) -> int:
             "overlapped_pairings": sum(p[k]["overlapped"] for b in block_stats for p in b["pairs"] for k in ("send", "read")),
         },
     }
-    print(json.dumps(result, indent=2))
-    if args.json_path:
-        Path(args.json_path).write_text(json.dumps(result, indent=2))
-    if result["failures"] or not result["paired_block_median_diffs"]:
-        print("no usable samples", file=sys.stderr)
-        return 1
-    return 0
+    result["partial"] = partial
+    return result
 
 
 if __name__ == "__main__":
