@@ -34,6 +34,7 @@ _EPOCH_ADVANCE_RE = re.compile(r"PKI epoch advanced to \d+")
 
 
 @pytest.mark.integration
+@pytest.mark.epoch_driven
 def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("KQT_LOG_LEVEL", "INFO")
 
