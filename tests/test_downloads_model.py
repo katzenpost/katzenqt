@@ -14,7 +14,7 @@ from PySide6.QtCore import (  # noqa: E402
     QCoreApplication,
     Qt,
 )
-from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from katzenqt import network, persistent, qt_models  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
@@ -34,7 +34,7 @@ from katzenqt.qt_models import (  # noqa: E402
 
 @pytest.fixture(scope="module", autouse=True)
 def _qt_app() -> Iterator[QCoreApplication]:
-    app = QGuiApplication.instance() or QGuiApplication([])
+    app = QApplication.instance() or QApplication([])
     yield app
 
 
