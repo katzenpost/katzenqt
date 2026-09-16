@@ -24,7 +24,8 @@ import logging
 from PySide6.QtCore import QObject, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QImage, QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QLabel, QRadioButton, QVBoxLayout,
+    QApplication, QDialog, QDialogButtonBox, QLabel, QRadioButton,
+    QVBoxLayout, QWidget,
 )
 
 from . import persistent
@@ -72,7 +73,9 @@ _THEMED_ACTIONS = (
 )
 
 
-def themed_icon(path, foreground, size=_TOOLBAR_ICON_SIZE):
+def themed_icon(
+    path: str, foreground: QColor, size: int = _TOOLBAR_ICON_SIZE,
+) -> QIcon:
     """Load ``path`` (SVG or PNG) at ``size`` and recolor opaque pixels to
     ``foreground``. Used in dark mode so black toolbar glyphs stay visible."""
     pixmap = QIcon(path).pixmap(QSize(size, size))
@@ -86,24 +89,32 @@ def themed_icon(path, foreground, size=_TOOLBAR_ICON_SIZE):
     return QIcon(QPixmap.fromImage(image))
 
 
-def normalize_mode(mode):
-    """Coerce an arbitrary value to a known mode, defaulting to system."""
+def normalize_mode(mode: object) -> str:
+    """Coerce an arbitrary value to a known mode, defaulting to system.
+
+    >>> normalize_mode("solarized_dark")
+    'solarized_dark'
+    >>> normalize_mode("DARK")
+    'system'
+    >>> normalize_mode(None)
+    'system'
+    """
     return mode if mode in _SCHEME else DEFAULT_MODE
 
 
 def _fill_palette(
-    p,
+    p: QPalette,
     *,
-    window,
-    base,
-    text,
-    button,
-    alternate_base,
-    highlight,
-    highlighted_text,
-    bright_text,
-    disabled,
-):
+    window: QColor,
+    base: QColor,
+    text: QColor,
+    button: QColor,
+    alternate_base: QColor,
+    highlight: QColor,
+    highlighted_text: QColor,
+    bright_text: QColor,
+    disabled: QColor,
+) -> QPalette:
     """Apply a full QPalette from the given colours."""
     p.setColor(QPalette.ColorRole.Window, window)
     p.setColor(QPalette.ColorRole.WindowText, text)
@@ -128,7 +139,7 @@ def _fill_palette(
     return p
 
 
-def _build_dark_palette():
+def _build_dark_palette() -> QPalette:
     """A consistent dark palette for the Fusion style. The light palette is
     taken from the style's own standard palette; only dark needs building,
     since most desktops' default Qt palette is light."""
@@ -146,7 +157,7 @@ def _build_dark_palette():
     )
 
 
-def _build_solarized_light_palette():
+def _build_solarized_light_palette() -> QPalette:
     """Solarized Light (Ethan Schoonover canonical palette)."""
     base3 = QColor(0xfd, 0xf6, 0xe3)
     base2 = QColor(0xee, 0xe8, 0xd5)
@@ -167,7 +178,7 @@ def _build_solarized_light_palette():
     )
 
 
-def _build_solarized_dark_palette():
+def _build_solarized_dark_palette() -> QPalette:
     """Solarized Dark (Ethan Schoonover canonical palette)."""
     base03 = QColor(0x00, 0x2b, 0x36)
     base02 = QColor(0x07, 0x36, 0x42)
@@ -198,7 +209,7 @@ _PALETTE_BUILDERS = {
 class ThemeManager(QObject):
     """Applies, persists, and restores the display mode for the GUI."""
 
-    def __init__(self, app, window):
+    def __init__(self, app: QApplication, window: QObject) -> None:
         super().__init__(window)
         self._app = app
         self._window = window
@@ -208,14 +219,14 @@ class ThemeManager(QObject):
         app.styleHints().colorSchemeChanged.connect(self._on_scheme_changed)
 
     @property
-    def mode(self):
+    def mode(self) -> str:
         return self._mode
 
-    def restore(self):
+    def restore(self) -> None:
         """Load the persisted mode and apply it. Call once at startup."""
         self.apply(self._load_mode(), persist=False)
 
-    def apply(self, mode, persist=True):
+    def apply(self, mode: object, persist: bool = True) -> None:
         """Switch to a known ``mode`` (system, light, dark, or Solarized)."""
         mode = normalize_mode(mode)
         self._mode = mode
@@ -230,7 +241,7 @@ class ThemeManager(QObject):
             self._save_mode(mode)
         logger.info("theme mode applied: %s", mode)
 
-    def _resolve_scheme(self):
+    def _resolve_scheme(self) -> str:
         """Return "dark" or "light" for the current mode; system follows
         the desktop's reported scheme."""
         if self._mode in _DARK_MODES:
@@ -240,7 +251,7 @@ class ThemeManager(QObject):
         desktop = self._app.styleHints().colorScheme()
         return "dark" if desktop == Qt.ColorScheme.Dark else "light"
 
-    def _apply_palette(self):
+    def _apply_palette(self) -> None:
         builder = _PALETTE_BUILDERS.get(self._mode)
         if builder is not None:
             palette = builder()
@@ -254,12 +265,12 @@ class ThemeManager(QObject):
         # Defer the widget-level sync so it reads the palette we just set.
         QTimer.singleShot(0, self._sync_theme)
 
-    def _on_scheme_changed(self, _scheme):
+    def _on_scheme_changed(self, _scheme: object) -> None:
         # The desktop scheme changed under us (system mode): re-resolve and
         # re-apply the matching explicit palette.
         self._apply_palette()
 
-    def _sync_theme(self):
+    def _sync_theme(self) -> None:
         ui = getattr(self._window, "ui", None)
         if ui is None:
             return
@@ -293,7 +304,7 @@ class ThemeManager(QObject):
         for widget in self._app.allWidgets():
             widget.setPalette(themed)
 
-    def _sync_themed_stylesheets(self, ui, pal):
+    def _sync_themed_stylesheets(self, ui: object, pal: QPalette) -> None:
         """Re-style the generated widgets that pin light colours in their
         stylesheets (which override the palette) so they stay legible in
         dark mode. Colours are re-derived from ``pal`` on every theme change.
@@ -329,7 +340,7 @@ class ThemeManager(QObject):
                 "}"
             )
 
-    def _sync_action_icons(self, ui, pal):
+    def _sync_action_icons(self, ui: object, pal: QPalette) -> None:
         """Re-apply toolbar icons; in dark mode tint black SVG glyphs to white."""
         scheme = self._resolve_scheme()
         if scheme == "dark":
@@ -354,7 +365,7 @@ class ThemeManager(QObject):
             if invite_btn is not None:
                 invite_btn.setIcon(QIcon("resources/invite.svg"))
 
-    def _load_mode(self):
+    def _load_mode(self) -> str:
         try:
             with persistent.Session(persistent._engine_sync) as sess:
                 row = sess.get(persistent.AppSetting, THEME_SETTING)
@@ -364,7 +375,7 @@ class ThemeManager(QObject):
             logger.warning("could not load theme mode: %s", e)
         return DEFAULT_MODE
 
-    def _save_mode(self, mode):
+    def _save_mode(self, mode: str) -> None:
         try:
             with persistent.Session(persistent._engine_sync) as sess:
                 row = sess.get(persistent.AppSetting, THEME_SETTING)
@@ -389,7 +400,9 @@ class ThemeDialog(QDialog):
         ("solarized_dark", "Solarized Dark"),
     )
 
-    def __init__(self, manager, parent=None):
+    def __init__(
+        self, manager: "ThemeManager", parent: "QWidget | None" = None,
+    ) -> None:
         super().__init__(parent)
         self._manager = manager
         self.setWindowTitle("Display mode")
@@ -413,7 +426,7 @@ class ThemeDialog(QDialog):
         box.rejected.connect(self.reject)
         layout.addWidget(box)
 
-    def accept(self):
+    def accept(self) -> None:
         for mode, button in self._buttons.items():
             if button.isChecked():
                 self._manager.apply(mode)
