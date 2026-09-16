@@ -597,9 +597,14 @@ def _attachments_root() -> Path:
     return persistent.state_file.parent / "attachments"
 
 
+_BASENAME_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-+()[]"
+)
+
+
 def _safe_basename(name: str) -> str:
-    """Strip path separators and leading dots, clamp to 200 chars."""
-    cleaned = (name or "").replace("/", "_").replace("\\", "_")
+    """Reduce a peer-supplied name to 7-bit ASCII from the allowlist."""
+    cleaned = "".join(c if c in _BASENAME_ALLOWED else "_" for c in (name or ""))
     cleaned = cleaned.lstrip(".")
     return cleaned[:200] or "unnamed"
 

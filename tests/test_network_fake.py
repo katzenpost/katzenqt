@@ -2970,3 +2970,18 @@ async def test_absent_box_returns_to_polling_without_advancing(monkeypatch, fake
         assert rcw.next_index == setup["rcr"].next_message_box_index
         rows = (await sess.exec(select(persistent.ConversationLog))).all()
         assert len(rows) == 1 and rows[0].payload == _make_F_payload("hello")
+class TestSafeBasename:
+    @pytest.mark.parametrize("raw,expected", [
+        ("ev\x00il.txt", "ev_il.txt"),
+        ("../../etc/passwd", "_.._etc_passwd"),
+        ("caf\u00e9.txt", "caf_.txt"),
+        ("\u4e2d\u6587.png", "__.png"),
+        ("ok name (1).png", "ok name (1).png"),
+        ("..hidden", "hidden"),
+        ("", "unnamed"),
+    ])
+    def test_reduces_a_peer_name_to_seven_bit_ascii(self, raw, expected):
+        got = network._safe_basename(raw)
+        assert got == expected
+        assert all(ord(c) < 128 for c in got)
+
