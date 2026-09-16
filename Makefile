@@ -75,6 +75,7 @@ help:
 		'Backend auto selection:' \
 		'  make setup                 Ensure setup is complete for the chosen backend and print status' \
 		'  make run                   Run katzenqt using the chosen backend' \
+		'  make run-launcher          Run katzenqt via the launcher (reaches a running kpclientd)' \
 		'  make test                  Run pytest using the chosen backend' \
 		'  make status                Show backend, venv, and kpclientd status' \
 		'' \
@@ -213,6 +214,11 @@ run-uv: $(STAMP_UV) code-generator
 
 run-pip: $(STAMP_PIP) code-generator
 	@$(VENV)/bin/katzenqt
+
+.PHONY: run-launcher
+
+run-launcher: setup code-generator
+	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python -m katzenqt.launcher
 
 test: setup
 	@if [[ -e "$(BACKEND_UV)" ]]; then \
