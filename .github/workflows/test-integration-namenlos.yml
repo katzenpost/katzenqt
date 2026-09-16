@@ -266,14 +266,31 @@ jobs:
       - name: Build a short-epoch mixnet and install deps in parallel
         run: |
           set -euo pipefail
-          ( cd katzenqt/katzenpost/docker && make base_port=62331 epoch_duration=30s start wait ) &
+          ( cd katzenqt/katzenpost/docker && make base_port=62331 epoch_duration=30s start ) &
           mixnet=$!
           sudo apt-get update
           sudo apt-get install -y libasound2-dev cargo
           ( cd katzenqt && uv sync --all-extras --dev --locked )
           wait "$mixnet"
 
-      - name: Brief pause so the mixnet is fully ready
+      # Not `make wait`: that runs fetch --require-ready, which compares each
+      # node's epoch against epochtime.Now(). The binaries are built with the
+      # warped 2m period and epoch_duration only reaches genconfig, so at 30s
+      # the two never match and every mix reports not-ready forever. Without
+      # --require-ready fetch just waits for a consensus carrying 2 storage
+      # replicas, which is the readiness the tests actually need.
+      - name: Wait for the mixnet to publish a usable consensus
+        working-directory: katzenqt/katzenpost/docker
+        run: |
+          set -euo pipefail
+          make base_port=62331 mixnet-alpine/client/thinclient-bridge.toml
+          engine=$(command -v podman >/dev/null 2>&1 && echo podman || echo docker)
+          timeout 600 "$engine" run --network=mixnet-alpine_katzenpost-net \
+            --user 0:0 --rm -v "$PWD/mixnet-alpine:/mixnet-alpine" \
+            katzenpost-alpine_base /mixnet-alpine/fetch.alpine \
+            -f /mixnet-alpine/client/thinclient-bridge.toml -r 2
+
+      - name: Brief pause so the mixnet settles
         run: sleep 30
 
       - name: Run the epoch-driven integration tests
