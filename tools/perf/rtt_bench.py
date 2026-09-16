@@ -77,7 +77,8 @@ def main(argv=None) -> int:
     ap.add_argument("--bob-state", required=True)
     ap.add_argument("--a", required=True, help="comma-separated addresses for arm A")
     ap.add_argument("--b", required=True, help="comma-separated addresses for arm B")
-    ap.add_argument("--pairs", type=int, default=24)
+    ap.add_argument("--pairs", type=int, default=8,
+                    help="send+read pairs PER ARM; total work is twice this")
     ap.add_argument("--block", type=int, default=4)
     ap.add_argument("--repo", default=".")
     ap.add_argument("--json", dest="json_path")
@@ -127,7 +128,7 @@ def main(argv=None) -> int:
             paired.append(statistics.median(av) - statistics.median(bv))
     result = {
         "arms": {"A": arms["A"], "B": arms["B"]},
-        "pairs": args.pairs, "block": args.block,
+        "pairs_per_arm": args.pairs, "block": args.block,
         "summary": summary,
         "paired_block_median_diffs": [round(d, 2) for d in paired],
         "paired_mean_diff_s": round(statistics.mean(paired), 2) if paired else None,

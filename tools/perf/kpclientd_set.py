@@ -39,7 +39,8 @@ def _gateway_blocks(lines: list[str]) -> tuple[list[list[str]], int, int]:
     return blocks, starts[0], end
 
 
-def write_configs(src: Path, out_dir: Path, count: int, base_port: int) -> list[dict]:
+def write_configs(src: Path, out_dir: Path, count: int, base_port: int,
+                  gateway_index: "int|None" = None) -> list[dict]:
     lines = src.read_text().splitlines(keepends=True)
     blocks, first, end = _gateway_blocks(lines)
     names = [re.search(r'Name = "([^"]+)"', "".join(b)).group(1) for b in blocks]
@@ -47,7 +48,7 @@ def write_configs(src: Path, out_dir: Path, count: int, base_port: int) -> list[
     made = []
     for i in range(count):
         port = base_port + i
-        gw = i % len(blocks)
+        gw = i % len(blocks) if gateway_index is None else gateway_index % len(blocks)
         body = "".join(lines[:first] + blocks[gw] + lines[end:])
         if body.count(_UNIX_LISTEN) != 1:
             raise SystemExit("config's [Listen] block is not the expected unix form")
@@ -64,7 +65,8 @@ def write_configs(src: Path, out_dir: Path, count: int, base_port: int) -> list[
 
 
 def start(args) -> int:
-    made = write_configs(Path(args.config), Path(args.out_dir), args.count, args.base_port)
+    made = write_configs(Path(args.config), Path(args.out_dir), args.count,
+                         args.base_port, args.gateway_index)
     log_dir = Path(args.out_dir) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     for entry in made:
@@ -109,6 +111,7 @@ def main(argv=None) -> int:
     s.add_argument("--base-port", type=int, default=64331)
     s.add_argument("--out-dir", default="clients")
     s.add_argument("--timeout", type=float, default=180.0)
+    s.add_argument("--gateway-index", type=int, default=None)
     s.set_defaults(func=start)
     args = ap.parse_args(argv)
     return args.func(args)

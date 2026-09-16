@@ -81,15 +81,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p results/bench
+          B="$PWD/results/bench"
           run() { KQT_STATE="$1" .venv/bin/python -m katzenqt.integration_runner "${@:2}" \
             --address 127.0.0.1:64331 --network tcp; }
-          run results/bench/alice create-conv demo alice
-          run results/bench/bob create-conv demo bob
-          run results/bench/bob voucher-mint demo bob 2> results/bench/mint.err
-          V=$(grep -hoE 'VOUCHER=[A-Za-z0-9+/=]+' results/bench/mint.err | head -1 | cut -d= -f2-)
+          run "$B/alice" create-conv demo alice
+          run "$B/bob" create-conv demo bob
+          run "$B/bob" voucher-mint demo bob 2> "$B/mint.err"
+          V=$(grep -hoE 'VOUCHER=[A-Za-z0-9+/=]+' "$B/mint.err" | head -1 | cut -d= -f2-)
           test -n "$V"
-          run results/bench/alice voucher-induct demo bob "$V"
-          run results/bench/bob voucher-await demo
+          run "$B/alice" voucher-induct demo bob "$V"
+          run "$B/bob" voucher-await demo
 
       - name: Experiment - one client against three
         id: bench
@@ -98,12 +99,19 @@ jobs:
         working-directory: katzenqt
         run: |
           .venv/bin/python tools/perf/rtt_bench.py \
-            --alice-state results/bench/alice --bob-state results/bench/bob \
+            --alice-state "$PWD/results/bench/alice" \
+            --bob-state "$PWD/results/bench/bob" \
             --a 127.0.0.1:64331 \
             --b 127.0.0.1:64331,127.0.0.1:64332,127.0.0.1:64333 \
-            --pairs 8 --block 2 --repo . \
+            --pairs 4 --block 2 --repo . \
             --python .venv/bin/python \
             --json results/rtt_bench.json
+
+      - name: Fail if the experiment did not run
+        if: always()
+        run: |
+          echo "connect=${{ steps.connect.outcome }} join=${{ steps.join.outcome }} bench=${{ steps.bench.outcome }}"
+          test "${{ steps.bench.outcome }}" = "success"
 
       - name: Upload results
         uses: actions/upload-artifact@v7
