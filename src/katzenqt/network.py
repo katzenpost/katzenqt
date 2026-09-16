@@ -1448,7 +1448,15 @@ async def readables_to_mixwal(connection):
                 sess.add(mw)
                 logger.debug("finished one peer: %s", cpeer.name)
             logger.debug("readables_to_mixwal: committing")
-            await sess.commit()
+            try:
+                await sess.commit()
+            except OperationalError as e:
+                if not _is_transient_sqlite_busy(e):
+                    raise
+                logger.warning(
+                    "readables_to_mixwal: sqlite busy; retrying on the next sweep: %s", e,
+                )
+                continue
         logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))
         if len(readable_peers):
             __mixwal_updated.set()
@@ -1535,7 +1543,15 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                     bacap_stream=row.bacap_stream,
                     bacap_payload=payload,
                 ))
-            await sess.commit()
+            try:
+                await sess.commit()
+            except OperationalError as e:
+                if not _is_transient_sqlite_busy(e):
+                    raise
+                logger.warning(
+                    "send_resendable_plaintexts: sqlite busy; retrying on the next sweep: %s", e,
+                )
+                continue
         for pwal in dispatch:
             if pwal.bacap_stream not in __resend_queue:
                 __resend_queue.add(pwal.bacap_stream)
