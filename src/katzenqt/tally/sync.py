@@ -11,31 +11,33 @@ from __future__ import annotations
 
 from pycrdt import Doc
 
+from .schema import SurveyDoc
 
-def state_vector(doc: Doc) -> bytes:
+
+def state_vector(doc: SurveyDoc) -> bytes:
     """The compact summary of what ``doc`` already has."""
     return doc.get_state()
 
 
-def diff_since(doc: Doc, remote_state: bytes) -> bytes:
+def diff_since(doc: SurveyDoc, remote_state: bytes) -> bytes:
     """The update carrying everything ``doc`` has that ``remote_state`` lacks."""
     return doc.get_update(remote_state)
 
 
-def full_state(doc: Doc) -> bytes:
+def full_state(doc: SurveyDoc) -> bytes:
     """The whole of ``doc`` as a single update (used to broadcast a new survey
     and to persist the survey's state as one replaceable blob)."""
     return doc.get_update()
 
 
-def apply_update(doc: Doc, blob: bytes) -> None:
+def apply_update(doc: SurveyDoc, blob: bytes) -> None:
     """Merge a received update into ``doc``."""
     doc.apply_update(blob)
 
 
-def load_doc(blob: bytes) -> Doc:
+def load_doc(blob: bytes) -> SurveyDoc:
     """Rebuild a ``Doc`` from a :func:`full_state` blob. The root types are
     materialised by the update itself."""
-    doc = Doc()
+    doc: SurveyDoc = Doc()
     doc.apply_update(blob)
     return doc
