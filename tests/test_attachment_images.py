@@ -105,6 +105,7 @@ def test_spill_image_thumbnail_small_image_not_upscaled() -> None:
         safe_basename="tiny.png",
         source=blob,
     )
+    assert rel_path is not None
     abs_path = persistent.state_file.parent / rel_path
     thumb = QImage()
     assert thumb.load(str(abs_path))

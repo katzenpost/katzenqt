@@ -1,9 +1,9 @@
+import importlib
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from katzenqt import audio_ptt
 from katzenqt.audio_ptt import (
     _load_backend_module,
     AudioEngineUnavailable,
@@ -12,14 +12,14 @@ from katzenqt.audio_ptt import (
 
 
 class _FakeClip:
-    def __init__(self, path: str, duration_seconds: float, file_size_bytes: int):
+    def __init__(self, path: str, duration_seconds: float, file_size_bytes: int) -> None:
         self.path = path
         self.duration_seconds = duration_seconds
         self.file_size_bytes = file_size_bytes
 
 
 class _FakeEngine:
-    def __init__(self, cache_dir: str):
+    def __init__(self, cache_dir: str) -> None:
         self.cache_dir = Path(cache_dir)
         self.current_path: Path | None = None
         self.preview_path: str | None = None
@@ -107,13 +107,13 @@ def test_take_playback_error_clears_cached_backend_failure(tmp_path: Path) -> No
 
 
 def test_load_backend_module_returns_installed_extension() -> None:
-    with patch.object(audio_ptt.importlib, "import_module", return_value=_FakeModule):
+    with patch.object(importlib, "import_module", return_value=_FakeModule):
         assert _load_backend_module() is _FakeModule
 
 
 def test_load_backend_module_reports_missing_extension() -> None:
     with patch.object(
-        audio_ptt.importlib, "import_module", side_effect=ImportError("missing")
+        importlib, "import_module", side_effect=ImportError("missing")
     ):
         with pytest.raises(AudioEngineUnavailable, match="not installed"):
             _load_backend_module()
@@ -124,7 +124,7 @@ def test_load_backend_module_rejects_extension_without_error_polling() -> None:
         class PttAudioEngine:
             pass
 
-    with patch.object(audio_ptt.importlib, "import_module", return_value=_OldModule):
+    with patch.object(importlib, "import_module", return_value=_OldModule):
         with pytest.raises(AudioEngineUnavailable, match="too old"):
             _load_backend_module()
 
