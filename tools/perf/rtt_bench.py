@@ -27,9 +27,11 @@ _RETRANSMIT = re.compile(r"ARQ resend|retransmit", re.I)
 _NOTREADY = re.compile(r"box does not exist yet|data not ready", re.I)
 
 
-def _run(state: Path, address: str, args: "list[str]", repo: Path, python: str) -> dict:
+def _run(state: Path, address: str, args: "list[str]", repo: Path, python: str,
+         extra_env: "dict|None" = None) -> dict:
     env = dict(os.environ, KQT_STATE=str(state), KQT_LOG_LEVEL="DEBUG",
                PYTHONPATH=str(repo / "src"))
+    env.update(extra_env or {})
     argv = [python, "-u", "-m", "katzenqt.integration_runner", *args,
             "--address", address, "--network", "tcp"]
     started = time.monotonic()
@@ -84,6 +86,8 @@ def main(argv=None) -> int:
     ap.add_argument("--json", dest="json_path")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--a-env", action="append", default=[])
+    ap.add_argument("--b-env", action="append", default=[])
     args = ap.parse_args(argv)
 
     repo = Path(args.repo).resolve()
@@ -104,8 +108,10 @@ def main(argv=None) -> int:
                 idx += 1
                 a_addr = addrs[idx % len(addrs)]
                 b_addr = addrs[(idx + 1) % len(addrs)]
-                send = _run(alice, a_addr, ["send", "demo", f"m{idx}", "--timeout", "450"], repo, args.python)
-                read = _run(bob, b_addr, ["read", "demo", "450", f"m{idx}"], repo, args.python)
+                arm_env = dict(kv.split("=", 1) for kv in
+                               (args.a_env if arm == "A" else args.b_env))
+                send = _run(alice, a_addr, ["send", "demo", f"m{idx}", "--timeout", "450"], repo, args.python, arm_env)
+                read = _run(bob, b_addr, ["read", "demo", "450", f"m{idx}"], repo, args.python, arm_env)
                 per_block.append({"send": send, "read": read})
                 results[arm].append(send["wall_s"] + read["wall_s"])
                 if args.json_path:

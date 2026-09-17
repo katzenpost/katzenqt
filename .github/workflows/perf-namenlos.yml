@@ -5,168 +5,85 @@ on:
   workflow_dispatch:
 
 jobs:
-  rtt-bench:
+  exp:
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: f-count-same-gateway
+            a_count: 1
+            a_gw: 0
+            b_count: 3
+            b_gw: 0
+          - name: g-gateway-spread
+            a_count: 3
+            a_gw: 0
+            b_count: 3
+            b_gw: -1
+          - name: h-katzenpost-build
+            a_count: 1
+            a_gw: 0
+            b_count: 1
+            b_gw: 0
+            b_ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          - name: i-arq-slop
+            a_count: 1
+            a_gw: 0
+            b_count: 1
+            b_gw: 0
+            b_patch: 's/RoundTripTimeSlop = (20 \* time.Second)/RoundTripTimeSlop = (5 * time.Second)/'
+          - name: j-retry-gaps
+            a_count: 1
+            a_gw: 0
+            b_count: 1
+            b_gw: 0
+            b_env: KQT_RETRY_GAP_SCALE=0
+          - name: k-three-vs-six
+            a_count: 3
+            a_gw: -1
+            b_count: 6
+            b_gw: -1
 
     steps:
-      - name: Checkout katzenqt
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           path: katzenqt
-
-      - name: Checkout katzenpost
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: katzenpost/katzenpost
           ref: 730d6cf458216cc1378fbafcf0e9f28c99ec83d5
           path: katzenqt/katzenpost
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: '>=1.26'
           cache: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           version: latest
+      - run: uv python install 3.12
 
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Build kpclientd and install deps in parallel
-        working-directory: katzenqt
-        run: |
-          set -euo pipefail
-          ( cd katzenpost/cmd/kpclientd && go build -o "$GITHUB_WORKSPACE/kpclientd" ) &
-          build=$!
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-          uv sync --all-extras --dev --locked
-          wait "$build"
-
-      - name: Start 3 kpclientd on distinct gateways
-        id: connect
-        continue-on-error: true
-        working-directory: katzenqt
-        run: |
-          set -euo pipefail
-          python3 tools/perf/kpclientd_set.py start \
-            --config config/client.toml \
-            --binary "$GITHUB_WORKSPACE/kpclientd" \
-            --count 3 --base-port 64331 \
-            --out-dir "$GITHUB_WORKSPACE/clients"
-
-      - name: Record run covariates
-        if: always()
-        working-directory: katzenqt
-        run: |
-          mkdir -p results
-          {
-            echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "katzenpost=730d6cf458216cc1378fbafcf0e9f28c99ec83d5"
-            echo "katzenqt=${{ github.sha }}"
-            echo "runner=$(nproc)cpu"
-          } > results/covariates.txt
-          cat "$GITHUB_WORKSPACE/clients/manifest.json" >> results/covariates.txt || true
-          cat results/covariates.txt
-
-      - name: Join a pair
-        id: join
-        if: steps.connect.outcome == 'success'
-        continue-on-error: true
-        working-directory: katzenqt
-        run: |
-          set -euo pipefail
-          mkdir -p results/bench
-          B="$PWD/results/bench"
-          run() { KQT_STATE="$1" .venv/bin/python -m katzenqt.integration_runner "${@:2}" \
-            --address 127.0.0.1:64331 --network tcp; }
-          run "$B/alice" create-conv demo alice
-          run "$B/bob" create-conv demo bob
-          run "$B/bob" voucher-mint demo bob 2> "$B/mint.err"
-          V=$(grep -hoE 'VOUCHER=[A-Za-z0-9+/=]+' "$B/mint.err" | head -1 | cut -d= -f2-)
-          test -n "$V"
-          run "$B/alice" voucher-induct demo bob "$V"
-          run "$B/bob" voucher-await demo
-
-      - name: Experiment - one client against three
-        id: bench
-        if: steps.join.outcome == 'success'
-        continue-on-error: true
-        working-directory: katzenqt
-        run: |
-          .venv/bin/python tools/perf/rtt_bench.py \
-            --alice-state "$PWD/results/bench/alice" \
-            --bob-state "$PWD/results/bench/bob" \
-            --a 127.0.0.1:64331 \
-            --b 127.0.0.1:64331,127.0.0.1:64332,127.0.0.1:64333 \
-            --pairs 12 --block 2 --repo . \
-            --python .venv/bin/python \
-            --json results/rtt_bench.json
-
-      - name: Fail if the experiment did not run
-        if: always()
-        run: |
-          echo "connect=${{ steps.connect.outcome }} join=${{ steps.join.outcome }} bench=${{ steps.bench.outcome }}"
-          test "${{ steps.bench.outcome }}" = "success"
-
-      - name: Upload results
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: perf-${{ github.run_id }}
-          path: |
-            katzenqt/results/rtt_bench.json
-            katzenqt/results/covariates.txt
-            clients/manifest.json
-            clients/logs/*.log
-          if-no-files-found: ignore
-
-  poll-interval:
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
-
-    steps:
-      - name: Checkout katzenqt
-        uses: actions/checkout@v7
-        with:
-          path: katzenqt
-
-      - name: Checkout katzenpost
-        uses: actions/checkout@v7
-        with:
-          repository: katzenpost/katzenpost
-          ref: 730d6cf458216cc1378fbafcf0e9f28c99ec83d5
-          path: katzenqt/katzenpost
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version: '>=1.26'
-          cache: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.1.0
-        with:
-          version: latest
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Build stock and 1s-poll kpclientd, install deps
+      - name: Build binaries and install deps
         working-directory: katzenqt
         run: |
           set -euo pipefail
           (
             cd katzenpost
-            go build -buildvcs=false -o "$GITHUB_WORKSPACE/kpclientd" ./cmd/kpclientd
-            sed -i 's/^const CopyPollInterval = 5 \* time.Second/const CopyPollInterval = 1 * time.Second/' client/pigeonhole.go
-            grep -q '^const CopyPollInterval = 1 \* time.Second' client/pigeonhole.go
-            go build -buildvcs=false -o "$GITHUB_WORKSPACE/kpclientd-poll1" ./cmd/kpclientd
-            git checkout -- client/pigeonhole.go
+            go build -buildvcs=false -o "$GITHUB_WORKSPACE/kp-a" ./cmd/kpclientd
+            if [ -n "${{ matrix.b_ref }}" ]; then
+              git fetch --depth 1 origin ${{ matrix.b_ref }}
+              git checkout -q FETCH_HEAD
+            fi
+            if [ -n "${{ matrix.b_patch }}" ]; then
+              sed -i '${{ matrix.b_patch }}' client/arq.go
+              grep -q 'RoundTripTimeSlop = (5 \* time.Second)' client/arq.go
+            fi
+            if [ -n "${{ matrix.b_ref }}${{ matrix.b_patch }}" ]; then
+              go build -buildvcs=false -o "$GITHUB_WORKSPACE/kp-b" ./cmd/kpclientd
+            else
+              cp "$GITHUB_WORKSPACE/kp-a" "$GITHUB_WORKSPACE/kp-b"
+            fi
           ) &
           build=$!
           sudo apt-get update
@@ -174,34 +91,20 @@ jobs:
           uv sync --all-extras --dev --locked
           wait "$build"
 
-      - name: Start stock and 1s-poll on the same gateway
+      - name: Start arms
         id: connect
         continue-on-error: true
         working-directory: katzenqt
         run: |
           set -euo pipefail
-          python3 tools/perf/kpclientd_set.py start \
-            --config config/client.toml --binary "$GITHUB_WORKSPACE/kpclientd" \
-            --count 1 --base-port 64331 --gateway-index 0 \
-            --out-dir "$GITHUB_WORKSPACE/clients"
-          python3 tools/perf/kpclientd_set.py start \
-            --config config/client.toml --binary "$GITHUB_WORKSPACE/kpclientd-poll1" \
-            --count 1 --base-port 64341 --gateway-index 0 \
-            --out-dir "$GITHUB_WORKSPACE/clients-poll1"
-
-      - name: Record run covariates
-        if: always()
-        working-directory: katzenqt
-        run: |
-          mkdir -p results
-          {
-            echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "katzenpost=730d6cf458216cc1378fbafcf0e9f28c99ec83d5"
-            echo "katzenqt=${{ github.sha }}"
-            echo "runner=$(nproc)cpu"
-          } > results/covariates.txt
-          cat "$GITHUB_WORKSPACE/clients/manifest.json" >> results/covariates.txt || true
-          cat results/covariates.txt
+          gwa=""; if [ "${{ matrix.a_gw }}" -ge 0 ]; then gwa="--gateway-index ${{ matrix.a_gw }}"; fi
+          gwb=""; if [ "${{ matrix.b_gw }}" -ge 0 ]; then gwb="--gateway-index ${{ matrix.b_gw }}"; fi
+          python3 tools/perf/kpclientd_set.py start --config config/client.toml \
+            --binary "$GITHUB_WORKSPACE/kp-a" --count ${{ matrix.a_count }} \
+            --base-port 64331 $gwa --out-dir "$GITHUB_WORKSPACE/arm-a"
+          python3 tools/perf/kpclientd_set.py start --config config/client.toml \
+            --binary "$GITHUB_WORKSPACE/kp-b" --count ${{ matrix.b_count }} \
+            --base-port 64431 $gwb --out-dir "$GITHUB_WORKSPACE/arm-b"
 
       - name: Join a pair
         id: join
@@ -222,37 +125,35 @@ jobs:
           run "$B/alice" voucher-induct demo bob "$V"
           run "$B/bob" voucher-await demo
 
-      - name: Experiment - 5s poll against 1s poll
+      - name: Experiment ${{ matrix.name }}
         id: bench
         if: steps.join.outcome == 'success'
         continue-on-error: true
         working-directory: katzenqt
         run: |
+          set -euo pipefail
+          A=$(python3 -c "print(','.join(f'127.0.0.1:{64331+i}' for i in range(${{ matrix.a_count }})))")
+          Bs=$(python3 -c "print(','.join(f'127.0.0.1:{64431+i}' for i in range(${{ matrix.b_count }})))")
+          benv=""; if [ -n "${{ matrix.b_env }}" ]; then benv="--b-env ${{ matrix.b_env }}"; fi
           .venv/bin/python tools/perf/rtt_bench.py \
             --alice-state "$PWD/results/bench/alice" \
             --bob-state "$PWD/results/bench/bob" \
-            --a 127.0.0.1:64331 \
-            --b 127.0.0.1:64341 \
-            --pairs 12 --block 2 --repo . \
-            --python .venv/bin/python \
+            --a "$A" --b "$Bs" $benv \
+            --pairs 10 --block 2 --repo . --python .venv/bin/python \
             --json results/rtt_bench.json
 
-      - name: Fail if the experiment did not run
+      - name: Guard
         if: always()
         run: |
           echo "connect=${{ steps.connect.outcome }} join=${{ steps.join.outcome }} bench=${{ steps.bench.outcome }}"
           test "${{ steps.bench.outcome }}" = "success"
 
-      - name: Upload results
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: poll-${{ github.run_id }}
+          name: ${{ matrix.name }}-${{ github.run_id }}
           path: |
             katzenqt/results/rtt_bench.json
-            katzenqt/results/covariates.txt
-            clients/manifest.json
-            clients/logs/*.log
-            clients-poll1/manifest.json
-            clients-poll1/logs/*.log
+            arm-a/manifest.json
+            arm-b/manifest.json
           if-no-files-found: ignore
