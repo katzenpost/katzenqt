@@ -15,7 +15,25 @@ import pytest
 
 
 _KPCLIENTD_HOST = os.environ.get("KATZENQT_KPCLIENTD_HOST", "127.0.0.1")
-_KPCLIENTD_PORT = int(os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331"))
+
+
+def _assign_worker_port() -> int:
+    """Worker gwI takes port base + I % N; base is remembered separately so a
+    second import cannot re-apply the offset."""
+    base = int(os.environ.setdefault(
+        "KATZENQT_KPCLIENTD_BASE_PORT",
+        os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331"),
+    ))
+    count = int(os.environ.get("KATZENQT_KPCLIENTD_COUNT", "1"))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if count <= 1 or not worker.startswith("gw"):
+        return base
+    port = base + int(worker[2:]) % count
+    os.environ["KATZENQT_KPCLIENTD_PORT"] = str(port)
+    return port
+
+
+_KPCLIENTD_PORT = _assign_worker_port()
 
 
 def _kpclientd_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
