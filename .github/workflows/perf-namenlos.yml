@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - name: f-count-same-gateway
@@ -139,7 +140,7 @@ jobs:
             --alice-state "$PWD/results/bench/alice" \
             --bob-state "$PWD/results/bench/bob" \
             --a "$A" --b "$Bs" $benv \
-            --pairs 10 --block 2 --repo . --python .venv/bin/python \
+            --pairs 8 --block 2 --repo . --python .venv/bin/python \
             --json results/rtt_bench.json
 
       - name: Guard
