@@ -264,19 +264,12 @@ Low priority; re-evaluate when we do the next dependency refresh.
 
 ---
 
-## 8. Context-menu Pause/Resume enablement is asymmetric (small)
+## 8. Context-menu Pause/Resume enablement was asymmetric (DONE)
 
-When a transfer is running, "Resume download" is correctly greyed out; when it
-is paused, **"Pause download" stays enabled** and clicking it silently does
-nothing, because the handler's `chosen is pgm and active` guard swallows the
-click. The contacts-tree peer menu has the same asymmetry, so an
-already-paused peer still offers a live "Do not read from X any more".
-
-Where: `peer_context_menu` (`katzen.py:1442-1444`) and
-`transfers_context_menu` (`katzen.py:1480-1482`). Each calls
-`rgm.setEnabled(not active)` with no matching `pgm.setEnabled(active)`.
-
-Fix: add `pgm.setEnabled(active)` in both. Trivial.
+Both context menus disabled only Resume, leaving Pause clickable on an
+already-paused row where the handler's state guard then swallowed the click as
+a silent no-op; each now sets `pgm.setEnabled(active)` alongside
+`rgm.setEnabled(not active)`. `455b7ad`.
 
 ---
 
