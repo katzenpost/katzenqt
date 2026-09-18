@@ -2040,7 +2040,18 @@ class MainWindow(QMainWindow):
             # Synthetic substream peers are never rendered.
             if name.startswith(network._SUBSTREAM_NAME_PREFIX):
                 continue
-            convo.contacts_standard_item.appendRow(QStandardItem(name))
+            new_item = QStandardItem(name)
+            # Tag like add_conversation's peers so the per-peer pause/resume
+            # context menu works on dynamically-announced members too.
+            async with persistent.asession() as _sess:
+                peer_row = (await _sess.exec(
+                    select(persistent.ConversationPeer)
+                    .where(persistent.ConversationPeer.name == name)
+                )).first()
+            if peer_row is not None:
+                new_item.peer_read_cap_id = peer_row.read_cap_id
+                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+            convo.contacts_standard_item.appendRow(new_item)
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(
             n for n in added if not n.startswith(network._SUBSTREAM_NAME_PREFIX)
@@ -2122,7 +2133,18 @@ class MainWindow(QMainWindow):
 
         # Synthetic substream peers are never rendered.
         if not joiner_name.startswith(network._SUBSTREAM_NAME_PREFIX):
-            convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
+            new_item = QStandardItem(joiner_name)
+            # Tag like add_conversation's peers so the per-peer pause/resume
+            # context menu works on inducted members too.
+            async with persistent.asession() as _sess:
+                peer_row = (await _sess.exec(
+                    select(persistent.ConversationPeer)
+                    .where(persistent.ConversationPeer.name == joiner_name)
+                )).first()
+            if peer_row is not None:
+                new_item.peer_read_cap_id = peer_row.read_cap_id
+                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+            convo.contacts_standard_item.appendRow(new_item)
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         QTimer.singleShot(0, lambda: self._info_plain(
