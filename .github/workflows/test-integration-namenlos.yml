@@ -1,0 +1,321 @@
+name: Namenlos Integration Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  namenlos-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      tests: ${{ steps.tests.outcome }}
+
+    steps:
+      - name: Checkout katzenqt
+        uses: actions/checkout@v7
+        with:
+          path: katzenqt
+
+      - name: Checkout katzenpost
+        uses: actions/checkout@v7
+        with:
+          repository: katzenpost/katzenpost
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          path: katzenqt/katzenpost
+
+      - name: Set up Go (for kpclientd build)
+        uses: actions/setup-go@v7
+        with:
+          go-version: '>=1.26'
+          cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build kpclientd and install deps in parallel
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
+          ( cd katzenpost/cmd/kpclientd && go build -o "$GITHUB_WORKSPACE/kpclientd" ) &
+          build=$!
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev cargo
+          uv sync --all-extras --dev --locked
+          wait "$build"
+
+      - name: Start kpclientd against namenlos
+        id: connect
+        continue-on-error: true
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("config/client.toml")
+          t = p.read_text()
+          old = '[Listen]\n  [Listen.Unix]\n    Address = "@katzenpost"'
+          new = '[Listen]\n  [Listen.Tcp]\n    Address = "127.0.0.1:64331"\n    Network = "tcp"'
+          assert t.count(old) == 1, "client.toml Listen block moved"
+          p.write_text(t.replace(old, new, 1))
+          PY
+          "$GITHUB_WORKSPACE/kpclientd" --config config/client.toml > "$GITHUB_WORKSPACE/kpclientd.log" 2>&1 &
+          for _ in $(seq 60); do
+            if grep -q 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; then
+              echo "kpclientd is on the mixnet:"; grep -m1 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; exit 0
+            fi
+            sleep 2
+          done
+          echo "kpclientd never reached a namenlos gateway"; cat "$GITHUB_WORKSPACE/kpclientd.log"; exit 1
+
+      - name: Run integration tests
+        id: tests
+        if: steps.connect.outcome == 'success'
+        continue-on-error: true
+        working-directory: katzenqt
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+          KQT_INTEGRATION_PARALLEL: "4"
+        run: |
+          mkdir -p integration-results
+          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+            --dist loadscope -m "not serial_docker and not epoch_driven" \
+            --basetemp=integration-results/namenlos \
+            --junitxml=integration-results/namenlos.xml
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: namenlos-${{ github.run_id }}-${{ github.job }}
+          path: |
+            katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.out
+            katzenqt/integration-results/**/*.err
+            kpclientd.log
+          if-no-files-found: ignore
+
+  docker-integration:
+    needs: [namenlos-integration]
+    if: always() && needs.namenlos-integration.outputs.tests != 'success'
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout katzenqt
+        uses: actions/checkout@v7
+        with:
+          path: katzenqt
+
+      # Checked out under katzenqt/ so katzenqt's Makefile default
+      # KATZENPOST_DIR (="katzenpost", relative to the Makefile) resolves
+      # without modification. Pin to a sha that has every daemon API the
+      # integration test exercises.
+      - name: Checkout katzenpost
+        uses: actions/checkout@v7
+        with:
+          repository: katzenpost/katzenpost
+          # Keep in lockstep with
+          # thin_client/.github/workflows/test-integration-docker.yml;
+          # both katzenqt and thin_client must exercise the same
+          # kpclientd sha or protocol drift will hit one workflow
+          # before the other.
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          path: katzenqt/katzenpost
+
+      - name: Cache the mixnet build
+        uses: actions/cache@v6
+        with:
+          path: katzenqt/katzenpost/docker/cache
+          key: ${{ runner.os }}-mixnet-${{ hashFiles('katzenqt/katzenpost/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-mixnet-
+
+      - name: Configure podman socket
+        run: systemctl --user start podman.socket || true
+
+      - name: Set up Go (for kpclientd build)
+        uses: actions/setup-go@v7
+        with:
+          go-version: '>=1.26'
+          cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin || true
+
+      - name: Build the mixnet and install deps in parallel
+        id: start_mixnet
+        run: |
+          set -euo pipefail
+          ( cd katzenqt/katzenpost/docker && make base_port=62331 start wait ) &
+          mixnet=$!
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev cargo
+          ( cd katzenqt && uv sync --all-extras --dev --locked )
+          wait "$mixnet"
+
+      - name: Brief pause so the mixnet is fully ready
+        run: sleep 30
+
+      - name: Run integration tests
+        working-directory: katzenqt
+        timeout-minutes: 90
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+          KQT_INTEGRATION_PARALLEL: "4"
+        run: |
+          mkdir -p integration-results
+          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+            --dist loadscope -m "not serial_docker" \
+            --basetemp=integration-results/parallel \
+            --junitxml=integration-results/parallel.xml
+
+      - name: Run serial watchdog integration tests
+        working-directory: katzenqt
+        if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' && steps.install_deps.outcome == 'success' }}
+        timeout-minutes: 90
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+        run: |
+          mkdir -p integration-results
+          .venv/bin/pytest tests/integration --no-cov -vv -m serial_docker \
+            --basetemp=integration-results/serial \
+            --junitxml=integration-results/serial.xml
+
+      - name: Stop the mixnet
+        if: always()
+        working-directory: katzenqt/katzenpost/docker
+        run: make stop
+
+      - name: Upload integration and mixnet logs
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mixnet-${{ github.run_id }}-${{ github.job }}
+          path: |
+            katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.out
+            katzenqt/integration-results/**/*.err
+            katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
+            katzenqt/katzenpost/docker/mixnet-alpine/*/*/*.log
+
+  epoch-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout katzenqt
+        uses: actions/checkout@v7
+        with:
+          path: katzenqt
+
+      - name: Checkout katzenpost
+        uses: actions/checkout@v7
+        with:
+          repository: katzenpost/katzenpost
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          path: katzenqt/katzenpost
+
+      - name: Cache the mixnet build
+        uses: actions/cache@v6
+        with:
+          path: katzenqt/katzenpost/docker/cache
+          key: ${{ runner.os }}-mixnet-${{ hashFiles('katzenqt/katzenpost/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-mixnet-
+
+      - name: Configure podman socket
+        run: systemctl --user start podman.socket || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin || true
+
+      - name: Build a short-epoch mixnet and install deps in parallel
+        run: |
+          set -euo pipefail
+          ( cd katzenqt/katzenpost/docker && make base_port=62331 epoch_duration=30s start ) &
+          mixnet=$!
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev cargo
+          ( cd katzenqt && uv sync --all-extras --dev --locked )
+          wait "$mixnet"
+
+      # Not `make wait`: that runs fetch --require-ready, which compares each
+      # node's epoch against epochtime.Now(). The binaries are built with the
+      # warped 2m period and epoch_duration only reaches genconfig, so at 30s
+      # the two never match and every mix reports not-ready forever. Without
+      # --require-ready fetch just waits for a consensus carrying 2 storage
+      # replicas, which is the readiness the tests actually need. Take the
+      # command from the Makefile rather than rewriting it here, so the
+      # engine, network name, mounts and image stay whatever it decides.
+      - name: Wait for the mixnet to publish a usable consensus
+        working-directory: katzenqt/katzenpost/docker
+        run: |
+          set -euo pipefail
+          test -f mixnet-alpine/running.stamp
+          make base_port=62331 mixnet-alpine/client/thinclient-bridge.toml
+          cmd=$(make base_port=62331 -n wait | sed 's/\\$//' | tr '\n' ' ')
+          test "$(grep -c -o -- '--require-ready' <<<"$cmd")" = 1
+          timeout 600 bash -c "${cmd/ --require-ready/}"
+
+      - name: Brief pause so the mixnet settles
+        run: sleep 30
+
+      - name: Run the epoch-driven integration tests
+        working-directory: katzenqt
+        env:
+          KATZENQT_DOCKER_INTEGRATION: "1"
+        run: |
+          mkdir -p integration-results
+          .venv/bin/pytest tests/integration --no-cov -vv -m epoch_driven \
+            --basetemp=integration-results/epoch \
+            --junitxml=integration-results/epoch.xml
+
+      - name: Stop the mixnet
+        if: always()
+        working-directory: katzenqt/katzenpost/docker
+        run: make stop
+
+      - name: Upload integration and mixnet logs
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: epoch-${{ github.run_id }}-${{ github.job }}
+          path: |
+            katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.out
+            katzenqt/integration-results/**/*.err
+            katzenqt/katzenpost/docker/mixnet-alpine/*/*.log

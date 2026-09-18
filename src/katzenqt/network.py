@@ -400,7 +400,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         # update the UX:
         create_task(conversation_update_queue.put((conv_id, True)))
 
-_SUBSTREAM_NAME_PREFIX = ":substream:"
+_SUBSTREAM_NAME_PREFIX = models.SUBSTREAM_NAME_PREFIX
 
 # Backstop bound on how long a single read's stop-and-wait ARQ may block with
 # NO other signal before we abort it at the daemon and re-cast the box. This
@@ -439,6 +439,10 @@ _CONNECTION_IDLE_RETRY_S = 60.0
 _ARMING_SWEEP_S = 60.0
 
 
+_EPOCH_LOSS_STREAK: "dict[object, int]" = {}
+_EPOCH_RACE_MAX_LOSSES = 3
+
+
 class ConnectionLifeInterruptedError(Exception):
     """An in-flight thinclient RPC was interrupted by a daemon reconnect or a
     PKI epoch rollover, so its reply may never arrive. Callers treat it as a
@@ -474,15 +478,26 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
         reconnect_marker = _reconnect_event
     if epoch_marker is None:
         epoch_marker = _epoch_event
+    losses = _EPOCH_LOSS_STREAK.get(bacap_uuid, 0)
+    race_epoch = losses < _EPOCH_RACE_MAX_LOSSES
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
+    racing = {task, reconnect_wait}
+    if race_epoch:
+        racing.add(epoch_wait)
+    else:
+        logger.warning(
+            "%s for bacap_stream=%s lost %d rollovers in a row; letting this "
+            "attempt run to the %s s backstop instead of racing the epoch",
+            what, bacap_uuid, losses, backstop_s,
+        )
     try:
         done, _pending = await asyncio.wait(
-            {task, reconnect_wait, epoch_wait}, timeout=backstop_s,
-            return_when=asyncio.FIRST_COMPLETED,
+            racing, timeout=backstop_s, return_when=asyncio.FIRST_COMPLETED,
         )
         if task in done:
+            _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
             return task.result()
         if reconnect_wait in done:
             logger.warning(
@@ -501,9 +516,13 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                 "as stale", what, bacap_uuid, grace_s,
             )
             try:
-                return await asyncio.wait_for(task, timeout=grace_s)
+                result = await asyncio.wait_for(task, timeout=grace_s)
             except asyncio.TimeoutError:
                 task.cancel()
+                _EPOCH_LOSS_STREAK[bacap_uuid] = losses + 1
+            else:
+                _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
+                return result
         else:
             # Backstop: backstop_s elapsed with no reply and no observed
             # reconnect or epoch rollover. Should be rare; treat it the same
@@ -589,9 +608,14 @@ def _attachments_root() -> Path:
     return persistent.state_file.parent / "attachments"
 
 
+_BASENAME_ALLOWED = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-+()[]"
+)
+
+
 def _safe_basename(name: str) -> str:
-    """Strip path separators and leading dots, clamp to 200 chars."""
-    cleaned = (name or "").replace("/", "_").replace("\\", "_")
+    """Reduce a peer-supplied name to 7-bit ASCII from the allowlist."""
+    cleaned = "".join(c if c in _BASENAME_ALLOWED else "_" for c in (name or ""))
     cleaned = cleaned.lstrip(".")
     return cleaned[:200] or "unnamed"
 
@@ -1178,6 +1202,24 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       )
       give_up()
       return
+    except Exception as e:
+      logger.error(
+          "drain_mixwal_read_single: dropping unprocessable message on "
+          "bacap_stream=%s: %s: %s; advancing past it",
+          mw.bacap_stream, type(e).__name__, e,
+      )
+      await sess.rollback()
+      async with persistent.asession() as drop_sess:
+        rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+        if rcw_row is not None:
+          rcw_row.next_index = rcr.next_message_box_index
+          drop_sess.add(rcw_row)
+        mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
+        if mw_row is not None:
+          await drop_sess.delete(mw_row)
+        await drop_sess.commit()
+      give_up()
+      return
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
@@ -1572,7 +1614,6 @@ async def readables_to_mixwal(connection):
         # is down and nothing pokes the event.
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
         retry_needed = False
-        readable_peers = []
         try:
             async with persistent.asession() as sess:
                 # TODO are these guaranteed to be distinct?
@@ -1605,22 +1646,27 @@ async def readables_to_mixwal(connection):
                     try:
                       mw = await process_box(cpeer, rcw)
                     except Exception as e:
-                      # Expected when a pass races a daemon bounce: mark the
-                      # retry flag so the loop re-arms after a short backoff.
                       logger.warning("Read setup failed; retrying: %s", e)
                       retry_needed = True
                       continue
                     sess.add(mw)
                     logger.debug("finished one peer: %s", cpeer.name)
                 logger.debug("readables_to_mixwal: committing")
-                await sess.commit()
+                try:
+                    await sess.commit()
+                except OperationalError as e:
+                    if not _is_transient_sqlite_busy(e):
+                        raise
+                    logger.warning(
+                        "readables_to_mixwal: sqlite busy; retrying on the next sweep: %s", e,
+                    )
+                    continue
         except Exception as e:
             # readables_to_mixwal is the session's only read-arming task, so
             # a failed pass must NEVER kill the loop: every read would wedge
-            # for the rest of the session (observed as a send-file timeout on
-            # the UNIQUE mixwal.bacap_stream collision). The uncommitted pass
-            # is rolled back by the session; the same streams are re-selected
-            # and armed on the next sweep.
+            # for the rest of the session. The uncommitted pass is rolled back
+            # by the session; the same streams are re-selected and armed on the
+            # next sweep.
             logger.warning(
                 "readables_to_mixwal: pass failed; re-arming next sweep: %s", e,
             )
@@ -1719,7 +1765,15 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                     bacap_stream=row.bacap_stream,
                     bacap_payload=payload,
                 ))
-            await sess.commit()
+            try:
+                await sess.commit()
+            except OperationalError as e:
+                if not _is_transient_sqlite_busy(e):
+                    raise
+                logger.warning(
+                    "send_resendable_plaintexts: sqlite busy; retrying on the next sweep: %s", e,
+                )
+                continue
         for pwal in dispatch:
             if pwal.bacap_stream not in __resend_queue:
                 __resend_queue.add(pwal.bacap_stream)

@@ -226,6 +226,7 @@ def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory)
 
 
 @pytest.mark.integration
+@pytest.mark.epoch_driven
 def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     """The GUI interleaving: the joiner's poll of box 1 is already in flight
     (riding out BoxIDNotFound) before the inductor writes the reply, rather
