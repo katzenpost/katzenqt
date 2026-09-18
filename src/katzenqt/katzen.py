@@ -13,7 +13,6 @@ import sys
 import threading
 import time
 import uuid
-from asyncio import ensure_future
 from pathlib import Path
 from typing import NamedTuple, Optional, TYPE_CHECKING
 
@@ -168,10 +167,30 @@ def todo_keys():
     shiftPgDown = QKeySequence(QKeySequence.StandardKey.SelectPreviousPage)
 
 def async_cb(method):
-    """this wraps async MainWindow methods and calls them """
+    """This wraps async MainWindow methods and runs them as tasks.
+
+    Transient UI actions executed this way never block the loop, and a failing
+    action leaves a logged traceback (create_task) instead of vanishing
+    silently.
+    """
     def f(*args, **kwargs):
-        return ensure_future(method(*args, **kwargs))
+        return create_task(method(*args, **kwargs))
     return f
+
+
+async def _dialog_finished(dialog):
+    """Open a dialog without exec() and await its ``finished`` signal.
+
+    dialog.exec() spins a nested Qt event loop; run inside a QtAsyncio task
+    step, that loop may step another task and trip asyncio's re-entrancy check,
+    corrupting whichever task got stepped. open() defers the same interaction
+    to the normal event processing and resumes this coroutine via the finished
+    signal instead.
+    """
+    fut = asyncio.get_event_loop().create_future()
+    dialog.finished.connect(fut.set_result)
+    dialog.open()
+    return await fut
 
 
 async def _commit_new_conversation(
@@ -1522,10 +1541,13 @@ class MainWindow(QMainWindow):
             is_draft = bool(audio and audio.is_draft_path(f_path))
 
             if not f_path.is_file():
-                QMessageBox.warning(
-                    self,
-                    APP_NAME,
-                    f"Attachment no longer exists and was skipped:\n{f_path}",
+                QTimer.singleShot(
+                    0,
+                    lambda p=f_path: QMessageBox.warning(
+                        self,
+                        APP_NAME,
+                        f"Attachment no longer exists and was skipped:\n{p}",
+                    ),
                 )
                 continue
 
@@ -1533,12 +1555,16 @@ class MainWindow(QMainWindow):
             # Same cap network._spill_attachment uses on receive.
             if size > network._ATTACHMENT_HARD_CAP:
                 cap_mib = network._ATTACHMENT_HARD_CAP / (1024 * 1024)
-                QMessageBox.warning(
-                    self,
-                    APP_NAME,
-                    f"{f_path.name} is {size / (1024 * 1024):.1f} MiB, which "
-                    f"exceeds the {cap_mib:.0f} MiB attachment limit. "
-                    "It was not sent.",
+                QTimer.singleShot(
+                    0,
+                    lambda n=f_path.name,
+                    s=size: QMessageBox.warning(
+                        self,
+                        APP_NAME,
+                        f"{n} is {s / (1024 * 1024):.1f} MiB, which "
+                        f"exceeds the {cap_mib:.0f} MiB attachment limit. "
+                        "It was not sent.",
+                    ),
                 )
                 continue
 
@@ -1607,8 +1633,7 @@ class MainWindow(QMainWindow):
             for draft_path in voice_note_drafts:
                 audio.discard_draft(draft_path)
 
-    @async_cb
-    async def attach_file(self):
+    def attach_file(self, _checked: bool = False):
         dialog = QFileDialog()
         dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)  # allow more than one file
         dialog.setAcceptMode(QFileDialog.AcceptOpen)  # files should exist already
@@ -1802,19 +1827,25 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def new_conversation(self):
-        conversation_name , ok = QInputDialog.getText(
-            self,
-            "New conversation",
-            "Choose conversation title:",
-        )
-        if not ok: return
+        title_dialog = QInputDialog(self)
+        title_dialog.setWindowTitle("New conversation")
+        title_dialog.setLabelText("Choose conversation title:")
+        if not await _dialog_finished(title_dialog):
+            return
+        conversation_name = title_dialog.textValue().strip()
+        if not conversation_name:
+            return
         # TODO this crap out while something is awaiting the write_channel:
-        display_name , ok = QInputDialog.getText(
-            self,
-            "New conversation",
+        display_dialog = QInputDialog(self)
+        display_dialog.setWindowTitle("New conversation")
+        display_dialog.setLabelText(
             "Choose (your) name displayed to the other user(s):",
         )
-        if not ok: return
+        if not await _dialog_finished(display_dialog):
+            return
+        display_name = display_dialog.textValue().strip()
+        if not display_name:
+            return
 
         wcapwal = persistent.WriteCapWAL(id=uuid.uuid4()) # actual CAP will be provisioned later
         rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
@@ -1854,10 +1885,10 @@ class MainWindow(QMainWindow):
         try:
             convo = self.convo_state()
         except Exception:
-            QMessageBox.critical(
+            QTimer.singleShot(0, lambda: QMessageBox.critical(
                 self, f"ERROR: {APP_NAME}",
                 "Select a conversation first (or create one) before generating a voucher.",
-            )
+            ))
             return
 
         conv_id = convo.conversation_id
@@ -1865,32 +1896,41 @@ class MainWindow(QMainWindow):
         # member, a second voucher would re-run the join and duplicate every
         # member and message, so refuse outright.
         if await self.iothread.run_in_io(conversation_is_joined(conv_id)):
-            QMessageBox.information(
+            QTimer.singleShot(0, lambda: QMessageBox.information(
                 self, APP_NAME,
                 "You are already a member of this conversation, so a voucher is "
                 "not needed. Vouchers are only for joining a conversation you are "
                 "not yet part of.",
-            )
+            ))
             return
         # At most one voucher in flight per conversation. If one is pending,
         # offer to abandon it and mint a fresh one (e.g. the code was lost).
         pending_id = await self.iothread.run_in_io(pending_voucher_for(conv_id))
         if pending_id is not None:
-            if QMessageBox.question(
-                self, APP_NAME,
+            replace_box = QMessageBox(
+                QMessageBox.Icon.Question, APP_NAME,
                 "A voucher for this conversation is already pending. Cancel it "
                 "and generate a new one?",
+                parent=self,
+            )
+            replace_box.setStandardButtons(
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                defaultButton=QMessageBox.StandardButton.No,
-            ) != QMessageBox.StandardButton.Yes:
+            )
+            replace_box.setDefaultButton(QMessageBox.StandardButton.No)
+            result = await _dialog_finished(replace_box)
+            if replace_box.standardButton(result) != QMessageBox.StandardButton.Yes:
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
-        display_name, ok = QInputDialog.getText(
-            self, "Generate voucher",
+        display_dialog = QInputDialog(self)
+        display_dialog.setWindowTitle("Generate voucher")
+        display_dialog.setLabelText(
             "Choose (your) name shown to the contact who inducts you:",
         )
-        if not ok or not display_name:
+        if not await _dialog_finished(display_dialog):
+            return
+        display_name = display_dialog.textValue().strip()
+        if not display_name:
             return
 
         try:
@@ -1898,11 +1938,11 @@ class MainWindow(QMainWindow):
                 mint_and_publish(self.iothread.kp_client, conv_id, display_name)
             )
         except Exception as e:
-            QMessageBox.critical(
+            QTimer.singleShot(0, lambda err=e: QMessageBox.critical(
                 self, f"ERROR: {APP_NAME}",
                 "Could not mint the voucher. Is the conversation finished setting "
-                f"up and the client connected?\n\n{e}",
-            )
+                f"up and the client connected?\n\n{err}",
+            ))
             return
 
         code = b64encode(voucher).decode()
@@ -1979,11 +2019,15 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        voucher_str, ok = QInputDialog.getText(
-            self, "Induct via voucher",
+        voucher_dialog = QInputDialog(self)
+        voucher_dialog.setWindowTitle("Induct via voucher")
+        voucher_dialog.setLabelText(
             "Enter the voucher your new contact handed you:",
         )
-        if not ok or not voucher_str:
+        if not await _dialog_finished(voucher_dialog):
+            return
+        voucher_str = voucher_dialog.textValue()
+        if not voucher_str:
             return
         try:
             voucher = b64decode(voucher_str.strip().encode())
@@ -2028,10 +2072,12 @@ class MainWindow(QMainWindow):
         """Open the pending-voucher view so the user can abandon stale ones."""
         rows = await self.iothread.run_in_io(list_pending_vouchers())
         if not rows:
-            QMessageBox.information(self, APP_NAME, "There are no pending vouchers.")
+            QTimer.singleShot(0, lambda: QMessageBox.information(
+                self, APP_NAME, "There are no pending vouchers.",
+            ))
             return
         dialog = PendingVouchersDialog(self, rows)
-        dialog.exec()
+        await _dialog_finished(dialog)
         for pv_id in dialog.cancelled:
             await self.iothread.run_in_io(cancel_pending_voucher(pv_id))
 
