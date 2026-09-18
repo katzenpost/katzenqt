@@ -561,46 +561,92 @@ while another task Task 'QtTask' with state: Pending is being executed."))
 does not match the current task Task 'QtTask' with state: Pending.
 ```
 
-### Root cause
+### Root cause (deepened by the 2026-09-18 rerun)
 
-`PySide6.QtAsyncio` task stepping (QtAsyncio/tasks.py `_step`) re-entered a
-task while another task was mid-step — the burst of back-to-back arrivals
-(bob2 @16:58:44, carol1 @16:58:53) colliding with carol's join processing
-(~16:59). One `QtTask` was abandoned forever. Because
-`katzen_util.create_task` only LOGS abnormal exits and never restarts
-(katzen_util.py:25-40), the dead listener never came back, so the live-refresh
-loop went silent: `receive_msg_listener`, `peer_added_listener`,
-`transfers_listener` (katzen.py:2186-2188) and the per-joiner
-`_await_voucher_join` (katzen.py:2198). The iothread kept running and the DB
-kept updating, but nothing pushed the Qt side to redraw: alice2 stayed showing
-"sending" until a manual click re-read the DB (`has_read_messages` @17:20:24,
-katzen.py:1738). bob/carol had 0 tracebacks, alice the only one — a timing
-race, not a data-path bug.
+The retrigger on the rerun proved the earlier "burst of arrivals" theory wrong.
+The same `Cannot enter into task 'QtTask' ... Pending while another task
+... Pending is being executed` RuntimeError hit **bob at 17:56:33 CEST** during
+an image send, with **no supervisor restart logged** — so the victim this time
+was a transient `@async_cb` task (bare `ensure_future`, no logging), not a
+supervised listener. Diagnosis of bob's DB: the image row persisted
+(`conversationlog` order 15, `network_status=1`, payload `file_outgoing`; the
+new substream WriteCapWAL + I-chunk PlaintextWAL + pending-write MixWAL all
+exist) but **no UI "sending" state and no dispatch happened** — the corrupted
+task died between the DB commit and the io-loop UI-refresh queue put +
+`check_for_new`. Supervisor mitigation alone cannot cover `@async_cb` tasks.
 
-Also fragile: `_process_conversation_update` (katzen.py:1246) and the
-conversation-switch path (katzen.py:1657) `await update_first_unread()`, which
-opens an aiosqlite session on the Qt loop (qt_models.py:654-664) — a second DB
-writer beside the iothread's single writer, and an extra await in the hot UI
-path.
+The real, common root cause of BOTH incidents: **a blocking modal dialog run
+inside a `@async_cb` task**. `dialog.exec()`, `QInputDialog.getText`,
+`QMessageBox.{question,critical,information,warning}`, and friends spin a
+nested Qt event loop while asyncio still considers the task mid-step; QtAsyncio
+steps another task from inside that nested loop and the bookkeeping check
+fails, corrupting whatever task was stepped. Both observed incidents line up:
+alice's 16:59 crash happened during the voucher generate/induct flow
+(`generate_voucher` `QInputDialog.getText`/`QMessageBox.question`), bob's
+17:56 crash happened with `attach_file`'s `QFileDialog().exec()` mid-task.
 
 ### Fix
 
-1. Listener supervisor: wrap the three listeners + `_await_voucher_join` so an
-   abnormal task exit (not `CancelledError`) is logged with `exc_info` and
-   re-scheduled with a short backoff on the same loop. Normal completion or
-   cancellation ends the supervised task (listeners only ever end abnormally).
-2. Move the `first_unread` DB write to the io loop: split `update_first_unread`
-   into a sync state-set (`mark_first_unread`, returns "changed") plus an
-   io-loop persist coroutine that reuses `persistent.asession()` there; update
-   both call sites to `if convo_state.mark_first_unread(v):
-   await self.iothread.run_in_io(persist_first_unread(...))`. This restores the
-   single-writer-on-iothread pattern and removes the Qt-loop session.
+1. Listener supervisor (shipped in `fdbde7d`): wrap the three listeners +
+   `_await_voucher_join` so an abnormal task exit is logged with `exc_info`
+   and re-scheduled with a short backoff. Keep as defense-in-depth.
+2. Move `first_unread` to the io loop (shipped in `fdbde7d`): sync
+   `mark_first_unread` state-set + io-loop `persist_first_unread`, single
+   writer on the iothread.
+3. **Never run a nested Qt event loop (modal dialog) inside a QtAsyncio
+   task** — the actual root fix. For each `@async_cb`/async site:
+   - `attach_file`: drop `@async_cb` (its body has no awaits) so
+     `dialog.exec()` runs in top-level event dispatch where no task is
+     mid-step.
+   - `send_file` (1525/1536): `QMessageBox.warning` -> `QTimer.singleShot(0, ...)`.
+   - `new_conversation` (1805/1812), `generate_voucher` (1879/1889),
+     `induct_via_voucher` (1982), `show_pending_vouchers` (2034):
+     result-returning dialogs become non-blocking via a small
+     `_await_dialog(dialog)` helper (`dialog.open()` + await its `finished`
+     signal through a Future); pure-note `QMessageBox` calls become
+     `QTimer.singleShot(0, ...)` (the pattern already used at 1909/1933/1976 etc.).
+   - Re-audit any future addition: blocking dialogs are only safe from plain
+     sync slots / deferred `singleShot`, never from a running task.
+4. **Harden `async_cb`**: replace the bare `ensure_future(...)` with
+   `katzen_util.create_task(...)` so a dying transient task always logs a
+   traceback instead of silently vanishing (the amplification behind bob's
+   invisible send failure).
 
 ### Status
 
-Implemented in `fdbde7d` (listener supervisor + io-loop `first_unread`
-persist, with `tests/test_listener_supervisor.py`; unit suite 440 passed /
-14 skipped, ruff delta 0). Awaits verification via a fresh 3-party manual
-webtop rerun: all three UIs show each other's messages live, alice2 flips to
-"sent" without user interaction, and no new tracebacks appear in
-`{a,b,c}.log`.
+Implemented in `fdbde7d` (listener supervisor + io-loop `first_unread` persist,
+`tests/test_listener_supervisor.py`; unit suite 440 passed / 14 skipped, ruff
+delta 0). `70a654f` re-worded the heading to the "freeze" symptom.
+
+Rerun on 2026-09-18: all text messages now flow between all three clients
+(supervisor worked — no permanent freeze), but bob's image send was eaten by
+the unchecked `@async_cb` task corruption (see root cause above). The dialog
+root-fix + `async_cb` hardening above are the pending work for this item;
+verification is another 3-party webtop rerun that also exercises the image
+send and a voucher generate/induct.
+
+---
+
+## 7. Tracked consideration: upgrade PySide6
+
+We pin `pyside6~=6.9.3` (pyproject.toml:15). Item 6 established that
+`PySide6.QtAsyncio` task stepping (QtAsyncio/tasks.py `_step`, the
+`asyncio._enter_task` bookkeeping check) is intolerant of any re-entrant step,
+e.g. a nested Qt event loop opened while a `QtTask` is mid-step; the mismatch
+is raised as a `RuntimeError` and the reinvoked task is left in a corrupt
+state.
+
+We are fixing the trigger at its source (item 6 / step 3: never run a modal
+dialog inside a task), so an upgrade is **not** needed to unblock this work.
+Tracked anyway for later: a newer PySide6 (6.9.x point release or 6.10+)
+may harden `QtAsyncio` itself — either by raising a clearer error for nested
+loop entry or by tolerating it. Before upgrading, verify:
+
+- Which `PySide6.QtAsyncio` changes landed since 6.9.3 (changelog /
+  upstream issues about `_enter_task` / nested event loops).
+- That the webtop GUI clients (Qt 6.9 ABI, Wayland) still run cleanly after
+  the version bump, since the pin also covers runtime, not just bindings.
+- That the item-6 manual rerun stays green on the new version (regression
+  guard, not a substitute for fixing our own code).
+
+Low priority; re-evaluate when we do the next dependency refresh.
