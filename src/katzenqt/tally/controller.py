@@ -175,10 +175,19 @@ class TallyController:
             )
             return
         doc = self._docs.get((conversation_id, survey_id))
+        try:
+            if doc is None:
+                loaded = sync.load_doc(crdt)
+            else:
+                sync.apply_update(doc, crdt)
+        except ValueError as exc:
+            logger.warning(
+                "dropping tally message: undecodable crdt for survey %s: %s",
+                survey_id.hex(), exc,
+            )
+            return
         if doc is None:
-            self._docs[(conversation_id, survey_id)] = sync.load_doc(crdt)
-        else:
-            sync.apply_update(doc, crdt)
+            self._docs[(conversation_id, survey_id)] = loaded
         await self._save(sess, survey_id, conversation_id)
 
     async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> bool:

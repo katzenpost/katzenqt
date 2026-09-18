@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import cbor2
 import struct
 
 import pytest
@@ -354,3 +355,65 @@ class TestOnError:
 
         assert fired == ["fired"]
         assert handler_calls == []
+
+
+class TestEpochRaceLivelock:
+    @pytest.mark.real_sleeps
+    @pytest.mark.asyncio
+    async def test_gives_up_racing_the_epoch_after_repeated_losses(self, caplog):
+        network._EPOCH_LOSS_STREAK.clear()
+        uid = "livelock-stream"
+        rolls = 0
+
+        async def never_answers():
+            await asyncio.sleep(3600)
+
+        async def roll_epoch():
+            await asyncio.sleep(0.01)
+            await network.on_new_pki_document(
+                {"payload": cbor2.dumps({"Epoch": 9000 + rolls})}
+            )
+
+        for attempt in range(network._EPOCH_RACE_MAX_LOSSES):
+            rolls += 1
+            roller = asyncio.ensure_future(roll_epoch())
+            with pytest.raises(network.ConnectionLifeInterruptedError):
+                await network._rpc_racing_connection_life(
+                    bacap_uuid=uid, what="encrypt_read",
+                    rpc_factory=never_answers,
+                    backstop_s=5.0, grace_s=0.05,
+                )
+            await roller
+            assert network._EPOCH_LOSS_STREAK[uid] == attempt + 1
+
+        rolls += 1
+        roller = asyncio.ensure_future(roll_epoch())
+        caplog.set_level(logging.WARNING, logger="katzen.network")
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(network.ConnectionLifeInterruptedError):
+            await network._rpc_racing_connection_life(
+                bacap_uuid=uid, what="encrypt_read",
+                rpc_factory=never_answers,
+                backstop_s=0.5, grace_s=0.05,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+        await roller
+        assert any("letting this attempt run to the" in r.message
+                   for r in caplog.records), [r.message for r in caplog.records]
+        assert elapsed >= 0.5, f"returned after {elapsed:.2f}s, did not use the backstop"
+
+    @pytest.mark.asyncio
+    async def test_a_success_clears_the_streak(self):
+        network._EPOCH_LOSS_STREAK.clear()
+        uid = "recovering-stream"
+        network._EPOCH_LOSS_STREAK[uid] = network._EPOCH_RACE_MAX_LOSSES - 1
+
+        async def answers():
+            return "ok"
+
+        got = await network._rpc_racing_connection_life(
+            bacap_uuid=uid, what="encrypt_read", rpc_factory=answers,
+            backstop_s=5.0, grace_s=0.05,
+        )
+        assert got == "ok"
+        assert uid not in network._EPOCH_LOSS_STREAK

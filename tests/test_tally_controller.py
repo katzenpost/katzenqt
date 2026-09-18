@@ -260,3 +260,10 @@ def controller_max_survey_id() -> int:
     from katzenqt.tally import controller as controller_mod
 
     return controller_mod._MAX_SURVEY_ID_LEN
+
+
+@pytest.mark.asyncio
+async def test_undecodable_crdt_is_dropped_not_raised(caplog):
+    from katzenqt.tally import sync
+    with pytest.raises(ValueError):
+        sync.load_doc(b"\xde\xad\xbe\xef" * 8)

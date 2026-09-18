@@ -136,6 +136,37 @@ async def pending_joiner_join_conversation_ids() -> "list[int]":
         return [r.conversation_id for r in rows]
 
 
+async def voucher_used_for(conversation_id: int) -> bool:
+    """True if a Contact Voucher handshake completed successfully for this
+    conversation. False for an unknown conversation or one that never used a
+    voucher."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        return bool(conv is not None and conv.voucher_used)
+
+
+async def list_used_vouchers() -> "list[tuple]":
+    """Every conversation whose voucher was successfully used, as
+    (conversation_id, conversation_name), for the pending-voucher view."""
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(
+            select(persistent.Conversation).where(
+                persistent.Conversation.voucher_used == True  # noqa: E712
+            )
+        )).all()
+        return [(conv.id, conv.name) for conv in rows]
+
+
+async def _finish_pending_voucher(sess, conversation, pending_row) -> None:
+    """Complete a handshake in one commit: mark the conversation's voucher used
+    and delete the in-flight PendingVoucher row. Callers own the surrounding
+    session and commit."""
+    conversation.voucher_used = True
+    sess.add(conversation)
+    if pending_row is not None:
+        await sess.delete(pending_row)
+
+
 async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, payload: bytes) -> bytes:
     """Write payload to one box and return the next box index.
 
@@ -506,7 +537,7 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
                 len(reply_who.please_adds), remaining,
             )
         row = await sess.get(persistent.PendingVoucher, pv_id)
-        await sess.delete(row)
+        await _finish_pending_voucher(sess, conv, row)
         await sess.commit()
     return added
 
@@ -676,7 +707,7 @@ async def derive_read_and_induct(
                 conversation_id,
             )
         row = await sess.get(persistent.PendingVoucher, pv_id)
-        await sess.delete(row)
+        await _finish_pending_voucher(sess, conv, row)
         await sess.commit()
 
     if already_inducted or at_capacity:
