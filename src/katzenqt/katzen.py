@@ -1441,6 +1441,7 @@ class MainWindow(QMainWindow):
         api = QMenu(tree)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
         rgm = api.addAction(f"Resume reading from {item.text()}")
+        pgm.setEnabled(active)
         rgm.setEnabled(not active)
         chosen = await _menu_chosen(api, tree.viewport().mapToGlobal(pos))
         if chosen is pgm and active:
@@ -1479,6 +1480,7 @@ class MainWindow(QMainWindow):
         api = QMenu(view)
         pgm = api.addAction("Pause download")
         rgm = api.addAction("Resume download")
+        pgm.setEnabled(active)
         rgm.setEnabled(not active)
         chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
         if chosen is pgm and active:
