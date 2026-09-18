@@ -2873,17 +2873,9 @@ class MainWindow(QMainWindow):
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
-        display_dialog = QInputDialog(self)
-        display_dialog.setWindowTitle("Generate voucher")
-        display_dialog.setLabelText(
-            "Choose (your) name shown to the contact who inducts you:",
-        )
-        if not await _dialog_finished(display_dialog):
-            return
-        display_name = display_dialog.textValue().strip()
+        display_name = convo.own_peer_name
         if not display_name:
             return
-
         try:
             client = self.iothread.kp_client
             assert client is not None
