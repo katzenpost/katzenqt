@@ -1206,6 +1206,46 @@ class MainWindow(QMainWindow):
             waited += 1
         return True
 
+    def _supervised_listener(
+        self,
+        name: str,
+        coro_factory,
+        *,
+        restart_on_finish: bool = False,
+        backoff_s: float = 2.0,
+    ) -> None:
+        """Run ``coro_factory()`` as a supervised task on the QtAsyncio loop.
+
+        Listener coroutines are long-lived loops; cancellation (shutdown) is
+        the only intended end. Any other end — an exception, or a clean return
+        when ``restart_on_finish`` is set — is treated as a loss: log it and
+        reschedule a fresh run after ``backoff_s`` so the live UI refresh can
+        never silently die for the rest of the session.
+        """
+        def _on_done(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is None and not restart_on_finish:
+                return
+            logger.error(
+                "%s: %s; restarting in %.1fs",
+                name,
+                "finished without error" if exc is None else f"died with {exc}",
+                backoff_s,
+                exc_info=exc,
+            )
+            loop.call_later(
+                backoff_s,
+                lambda: self._supervised_listener(
+                    name, coro_factory,
+                    restart_on_finish=restart_on_finish, backoff_s=backoff_s,
+                ),
+            )
+        loop = asyncio.get_event_loop()
+        task = create_task(coro_factory())
+        task.add_done_callback(_on_done)
+
     async def receive_msg_listener(self):
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
@@ -1243,7 +1283,13 @@ class MainWindow(QMainWindow):
             # TODO make which of these to do configurable:
             convo_state.chat_lines_scroll_idx = 1.0
             root = self.ui.qml_ChatLines.rootObject()
-            await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
+            new_first_unread = root.property("ctx").value("first_unread")
+            if convo_state.mark_first_unread(new_first_unread):
+                await self.iothread.run_in_io(
+                    network.persist_first_unread(
+                        convo_state.conversation_id, new_first_unread,
+                    ),
+                )
             root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
         else:
             #   x.2) Scrolling: Conversation is NOT in focus:
@@ -1654,7 +1700,13 @@ class MainWindow(QMainWindow):
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
             if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
                 print("old first_unread is", old_ctx.value("first_unread"))
-                await old_convo.update_first_unread(old_ctx.value("first_unread"))
+                old_first_unread = old_ctx.value("first_unread")
+                if old_convo.mark_first_unread(old_first_unread):
+                    await self.iothread.run_in_io(
+                        network.persist_first_unread(
+                            old_convo.conversation_id, old_first_unread,
+                        ),
+                    )
             root = self.ui.qml_ChatLines.rootObject()
             if root and (vscrollbar := root.findChild(object, "vscrollbar")):
                 #vrect = vscrollbar.findChild(object, "vscrollbar_rect")
@@ -1862,7 +1914,10 @@ class MainWindow(QMainWindow):
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
-        ensure_future(self._await_voucher_join(convo))
+        self._supervised_listener(
+            "_await_voucher_join",
+            lambda: self._await_voucher_join(convo),
+        )
 
     async def _await_voucher_join(self, convo):
         # A fresh GUI start may still be dialling the daemon on the io thread
@@ -2183,9 +2238,15 @@ async def main(window: MainWindow):
             await add_conversation(window, convo)
 
     window.show()
-    create_task(window.receive_msg_listener())
-    create_task(window.peer_added_listener())
-    create_task(window.transfers_listener())
+    window._supervised_listener(
+        "receive_msg_listener", window.receive_msg_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
+        "peer_added_listener", window.peer_added_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
+        "transfers_listener", window.transfers_listener, restart_on_finish=True,
+    )
     await window.transfers_model.seed_from_db()
 
     # Resume any joiner handshake a previous run left in flight: the inductor
@@ -2195,7 +2256,10 @@ async def main(window: MainWindow):
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)
-            create_task(window._await_voucher_join(convo_state))
+            window._supervised_listener(
+                f"_await_voucher_join:{conv_id}",
+                lambda: window._await_voucher_join(convo_state),
+            )
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html

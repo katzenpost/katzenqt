@@ -223,6 +223,25 @@ async def _remint_mixwal(mw: persistent.MixWAL, fresh) -> bool:
     return True
 
 
+async def persist_first_unread(conversation_id: int, first_unread: int) -> None:
+    """Persist a conversation's first_unread cursor; io-loop only.
+
+    All conversation writes funnel through this loop's single aiosqlite
+    writer, so callers (Qt-side refresh paths) schedule this via
+    run_in_io rather than opening a session here themselves."""
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.Conversation, conversation_id)
+        if row is None:
+            logger.warning(
+                "persist_first_unread: conversation %d not found; skipping",
+                conversation_id,
+            )
+            return
+        row.first_unread = first_unread
+        sess.add(row)
+        await sess.commit()
+
+
 async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, wcw: persistent.WriteCapWAL) -> bool:
     """Re-encrypt a stale write envelope at the same index, from the
     PlaintextWAL payload that is retained until the write is ACK'ed."""

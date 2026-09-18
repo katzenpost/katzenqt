@@ -651,14 +651,14 @@ class ConversationUIState(BaseModel):
         })
         return props
 
-    async def update_first_unread(self, new_first_unread:int) -> None:
-        """Update first_unread in the persistent database:"""
+    def mark_first_unread(self, new_first_unread:int) -> bool:
+        """Set the in-memory first_unread cursor; return True if it changed.
+
+        The persistent write is kept single-writer on the io loop: callers
+        follow up with network.persist_first_unread() only when this returns
+        True."""
         if new_first_unread == self.first_unread:
-            return
+            return False
         print("UPDATED FIRST_UNREAD", self.first_unread, new_first_unread)
         self.first_unread = new_first_unread
-        async with persistent.asession() as sess:
-            co = await sess.get(persistent.Conversation, self.conversation_id)
-            co.first_unread = self.first_unread
-            sess.add(co)
-            await sess.commit()
+        return True
