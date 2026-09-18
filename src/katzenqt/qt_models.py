@@ -64,6 +64,8 @@ ROLE_TRANSFER_PARENT_NAME = 0x202
 ROLE_TRANSFER_PIECES = 0x203
 ROLE_TRANSFER_TOTAL = 0x204
 ROLE_TRANSFER_ACTIVE = 0x205  # True = downloading, False = paused
+ROLE_TRANSFER_FAILED = 0x206  # True = failed, False/missing = active or paused
+ROLE_TRANSFER_FAILURE_REASON = 0x207  # reason string for failed transfers
 
 _TRANSFER_ROLES = {
     ROLE_TRANSFER_RCW_ID: QByteArray(b"transfer_rcw_id"),
@@ -72,6 +74,8 @@ _TRANSFER_ROLES = {
     ROLE_TRANSFER_PIECES: QByteArray(b"transfer_pieces"),
     ROLE_TRANSFER_TOTAL: QByteArray(b"transfer_total"),
     ROLE_TRANSFER_ACTIVE: QByteArray(b"transfer_active"),
+    ROLE_TRANSFER_FAILED: QByteArray(b"transfer_failed"),
+    ROLE_TRANSFER_FAILURE_REASON: QByteArray(b"transfer_failure_reason"),
 }
 
 
@@ -80,9 +84,10 @@ class DownloadsModel(QtCore.QAbstractTableModel):
 
     Backs the Transfers QTableView. Columns: Contact, Progress, State, with
     the substream's ReadCapWAL id carried as ROLE_TRANSFER_RCW_ID for the
-    Pause/Resume actions. Rows are added/updated by MainWindow's
+    Pause/Resume/Remove actions. Rows are added/updated by MainWindow's
     transfers_listener (network.substream_progress_queue) and seeded from
-    the database at startup by seed_from_db().
+    the database at startup by seed_from_db(). Failed transfers stay visible
+    until dismissed by the user.
     """
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -123,6 +128,8 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                     return f"{pieces} pieces"
                 return f"{pieces}/{total}"
             if index.column() == 2:
+                if row.get("failed", False):
+                    return f"Failed: {row.get('failure_reason', 'unknown')}"
                 return "Paused" if not row.get("active", True) else "Downloading"
             return None
         if role == ROLE_TRANSFER_RCW_ID:
@@ -137,6 +144,10 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             return row.get("total")
         if role == ROLE_TRANSFER_ACTIVE:
             return row.get("active", True)
+        if role == ROLE_TRANSFER_FAILED:
+            return row.get("failed", False)
+        if role == ROLE_TRANSFER_FAILURE_REASON:
+            return row.get("failure_reason")
         return None
 
     # -- mutations (Qt-listener thread) ------------------------------------
@@ -185,6 +196,34 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         row = self._idx(rcw_id)
         idx0 = self.index(row, 2)
         self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_ACTIVE])
+
+    def fail_transfer(self, rcw_id: uuid.UUID, reason: str) -> None:
+        """Mark a transfer as failed with a reason string.
+
+        The row stays visible in the Transfers panel so the user can see
+        what failed and why. Use remove_transfer() to dismiss it.
+
+        TODO: When removing a failed transfer, also purge any partial
+        ReceivedPiece rows from the database to free disk space.
+        """
+        if rcw_id not in self._rows:
+            return
+        self._rows[rcw_id]["failed"] = True
+        self._rows[rcw_id]["failure_reason"] = reason
+        self._rows[rcw_id]["active"] = False  # no longer downloading
+        row = self._idx(rcw_id)
+        idx2 = self.index(row, 2)  # State column
+        self.dataChanged.emit(idx2, idx2, [ROLE_TRANSFER_FAILED, ROLE_TRANSFER_FAILURE_REASON])
+
+    def remove_transfer(self, rcw_id: uuid.UUID) -> None:
+        """Remove a transfer row from the model (user-dismissal of failed/complete)."""
+        if rcw_id not in self._rows:
+            return
+        row = self._idx(rcw_id)
+        self.beginRemoveRows(QtCore.QModelIndex(), row, row)
+        del self._rows[rcw_id]
+        del self._order[row]
+        self.endRemoveRows()
 
     def _idx(self, rcw_id: uuid.UUID) -> int:
         return self._order.index(rcw_id)

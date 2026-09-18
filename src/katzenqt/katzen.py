@@ -1466,10 +1466,10 @@ class MainWindow(QMainWindow):
     @async_cb
     async def transfers_context_menu(self, pos) -> None:
         """Right-click a Transfers row: Pause / Resume that substream
-        download. Reuses the item-5 per-stream primitive (pause freezes the
-        BACAP cursor + cancels the in-flight ARQ; resume re-arms from the
-        saved next_index), so the main conversation keeps flowing either
-        way."""
+        download, or Remove a failed one. Reuses the item-5 per-stream
+        primitive (pause freezes the BACAP cursor + cancels the in-flight
+        ARQ; resume re-arms from the saved next_index), so the main
+        conversation keeps flowing either way."""
         view = self.transfers_view
         idx = view.indexAt(pos)
         if not idx.isValid():
@@ -1486,21 +1486,38 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == rcw_id,
                 )
             )).first()
-        active = bool(solo.active) if solo is not None else True
+        # Check if this transfer is marked as failed in the UI model
+        transfers_model = view.model()
+        row = None
+        for i, rid in enumerate(transfers_model._order):
+            if rid == str(rcw_id):
+                row = i
+                break
+        is_failed = (
+            row is not None and
+            transfers_model._rows.get(rcw_id, {}).get("failed", False)
+        )
         api = QMenu(view)
-        pgm = api.addAction("Pause download")
-        rgm = api.addAction("Resume download")
-        pgm.setEnabled(active)
-        rgm.setEnabled(not active)
-        chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-        if chosen is pgm and active:
-            await self.iothread.run_in_io(
-                network.pause_peer_reads(bacap_stream=rcw_id),
-            )
-        elif chosen is rgm and not active:
-            await self.iothread.run_in_io(
-                network.resume_peer_reads(bacap_stream=rcw_id),
-            )
+        if is_failed:
+            rm = api.addAction("Remove")
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is rm:
+                transfers_model.remove_transfer(rcw_id)
+        else:
+            active = bool(solo.active) if solo is not None else True
+            pgm = api.addAction("Pause download")
+            rgm = api.addAction("Resume download")
+            pgm.setEnabled(active)
+            rgm.setEnabled(not active)
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is pgm and active:
+                await self.iothread.run_in_io(
+                    network.pause_peer_reads(bacap_stream=rcw_id),
+                )
+            elif chosen is rgm and not active:
+                await self.iothread.run_in_io(
+                    network.resume_peer_reads(bacap_stream=rcw_id),
+                )
 
     async def transfers_listener(self) -> None:
         """Drain network.substream_progress_queue into the Transfers model.
@@ -1529,6 +1546,8 @@ class MainWindow(QMainWindow):
                     self.transfers_model.set_paused(rcw_id, paused=True)
                 elif kind == "resumed":
                     self.transfers_model.set_paused(rcw_id, paused=False)
+                elif kind == "failed":
+                    self.transfers_model.fail_transfer(rcw_id, event[2])
             except asyncio.CancelledError:
                 raise
             except Exception as e:

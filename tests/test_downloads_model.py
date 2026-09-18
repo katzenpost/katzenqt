@@ -20,6 +20,8 @@ from katzenqt import network, persistent  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
     ROLE_TRANSFER_ACTIVE,
     ROLE_TRANSFER_CONV_ID,
+    ROLE_TRANSFER_FAILED,
+    ROLE_TRANSFER_FAILURE_REASON,
     ROLE_TRANSFER_PARENT_NAME,
     ROLE_TRANSFER_PIECES,
     ROLE_TRANSFER_RCW_ID,
@@ -100,6 +102,55 @@ def test_set_paused_toggles_state_column():
     model.set_paused(rcw_id, paused=False)
     assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Downloading"
     assert model.data(model.index(0, 0), ROLE_TRANSFER_ACTIVE) is True
+
+
+def test_fail_transfer_keeps_row_visible_with_reason():
+    """A failed transfer stays visible in the model with state
+    'Failed: {reason}' so the user can see what went wrong."""
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=5)
+    
+    model.fail_transfer(rcw_id, "MalformedChunkError: invalid CRC")
+    
+    assert rcw_id in model._rows
+    assert model._rows[rcw_id]["failed"] is True
+    assert model._rows[rcw_id]["failure_reason"] == "MalformedChunkError: invalid CRC"
+    assert model._rows[rcw_id]["active"] is False
+    # State column shows the failure reason
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Failed: MalformedChunkError: invalid CRC"
+    # Roles expose the failed flag and reason
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_FAILED) is True
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_FAILURE_REASON) == "MalformedChunkError: invalid CRC"
+
+
+def test_fail_transfer_unknown_row_is_ignored():
+    """Calling fail_transfer on a non-existent row must not raise."""
+    model = DownloadsModel()
+    model.fail_transfer(uuid.uuid4(), "some error")  # must not raise
+    assert model.rowCount() == 0
+
+
+def test_remove_transfer_deletes_row():
+    """Remove a transfer row from the model (user-dismissal of failed/complete)."""
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
+    model.fail_transfer(rcw_id, "test error")
+    assert model.rowCount() == 1
+    
+    model.remove_transfer(rcw_id)
+    
+    assert rcw_id not in model._rows
+    assert rcw_id not in model._order
+    assert model.rowCount() == 0
+
+
+def test_remove_transfer_unknown_row_is_ignored():
+    """Calling remove_transfer on a non-existent row must not raise."""
+    model = DownloadsModel()
+    model.remove_transfer(uuid.uuid4())  # must not raise
+    assert model.rowCount() == 0
 
 
 def test_column_and_role_metadata():

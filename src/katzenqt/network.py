@@ -48,6 +48,7 @@ peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 #   ("completed", rcw_id)
 #   ("paused",   rcw_id)
 #   ("resumed",  rcw_id)
+#   ("failed",   rcw_id, reason_str)         # unprocessable chunk
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
 substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
@@ -1203,23 +1204,52 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       give_up()
       return
     except Exception as e:
-      logger.error(
-          "drain_mixwal_read_single: dropping unprocessable message on "
-          "bacap_stream=%s: %s: %s; advancing past it",
-          mw.bacap_stream, type(e).__name__, e,
-      )
-      await sess.rollback()
-      async with persistent.asession() as drop_sess:
-        rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-        if rcw_row is not None:
-          rcw_row.next_index = rcr.next_message_box_index
-          drop_sess.add(rcw_row)
-        mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
-        if mw_row is not None:
-          await drop_sess.delete(mw_row)
-        await drop_sess.commit()
-      give_up()
-      return
+      # Check if this is a substream peer (look up the peer by bacap_stream)
+      async with persistent.asession() as _cp_sess:
+          _cp = (await _cp_sess.exec(select(persistent.ConversationPeer).where(
+              persistent.ConversationPeer.read_cap_id == mw.bacap_stream,
+          ))).first()
+      is_substream = _cp is not None and _cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+      
+      if is_substream:
+          # Substream: deactivate peer and fire failed event. Rollback the
+          # original session first to release any locks held by the failed
+          # transaction.
+          await sess.rollback()
+          async with persistent.asession() as drop_sess:
+              _cp_row = await drop_sess.get(persistent.ConversationPeer, _cp.id)
+              if _cp_row is not None:
+                  _cp_row.active = False
+                  drop_sess.add(_cp_row)
+              rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+              if rcw_row is not None:
+                  rcw_row.next_index = rcr.next_message_box_index
+                  drop_sess.add(rcw_row)
+              mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
+              if mw_row is not None:
+                  await drop_sess.delete(mw_row)
+              await drop_sess.commit()
+          substream_progress_queue.put_nowait(("failed", str(mw.bacap_stream), f"{type(e).__name__}: {e}"))
+          give_up()
+          return
+      else:
+          logger.error(
+              "drain_mixwal_read_single: dropping unprocessable message on "
+              "bacap_stream=%s: %s: %s; advancing past it",
+              mw.bacap_stream, type(e).__name__, e,
+          )
+          await sess.rollback()
+          async with persistent.asession() as drop_sess:
+              rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+              if rcw_row is not None:
+                  rcw_row.next_index = rcr.next_message_box_index
+                  drop_sess.add(rcw_row)
+              mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
+              if mw_row is not None:
+                  await drop_sess.delete(mw_row)
+              await drop_sess.commit()
+          give_up()
+          return
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
