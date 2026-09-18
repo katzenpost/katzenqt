@@ -58,6 +58,40 @@ handshake's bounded daemon RPCs, `_substream_parent` + `test_substream_guard.py`
 floor, and the junit/`--no-cov` CI reporting. Full suite: 403 passed / 14
 skipped.
 
+State as of 2026-09-18: deckard-dev merged `origin/main` PR #39 "Remint
+stale envelopes" (`1504760`) via merge commit `9dad3f9`, taking main's
+write-path remint (`_remint_mixwal`/`_remint_write_envelope` re-cast after a
+courier rejection through a racing-connection-lifetime thin read) and the new
+read semantics: every `start_resending_encrypted_message` now casts
+`no_retry_on_box_id_not_found=True`, so reads fail fast and re-poll locally
+instead of riding out in the daemon (the epoch-grace path is gone;
+`InvalidEpochError` no longer exists in the except tuple — main imports
+`CourierError, CourierInvalidEpochError, ReplicaError`). Our substream work
+is re-applied on top of that read path (`is_substream` pre-query +
+deactivate-on-unrecoverable-`BoxIDNotFound` branch, `pause`/`resume_peer_reads`
++ the `_inflight_reads` registry, the 140-byte I-chunk numerator, and the
+`substream_progress_queue` events feeding the Transfers panel). `test_voucher`
+keeps our `KQT_SEND_BUDGET_FLOOR_S` plumbing, and
+`test_normal_peer_not_found_rides_out` was updated to the
+`no_retry=True`-only semantics (renamed `..._is_benign`).
+
+Also since the merge: the shared webtop/readarm venv was abandoned for a
+rebuilt repo-local `.venv` (uv, CPython 3.13, editable katzenqt +
+`~/thin_client`), so the integration tests no longer borrow a venv the webtop
+GUI also mutates. Full integration suite passed against the local docker
+mixnet on 2026-09-18: 12/12 parallel (`-n 4 --dist loadscope`, incl.
+`test_file_roundtrip`) + 2/2 serial.
+
+New robustness fix `169af71`: `readables_to_mixwal` is the session's only
+read-arming task. Before this, one arming pass committing into the UNIQUE
+`mixwal.bacap_stream` collision (two `ConversationPeer` rows transiently
+aliasing one `ReadCapWAL`) raised `IntegrityError` and permanently killed the
+loop, wedging every later read (observed as a 900s send-file timeout in
+`test_file_roundtrip`). The pass now rolls back and re-arms on the next sweep,
+and dedupes by `rcw.id`; regression test
+`test_duplicate_readable_peer_arms_stream_once`. Unit suite 438 passed / 14
+skipped.
+
 Quick orientation for a new session:
 
 - Repo: `/home/kpdev/katzenqt` (Python client). Sibling Go repo:
@@ -141,7 +175,10 @@ Investigate and fix the replica-side proxy storm that has been hammering this
 1. Infinite/long-lived proxy probe loop when a box genuinely does not exist
    durable, amplified by every client retrying the read (client-side
    `no_retry_on_box_id_not_found=False` in the kpclientd config means rides out
-   BoxIDNotFound forever instead of giving up).
+   BoxIDNotFound forever instead of giving up). The deckard-dev client now
+   always casts `no_retry_on_box_id_not_found=True` and re-polls locally (see
+   the 2026-09-18 note), so this amplification route is closed for this
+   client; the mixnet/courier-side investigation below is still open.
 2. Replication acknowledged to the client before durability (see item 3) so the
    proxy machinery spins trying to satisfy reads for boxes that will never
    appear.
@@ -295,9 +332,10 @@ RESOLVED DURING REVIEW (2026-09-11) and IMPLEMENTED (2026-09-13, commit
   `TombstoneError`, cancel the in-flight ARQ (`cancel_resending_encrypted_message`)
   and drain task (new per-`bacap_stream` registry), set `cp.active=False`,
   delete the is_read MixWAL row, `draining_right_now.discard`, and WARNING-log.
-  Keep the ReadCapWAL + ReceivedPiece rows so a future retry (item 4/5) can
-  resume from `next_index`. Normal conversation peers keep the current
-  ride-out behavior.
+Keep the ReadCapWAL + ReceivedPiece rows so a future retry (item 4/5) can
+   resume from `next_index`. Normal conversation peers fail fast the same way
+   (post-merge, every read casts `no_retry=True`) and re-poll locally; they
+   are only ever deactivated manually (item 5), never by a not-found.
 - Are the items above (deactivate/keep-RP/retry primitive) consistent with item
   5's per-peer pause/resume? Yes — pause/deactivate share the same machinery.
 
@@ -308,8 +346,12 @@ is_read MixWAL row, cancels the in-flight read ARQ + drain task (per-
 `bacap_stream` registry `_inflight_reads`), discards from `draining_right_now`,
 and WARNING-logs; `InvalidEpochError` added to the transient-recover catch
 (needed because `no_retry=True` surfaces it as a `ReplicaError` subclass that
-was previously uncaught). Normal conversation peers keep the 5s ride-out.
-ReadCapWAL + ReceivedPiece rows are kept so item 5's resume can re-arm.
+was previously uncaught; post-merge the tuple is main's
+`CourierError, CourierInvalidEpochError, ReplicaError`). Normal conversation
+peers keep the benign treatment — the read is re-polled locally rather than
+riding out in the daemon (see the 2026-09-18 note: every read now casts
+`no_retry=True`). ReadCapWAL + ReceivedPiece rows are kept so item 5's resume
+can re-arm.
 
 ---
 
