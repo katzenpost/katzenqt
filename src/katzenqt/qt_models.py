@@ -6,11 +6,11 @@ from PySide6.QtQml import QQmlPropertyMap
 from PySide6.QtQuick import QQuickImageProvider
 
 from pydantic import BaseModel, Field
+from sqlmodel import select
 import uuid
 from typing import Any, NamedTuple
 
 import cbor2
-from sqlmodel import select
 
 from . import attachment_images, persistent
 
@@ -523,9 +523,12 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         # sa_relationship_kwargs={"order_by": "conversation_order", "lazy": "dynamic"},
 
         with persistent.Session(persistent._engine_sync) as sess:
-                cl = sess.query(persistent.ConversationLog).filter(
-                    persistent.ConversationLog.conversation_id == self.convo_id).filter(
-                        persistent.ConversationLog.conversation_order==index_row).first()
+                cl = sess.exec(
+                    select(persistent.ConversationLog).where(
+                        persistent.ConversationLog.conversation_id == self.convo_id,
+                        persistent.ConversationLog.conversation_order == index_row,
+                    )
+                ).first()
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
                     if cl.network_status == 1:

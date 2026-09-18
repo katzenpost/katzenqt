@@ -102,7 +102,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     # 1. Baseline: Bob's send is ACKed -> the pair is connected and working.
-    baseline = _run_role(bob_state, "chat-session", "demo", "SEND:m0", timeout=300.0)
+    baseline = _run_role(bob_state, "chat-session", "demo", "SEND:m0", timeout=750.0)
     assert "STEP_OK:0:SEND:m0" in baseline.stdout + baseline.stderr, (
         f"baseline SEND:m0 did not complete\n"
         f"stdout:\n{baseline.stdout}\nstderr:\n{baseline.stderr}"

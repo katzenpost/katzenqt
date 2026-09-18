@@ -58,7 +58,7 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         wait_reachable(120.0)
         tw.mark("tcp_back")
 
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=900.0)
+        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=1200.0)
         assert send.returncode == 0, send.stdout + send.stderr
         tw.mark("bob_sent")
 

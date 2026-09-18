@@ -44,6 +44,12 @@ STEP_DONE = "done"
 _INDEX_LEN = 104
 _READ_RETRY_GAP_S = 15.0  # bounded round gap, well inside a ~60s PKI epoch window
 _STALL_WARN_ROUNDS = 40  # ~10 minutes of continuous errors before escalating to WARNING
+_PUBLISH_DEADLINE_S = 900.0  # bounded, unlike _read_box which may wait on a human
+_PUBLISH_TRANSIENT_ERRORS = (
+    BoxIDNotFoundError, InvalidEpochError, CourierInvalidEpochError,
+    DatabaseFailureError, CourierError, ThinClientOfflineError,
+    ConnectionLifeInterruptedError,
+)
 
 
 def _brief(b: "bytes | None") -> str:
@@ -137,28 +143,60 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
     drain loops do (see _rpc_racing_connection_life): a daemon reconnect or
     PKI epoch rollover mid-call otherwise orphans the await forever, which
     is exactly what stranded a voucher-mint/induct CLI process past its
-    caller's own subprocess timeout with no diagnostic at all."""
-    wcr = await _rpc_racing_connection_life(
-        bacap_uuid=_brief(write_cap), what="encrypt_write",
-        rpc_factory=lambda: connection.encrypt_write(
-            plaintext=payload, write_cap=write_cap, message_box_index=message_box_index,
-        ),
-        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
-    )
-    await _rpc_racing_connection_life(
-        bacap_uuid=_brief(write_cap), what="start_resending_encrypted_message",
-        rpc_factory=lambda: connection.start_resending_encrypted_message(
-            read_cap=None, write_cap=write_cap, message_box_index=None, reply_index=None,
-            envelope_descriptor=wcr.envelope_descriptor,
-            message_ciphertext=wcr.message_ciphertext,
-            envelope_hash=wcr.envelope_hash,
-        ),
-    )
-    logger.debug(
-        "publish_box: wrote box %s on write_cap %s; next box index %s",
-        _brief(message_box_index), _brief(write_cap), _brief(wcr.next_message_box_index),
-    )
-    return wcr.next_message_box_index
+    caller's own subprocess timeout with no diagnostic at all.
+
+    Retried on the same transient set _read_box uses. Racing the RPCs turned
+    an orphaned await into a hard failure but never added recovery, so one
+    epoch rollover mid-publish aborted the whole mint or induct. Each round
+    re-encrypts at the SAME index, so the retry is idempotent and always
+    speaks the current epoch."""
+    started = asyncio.get_event_loop().time()
+    rounds = 0
+    while True:
+        rounds += 1
+        try:
+            wcr = await _rpc_racing_connection_life(
+                bacap_uuid=_brief(write_cap), what="encrypt_write",
+                rpc_factory=lambda: connection.encrypt_write(
+                    plaintext=payload, write_cap=write_cap,
+                    message_box_index=message_box_index,
+                ),
+                backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+            )
+            await _rpc_racing_connection_life(
+                bacap_uuid=_brief(write_cap), what="start_resending_encrypted_message",
+                rpc_factory=lambda: connection.start_resending_encrypted_message(
+                    read_cap=None, write_cap=write_cap, message_box_index=None,
+                    reply_index=None,
+                    envelope_descriptor=wcr.envelope_descriptor,
+                    message_ciphertext=wcr.message_ciphertext,
+                    envelope_hash=wcr.envelope_hash,
+                ),
+            )
+            logger.debug(
+                "publish_box: wrote box %s on write_cap %s; next box index %s",
+                _brief(message_box_index), _brief(write_cap),
+                _brief(wcr.next_message_box_index),
+            )
+            return wcr.next_message_box_index
+        except _PUBLISH_TRANSIENT_ERRORS as e:
+            elapsed = asyncio.get_event_loop().time() - started
+            if elapsed >= _PUBLISH_DEADLINE_S:
+                logger.error(
+                    "publish_box: box %s on write_cap %s still failing after "
+                    "%.1fs (round %d, %s); giving up",
+                    _brief(message_box_index), _brief(write_cap), elapsed,
+                    rounds, type(e).__name__,
+                )
+                raise
+            if rounds == 1 or rounds % 4 == 0:
+                logger.debug(
+                    "publish_box: box %s on write_cap %s failed after %.1fs "
+                    "(round %d, %s); retrying in %.0fs",
+                    _brief(message_box_index), _brief(write_cap), elapsed,
+                    rounds, type(e).__name__, _READ_RETRY_GAP_S,
+                )
+            await asyncio.sleep(_READ_RETRY_GAP_S)
 
 
 async def _read_box(

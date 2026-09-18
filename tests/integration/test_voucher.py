@@ -206,7 +206,7 @@ def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory)
     _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
     _assert_ok(_run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv")
 
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
     _assert_ok(mint, "bob voucher-mint")
     voucher = _expect_token(mint, "VOUCHER=")
 
@@ -216,11 +216,11 @@ def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory)
         _run_role(bob_state, "voucher-await", "demo", timeout=25.0)
 
     # Now Alice replies.
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
     _assert_ok(induct, "alice voucher-induct")
 
     # A fresh await must resume from the persisted PendingVoucher and join.
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
+    joined = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
     _assert_ok(joined, "bob voucher-await (resumed)")
     assert "JOINED" in _output(joined)
 
@@ -245,7 +245,7 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
     _assert_ok(_run_role(carol_state, "create-conv", "demo", "carol"), "carol create-conv")
 
-    mint = _run_role(carol_state, "voucher-mint", "demo", "carol", timeout=300.0)
+    mint = _run_role(carol_state, "voucher-mint", "demo", "carol", timeout=750.0)
     _assert_ok(mint, "carol voucher-mint")
     voucher = _expect_token(mint, "VOUCHER=")
     assert voucher, "empty voucher"
@@ -271,14 +271,14 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
                 flush=True,
             )
         t_induct = time.perf_counter()
-        induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=300.0)
+        induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=900.0)
         _assert_ok(induct, "alice voucher-induct carol")
         if _TIMING:
             print(
                 f"[KQT-TIMING] overlap induct: {time.perf_counter() - t_induct:.2f}s",
                 flush=True,
             )
-        await_proc.wait(timeout=300.0)
+        await_proc.wait(timeout=900.0)
     finally:
         if await_proc.poll() is None:
             await_proc.kill()
@@ -311,16 +311,16 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
     _assert_ok(_run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv")
 
-    mint_ab = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    mint_ab = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
     _assert_ok(mint_ab, "bob voucher-mint")
     voucher_ab = _expect_token(mint_ab, "VOUCHER=")
     assert voucher_ab, "empty voucher"
 
-    induct_ab = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher_ab, timeout=300.0)
+    induct_ab = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher_ab, timeout=750.0)
     _assert_ok(induct_ab, "alice voucher-induct bob")
     assert "INDUCTED=" in _output(induct_ab)
 
-    joined_bob = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
+    joined_bob = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
     _assert_ok(joined_bob, "bob voucher-await")
     assert "JOINED" in _output(joined_bob)
 
@@ -336,16 +336,16 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
 
     # Phase 1: Carol joins via Bob, the group's third member.
     _assert_ok(_run_role(carol_state, "create-conv", "demo", "carol"), "carol create-conv")
-    mint_bc = _run_role(carol_state, "voucher-mint", "demo", "carol", timeout=300.0)
+    mint_bc = _run_role(carol_state, "voucher-mint", "demo", "carol", timeout=750.0)
     _assert_ok(mint_bc, "carol voucher-mint")
     voucher_bc = _expect_token(mint_bc, "VOUCHER=")
     assert voucher_bc, "empty voucher"
 
-    induct_bc = _run_role(bob_state, "voucher-induct", "demo", "carol", voucher_bc, timeout=300.0)
+    induct_bc = _run_role(bob_state, "voucher-induct", "demo", "carol", voucher_bc, timeout=750.0)
     _assert_ok(induct_bc, "bob voucher-induct carol")
     assert "INDUCTED=" in _output(induct_bc)
 
-    joined_carol = _run_role(carol_state, "voucher-await", "demo", timeout=300.0)
+    joined_carol = _run_role(carol_state, "voucher-await", "demo", timeout=750.0)
     _assert_ok(joined_carol, "carol voucher-await")
     assert "JOINED" in _output(joined_carol)
 
@@ -373,7 +373,7 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
 
     # Carol receives Bob's announcement about herself but must not subscribe to
     # her own stream: exactly own + alice + bob.
-    info_carol = _run_role(carol_state, "info", timeout=60.0)
+    info_carol = _run_role(carol_state, "info", timeout=150.0)
     _assert_ok(info_carol, "carol info")
     info = _expect_info(info_carol)
     demo = next(

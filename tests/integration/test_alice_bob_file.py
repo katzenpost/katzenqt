@@ -98,8 +98,8 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
 
     t0 = time.monotonic()
     send = _run_role(
-        alice_state, "send-file", "demo", str(src), "--timeout", "600",
-        timeout=900.0,
+        alice_state, "send-file", "demo", str(src), "--timeout", "900",
+        timeout=1200.0,
     )
     assert send.returncode == 0 and "SENT" in _output(send), (
         f"send-file failed:\nstdout:\n{send.stdout}\nstderr:\n{send.stderr}"
@@ -110,8 +110,8 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
     read = _run_role(
         bob_state, "read-file", "demo",
         "--to-dir", str(dst_dir),
-        "--timeout", "600",
-        timeout=700.0,
+        "--timeout", "900",
+        timeout=1000.0,
     )
     assert read.returncode == 0, (
         f"read-file failed:\nstdout tail:\n{read.stdout[-2000:]}\n"

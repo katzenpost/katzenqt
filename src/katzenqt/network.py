@@ -4,7 +4,7 @@ from katzenpost_thinclient import (
     ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
     DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
-    CourierError, InvalidEpochError,
+CourierError, CourierInvalidEpochError, ReplicaError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -136,7 +136,8 @@ async def on_new_pki_document(event: "Dict[str, Any]") -> None:
     epoch = doc.get("Epoch")
     if epoch is None or epoch == _last_epoch:
         return
-    _last_epoch = epoch
+    previous, _last_epoch = _last_epoch, epoch
+    logger.info("PKI epoch advanced to %s (from %s)", epoch, previous)
     old_event, _epoch_event = _epoch_event, asyncio.Event()
     old_event.set()
 
@@ -201,6 +202,61 @@ async def drain_mixwal(connection: ThinClient):
         traceback.print_exc()
 
 
+async def _remint_mixwal(mw: persistent.MixWAL, fresh) -> bool:
+    """Persist a freshly minted envelope onto an existing MixWAL row.
+
+    fresh is an EncryptWriteResult. Returns False if the row no longer
+    exists (a concurrent path deleted it). The mw we were handed is
+    detached from the scheduler's closed session, so re-fetch by primary
+    key rather than sess.add()ing the stale object.
+    """
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.MixWAL, mw.id)
+        if row is None:
+            return False
+        row.envelope_hash = fresh.envelope_hash
+        row.encrypted_payload = fresh.message_ciphertext
+        row.envelope_descriptor = fresh.envelope_descriptor
+        row.next_message_index = fresh.next_message_box_index
+        sess.add(row)
+        await sess.commit()
+    return True
+
+
+async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, wcw: persistent.WriteCapWAL) -> bool:
+    """Re-encrypt a stale write envelope at the same index, from the
+    PlaintextWAL payload that is retained until the write is ACK'ed."""
+    pwal = None
+    if mw.plaintextwal is not None:
+        async with persistent.asession() as sess:
+            pwal = await sess.get(persistent.PlaintextWAL, mw.plaintextwal)
+    if pwal is None:
+        # Must drop the row: bacap_stream is unique, so keeping one we can
+        # never re-mint blocks every later write on this stream.
+        logger.critical(
+            "cannot re-mint write for stream %s: PlaintextWAL %s missing; "
+            "dropping the MixWAL row", mw.bacap_stream, mw.plaintextwal)
+        async with persistent.asession() as sess:
+            if row := await sess.get(persistent.MixWAL, mw.id):
+                await sess.delete(row)
+                await sess.commit()
+        return False
+    try:
+        fresh = await _rpc_racing_connection_life(
+            bacap_uuid=mw.bacap_stream,
+            what="encrypt_write",
+            rpc_factory=lambda: connection.encrypt_write(
+                plaintext=pwal.bacap_payload,
+                write_cap=wcw.write_cap,
+                message_box_index=mw.current_message_index),
+            backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+        )
+    except _REMINT_TRANSIENT_ERRORS as e:
+        logger.warning("re-mint encrypt_write failed, will retry: %s", e)
+        return False
+    return await _remint_mixwal(mw, fresh)
+
+
 async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]") -> None:
     """Resend a write until it is ACK'ed by courier.
 
@@ -249,6 +305,24 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       # persistent (non-transient) failure of this kind backs off instead of
       # retrying in a tight loop.
       logger.warning("thin client is offline or resend cancelled, can't drain mixwal: %s", e)
+      await asyncio.sleep(5)
+      give_up()
+      return
+    except CourierInvalidEpochError as e:
+      # Permanent for the stored blob (rotated replica keys); re-mint from
+      # the retained plaintext and let the scheduler resend. Sleep even on
+      # success so a daemon holding a stale PKI document cannot hot-loop.
+      logger.warning(
+          "drain_mixwal_write_single: stale replica epoch (%s); re-minting envelope", e,
+      )
+      await _remint_write_envelope(connection, mw, wcw)
+      await asyncio.sleep(5)
+      give_up()
+      return
+    except CourierError as e:
+      logger.warning(
+          "drain_mixwal_write_single: courier rejected envelope (%s); will retry", e,
+      )
       await asyncio.sleep(5)
       give_up()
       return
@@ -351,6 +425,12 @@ class ConnectionLifeInterruptedError(Exception):
     PKI epoch rollover, so its reply may never arrive. Callers treat it as a
     transient failure: release the stream and let the drain loop re-cast
     (a fresh envelope for reads, the same idempotent envelope for writes)."""
+
+
+_REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
+    ThinClientOfflineError, BrokenPipeError, CourierError, ReplicaError,
+    StartResendingCancelledError, ConnectionLifeInterruptedError,
+)
 
 
 async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
@@ -649,7 +729,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     - If we get a response:
       - A message: We can progress
       - A box not found:
-        - We should: Resend at at later time (handled by kpclientd)
+        - We should: Resend after the local polling delay
   """
   assert mw.is_read
   assert len(rcw_read_cap) == 136
@@ -712,6 +792,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
 
+  read_started = asyncio.get_running_loop().time()
   try:
     # Re-read the current globals rather than reuse the markers captured
     # above: if a reconnect or epoch rollover fired during the encrypt_read
@@ -735,7 +816,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         envelope_descriptor=rcr.envelope_descriptor,
         envelope_hash=rcr.envelope_hash,
         message_ciphertext=rcr.message_ciphertext,
-        no_retry_on_box_id_not_found=is_substream,
+        no_retry_on_box_id_not_found=True,
     )
   except ConnectionLifeInterruptedError as e:
     # The fresh encrypt_read was interrupted before dispatching anything, so
@@ -754,9 +835,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # it, so abort the in-flight ARQ at the daemon and let the drain loop
     # re-cast the same box with a fresh query id.
     logger.warning(
-        "drain_mixwal_read_single: read for bacap_stream=%s exceeded watchdog"
-        " (%s s); cancelling the in-flight ARQ and re-scheduling",
-        bacap_uuid, read_watchdog_s,
+        "drain_mixwal_read_single: read for bacap_stream=%s gave up after"
+        " %.1f s (watchdog %s s); cancelling the in-flight ARQ and re-scheduling",
+        bacap_uuid, asyncio.get_running_loop().time() - read_started,
+        read_watchdog_s,
     )
     try:
         await asyncio.wait_for(
@@ -795,8 +877,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     raise
   except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
           BACAPDecryptionFailedError, StartResendingCancelledError,
-          ThinClientOfflineError, InvalidEpochError,
-          BrokenPipeError, OSError) as e:
+          ThinClientOfflineError, BrokenPipeError, OSError) as e:
     logger.warning("drain_mixwal_read_single giving up: %s", e)
     await asyncio.sleep(5)
     give_up()
@@ -836,12 +917,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
               "substream bacap=%s", bacap_uuid,
           )
     else:
-      # Normal conversation: BoxIDNotFound means the peer simply has no
-      # further data yet; kpclientd normally rides this out for us while
-      # no_retry_on_box_id_not_found is False, so it rarely reaches here.
-      # Tombstone means the writer deleted this box.  Neither warrants an
-      # error to the user: release the stream and wait for more, rather
-      # than wedging it (an uncaught one would strand the stream in
+      # Benign replica read outcomes, not failures (cf. the thin client's
+      # is_expected_outcome). BoxIDNotFound means the stream simply has no
+      # further data yet; the local polling delay handles the next attempt.
+      # Tombstone means the writer deleted this box. Neither warrants an
+      # error to the user: release the stream and wait for more, rather than
+      # wedging it (an uncaught one would strand the stream in
       # draining_right_now exactly as DatabaseFailure once did).
       logger.debug("drain_mixwal_read_single: benign replica outcome, nothing to advance: %s", e)
       await asyncio.sleep(5)
@@ -868,6 +949,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # or a malformed/uncacheable envelope), distinct from any replica error and
     # from our local SQLite. The daemon remaps these out of the replica code
     # range precisely so we can tell them apart. Treat as transient and retry.
+    # Nothing to re-mint here: every pass re-encrypts a fresh envelope at the
+    # top of drain_mixwal_read_single and resends that, never the stored blob.
     logger.warning(
         "drain_mixwal_read_single: the courier rejected the read envelope (%s); "
         "will retry", e,
