@@ -42,94 +42,66 @@ the bugs they guarded").
 - Loose `TODO:` queries left with no plan number are fine where they mark a
   genuine open question, but keep them specific and current.
 
-State as of 2026-09-14. Session context: recovering from a proxy-sweep storm in a
-5-replica katzenpost mixnet while debugging the delivery of Bob's
-`jamiroquai.webp` (37300 B) to Alice and Carol. **Delivery of Bob's second
-send of jamiroquai.webp has been CONFIRMED to both Alice and Carol** (MD5
-`00c8541c15e56ff317c15e755a97427e` verified identical to source). The items
-below remain open.
+---
 
-Also as of 2026-09-14: deckard-dev merged `origin/main` (PR #66 "Harden peer
-input and local state", commit `243422a`) via merge commit `27fbe52`, taking
-main's reconnect/epoch-marker anti-race RPC guard (`_rpc_racing_connection_life`,
-mark_sent `resolve_counter`, pause/resume-friendly `rcr=None`), the voucher
-handshake's bounded daemon RPCs, `_substream_parent` + `test_substream_guard.py`
-(peer-name spoofing guard, see item 2), the `KQT_SEND_BUDGET_FLOOR_S` CI budget
-floor, and the junit/`--no-cov` CI reporting. Full suite: 403 passed / 14
-skipped.
-
-State as of 2026-09-18: deckard-dev merged `origin/main` PR #39 "Remint
-stale envelopes" (`1504760`) via merge commit `9dad3f9`, taking main's
-write-path remint (`_remint_mixwal`/`_remint_write_envelope` re-cast after a
-courier rejection through a racing-connection-lifetime thin read) and the new
-read semantics: every `start_resending_encrypted_message` now casts
-`no_retry_on_box_id_not_found=True`, so reads fail fast and re-poll locally
-instead of riding out in the daemon (the epoch-grace path is gone;
-`InvalidEpochError` no longer exists in the except tuple — main imports
-`CourierError, CourierInvalidEpochError, ReplicaError`). Our substream work
-is re-applied on top of that read path (`is_substream` pre-query +
-deactivate-on-unrecoverable-`BoxIDNotFound` branch, `pause`/`resume_peer_reads`
-+ the `_inflight_reads` registry, the 140-byte I-chunk numerator, and the
-`substream_progress_queue` events feeding the Transfers panel). `test_voucher`
-keeps our `KQT_SEND_BUDGET_FLOOR_S` plumbing, and
-`test_normal_peer_not_found_rides_out` was updated to the
-`no_retry=True`-only semantics (renamed `..._is_benign`).
-
-Also since the merge: the shared webtop/readarm venv was abandoned for a
-rebuilt repo-local `.venv` (uv, CPython 3.13, editable katzenqt +
-`~/thin_client`), so the integration tests no longer borrow a venv the webtop
-GUI also mutates. Full integration suite passed against the local docker
-mixnet on 2026-09-18: 12/12 parallel (`-n 4 --dist loadscope`, incl.
-`test_file_roundtrip`) + 2/2 serial.
-
-New robustness fix `169af71`: `readables_to_mixwal` is the session's only
-read-arming task. Before this, one arming pass committing into the UNIQUE
-`mixwal.bacap_stream` collision (two `ConversationPeer` rows transiently
-aliasing one `ReadCapWAL`) raised `IntegrityError` and permanently killed the
-loop, wedging every later read (observed as a 900s send-file timeout in
-`test_file_roundtrip`). The pass now rolls back and re-arms on the next sweep,
-and dedupes by `rcw.id`; regression test
-`test_duplicate_readable_peer_arms_stream_once`. Unit suite 438 passed / 14
-skipped.
-
-Quick orientation for a new session:
+## Quick orientation for a new session
 
 - Repo: `/home/kpdev/katzenqt` (Python client). Sibling Go repo:
   `/home/kpdev/katzenpost` (mixnet / replicas / courier).
 - Client code of interest:
   - `src/katzenqt/network.py` — read/write drain loops, `_try_assemble`,
-    `drain_mixwal_read_single`, substream handling, `_SUBSTREAM_NAME_PREFIX`
-    at `network.py:303`, `_substream_parent` at `network.py:472`.
+    `drain_mixwal_read_single`, `drain_mixwal_write_single`, substream
+    handling, `_SUBSTREAM_NAME_PREFIX`, `_substream_parent`, the
+    `pause_peer_reads` / `resume_peer_reads` primitives, and
+    `substream_progress_queue`.
   - `src/katzenqt/persistent.py` — MixWAL / PlaintextWAL / ReadCapWAL /
-    ConversationPeer / ReceivedPiece models, `get_resendable()` gates
-    (`after_id` / `after_stream` around `persistent.py:676-740`).
-  - `src/katzenqt/models.py` — `serialize()` at `models.py:82-170`
-    (substream creation, `agg_bacap_stream`).
-  - `src/katzenqt/katzen.py` — GUI backend; `add_conversation()` at
-    `katzen.py:1827-1864`.
-  - `src/katzenqt/voucher.py` — `conversation_is_joined()` at `voucher.py:62-73`.
+    WriteCapWAL / ConversationPeer / ReceivedPiece models, and
+    `PlaintextWAL.find_resendable()` (the `after_id` / `after_stream` gates).
+  - `src/katzenqt/models.py` — `SendOperation.serialize()`: chunk splitting,
+    substream (`agg_bacap_stream`) creation, the indirection ReadCapWAL and
+    the I-chunk PlaintextWAL.
+  - `src/katzenqt/katzen.py` — GUI backend: `MainWindow`, the `@async_cb`
+    actions, the supervised listeners, `add_conversation()`.
+  - `src/katzenqt/qt_models.py` — `ConversationUIState`, `DownloadsModel`,
+    and the chat/transfer model roles.
+  - `src/katzenqt/voucher.py` — the contact-voucher handshake
+    (`conversation_is_joined()`, `mint_and_publish`, `derive_read_and_induct`).
+- Environments:
+  - Host tests use the repo-local `.venv` (uv, CPython 3.13, editable
+    katzenqt + `~/thin_client`); the shared webtop venv is no longer used.
+    `uv run pytest --no-cov` runs the unit suite; `tests/integration` needs
+    the docker mixnet up.
+  - The webtop GUI clients use a separate container venv,
+    `/config/.venv-katzenqt`.
 - Mixnet replica code: `/home/kpdev/katzenpost/replica/handlers.go`,
   `/home/kpdev/katzenpost/replica/proxy_request_manager.go`,
   `/home/kpdev/katzenpost/replica/connector.go`.
 - Dockerized testnet: `/home/kpdev/katzenpost/docker/mixnet-alpine/`.
   Makefile targets in that dir: if a full containerized-mixnet restart is ever
   needed, pass `base_port=62331` so kpclientd lands on `127.0.0.1:64331`.
-- The webtop container (runs the 3 client GUI apps) is `katzenqt_webtop`.
-  Client DBs LIVES **inside webtop**, not on the host:
-  `/config/.local/share/katzenqt/{a,b,c}.sqlite3` (WAL mode; read with the WAL
-  present; owner uid 1001 `abc:abc`). Logs: `/config/katzenqt/{a,b,c}.log`
-  (client local time = UTC+2; host/replica logs are UTC).
+- The webtop container (runs the 3 client GUI apps) is `katzenqt_webtop`, with
+  the repo mounted read-write at `/config/katzenqt`. Client DBs live **inside
+  webtop**, not on the host: `/config/.local/share/katzenqt/{a,b,c}.sqlite3`
+  (WAL mode; read with the WAL present; owner uid 1001 `abc:abc`; for
+  read-only inspection use `sqlite3.connect("file:...?mode=ro", uri=True)`).
+  Spilled attachments land in
+  `/config/.local/share/katzenqt/attachments/<conversation_id>/`, a directory
+  shared by all three clients. Logs: `/config/katzenqt/{a,b,c}.log` (client
+  local time = UTC+2; host and replica logs are UTC).
 - kpclientd container: `mixnet-alpine_da39a-kpclientd-1`, runs
   `/mixnet-alpine/kpclientd.alpine -c /mixnet-alpine/client/client.toml` on
   `127.0.0.1:64331`, epoch 2m.
-- Clients are relaunched in webtop as user `abc` via
-  `/config/katzenqt/start.sh` (`KQT_STATE=a|b|c uv run katzenqt`). To launch
-  programmatically, use `podman exec -e DISPLAY=:0 -e
-  WAYLAND_DISPLAY=wayland-0 -e XDG_RUNTIME_DIR=/config/.XDG -e
-  QT_QPA_PLATFORM=wayland -e DBUS_SESSION_BUS_ADDRESS=... -u abc`; otherwise the
-  system tray is unavailable and `window.systray` stays `None`, which crashes
-  `conversation_selected` at `katzen.py:1500`
-  (`'NoneType' object has no attribute 'has_read_messages'`).
+- Relaunching the 3 GUI clients: quit them via VNC, then from a desktop
+  terminal inside the container run `cd /config/katzenqt/webtop && make
+  launch-3`. That target sets `KQT_STATE=a|b|c`,
+  `KATZENQT_THINCLIENT_CONFIG=/config/katzenqt/webtop/thinclient-webtop.toml`
+  and `UV_PROJECT_ENVIRONMENT=/config/.venv-katzenqt`, appending to
+  `/config/katzenqt/{a,b,c}.log`. Launching by hand instead needs
+  `DISPLAY=:0`, `WAYLAND_DISPLAY=wayland-0`, `XDG_RUNTIME_DIR=/config/.XDG`,
+  `QT_QPA_PLATFORM=wayland`, `DBUS_SESSION_BUS_ADDRESS=...` and `-u abc`;
+  without them the system tray is unavailable and `window.systray` stays
+  `None`, which crashes the conversation-selected path (`'NoneType' object has
+  no attribute 'has_read_messages'`).
 
 ---
 
@@ -143,13 +115,13 @@ Investigate and fix the replica-side proxy storm that has been hammering this
 - Tens of thousands of `proxy sweep budget exhausted` errors in replica logs:
   `replica1=~72,800`, `replica3=~35,000`, `replica4=~25,300`, `replica5=~34,000`
   (paths: `/home/kpdev/katzenpost/docker/mixnet-alpine/replica{1..5}/katzenpost.log`).
-- Replicas stuck at 50-85% CPU for days, even today while reads were still
+- Replicas stuck at 50-85% CPU for days, even while reads were still
   completing on the second attempt.
 - `err=9` (ReplicationFailed) <-> `err=1` (BoxIDNotFound) churn in
   `/home/kpdev/katzenpost/docker/mixnet-alpine/servicenode{1,2,3}/courier/courier.log`.
 - Restarting the 5 replicas dropped CPU 50% -> 3-4% for ~2 min, then it crept
   back to 26-85% as the clients' dead-substream read loops re-engaged. Removing
-  the dead-substream reads (see item 3) gave steady ~1 crate/min progress with
+  the dead-substream reads (item 3) gave steady ~1 crate/min progress with
   only transient stalls.
 
 ### Code to inspect
@@ -173,13 +145,12 @@ Investigate and fix the replica-side proxy storm that has been hammering this
 ### Suspects to pursue
 
 1. Infinite/long-lived proxy probe loop when a box genuinely does not exist
-   durable, amplified by every client retrying the read (client-side
-   `no_retry_on_box_id_not_found=False` in the kpclientd config means rides out
-   BoxIDNotFound forever instead of giving up). The deckard-dev client now
-   always casts `no_retry_on_box_id_not_found=True` and re-polls locally (see
-   the 2026-09-18 note), so this amplification route is closed for this
-   client; the mixnet/courier-side investigation below is still open.
-2. Replication acknowledged to the client before durability (see item 3) so the
+   durable, amplified by every client retrying the read. This client no longer
+   contributes to that amplification — every read now casts
+   `no_retry_on_box_id_not_found=True` and re-polls locally instead of riding
+   out BoxIDNotFound in the daemon — but the mixnet/courier-side investigation
+   is still open.
+2. Replication acknowledged to the client before durability (item 3), so the
    proxy machinery spins trying to satisfy reads for boxes that will never
    appear.
 3. `ProxyWorkerCount` / `ProxyRequestTimeout` defaults of 0 interacting badly
@@ -187,483 +158,83 @@ Investigate and fix the replica-side proxy storm that has been hammering this
 
 ---
 
-## 2. Fix: `:substream:` synthetic peers leak into the GUI user list
+## 2. `:substream:` synthetic peers leaked into the GUI user list (DONE)
 
-The synthetic substream peers appear in the contact/user list in the GUI.
-
-### Where
-
-- `src/katzenqt/network.py:303` defines `_SUBSTREAM_NAME_PREFIX = ":substream:"`.
-- Substream peers are created with names like `:substream:3:64c9` on I-chunk
-  receive (`network.py:755-761`, `active=True`), and retired (`active=False`) on
-  F-assembly (`network.py:734`), but are **never deleted** from the DB.
-- GUI lists contacts from the DB without filtering: `add_conversation()` at
-  `katzen.py:1848-1851` iterates ALL `convo.peers` and thus shows
-  `:substream:2:77ca`, `:substream:3:f8f2`, etc. in the user list of Alice's /
-  Carol's GUI.
-- Contrast: `voucher.py:68` (`conversation_is_joined()`) and `_actions.py`
-  correctly exclude `:substream:` names, so the leak is purely a display bug.
-
-### Options
-
-- Filter out `name.startswith(":substream:")` (and/or inactive peers) where the
-  user list is rendered (`katzen.py:1848-1851`).
-- Optionally actually delete or tombstone retired substream peers instead of
-  leaving `active=False` rows forever. (Note item 3 and the DB surgery — stale
-  substream peer rows caused real damage; housekeeping here is non-trivial
-  because the `active` flag is also used to stop reads.)
-
-### Related commit (now merged) and post-merge state
-
-- `a3d2e2bc44b` "Stop a peer name from spoofing a substream and crashing the
-  reader" has been **merged into deckard-dev** via main's PR #66
-  (`243422a`/merge `27fbe52`) as `_substream_parent` in network.py
-  (`network.py:472`) + `tests/test_substream_guard.py`. It stops a peer NAME
-  like `:substream:` from spoofing a substream — but it does NOT filter
-  `:substream:` peers out of the GUI user list.
-- **Still open:** `add_conversation()` at `katzen.py:1959-2016` iterates ALL
-  `convo.peers` and renders `:substream:*` names into the contacts tree. The
-  fix is to skip `peer.name.startswith(network._SUBSTREAM_NAME_PREFIX)` (and/or
-  `not peer.active`) there, mirroring the exclusions already in
-  `voucher.py:77` and `headless/_actions.py:750-753`. Optionally also
-  delete/tombstone retired substream peers instead of leaving
-  `active=False` rows forever (see item 3's DB-surgery lessons).
-  **DONE in `d8f943d` (code) + `0510097` (tests)** — see status below.
-
-### Status (complete, 2026-09-14)
-
-DONE in `d8f943d`:
-- Extracted module-level `_peer_is_displayable()` (katzen.py:73) keyed on
-  `network._SUBSTREAM_NAME_PREFIX`; applied in `add_conversation` peer loop
-  (katzen.py:1992).
-- Defensive prefix guard in `_process_peer_added` (katzen.py:1261), the
-  `_await_voucher_join` appendRow (katzen.py:1794), and
-  `induct_via_voucher` appendRow (katzen.py:1871).
-- `voucher._build_who_reply` (voucher.py:677) now skips substream peers.
-
-Tests DONE in `0510097` (`tests/test_substream_gui_filter.py`): predicate unit
-tests (normal yes / substream no / inactive substream no / near-miss name
-yes) + who-reply skips an active substream peer while keeping real members.
-
-NOTE: filtering substream rows removes today's only GUI handle for pausing
-dead substreams; TODO item 4's Transfers panel replaces that handle (see
-item 4 plan below).
+Synthetic `:substream:*` peers are filtered out of the contacts tree and out of
+the voucher who-reply, and a peer *name* can no longer spoof a substream.
+`d8f943d` (filter), `0510097` (tests), `a3d2e2bc44b` (spoof guard, merged via
+`27fbe52`).
 
 ---
 
-## 3. Underlying bug that forced DB surgery: dead-substream read amplification (a.k.a. the "replica storm feedback" bug)
+## 3. Dead-substream read amplification (DONE)
 
-Root cause analysis of why Bob's FIRST jamiroquai.webp send failed and why DB
-surgery was required to let the SECOND send through. This is the most
-important thing to understand before touching item 1.
+A substream read that hits its first `BoxIDNotFound`/`Tombstone` now fails fast
+— cancel the in-flight ARQ and drain task, delete the is_read MixWAL row,
+deactivate the peer — so dead substreams stopped re-polling forever and feeding
+the replica proxy storm, and a failed arming pass can no longer kill the
+session's only read-arming task. `3bba25a`, `169af71`.
 
-### Chain of events (observed)
+Schema facts worth keeping (re-derivable from `persistent.py`, easy to get
+wrong):
 
-1. On the first send, the client received ACKs from kpclientd for all file
-   chunks (e.g. boxes 5519-5525), but boxes ~5526-5543 (18 of 25 chunks) were
-   **never durably stored** in the replicas. `BoxIDNotFound` on all replicas
-   for that range, permanently. (Blame roller: replication acknowledged before
-   durability / replication failures during the storm.)
-2. Because each file send gets a **fresh substream** (new
-   `agg_bacap_stream` UUID + write/read caps starting at index 0), the lost
-   boxes were unrecoverable: there is no way to re-fetch what was never stored,
-   and no retry that can resurrect them.
-3. The client DB had **no way to forget** the dead substream. `drain_mixwal_read_single`
-   (with kpclientd `no_retry_on_box_id_not_found=False`) read loops rode
-   `BoxIDNotFound` **forever**, re-issuing reads every few seconds for streams
-   that could never yield data. With Bob + Alice + Carol all reading dead
-   substreams and ticking the proxy machinery, the replica storm went critical:
-   67k+ `proxy sweep budget exhausted`, 5 replicas at ~50% CPU for 3 days.
-4. **DB surgery that fixed it** (documented so it can be re-derived, not
-   recommended as a permanent fix):
-   - Stopped the 3 katzenqt apps + stopped kpclientd.
-   - In webtop DBs, for each dead substream peer
-     (`conversationpeer.name LIKE ':substream:%'`, rows id=4 named
-     `:substream:2:77ca` / `:substream:3:f8f2`): set `active=0`, and deleted the
-     matching `mixwal` row whose `bacap_stream` was the dead readcap
-     UUID (`538ae279` for Alice, `99614674` for Carol).
-   - Copied DBs back into webtop, fixed ownership to `abc:abc`.
-   - Backups exist in webtop as `{a,b,c}.sqlite3.bak_disab` /
-     `*.sqlite3-wal.bak_disab`.
-   - Effect: clients stopped reading the dead substreams; the residual storm
-     subsided enough for Bob's second send (fresh substream base
-     `3256359971903960859`, I-chunk on main stream at
-     `4007537799310947422`) to drain 860->883 in both Alice and Carol and
-     deliver the file.
-
-### Schema facts needed to reason about this
-
-- `conversationpeer`: `id/name/active/read_cap_id`; `mixwal`:
-  `bacap_stream/current_message_index`; `readcapwal`:
-  `id/read_cap/next_index`. `bacap_stream` stored as 32-hex, no dashes.
-- `current_message_index` / `next_index` are 104-byte blobs; the first 8 bytes
-  are the LE uint64 Pigeonhole box index (BACAP counters).
-- Substream write/read caps start at their own index 0.
-
-### Open questions / likely fix surfaces
-
-RESOLVED DURING REVIEW (2026-09-11) and IMPLEMENTED (2026-09-13, commit
-`3bba25a`):
-
-- **What the writer's ACK means (answered from Go code):** a write completes on
-  the courier's ACK — "a single mixnet round trip" (`client/thin/pigeonhole.go:452`,
-  `client/arq.go:84-99`: idempotent write + `ReplyType=ACK` -> `ARQActionComplete`).
-  The courier's `ackReply` fires "the moment an envelope is accepted. Replica
-  dispatch happens asynchronously" (`courier/server/plugin.go:523-528`) and is
-  fire-and-forget to the 2 intermediate replicas, with NO courier-level retry on
-  the normal write path. So the writer's ACK means **only "a courier cached the
-  envelope" — not that any replica durable-stored it**, and the write client is
-  ACK'd and gone (cache-based redispatch, which only fires on client re-polls,
-  never runs). BUT the reader's not-found is a much stronger signal: reads never
-  consult the courier cache, they hit the shard replicas through the proxy
-  failover (`readBoxFromShardReplicas`/"trying the next holder"), so a
-  `BoxIDNotFound` reaching the reader means **no holder anywhere can serve it**.
-- **First not-found IS terminal → deactivate on the FIRST not-found, no N
-  counter needed.** Even with async dispatch, the I-chunk is gated
-  `after_stream` (only written after all substream boxes ACK'd at couriers), the
-  reader only learns of the substream after the I-chunk survives a full mixnet
-  round trip, plus app-facing delays (5s give_up sleep, 15s sweep, 60s arming
-  sweep) stack on top — any replica dispatch still in flight has landed or
-  permanently failed long before the reader first tries the substream box. This
-  matches operationally: boxes 5526-5543 never reappeared.
-- **Design confirmed:** in `drain_mixwal_read_single`, for peers whose name
-  starts with `_SUBSTREAM_NAME_PREFIX`, use `no_retry_on_box_id_not_found=True`
-  (fail-fast, like `voucher._read_box`); on the first `BoxIDNotFoundError`/
-  `TombstoneError`, cancel the in-flight ARQ (`cancel_resending_encrypted_message`)
-  and drain task (new per-`bacap_stream` registry), set `cp.active=False`,
-  delete the is_read MixWAL row, `draining_right_now.discard`, and WARNING-log.
-Keep the ReadCapWAL + ReceivedPiece rows so a future retry (item 4/5) can
-   resume from `next_index`. Normal conversation peers fail fast the same way
-   (post-merge, every read casts `no_retry=True`) and re-poll locally; they
-   are only ever deactivated manually (item 5), never by a not-found.
-- Are the items above (deactivate/keep-RP/retry primitive) consistent with item
-  5's per-peer pause/resume? Yes — pause/deactivate share the same machinery.
-
-DONE in `3bba25a`: `drain_mixwal_read_single` sets
-`no_retry_on_box_id_not_found=True` for substream peers and on the first
-`BoxIDNotFoundError`/`TombstoneError` deactivates `cp.active`, deletes the
-is_read MixWAL row, cancels the in-flight read ARQ + drain task (per-
-`bacap_stream` registry `_inflight_reads`), discards from `draining_right_now`,
-and WARNING-logs; `InvalidEpochError` added to the transient-recover catch
-(needed because `no_retry=True` surfaces it as a `ReplicaError` subclass that
-was previously uncaught; post-merge the tuple is main's
-`CourierError, CourierInvalidEpochError, ReplicaError`). Normal conversation
-peers keep the benign treatment — the read is re-polled locally rather than
-riding out in the daemon (see the 2026-09-18 note: every read now casts
-`no_retry=True`). ReadCapWAL + ReceivedPiece rows are kept so item 5's resume
-can re-arm.
+- `mixwal.bacap_stream` is stored as 32 hex chars, no dashes.
+- `current_message_index` / `next_index` are 104-byte blobs whose first 8 bytes
+  are the little-endian uint64 Pigeonhole box index (BACAP counters).
+- A substream's write/read caps start at their own index 0, independently of
+  the parent stream.
+- A retired substream peer (`active=0`, ReceivedPiece rows pruned, no MixWAL
+  row) is the **normal terminal state** after F-assembly, not a stall. The
+  fail-fast deactivate above looks similar but WARNING-logs and keeps the
+  pieces.
 
 ---
 
-## 4. Feature: show substream file-download status in the GUI, with pause/cancel
+## 4. Substream download status in the GUI (DONE)
 
-Currently, when a recipient's main stream yields an `I`-chunk announcing "there
-is a file on substream X, download it starting at index 0", the client silently
-creates the substream peer and starts draining it. The GUI shows nothing until
-the whole file arrives. Feature request (addition, not a bugfix):
+Substream downloads appear in a Transfers panel (contact / pieces-of-total /
+state) fed by `network.substream_progress_queue`, with the denominator carried
+in the extended 140-byte I-chunk and persisted as
+`ReadCapWAL.substream_total_chunks`. `346ba4f`, `11cd56c`, `b80e715`,
+`08a253b`, migration `c4f1a8b2e9d7`.
 
-- Show an in-UI indication that a file is being downloaded from a substream,
-  including its status/progress (pieces received vs total known; see
-  `models.serialize()` for chunk counts, `network.py` `_try_assemble`,
-  ReceivedPiece rows).
-- Give the recipient the ability to **pause** and **cancel** the substream
-  download while **continuing to receive/read messages on the main stream**.
-  (Currently the read loops are driven by per-MixWAL `drain_mixwal_read_single`
-  coroutines keyed on `bacap_stream`, so pause/cancel must target the substream
-  MixWAL/WAL entry without touching the main-stream entries — see
-  `persistent.MixWAL`, `draining_right_now` set, `readables_to_mixwal()`.)
-- Design decisions to surface: how to represent the in-progress file in the QML
-  UI model; what "pause" semantically means for a BACAP index (freeze the
-  `next_index` cursor and stop the coroutine vs mark the MW and skip in
-  `get_resendable()`/`readables_to_mixwal()`); whether cancel should prune
-  ReceivedPiece rows + retire the substream peer + delete its MixWAL (mirroring
-  the DB surgery in item 3, but done cleanly in-app; possibly also tombstone the
-  substream's remaining boxes, which would require the write cap... likely out
-  of scope).
-
-### Plan (2026-09-14, COMPLETE 2026-09-15)
-
-Two design facts from the 2026-09-14 review of the post-merge code:
-- **No denominator today.** The I-chunk wire body is only `b'I' + 136-byte read
-  cap` (`network.py:1546`); the sender computes the chunk count in
-  `models.serialize()` (`models.py:134-151`) but never transmits it, so
-  "pieces received vs total" is unknowable at read time. Fix: extend the
-  I-chunk to `b'I' + struct.pack(">I", total_chunks) + read_cap` (140-byte
-  body); receiver parses both the legacy 136-byte (total unknown →
-  indeterminate) and new 140-byte forms. Sender total count stored on the
-  indirection `ReadCapWAL` as a new nullable `substream_total_chunks` column
-  (needs an Alembic migration).
-- **Progress numerator already exists:** `COUNT(ReceivedPiece WHERE
-  read_cap == <substream rcw.id>` (`network.py:940-945` inserts one row per
-  box; `headless/_actions.py:772-774` already counts them).
-
-Shipped surface (per decisions on 2026-09-14):
-- **Transfers panel** (not in-chat rows): a new `DownloadsModel`-backed
-  `QTableView` under the contacts tree listing resumable substream downloads
-  (column: contact, status downloading/paused, `pieces/total` or
-  indeterminate), with a right-click Pause/Resume menu.
-- **Pause ONLY; Cancel deferred.** `pause_peer_reads` / `resume_peer_reads`
-  (item 5) already freeze/resume exactly one stream — cancel (prune
-  ReceivedPiece + retire peer + delete MixWAL) is out of scope for now.
-- **Network→GUI events** via a new module-level
-  `network.substream_progress_queue` (mirroring `conversation_update_queue`)
-  plus a `transfers_listener()` coroutine in katzen.py `main()`:
-  `started` / `piece` / `completed` / `paused` / `resumed` events keyed by
-  rcw_id. Startup seeds the panel from active-or-resumable substream
-  `ConversationPeer` rows (active OR has ReceivedPiece), which also replaces
-  the pause/resume handle for dead substreams that item 2's filter removes
-  from the contacts tree.
-
-### Step 2.1 — wire total (DONE in `346ba4f`, 2026-09-14)
-
-- `ReadCapWAL.substream_total_chunks: int | None` (persistent.py:353) +
-  Alembic migration `c4f1a8b2e9d7` (down_revision `d08418a855a1`). Verified
-  via `tests/migrations/test_upgrade.py` (all revisions reach head) and the
-  extension test in `tests/test_network_fake.py`.
-- `models.serialize()` sets `substream_total_chunks = C_chunk_count + 1` on
-  the indirection `ReadCapWAL` (models.py:158-165).
-- Send side (`network.py:1570-1573`): legacy 136-byte `b'I'+read_cap` when the
-  sender's rcw predates the column (total None); extended
-  `b'I' + struct.pack(">I", total) + read_cap` (140 B) otherwise. Existing
-  `test_indirection_pwal_fills_read_cap_before_dispatch` now pins the
-  fallback; new `test_indirection_pwal_prepends_total_chunk_count_when_known`
-  pins the extended form.
-- Receive side (`network.py:1030-1048`): accepts 136 (total unknown) and 140
-  (bytes 0-3 = total, bytes 4-139 = read cap) forms; malformed lengths still
-  warning-and-ignore. `substream_total_chunks` persisted on the receiver's
-  new_rcw for the GUI denominator.
-
-### Step 2.2 — progress events queue (DONE in `11cd56c`, 2026-09-14)
-
-- New module-level `network.substream_progress_queue` (network.py:92) holding
-  post-commit events as `(kind, ...)` tuples:
-  `("started", rcw_id, conv_id, total_or_None, parent_name)`,
-  `("piece", rcw_id, count)`, `("completed", rcw_id)`, `("paused", rcw_id)`,
-  `("resumed", rcw_id)`.
-- Push sites: I-branch create (`started`), per-substream ReceivedPiece insert
-  (`piece`, via a `COUNT(ReceivedPiece WHERE read_cap == mw.bacap_stream)` in
-  the same unflushed transaction), substream terminal-F retire (`completed`),
-  and `pause_peer_reads`/`resume_peer_reads` when the peer is a substream.
-- All events are held until the commit succeeds, so listeners never observe
-  uncommitted pieces (OperationalError retries roll back both the rows and
-  the pending events).
-
-### Step 2.3 — Transfers panel (DONE in `b80e715`, 2026-09-15)
-
-- `qt_models.DownloadsModel(QAbstractTableModel)`: rows keyed by ReadCapWAL id;
-  columns Contact / Progress / State, plus structured roles
-  `ROLE_TRANSFER_RCW_ID` (0x200) and `ROLE_TRANSFER_*` for pieces/total/active.
-  Methods `start_transfer` (insert or refresh unknown total),
-  `notify_piece`, `complete_transfer` (remove row), `set_paused`.
-- `MainWindow.__init__` builds `transfers_model` + `transfers_view`
-  (QTableView, gridLayout_2 row 2, under the contacts tree) with a custom
-  context menu; `transfers_context_menu` toggles Pause/Resume via the item-5
-  `network.pause_peer_reads`/`resume_peer_reads` primitives.
-- `transfers_listener()` mirrors `receive_msg_listener` (queue.get on the IO
-  thread, model mutation on the Qt thread) and translates
-  started/piece/completed/paused/resumed events into model calls.
-- `main()` starts `transfers_listener()` and seeds the panel from the DB with
-  `await transfers_model.seed_from_db()` (resumable = active peer or
-  has ReceivedPiece rows; parent display name via `_substream_parent_name`,
-  hiding the synthetic `:substream:` peer name).
-
-### Step 2.4 — tests (DONE in `08a253b`, 2026-09-15)
-
-- `tests/test_downloads_model.py` (8, offscreen QGuiApplication): inserts
-  unknown-total UI rows in proportion to `substream_total_chunks`, refresh
-  jumps to the larger denominator, `notify_piece` increments state text, the
-  final piece keeps the target visible, unknown ids are ignored, `complete`
-  removes rows, `set_paused` toggles the State column + active role,
-  column/role header metadata, and `seed_from_db` restores resumable transfers
-  (filters active peers / peers with ReceivedPiece rows).
-- `tests/test_network_fake.py` receive-side events: extended I-chunk (140 B)
-  persists `substream_total_chunks` and its `started` event carries
-  (rcw, conv_id, total, parent_name); legacy 136-byte `started` carries
-  total None; each substream C-chunk read fires `("piece", rcw, count)`; the
-  terminal F assembles through the parent peer resolved from the substream
-  name and fires `("completed", rcw)`. `TestPauseResumePeerReads` now asserts
-  the `paused`/`resumed` events.
-- `tests/test_listener_hardening.py` `TestTransfersListenerDrainsEvents`:
-  `transfers_listener` dispatches all five event kinds to `DownloadsModel`
-  and, like the other UI listeners, survives a per-item error (log-and-
-  continue). This test exposed two fixes shipped in `08a253b`: the missing
-  `DownloadsModel._idx` helper, and the missing try/except wrapper in
-  `transfers_listener` itself.
-- `tests/test_models.py` `test_serialize_sets_substream_total_chunks_on_multi_chunk`
-  pins the C-chunks+1 denominator on multi-box sends.
-- `tests/conftest.py`: the state-reset hook now drains
-  `network.substream_progress_queue` so module-level events cannot leak
-  across tests.
-- Still deferred to item 5: a GUI test driving the actual
-  `pause_peer_reads`/`resume_peer_reads` calls from the panel's context
-  menu.
+Cancel was deliberately deferred; item 9 should decide whether upload cancel
+and download cancel share machinery.
 
 ---
 
-## 5. Feature: per-peer pause/resume (and the retry primitive for dead substreams)
+## 5. Per-peer pause/resume (DONE)
 
-The `ConversationPeer.active` flag (`persistent.py:762`) already gates arming
-(`network.py:1221`), but there is no GUI way to toggle it individual peers, and
-`active=False` alone is not enough to stop reads: `drain_mixwal2`'s 15s sweep
-re-casts pending is_read MixWAL rows regardless of `active`. Building
-per-peer pause/resume:
-
-- Pause a peer = set `active=False`, delete its pending is_read MixWAL rows,
-  and cancel any in-flight read ARQ (`cancel_resending_encrypted_message`) and
-  drain task (shared per-`bacap_stream` registry from item 3), so reads stop
-  immediately rather than on the next sweep.
-- Resume = set `active=True` and poke `readables_to_mixwal_event` so the read
-  arms again from the saved ReadCapWAL `next_index`. Kept ReceivedPiece rows
-  are picked up by `_try_assemble`.
-- GUI: tag contacts-tree peer `QStandardItem`s with `peer.id` (Qt.UserRole;
-  currently only convo items carry `conversation_id` at `katzen.py:1833`, peer
-  items have no id) and add a right-click Pause/Resume action on peer rows
-  (not own-peer; `katzen.py:1536`). QMenu already imported at `katzen.py:34`.
-- This is also the retry primitive item 4's download pause/cancel and the
-  dead-substream resume button need — a deactivated substream (item 3) can be
-  re-armed via Resume.
-- Note: `a3d2e2bc44b` (see item 2) was merged via main's PR #66 and now
-  supplies `_substream_parent`, which the merged code already uses to route
-  substream reads back to their parent peer.
-
-DONE in `3bba25a`:
-- Network level: `pause_peer_reads(bacap_stream)` / `resume_peer_reads(bacap_stream)` —
-  pause cancels the in-flight drain task (via `_inflight_reads` registry) and ARQ
-  (`cancel_resending_encrypted_message`), deletes the is_read MixWAL rows, sets
-  `cp.active=False`, discards from `_inflight_reads`/`__resend_queue`, pokes the
-  events; resume sets `active=True` and pokes `readables_to_mixwal_event` so the
-  read re-arms from the saved ReadCapWAL `next_index`.
-- GUI: `add_conversation`/`_process_peer_added` tag peer `QStandardItem`s with
-  `peer_read_cap_id` + `peer_is_own`; `contacts_treeWidget` context menu
-  (`peer_context_menu`) offers "Do not read from X any more" / "Resume reading
-  from X" (own-peer row excluded and skipped).
-- Tests: `TestPauseResumePeerReads` (cancel-in-flight, deactivate-without-task,
-  resume-rearms-from-saved-index); full suite 307 passed / 14 skipped.
-
-Item 4's pause/cancel (substream download progress in GUI) remains open — only
-the per-peer machinery it needs is now in place.
+`pause_peer_reads` / `resume_peer_reads` freeze and re-arm a single BACAP
+stream from its saved `next_index`, surfaced as a right-click action on
+contacts-tree peer rows. `3bba25a`.
 
 ---
 
-## 6. A transient QtAsyncio task bug can permanently freeze the UI listeners
+## 6. Modal dialogs inside QtAsyncio tasks corrupted tasks (DONE)
 
-During the 3-party webtop manual test on 2026-09-18 alice's UI stopped
-updating live — no more `has_new_messages` after ~16:59 — even though every
-message the others sent WAS delivered and persisted in her DB (bob2/bob3/carol1/
-carol2 all present with `network_status=0`; bob/carol hold both of alice's
-sends). bob and carol's UIs kept flowing. The only differentiator in alice's
-log is one traceback at `a.log` ~16:59:04:
+Blocking modals (`dialog.exec()`, `QInputDialog.getText`, `QMessageBox.*`,
+`QMenu.exec`) run inside `@async_cb` tasks spun nested Qt event loops that
+re-entered another task's `_step` and corrupted it — freezing the UI listeners
+and silently eating an image send; every such site is now a sync slot, deferred
+via `QTimer.singleShot`, or non-blocking through `_dialog_finished` /
+`_menu_chosen`, the long-lived listeners are supervised and restarted,
+`first_unread` persists on the io loop, and `async_cb` logs failures instead of
+vanishing. `fdbde7d`, `bfe2a29`, `78e08d8`.
 
-```
-RuntimeError: Leaving task Task 'QtTask' with state: Done with exception
-(RuntimeError("Cannot enter into task Task 'QtTask' with state: Pending
-while another task Task 'QtTask' with state: Pending is being executed."))
-does not match the current task Task 'QtTask' with state: Pending.
-```
+**Invariant to preserve:** never spin a nested Qt event loop inside a QtAsyncio
+task. Blocking dialogs and menus are safe only from plain sync slots (top-level
+event dispatch, no task mid-step) or from `QTimer.singleShot`; anything that
+must happen inside a task goes through `_dialog_finished(dialog)` or
+`_menu_chosen(menu, global_pos)`.
 
-### Root cause (deepened by the 2026-09-18 rerun)
-
-The retrigger on the rerun proved the earlier "burst of arrivals" theory wrong.
-The same `Cannot enter into task 'QtTask' ... Pending while another task
-... Pending is being executed` RuntimeError hit **bob at 17:56:33 CEST** during
-an image send, with **no supervisor restart logged** — so the victim this time
-was a transient `@async_cb` task (bare `ensure_future`, no logging), not a
-supervised listener. Diagnosis of bob's DB: the image row persisted
-(`conversationlog` order 15, `network_status=1`, payload `file_outgoing`; the
-new substream WriteCapWAL + I-chunk PlaintextWAL + pending-write MixWAL all
-exist) but **no UI "sending" state and no dispatch happened** — the corrupted
-task died between the DB commit and the io-loop UI-refresh queue put +
-`check_for_new`. Supervisor mitigation alone cannot cover `@async_cb` tasks.
-
-The real, common root cause of BOTH incidents: **a blocking modal dialog run
-inside a `@async_cb` task**. `dialog.exec()`, `QInputDialog.getText`,
-`QMessageBox.{question,critical,information,warning}`, and friends spin a
-nested Qt event loop while asyncio still considers the task mid-step; QtAsyncio
-steps another task from inside that nested loop and the bookkeeping check
-fails, corrupting whatever task was stepped. Both observed incidents line up:
-alice's 16:59 crash happened during the voucher generate/induct flow
-(`generate_voucher` `QInputDialog.getText`/`QMessageBox.question`), bob's
-17:56 crash happened with `attach_file`'s `QFileDialog().exec()` mid-task.
-
-### Fix
-
-1. Listener supervisor (shipped in `fdbde7d`): wrap the three listeners +
-   `_await_voucher_join` so an abnormal task exit is logged with `exc_info`
-   and re-scheduled with a short backoff. Keep as defense-in-depth.
-2. Move `first_unread` to the io loop (shipped in `fdbde7d`): sync
-   `mark_first_unread` state-set + io-loop `persist_first_unread`, single
-   writer on the iothread.
-3. **Never run a nested Qt event loop (modal dialog) inside a QtAsyncio
-   task** — the actual root fix. For each `@async_cb`/async site:
-   - `attach_file`: drop `@async_cb` (its body has no awaits) so
-     `dialog.exec()` runs in top-level event dispatch where no task is
-     mid-step.
-   - `send_file` (1525/1536): `QMessageBox.warning` -> `QTimer.singleShot(0, ...)`.
-   - `new_conversation` (1805/1812), `generate_voucher` (1879/1889),
-     `induct_via_voucher` (1982), `show_pending_vouchers` (2034):
-     result-returning dialogs become non-blocking via a small
-     `_await_dialog(dialog)` helper (`dialog.open()` + await its `finished`
-     signal through a Future); pure-note `QMessageBox` calls become
-     `QTimer.singleShot(0, ...)` (the pattern already used at 1909/1933/1976 etc.).
-   - Re-audit any future addition: blocking dialogs are only safe from plain
-     sync slots / deferred `singleShot`, never from a running task.
-4. **Harden `async_cb`**: replace the bare `ensure_future(...)` with
-   `katzen_util.create_task(...)` so a dying transient task always logs a
-   traceback instead of silently vanishing (the amplification behind bob's
-   invisible send failure).
-
-### Status
-
-Implemented in `fdbde7d` (listener supervisor + io-loop `first_unread` persist,
-`tests/test_listener_supervisor.py`; unit suite 440 passed / 14 skipped, ruff
-delta 0). `70a654f` re-worded the heading to the "freeze" symptom.
-
-Rerun on 2026-09-18: all text messages now flow between all three clients
-(supervisor worked — no permanent freeze), but bob's image send was eaten by
-the unchecked `@async_cb` task corruption (see root cause above).
-
-Root fix implemented in `bfe2a29` (ruff delta 0, unit suite 440 passed /
-14 skipped): the nested event loops are gone — `attach_file` is a sync slot,
-`send_file`'s warnings and all pure-note `QMessageBox` calls inside tasks are
-deferred via `QTimer.singleShot`, the result-returning dialogs
-(`new_conversation`, `generate_voucher`, `induct_via_voucher`,
-`show_pending_vouchers`; `QMessageBox.question`, `QInputDialog.getText`, the
-`PendingVouchersDialog`) go through a non-blocking `_dialog_finished(dialog)`
-helper (`open()` + await the `finished` signal), and `async_cb` now schedules
-through `create_task` so a failing transient action logs instead of vanishing.
-The remaining `box.exec()`/direct-`QMessageBox` sites live only in sync slots,
-which run in top-level event dispatch and cannot re-enter a mid-step task.
-
-### VERIFIED on the 2026-09-18 rerun (clients relaunched 18:25 local on `bfe2a29`)
-
-- **No new re-entrancy tracebacks.** The only `RuntimeError: Leaving task
-  'QtTask' ... Cannot enter into task` entries in `{a,b,c}.log` are the two
-  pre-fix crashes (alice 16:59, bob 17:56); nothing new appeared across the
-  whole session, including a full 25-chunk image transfer.
-- **The image send the 17:56 corruption had eaten completed end to end.**
-  bob's stuck `conversationlog` order 15 drained from `network_status=1`
-  (pending) to `2` once the relaunched client armed the pending MixWAL write.
-  alice (18:40:50) and carol (18:41:08) each assembled the 37300-byte
-  `jamiroquai.webp` and spilled it under `attachments/1/` with md5
-  `00c8541c15e56ff317c15e755a97427e` — byte-identical to the source file.
-- Their substream peers now read `active=0` with zero `ReceivedPiece` rows and
-  no MixWAL entry. That is the **expected terminal state** (F-assembly retires
-  the substream peer and prunes its pieces), not a stall — worth remembering
-  before misreading it as item 3's fail-fast deactivate, which looks similar
-  but WARNING-logs and leaves the pieces in place.
-
-Same bug class, surfaced by the same rerun and fixed in `78e08d8` (**committed,
-not yet rerun-verified** — needs a client relaunch, since the processes that
-hit it predate the commit): both context menus still spun `QMenu.exec()` inside
-their `@async_cb` task. They now pop non-blocking through
-`_menu_chosen(menu, global_pos)` (`popup()` + await `aboutToHide`, returning
-the triggered action). That commit also fixes the error the right-click
-actually hit first: `DownloadsModel` hands out the substream rcw id as `str`,
-and binding a `str` to the BLOB `read_cap_id` column dies in SQLAlchemy's
-binary processor (`'str' object has no attribute 'hex'`), so
-`transfers_context_menu` parses it to `uuid.UUID` before the peer lookup. The
-contacts-tree peer menu was unaffected by that half — it tags
-`peer_read_cap_id` as a real `uuid.UUID`, which does have `.hex`.
+Verified on the 2026-09-18 3-party webtop rerun: no new re-entrancy tracebacks,
+and the previously eaten image send completed end to end — bob's stuck
+`conversationlog` row drained `network_status` 1 -> 2 once the relaunched
+client armed the pending write, and alice and carol each assembled the
+37300-byte `jamiroquai.webp` with md5 `00c8541c15e56ff317c15e755a97427e`,
+byte-identical to the source. The `78e08d8` context-menu half was committed
+with its rerun verification still in progress.
 
 ---
 
@@ -676,11 +247,11 @@ e.g. a nested Qt event loop opened while a `QtTask` is mid-step; the mismatch
 is raised as a `RuntimeError` and the reinvoked task is left in a corrupt
 state.
 
-We are fixing the trigger at its source (item 6 / step 3: never run a modal
-dialog inside a task), so an upgrade is **not** needed to unblock this work.
-Tracked anyway for later: a newer PySide6 (6.9.x point release or 6.10+)
-may harden `QtAsyncio` itself — either by raising a clearer error for nested
-loop entry or by tolerating it. Before upgrading, verify:
+We fixed the trigger at its source (item 6: never run a modal dialog inside a
+task), so an upgrade is **not** needed to unblock that work. Tracked anyway for
+later: a newer PySide6 (6.9.x point release or 6.10+) may harden `QtAsyncio`
+itself — either by raising a clearer error for nested loop entry or by
+tolerating it. Before upgrading, verify:
 
 - Which `PySide6.QtAsyncio` changes landed since 6.9.3 (changelog /
   upstream issues about `_enter_task` / nested event loops).
@@ -690,3 +261,118 @@ loop entry or by tolerating it. Before upgrading, verify:
   guard, not a substitute for fixing our own code).
 
 Low priority; re-evaluate when we do the next dependency refresh.
+
+---
+
+## 8. Context-menu Pause/Resume enablement is asymmetric (small)
+
+When a transfer is running, "Resume download" is correctly greyed out; when it
+is paused, **"Pause download" stays enabled** and clicking it silently does
+nothing, because the handler's `chosen is pgm and active` guard swallows the
+click. The contacts-tree peer menu has the same asymmetry, so an
+already-paused peer still offers a live "Do not read from X any more".
+
+Where: `peer_context_menu` (`katzen.py:1442-1444`) and
+`transfers_context_menu` (`katzen.py:1480-1482`). Each calls
+`rgm.setEnabled(not active)` with no matching `pgm.setEnabled(active)`.
+
+Fix: add `pgm.setEnabled(active)` in both. Trivial.
+
+---
+
+## 9. Transfers panel entries for uploads, pausable and cancelable
+
+The Transfers panel is receive-only today (`DownloadsModel` seeds from
+substream `ConversationPeer` rows). A large outgoing file is invisible until
+its chat bubble flips to sent, and it can be neither paused nor cancelled.
+Uploads should get their own rows, pausable and cancelable.
+
+### How an upload is wired today
+
+- `SendOperation.serialize()` (`models.py:129-187`) splits an oversized message
+  into C-chunks plus a final F-chunk on a fresh `agg_bacap_stream`, creates the
+  indirection `ReadCapWAL(active=False, substream_total_chunks=C+1)`, and
+  appends the I-chunk PlaintextWAL on the **main** conversation stream with
+  `after_stream=agg_bacap_stream` and `indirection=rcw.id`.
+- `_enqueue_outgoing_gcm` (`katzen.py:1147-1178`) persists those rows plus the
+  optimistic `conversationlog` bubble with `network_status=1` and
+  `outgoing_pwal=<I-chunk PWAL id>`.
+- The writer sweep `send_resumable_plaintexts` (`network.py:1660-1732`) asks
+  `PlaintextWAL.find_resendable()` (`persistent.py:730-790`) for dispatchable
+  rows and starts one `start_resending` task per stream, guarded by
+  `__resend_queue` and by "one msg per BACAP stream at a time".
+
+### Pausing must not block the conversation
+
+Requirement: while an upload is paused the user can keep sending chat
+messages, which means the I-chunk that announces the substream lands at a
+*later* main-stream box index than it would have.
+
+This already works with the current gate semantics: `find_resendable` applies
+the `after_id` / `after_stream` conditions **inside** the
+`row_number() OVER (PARTITION BY bacap_stream)` window, so a gated-shut
+I-chunk is excluded from the window entirely and a later eligible row on the
+same stream gets `rownum=1` and dispatches. Worth verifying while implementing:
+that `row_number()` has **no `ORDER BY`**, so per-stream pick order currently
+relies on scan order.
+
+Consequence to decide: local vs wire render order. The outgoing bubble's
+`conversation_order` is fixed at send time, so the sender sees the image
+*before* messages sent during the pause, while recipients render it in
+arrival order, i.e. after. Either re-order the local row on resume or accept
+the divergence deliberately.
+
+### Pause mechanics (mirror `pause_peer_reads`, `network.py:1210-1254`)
+
+- Stop the sweep from re-picking the substream's C/F rows: a persisted pause
+  marker (nullable column on PlaintextWAL, needing an Alembic migration —
+  precedent `c4f1a8b2e9d7`) or a persisted paused-stream set.
+- Cancel the in-flight write task and its ARQ, delete pending `is_read=0`
+  MixWAL rows for `agg_bacap_stream` so the drain sweep cannot re-cast them,
+  and discard the stream from `__resend_queue`.
+- **Blocker:** there is no write-side analogue of the `_inflight_reads`
+  registry (`network.py:61`). Write tasks are tracked only loosely via
+  `on_error(t, ...)` (`network.py:1732`) and the `draining_right_now` set, so
+  a per-stream write-task registry is needed before a pause can cancel
+  reliably.
+- Resume: clear the marker and poke `resendable_event` / `__mixwal_updated`.
+
+### Cancel mechanics
+
+- Cancel is clean only while the I-chunk PlaintextWAL still exists (i.e. has
+  not reached SentLog). Then delete: the substream C/F PlaintextWAL rows, the
+  I-chunk PlaintextWAL, the indirection ReadCapWAL, the `agg_bacap_stream`
+  WriteCapWAL, that stream's MixWAL rows, **and** the optimistic
+  `conversationlog` row — the last is mandatory because its `outgoing_pwal`
+  foreign key points at the I-chunk (`katzen.py:1176`).
+- Boxes already ACK'd at couriers/replicas are orphaned but harmless: without
+  the I-chunk nobody ever learns the substream read cap, so they are
+  unreachable and expire.
+- Once the I-chunk *has* been sent, recipients may already be downloading, so
+  cancel must either be refused or degrade to "remove the local copy only".
+  Decide which.
+
+### GUI surface
+
+- `DownloadsModel` (`qt_models.py:78+`) becomes direction-aware: a direction
+  role/column distinguishing upload from download rows, and Pause/Resume/Cancel
+  menu entries that apply per direction (item 8's enablement fix applies here
+  too).
+- `substream_progress_queue` (`network.py:92`) gains write-side events
+  (upload started / chunk-acked / completed / paused / resumed / cancelled);
+  today all its push sites are receive-side.
+- Upload progress numerator: `substream_total_chunks - COUNT(PlaintextWAL
+  WHERE bacap_stream = agg_bacap_stream)`, since PlaintextWAL rows are deleted
+  as each chunk is ACK'd. The denominator is already persisted on the sender's
+  indirection ReadCapWAL.
+- Row key: the indirection `ReadCapWAL.id`, which mirrors the download side
+  and is known before dispatch.
+- Startup seeding: uploads have no `ConversationPeer` row, so seed from
+  PlaintextWAL rows with `indirection IS NOT NULL` (an in-flight upload's
+  I-chunk).
+
+### Open question
+
+Item 4 deferred download *cancel*. Decide whether it shares this machinery —
+its prune-and-retire path (drop ReceivedPiece rows, retire the substream peer,
+delete its MixWAL row) is the mirror image of upload cancel.
