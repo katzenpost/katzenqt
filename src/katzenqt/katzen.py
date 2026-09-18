@@ -193,6 +193,32 @@ async def _dialog_finished(dialog):
     return await fut
 
 
+async def _menu_chosen(menu, global_pos):
+    """Show a popup menu non-blocking and return the triggered QAction.
+
+    menu.exec() spins a nested Qt event loop; run inside a QtAsyncio task
+    step, that loop can step another task and trip asyncio's re-entrancy
+    check. popup() returns immediately and this coroutine resumes when the
+    menu hides, yielding the action the user picked (None if dismissed).
+    """
+    loop = asyncio.get_event_loop()
+    hidden = loop.create_future()
+    local = []
+
+    def _chosen(action):
+        local.append(action)
+
+    def _hidden():
+        if not hidden.done():
+            hidden.set_result(None)
+
+    menu.triggered.connect(_chosen)
+    menu.aboutToHide.connect(_hidden)
+    menu.popup(global_pos)
+    await hidden
+    return local[0] if local else None
+
+
 async def _commit_new_conversation(
     wcapwal: persistent.WriteCapWAL,
     rcapwal: persistent.ReadCapWAL,
@@ -1416,7 +1442,7 @@ class MainWindow(QMainWindow):
         pgm = api.addAction(f"Do not read from {item.text()} any more")
         rgm = api.addAction(f"Resume reading from {item.text()}")
         rgm.setEnabled(not active)
-        chosen = api.exec(tree.viewport().mapToGlobal(pos))
+        chosen = await _menu_chosen(api, tree.viewport().mapToGlobal(pos))
         if chosen is pgm and active:
             await self.iothread.run_in_io(
                 network.pause_peer_reads(bacap_stream=read_cap_id),
@@ -1442,6 +1468,7 @@ class MainWindow(QMainWindow):
         )
         if not rcw_id:
             return
+        rcw_id = uuid.UUID(rcw_id)
         with persistent.Session(persistent._engine_sync) as sess:
             solo = (sess.exec(
                 select(persistent.ConversationPeer).where(
@@ -1453,14 +1480,14 @@ class MainWindow(QMainWindow):
         pgm = api.addAction("Pause download")
         rgm = api.addAction("Resume download")
         rgm.setEnabled(not active)
-        chosen = api.exec(view.viewport().mapToGlobal(pos))
+        chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
         if chosen is pgm and active:
             await self.iothread.run_in_io(
-                network.pause_peer_reads(bacap_stream=uuid.UUID(rcw_id)),
+                network.pause_peer_reads(bacap_stream=rcw_id),
             )
         elif chosen is rgm and not active:
             await self.iothread.run_in_io(
-                network.resume_peer_reads(bacap_stream=uuid.UUID(rcw_id)),
+                network.resume_peer_reads(bacap_stream=rcw_id),
             )
 
     async def transfers_listener(self) -> None:
