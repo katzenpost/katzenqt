@@ -1408,7 +1408,7 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 event = await self.iothread.run_in_io(
-                    network.substream_progress_queue.get,
+                    network.substream_progress_queue.get(),
                 )
                 kind = event[0]
                 rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]

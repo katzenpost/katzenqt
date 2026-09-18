@@ -22,12 +22,12 @@ class _BlockedLoop:
     this loop, as ``MainWindow.run_in_io`` does over the thread hop."""
 
     async def run_in_io(self, fn):
-        if asyncio.iscoroutine(fn):
-            # the real caller passes network...queue.get(), a coroutine,
-            # straight to run_coroutine_threadsafe; the get() body only
-            # runs on await.
-            return await fn
-        return await fn()
+        if not asyncio.iscoroutine(fn):
+            # mirror asyncio.run_coroutine_threadsafe's contract: callers
+            # pass a started coroutine (network...queue.get(), not .get),
+            # and a bare callable must fail loudly rather than be tolerated.
+            raise TypeError("A coroutine object is required")
+        return await fn
 
 
 class _FakeQueue:
