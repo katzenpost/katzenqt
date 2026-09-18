@@ -2022,6 +2022,58 @@ class TestPauseResumePeerReads:
         assert rows[0].bacap_stream == setup["bacap_stream"]
         assert rows[0].current_message_index == setup["first_message_index"]
 
+    @pytest.mark.asyncio
+    async def test_duplicate_readable_peer_arms_stream_once(self, fake_thinclient):
+        """Two active ConversationPeer rows aliasing ONE ReadCapWAL (a stale
+        duplicate-identity transient) must arm the stream exactly once per
+        pass. Without the dedupe, a pass adds two is_read MixWAL rows with
+        the same bacap_stream and its single commit raises IntegrityError
+        (UNIQUE constraint failed: mixwal.bacap_stream), killing
+        readables_to_mixwal -- the session's only read-arming task -- and
+        wedging every later read (observed as a send-file timeout)."""
+        setup = await _insert_write_setup(fake_thinclient)
+        fake_thinclient.pre_store(
+            write_cap=setup["write_cap"],
+            message_box_index=setup["first_message_index"],
+            plaintext=_make_F_payload("duplicate peer arms stream once"),
+        )
+        async with persistent.asession() as sess:
+            dup_peer = persistent.ConversationPeer(
+                name="self:duplicate",
+                read_cap_id=setup["bacap_stream"],
+                active=True,
+            )
+            sess.add(dup_peer)
+            await sess.commit()
+
+        await network.on_connection_status({"is_connected": True, "err": None})
+        getattr(network, "__resend_queue_populated").set()
+        getattr(network, "readables_to_mixwal_event").set()
+
+        async def armed_once():
+            async with persistent.asession() as sess:
+                rows = (await sess.exec(select(persistent.MixWAL).where(
+                    persistent.MixWAL.is_read,
+                ))).all()
+                return len(rows) == 1 and rows[0].bacap_stream == setup["bacap_stream"]
+
+        await _run_loop_until(
+            network.readables_to_mixwal(fake_thinclient),
+            armed_once,
+            timeout=5.0,
+        )
+        async with persistent.asession() as sess:
+            rows = (await sess.exec(select(persistent.MixWAL).where(
+                persistent.MixWAL.is_read,
+            ))).all()
+        assert len(rows) == 1
+        assert rows[0].bacap_stream == setup["bacap_stream"]
+        async with persistent.asession() as sess:
+            peers = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).all()
+        assert len(peers) == 2  # both identities remain; only one stream armed
+
 
 # ---------------------------------------------------------------------------
 # start_resending (PlaintextWAL -> MixWAL)

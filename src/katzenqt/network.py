@@ -1553,32 +1553,59 @@ async def readables_to_mixwal(connection):
         # is down and nothing pokes the event.
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
         retry_needed = False
-        async with persistent.asession() as sess:
-            # TODO are these guaranteed to be distinct?
-            readable_peers = (await sess.exec(select(
-                persistent.ConversationPeer, persistent.ReadCapWAL
-            ).where(persistent.ConversationPeer.active==True
-                    ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
-                            ).where(
-                                persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?
-                            )
-                )
-            ).all()
-            logger.debug("readable_peers: %d", len(readable_peers))
-            for (cpeer, rcw) in readable_peers:
-                logger.debug("going to process_box", cpeer.name, rcw.next_index[:8].hex())
-                try:
-                  mw = await process_box(cpeer, rcw)
-                except Exception as e:
-                  # Expected when a pass races a daemon bounce: mark the
-                  # retry flag so the loop re-arms after a short backoff.
-                  logger.warning("Read setup failed; retrying: %s", e)
-                  retry_needed = True
-                  continue
-                sess.add(mw)
-                logger.debug("finished one peer: %s", cpeer.name)
-            logger.debug("readables_to_mixwal: committing")
-            await sess.commit()
+        readable_peers = []
+        try:
+            async with persistent.asession() as sess:
+                # TODO are these guaranteed to be distinct?
+                readable_peers = (await sess.exec(select(
+                    persistent.ConversationPeer, persistent.ReadCapWAL
+                ).where(persistent.ConversationPeer.active==True
+                        ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
+                                ).where(
+                                    persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?
+                                )
+                    )
+                ).all()
+                logger.debug("readable_peers: %d", len(readable_peers))
+                # Two ConversationPeer rows can transiently alias the same
+                # ReadCapWAL (e.g. a stale duplicate self-peer). bacap_stream
+                # is MixWAL's primary key, so an arming pass that adds the
+                # same stream twice raises IntegrityError on its single
+                # commit (UNIQUE constraint failed: mixwal.bacap_stream);
+                # arm each read cap at most once per pass.
+                armed = set()
+                for (cpeer, rcw) in readable_peers:
+                    if rcw.id in armed:
+                        logger.warning(
+                            "readables_to_mixwal: skipping duplicate rcw=%s (%s)",
+                            rcw.id, cpeer.name,
+                        )
+                        continue
+                    armed.add(rcw.id)
+                    logger.debug("going to process_box", cpeer.name, rcw.next_index[:8].hex())
+                    try:
+                      mw = await process_box(cpeer, rcw)
+                    except Exception as e:
+                      # Expected when a pass races a daemon bounce: mark the
+                      # retry flag so the loop re-arms after a short backoff.
+                      logger.warning("Read setup failed; retrying: %s", e)
+                      retry_needed = True
+                      continue
+                    sess.add(mw)
+                    logger.debug("finished one peer: %s", cpeer.name)
+                logger.debug("readables_to_mixwal: committing")
+                await sess.commit()
+        except Exception as e:
+            # readables_to_mixwal is the session's only read-arming task, so
+            # a failed pass must NEVER kill the loop: every read would wedge
+            # for the rest of the session (observed as a send-file timeout on
+            # the UNIQUE mixwal.bacap_stream collision). The uncommitted pass
+            # is rolled back by the session; the same streams are re-selected
+            # and armed on the next sweep.
+            logger.warning(
+                "readables_to_mixwal: pass failed; re-arming next sweep: %s", e,
+            )
+            retry_needed = True
         logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))
         if len(readable_peers):
             __mixwal_updated.set()
