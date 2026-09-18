@@ -634,9 +634,36 @@ through `create_task` so a failing transient action logs instead of vanishing.
 The remaining `box.exec()`/direct-`QMessageBox` sites live only in sync slots,
 which run in top-level event dispatch and cannot re-enter a mid-step task.
 
-Awaits verification via a fresh 3-party webtop rerun that exercises the image
-send (the bob 17:56 path) and a voucher generate/induct, and confirms all three
-UIs show each other's messages live with no new tracebacks in `{a,b,c}.log`.
+### VERIFIED on the 2026-09-18 rerun (clients relaunched 18:25 local on `bfe2a29`)
+
+- **No new re-entrancy tracebacks.** The only `RuntimeError: Leaving task
+  'QtTask' ... Cannot enter into task` entries in `{a,b,c}.log` are the two
+  pre-fix crashes (alice 16:59, bob 17:56); nothing new appeared across the
+  whole session, including a full 25-chunk image transfer.
+- **The image send the 17:56 corruption had eaten completed end to end.**
+  bob's stuck `conversationlog` order 15 drained from `network_status=1`
+  (pending) to `2` once the relaunched client armed the pending MixWAL write.
+  alice (18:40:50) and carol (18:41:08) each assembled the 37300-byte
+  `jamiroquai.webp` and spilled it under `attachments/1/` with md5
+  `00c8541c15e56ff317c15e755a97427e` — byte-identical to the source file.
+- Their substream peers now read `active=0` with zero `ReceivedPiece` rows and
+  no MixWAL entry. That is the **expected terminal state** (F-assembly retires
+  the substream peer and prunes its pieces), not a stall — worth remembering
+  before misreading it as item 3's fail-fast deactivate, which looks similar
+  but WARNING-logs and leaves the pieces in place.
+
+Same bug class, surfaced by the same rerun and fixed in `78e08d8` (**committed,
+not yet rerun-verified** — needs a client relaunch, since the processes that
+hit it predate the commit): both context menus still spun `QMenu.exec()` inside
+their `@async_cb` task. They now pop non-blocking through
+`_menu_chosen(menu, global_pos)` (`popup()` + await `aboutToHide`, returning
+the triggered action). That commit also fixes the error the right-click
+actually hit first: `DownloadsModel` hands out the substream rcw id as `str`,
+and binding a `str` to the BLOB `read_cap_id` column dies in SQLAlchemy's
+binary processor (`'str' object has no attribute 'hex'`), so
+`transfers_context_menu` parses it to `uuid.UUID` before the peer lookup. The
+contacts-tree peer menu was unaffected by that half — it tags
+`peer_read_cap_id` as a real `uuid.UUID`, which does have `.hex`.
 
 ---
 
