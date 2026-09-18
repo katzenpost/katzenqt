@@ -620,10 +620,23 @@ delta 0). `70a654f` re-worded the heading to the "freeze" symptom.
 
 Rerun on 2026-09-18: all text messages now flow between all three clients
 (supervisor worked — no permanent freeze), but bob's image send was eaten by
-the unchecked `@async_cb` task corruption (see root cause above). The dialog
-root-fix + `async_cb` hardening above are the pending work for this item;
-verification is another 3-party webtop rerun that also exercises the image
-send and a voucher generate/induct.
+the unchecked `@async_cb` task corruption (see root cause above).
+
+Root fix implemented in `bfe2a29` (ruff delta 0, unit suite 440 passed /
+14 skipped): the nested event loops are gone — `attach_file` is a sync slot,
+`send_file`'s warnings and all pure-note `QMessageBox` calls inside tasks are
+deferred via `QTimer.singleShot`, the result-returning dialogs
+(`new_conversation`, `generate_voucher`, `induct_via_voucher`,
+`show_pending_vouchers`; `QMessageBox.question`, `QInputDialog.getText`, the
+`PendingVouchersDialog`) go through a non-blocking `_dialog_finished(dialog)`
+helper (`open()` + await the `finished` signal), and `async_cb` now schedules
+through `create_task` so a failing transient action logs instead of vanishing.
+The remaining `box.exec()`/direct-`QMessageBox` sites live only in sync slots,
+which run in top-level event dispatch and cannot re-enter a mid-step task.
+
+Awaits verification via a fresh 3-party webtop rerun that exercises the image
+send (the bob 17:56 path) and a voucher generate/induct, and confirms all three
+UIs show each other's messages live with no new tracebacks in `{a,b,c}.log`.
 
 ---
 
