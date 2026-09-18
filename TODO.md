@@ -598,6 +598,9 @@ path.
 
 ### Status
 
-Open. To be implemented and verified by a fresh 3-party manual webtop rerun:
-all three UIs show each other's messages live, alice2 flips to "sent" without
-user interaction, and no new tracebacks appear in `{a,b,c}.log`.
+Implemented in `fdbde7d` (listener supervisor + io-loop `first_unread`
+persist, with `tests/test_listener_supervisor.py`; unit suite 440 passed /
+14 skipped, ruff delta 0). Awaits verification via a fresh 3-party manual
+webtop rerun: all three UIs show each other's messages live, alice2 flips to
+"sent" without user interaction, and no new tracebacks appear in
+`{a,b,c}.log`.
