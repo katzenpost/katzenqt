@@ -542,3 +542,62 @@ DONE in `3bba25a`:
 
 Item 4's pause/cancel (substream download progress in GUI) remains open — only
 the per-peer machinery it needs is now in place.
+
+---
+
+## 6. A transient QtAsyncio task bug can permanently freeze the UI listeners
+
+During the 3-party webtop manual test on 2026-09-18 alice's UI stopped
+updating live — no more `has_new_messages` after ~16:59 — even though every
+message the others sent WAS delivered and persisted in her DB (bob2/bob3/carol1/
+carol2 all present with `network_status=0`; bob/carol hold both of alice's
+sends). bob and carol's UIs kept flowing. The only differentiator in alice's
+log is one traceback at `a.log` ~16:59:04:
+
+```
+RuntimeError: Leaving task Task 'QtTask' with state: Done with exception
+(RuntimeError("Cannot enter into task Task 'QtTask' with state: Pending
+while another task Task 'QtTask' with state: Pending is being executed."))
+does not match the current task Task 'QtTask' with state: Pending.
+```
+
+### Root cause
+
+`PySide6.QtAsyncio` task stepping (QtAsyncio/tasks.py `_step`) re-entered a
+task while another task was mid-step — the burst of back-to-back arrivals
+(bob2 @16:58:44, carol1 @16:58:53) colliding with carol's join processing
+(~16:59). One `QtTask` was abandoned forever. Because
+`katzen_util.create_task` only LOGS abnormal exits and never restarts
+(katzen_util.py:25-40), the dead listener never came back, so the live-refresh
+loop went silent: `receive_msg_listener`, `peer_added_listener`,
+`transfers_listener` (katzen.py:2186-2188) and the per-joiner
+`_await_voucher_join` (katzen.py:2198). The iothread kept running and the DB
+kept updating, but nothing pushed the Qt side to redraw: alice2 stayed showing
+"sending" until a manual click re-read the DB (`has_read_messages` @17:20:24,
+katzen.py:1738). bob/carol had 0 tracebacks, alice the only one — a timing
+race, not a data-path bug.
+
+Also fragile: `_process_conversation_update` (katzen.py:1246) and the
+conversation-switch path (katzen.py:1657) `await update_first_unread()`, which
+opens an aiosqlite session on the Qt loop (qt_models.py:654-664) — a second DB
+writer beside the iothread's single writer, and an extra await in the hot UI
+path.
+
+### Fix
+
+1. Listener supervisor: wrap the three listeners + `_await_voucher_join` so an
+   abnormal task exit (not `CancelledError`) is logged with `exc_info` and
+   re-scheduled with a short backoff on the same loop. Normal completion or
+   cancellation ends the supervised task (listeners only ever end abnormally).
+2. Move the `first_unread` DB write to the io loop: split `update_first_unread`
+   into a sync state-set (`mark_first_unread`, returns "changed") plus an
+   io-loop persist coroutine that reuses `persistent.asession()` there; update
+   both call sites to `if convo_state.mark_first_unread(v):
+   await self.iothread.run_in_io(persist_first_unread(...))`. This restores the
+   single-writer-on-iothread pattern and removes the Qt-loop session.
+
+### Status
+
+Open. To be implemented and verified by a fresh 3-party manual webtop rerun:
+all three UIs show each other's messages live, alice2 flips to "sent" without
+user interaction, and no new tracebacks appear in `{a,b,c}.log`.
