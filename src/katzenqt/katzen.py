@@ -1129,8 +1129,8 @@ class MainWindow(QMainWindow):
         self.transfers_view.setMinimumHeight(80)
         self.ui.gridLayout_2.addWidget(self.transfers_view, 2, 0, 1, 1)
 
-        # Polls panel: a sibling tab in the chat tab bar (locked decision 2).
-        # It lists the currently selected conversation's surveys and hosts the
+        # Polls panel: a sibling tab in the chat tab bar. It lists the
+        # currently selected conversation's surveys and hosts the
         # create/vote/close flows; clicking an in-chat placeholder raises it.
         self.tally_panel = TallyPanel()
         self.polls_model = PollsTabModel()

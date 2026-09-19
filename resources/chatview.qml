@@ -303,7 +303,7 @@ TreeView {
 } // contentItem: Row
 
           // A virtual poll placeholder row opens that survey in the Polls
-          // panel (locked decision 9). Chat rows leave tally_placeholder unset.
+          // panel. Chat rows leave tally_placeholder unset.
           TapHandler {
             enabled: model.tally_placeholder === true
             onTapped: chatController.openPoll(model.tally_survey_id)

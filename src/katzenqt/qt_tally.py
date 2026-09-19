@@ -119,7 +119,7 @@ class TimelineModel(QtCore.QAbstractItemModel):
         self._source.rowsInserted.connect(self.refresh)
         self._poll_cache: "list[SurveySummary]" = []
 
-    # -- public plumbing (Step 5 wire-up uses these) ---------------------------------
+    # -- public plumbing for the window wiring --------------------------------------
 
     def source_model(self) -> ConversationLogModel:
         """The underlying chat model (row_count bookkeeping, redraw hooks)."""
@@ -484,7 +484,8 @@ class TallyPanel(QWidget):
     def show_survey(self, conversation_id: int, survey_id: bytes) -> bool:
         """Load one survey from persisted state and render it (summary, grid
         and per-voter detail). Returns False when the survey is unknown;
-        otherwise records it as the current survey for step-5 refresh logic."""
+        otherwise records it as the current survey so a later refresh (a
+        received vote or close) can re-render the same one."""
         blob = presenter.survey_doc(conversation_id, survey_id)
         if blob is None:
             return False

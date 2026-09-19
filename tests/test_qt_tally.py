@@ -371,7 +371,7 @@ def test_create_dialog_removes_and_reorders_custom_slots():
 
 
 # ---------------------------------------------------------------------------
-# Step-5 wiring seams (model sharing, row<->order at the QML boundary)
+# Window-wiring seams (model sharing, row<->order at the QML boundary)
 # ---------------------------------------------------------------------------
 
 
