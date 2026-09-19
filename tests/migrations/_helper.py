@@ -56,8 +56,8 @@ def main(revision: str) -> int:
     expected = sorted(SQLModel.metadata.tables.keys())
 
     # Column-level snapshot: a table can exist at an old revision and still be
-    # missing a column added later (e.g. TallyState.conversation_order), which
-    # the table-set check alone would not catch.
+    # missing a column added later, which the table-set check alone would not
+    # catch.
     columns = {
         table: sorted(col["name"] for col in inspector.get_columns(table))
         for table in actual

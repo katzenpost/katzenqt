@@ -54,6 +54,9 @@ ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
 ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save visibility
 ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
 ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
+ROLE_CHAT_TALLY_KIND = 0x109  # QML: tally_kind, one of create/vote/recast/close/sync/invalid (tally rows only)
+ROLE_CHAT_TALLY_SURVEY_ID = 0x10A  # QML: tally_survey_id, survey id hex to open on click (tally rows only)
+ROLE_CHAT_IS_TALLY = 0x10B  # QML: is_tally, true for tally rows (so the delegate can style/click them)
 
 # Custom roles for the Transfers panel. The table is driven by DownloadsModel
 # below; these roles let a future delegate/QML entry fetch the
@@ -452,6 +455,68 @@ def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
     return None
 
 
+def _is_tally_type(msg_type) -> bool:
+    """True for the tally protocol's message family."""
+    from .models import GroupChatTypeEnum as T
+
+    return msg_type in (
+        T.TALLY_CREATE, T.TALLY_VOTE, T.TALLY_CLOSE,
+        T.TALLY_SYNC_REQ, T.TALLY_SYNC_RESP,
+    )
+
+
+_TALLY_ROW_CACHE: "dict[tuple, object]" = {}
+
+
+def _tally_row(cl):
+    """The projected :class:`presenter.TallyRowText` for a tally log row, or
+    None when the row is not a tally message. Cached by row id: a log row's
+    payload and peer name do not change."""
+    if cl.payload[:1] != b"F":
+        return None
+    key = (str(cl.id), cl.conversation_peer.name if cl.conversation_peer else "")
+    cached = _TALLY_ROW_CACHE.get(key, False)
+    if cached is not False:
+        return cached
+    from .models import GroupChatMessage
+    from .tally import presenter
+
+    try:
+        gcm = GroupChatMessage.from_cbor(cl.payload[1:])
+    except Exception:
+        return None
+    if getattr(gcm, "tally", None) is None and not _is_tally_type(gcm.msg_type):
+        return None
+    summary = None
+    if gcm.tally is not None:
+        summary = _tally_survey_summary(cl.conversation_id, gcm.tally.survey_id)
+    row = presenter.tally_row_text(
+        gcm,
+        actor_name=cl.conversation_peer.name if cl.conversation_peer else "?",
+        survey_summary=summary,
+    )
+    _TALLY_ROW_CACHE[key] = row
+    return row
+
+
+def _tally_survey_summary(conversation_id: int, survey_id: bytes):
+    """Project the persisted survey a tally row concerns, or None if absent."""
+    from .tally import presenter
+    from .tally.sync import load_doc
+
+    blob = presenter.survey_doc(conversation_id, survey_id)
+    if blob is None:
+        return None
+    try:
+        doc = load_doc(blob)
+    except ValueError:
+        return None
+    return presenter.summarize(
+        doc, conversation_id=conversation_id,
+        voter_names=presenter.voter_names(conversation_id),
+    )
+
+
 def lru_cache_for_data_roles(maxsize=10000):
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
     def decorator(func):
@@ -506,6 +571,9 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND: QByteArray(b'attachment_kind'),
             ROLE_CHAT_ATTACHMENT_REL_PATH: QByteArray(b'attachment_rel_path'),
             ROLE_CHAT_PICTURE_PATH: QByteArray(b'picture_path'),
+            ROLE_CHAT_TALLY_KIND: QByteArray(b'tally_kind'),
+            ROLE_CHAT_TALLY_SURVEY_ID: QByteArray(b'tally_survey_id'),
+            ROLE_CHAT_IS_TALLY: QByteArray(b'is_tally'),
         }
 
     @lru_cache(maxsize=10000)
@@ -562,6 +630,9 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND,
             ROLE_CHAT_ATTACHMENT_REL_PATH,
             ROLE_CHAT_PICTURE_PATH,
+            ROLE_CHAT_TALLY_KIND,
+            ROLE_CHAT_TALLY_SURVEY_ID,
+            ROLE_CHAT_IS_TALLY,
         ):
             return None
         index_row : int = index.row()
@@ -587,6 +658,20 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 elif role == ROLE_CHAT_MESSAGE_ID:
                     return str(cl.id)
                 else:
+                    tally = _tally_row(cl)
+                    if tally is not None:
+                        if role == 0:
+                            return tally.text
+                        if role == ROLE_CHAT_TALLY_KIND:
+                            return tally.kind
+                        if role == ROLE_CHAT_TALLY_SURVEY_ID:
+                            return tally.survey_id.hex() if tally.survey_id else None
+                        if role == ROLE_CHAT_IS_TALLY:
+                            return True
+                        if role == ROLE_CHAT_AUTHOR:
+                            return cl.conversation_peer.name
+                        # No attachment/picture roles for tally rows.
+                        return None
                     # Derive display text and attachment roles from the payload.
                     # INTRODUCTION rows carry no body text, so surface the
                     # announcement ("<author> added <name>") before the
@@ -676,10 +761,6 @@ class ConversationUIState(BaseModel):
     own_peer_bacap_uuid: uuid.UUID
     chat_lineEdit_buffer : str
     conversation_log_model: ConversationLogModel
-    # The QML-facing timeline: a katzenqt.qt_tally.TimelineModel that wraps
-    # conversation_log_model and interleaves poll placeholders. Typed Any to
-    # avoid qt_models importing qt_tally (qt_tally imports qt_models).
-    timeline_model: Any = None
     contacts_standard_item : QStandardItem = Field(description="the entry in the Contacts pane for the conversation")
     chat_lines_scroll_idx : float = 0.0
     # TODO: should store scroll state of self.ui.ChatLines
@@ -688,27 +769,18 @@ class ConversationUIState(BaseModel):
     attached_files : set[str] = Field(default_factory=set)
 
     first_unread : int = 0
-    # (projected) ConversationLog.conversation_order of first message the user
-    # hasn't "read" yet - it doesn't have to exist in ConversationLog yet.
+    # ConversationLog.conversation_order of the first message the user hasn't
+    # "read" yet. QML's marker walks visible rows and the timeline is exactly
+    # the conversation log (tally messages are ordinary rows), so this is both
+    # the row index and the order.
 
     def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
-        # The QML unread marker walks visible *rows* (ctx.first_unread <= row),
-        # while the persisted pointer and tally_new are in conversation_order
-        # space. Mirror TimelineModel's row<->order mapping for the model we
-        # hand QML: order_to_row first_unread on the way in; katzen.py runs the
-        # value QML writes back through row_to_order before persisting.
-        view_model = self.timeline_model or self.conversation_log_model
-        first_unread_row = (
-            self.timeline_model.order_to_row(self.first_unread)
-            if self.timeline_model is not None
-            else self.first_unread
-        )
         props = QQmlPropertyMap(rootObject)
         props.insert({
             **settings,
-            "chatTreeViewModel": view_model,
+            "chatTreeViewModel": self.conversation_log_model,
             "conversation_scroll": self.chat_lines_scroll_idx,
-            "first_unread": first_unread_row,
+            "first_unread": self.first_unread,
             "chat_text_size": 11, # governs text size of chat messages
             "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
         })

@@ -42,7 +42,7 @@ _HELPER = Path(__file__).with_name("_helper.py")
     "524576e2f8a5",  # network_status tracking
     "a430f7202849",  # ReceivedPiece introduced
     "93eef61c3c54",  # 64-bit-integer remediation; one before AppSetting
-    "35cec50b9604",  # conversation_voucher_used_flag; before the tally column
+    "35cec50b9604",  # conversation_voucher_used_flag
 ])
 def test_upgrade_from_revision_reaches_head(revision, tmp_path):
     """Each historical revision must upgrade to head and leave every
@@ -66,14 +66,13 @@ def test_upgrade_from_revision_reaches_head(revision, tmp_path):
     )
 
 
-def test_upgrade_from_pre_tally_revision_gains_conversation_order(tmp_path):
-    """``TallyState.conversation_order`` is added by the tally migration; a
-    state file parked at 35cec50b9604 (its parent) must gain the column on the
-    way to head. The table-set check alone cannot see a missing column."""
+def test_upgrade_from_pre_tally_revision_reaches_head(tmp_path):
+    """A state file parked at 35cec50b9604 (the parent of the since-removed
+    tally migration) must still reach head; the tally state table has only its
+    core columns because conversation_order was dropped from the model."""
     payload = _run_helper("35cec50b9604", tmp_path)
-    assert "conversation_order" in payload["columns"]["tallystate"]
-    # ...and it is nullable, so pre-existing surveys keep working.
     assert "doc_state" in payload["columns"]["tallystate"]
+    assert "conversation_order" not in payload["columns"]["tallystate"]
 
 
 def _run_helper(revision: str, tmp_path) -> dict:

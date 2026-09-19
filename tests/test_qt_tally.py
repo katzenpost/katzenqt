@@ -1,11 +1,12 @@
-"""Offscreen widget tests for ``katzenqt.qt_tally``: the poll timeline model,
-the Polls tab list, the voting panel and the create dialog.
+"""Offscreen widget tests for ``katzenqt.qt_tally`` (the Polls tab, the voting
+panel and the create dialog) and for tally rows rendered by
+``katzenqt.qt_models.ConversationLogModel``.
 
-These build QWidgets, so the module-scoped app is a QApplication (see the
-note in ``test_conversation_log_model`` about the one-instance rule).
-Surveys are seeded straight into the sync DB exactly as ``presenter`` reads
-them (a ``TallyState`` row holding a ``full_state`` blob), so no network or
-io loop is involved.
+These build QWidgets, so the module-scoped app is a QApplication (see the note
+in ``test_conversation_log_model`` about the one-instance rule). Surveys are
+seeded straight into the sync DB exactly as ``presenter`` reads them (a
+``TallyState`` row holding a ``full_state`` blob) and tally messages as
+``ConversationLog`` rows, so no network or io loop is involved.
 """
 from __future__ import annotations
 
@@ -17,26 +18,23 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QStandardItem  # noqa: E402
+from PySide6.QtCore import QModelIndex  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
-    ROLE_CHAT_AUTHOR,
+    ROLE_CHAT_IS_TALLY,
+    ROLE_CHAT_TALLY_KIND,
+    ROLE_CHAT_TALLY_SURVEY_ID,
     ConversationLogModel,
-    ConversationUIState,
 )
 from katzenqt.qt_tally import (  # noqa: E402
-    ROLE_TALLY_NEW,
-    ROLE_TALLY_PLACEHOLDER,
-    ROLE_TALLY_SURVEY_ID,
     PollsTabModel,
     TallyCreateDialog,
     TallyPanel,
-    TimelineModel,
     polls_tab_label,
 )
-from katzenqt.tally import schema, sync  # noqa: E402
+from katzenqt.tally import events, schema, sync  # noqa: E402
 from katzenqt.tally.controller import voter_id_from_read_cap  # noqa: E402
 from katzenqt.tally.schema import Mode  # noqa: E402
 
@@ -76,12 +74,31 @@ def _make_convo_sync(name: str = "lobby") -> "tuple[int, int]":
         return convo.id, own_peer.id
 
 
-def _seed_chat(convo_id: int, peer_id: int, order: int, text: str) -> None:
+def _next_order(convo_id: int) -> int:
+    with persistent.Session(persistent._engine_sync) as sess:
+        rows = sess.exec(
+            persistent.select(persistent.ConversationLog)
+            .where(persistent.ConversationLog.conversation_id == convo_id)
+        ).all()
+        return len(rows)
+
+
+def _seed_chat(convo_id: int, peer_id: int, text: str) -> None:
     cm = models.GroupChatMessage(version=0, membership_hash=bytes(32), text=text)
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.ConversationLog(
             conversation_id=convo_id, conversation_peer_id=peer_id,
-            conversation_order=order, payload=b"F" + cm.to_cbor(),
+            conversation_order=_next_order(convo_id), payload=b"F" + cm.to_cbor(),
+        ))
+        sess.commit()
+
+
+def _seed_tally_row(convo_id: int, peer_id: int, gcm) -> None:
+    with persistent.Session(persistent._engine_sync) as sess:
+        sess.add(persistent.ConversationLog(
+            conversation_id=convo_id, conversation_peer_id=peer_id,
+            conversation_order=_next_order(convo_id),
+            payload=b"F" + gcm.to_cbor(),
         ))
         sess.commit()
 
@@ -93,9 +110,8 @@ def _seed_survey(
     topic: str = "lunch?",
     mode: Mode = Mode.APPROVAL,
     slots: "tuple[str, ...]" = ("chicken", "pasta"),
-    order: "int | None" = 0,
     creator_voter_id: "bytes | None" = None,
-) -> None:
+):
     doc = schema.new_survey_doc(
         survey_id, topic, mode, slots,
         creator=creator_voter_id or voter_id_from_read_cap(OWN_CAP),
@@ -103,10 +119,10 @@ def _seed_survey(
     blob = sync.full_state(doc)
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.TallyState(
-            survey_id=survey_id, conversation_id=convo_id,
-            doc_state=blob, conversation_order=order,
+            survey_id=survey_id, conversation_id=convo_id, doc_state=blob,
         ))
         sess.commit()
+    return doc
 
 
 def _set_first_unread(convo_id: int, value: int) -> None:
@@ -117,123 +133,65 @@ def _set_first_unread(convo_id: int, value: int) -> None:
         sess.commit()
 
 
-def _timeline_for(convo_id: int, n_chat: int = 0) -> TimelineModel:
-    m = TimelineModel(convo_id)
-    m.source_model().row_count = n_chat  # set by katzen.py:1933 in the GUI
-    m.refresh()
-    return m
-
-
 # ---------------------------------------------------------------------------
-# TimelineModel
+# Tally rows in ConversationLogModel
 # ---------------------------------------------------------------------------
 
 
-def test_timeline_interleaves_polls_and_chat_and_sorts_poll_first_on_equal_order():
-    """A survey stamped at order O while the log holds O rows shares order O
-    with the next chat row; the poll sorts ahead (it came first)."""
+def test_create_row_renders_as_a_poll_line():
     convo_id, peer_id = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
-    _seed_chat(convo_id, peer_id, 0, "hello 0")
-    _seed_chat(convo_id, peer_id, 1, "hello 1")
-    _seed_survey(convo_id, survey_id, order=1)
+    doc = _seed_survey(convo_id, survey_id)
+    _seed_tally_row(convo_id, peer_id, events.build_create(survey_id, sync.full_state(doc)))
 
-    m = _timeline_for(convo_id, n_chat=2)
-
-    assert [e.kind for e in m._rows] == ["chat", "poll", "chat"]
-    assert [e.order for e in m._rows] == [0, 1, 1]
-
-    chat0, poll, chat1 = (m.index(r, 0) for r in range(3))
-    assert m.data(chat0, 0) == "hello 0"
-    assert m.data(poll, 0) == "[Poll] lunch? — open · no votes yet"
-    assert m.data(chat1, 0) == "hello 1"
-
-    assert m.data(poll, ROLE_TALLY_PLACEHOLDER) is True
-    assert m.data(poll, ROLE_TALLY_SURVEY_ID) == survey_id.hex()
-    assert m.data(chat0, ROLE_TALLY_PLACEHOLDER) is None
-    assert m.data(chat0, ROLE_TALLY_SURVEY_ID) is None
-
-    # A poll is "new" once its order passes the first-unread pointer.
-    m.set_first_unread(2)
-    assert m.data(poll, ROLE_TALLY_NEW) is False
-    m.set_first_unread(0)
-    assert m.data(poll, ROLE_TALLY_NEW) is True
+    m = ConversationLogModel(convo_id)
+    m.row_count = 1
+    idx = m.index(0, 0, QModelIndex())
+    assert m.data(idx, ROLE_CHAT_IS_TALLY) is True
+    assert m.data(idx, ROLE_CHAT_TALLY_KIND) == "create"
+    assert m.data(idx, ROLE_CHAT_TALLY_SURVEY_ID) == survey_id.hex()
+    assert m.data(idx, 0) == "me created [Poll] lunch? — open · no votes yet"
 
 
-def test_timeline_untamped_survey_hangs_off_the_tail():
-    """A survey whose order was never persisted renders after every chat row."""
+def test_vote_row_names_the_sender_and_lists_selections():
     convo_id, peer_id = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
-    for i, text in enumerate(("a", "b", "c")):
-        _seed_chat(convo_id, peer_id, i, text)
-    _seed_survey(convo_id, survey_id, order=None)
-
-    m = _timeline_for(convo_id, n_chat=3)
-
-    assert [e.kind for e in m._rows] == ["chat", "chat", "chat", "poll"]
-    assert m._rows[-1].order == 3
-    assert m.survey_id_at_row(3) == survey_id.hex()
-    assert m.survey_id_at_row(0) is None
-    assert m.survey_id_at_row(-1) is None
-
-
-def test_timeline_unread_maps_between_row_and_order_space():
-    """QML's first_unread counter is row space; the DB pointer is order space."""
-    convo_id, peer_id = _make_convo_sync()
-    _seed_chat(convo_id, peer_id, 0, "a")
-    _seed_survey(convo_id, uuid.uuid4().bytes, order=1)  # shares order 1
-    _seed_chat(convo_id, peer_id, 1, "b")
-
-    m = _timeline_for(convo_id, n_chat=2)
-
-    assert [e.order for e in m._rows] == [0, 1, 1]
-    assert m.order_to_row(0) == 0
-    assert m.order_to_row(1) == 1  # the poll row
-    assert m.order_to_row(2) == 3  # all read
-
-    assert m.row_to_order(0) == 0
-    assert m.row_to_order(1) == 1
-    assert m.row_to_order(len(m._rows)) == 2  # past-the-end
-    assert m.row_to_order(-1) == 0
-
-    m.set_first_unread(1)
-    assert m.first_unread_row == 1
-    assert m.first_unread_order == 1
-
-
-def test_timeline_unknown_conversation_has_no_rows():
-    m = _timeline_for(0xFFFFFF)
-    assert m.rowCount() == 0
-    assert m.order_to_row(0) == 0
-    assert m.row_to_order(0) == 0
-
-
-def test_timeline_poll_author_is_the_creator():
-    """The placeholder row must say who opened the poll, not a generic label."""
-    convo_id, _ = _make_convo_sync()
-    own_sid = uuid.uuid4().bytes
-    alice_sid = uuid.uuid4().bytes
-    _seed_survey(convo_id, own_sid, order=0)  # creator defaults to us
-    _seed_survey(
-        convo_id, alice_sid, topic="alice's", order=1,
-        creator_voter_id=voter_id_from_read_cap(ALICE_CAP),
+    _seed_survey(convo_id, survey_id)
+    _seed_tally_row(
+        convo_id, peer_id, events.build_vote(survey_id, {"s0": "yes", "s1": "no"}),
     )
 
-    m = _timeline_for(convo_id, n_chat=0)
-    row_by_sid = {entry.poll.survey_id: i for i, entry in enumerate(m._rows)}
-    assert m.data(m.index(row_by_sid[own_sid], 0), ROLE_CHAT_AUTHOR) == "me"
-    assert m.data(m.index(row_by_sid[alice_sid], 0), ROLE_CHAT_AUTHOR) == "alice"
-
-
-def test_timeline_poll_author_falls_back_when_the_creator_is_unknown():
-    """A creator id with no resolvable peer name keeps the generic label."""
-    convo_id, _ = _make_convo_sync()
-    survey_id = uuid.uuid4().bytes
-    _seed_survey(
-        convo_id, survey_id, order=0, creator_voter_id=b"\xaa" * 16,
+    m = ConversationLogModel(convo_id)
+    m.row_count = 1
+    assert m.data(m.index(0, 0, QModelIndex()), 0) == (
+        'me voted on "[Poll] lunch?": chicken: yes, pasta: no'
     )
-    m = _timeline_for(convo_id, n_chat=0)
-    assert m.data(m.index(0, 0), ROLE_CHAT_AUTHOR) == "Unknown"
+    assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "vote"
+
+
+def test_recast_row_says_changed_vote():
+    convo_id, peer_id = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id)
+    _seed_tally_row(
+        convo_id, peer_id,
+        events.build_vote(survey_id, {"s0": "maybe"}, version=1),
+    )
+    m = ConversationLogModel(convo_id)
+    m.row_count = 1
+    assert "changed vote in" in m.data(m.index(0, 0, QModelIndex()), 0)
+    assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "recast"
+
+
+def test_vote_for_an_unknown_survey_renders_invalid():
+    convo_id, peer_id = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes  # no survey seeded
+    _seed_tally_row(convo_id, peer_id, events.build_vote(survey_id, {"s0": "yes"}))
+
+    m = ConversationLogModel(convo_id)
+    m.row_count = 1
+    assert m.data(m.index(0, 0, QModelIndex()), 0) == f"me: vote for unknown poll {survey_id.hex()}"
+    assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -241,31 +199,35 @@ def test_timeline_poll_author_falls_back_when_the_creator_is_unknown():
 # ---------------------------------------------------------------------------
 
 
-def test_polls_tab_model_filters_by_conversation_and_counts_badges():
-    alpha_id, _ = _make_convo_sync("alpha")
-    beta_id, _ = _make_convo_sync("beta")
+def test_polls_tab_model_lists_surveys_for_the_conversation():
+    convo_id, peer_id = _make_convo_sync("alpha")
+    other_id, _ = _make_convo_sync("beta")
     a_sid = uuid.uuid4().bytes
     b_sid = uuid.uuid4().bytes
-    _seed_survey(alpha_id, a_sid, topic="tea?", order=0)
-    _seed_survey(beta_id, b_sid, topic="beer?", order=0)
-    _set_first_unread(alpha_id, 99)  # read the alpha poll
+    _seed_survey(convo_id, a_sid, topic="tea?")
+    _seed_survey(other_id, b_sid, topic="beer?")
 
     model = PollsTabModel()
-    model.refresh()
-    assert model.rowCount() == 2
-    assert model.badge_count() == 1  # only the beta poll is new
-
-    model.set_conversation_filter(alpha_id)
+    model.set_conversation_filter(convo_id)
     assert model.rowCount() == 1
     assert model.data(model.index(0), 0x201) == "tea?"
-    assert model.data(model.index(0), 0x204) == alpha_id
+    assert model.data(model.index(0), 0x204) == convo_id
     assert model.data(model.index(0), 0x205) == "alpha"
-    assert model.data(model.index(0), 0x208) is False
     assert model.summary_at(0).topic == "tea?"
 
-    model.set_conversation_filter(None)
-    assert model.rowCount() == 2
+
+def test_polls_badge_counts_unread_create_rows():
+    convo_id, peer_id = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    doc = _seed_survey(convo_id, survey_id)
+    _seed_tally_row(convo_id, peer_id, events.build_create(survey_id, sync.full_state(doc)))
+
+    model = PollsTabModel()
+    model.set_conversation_filter(convo_id)
+    _set_first_unread(convo_id, 0)
     assert model.badge_count() == 1
+    _set_first_unread(convo_id, 5)  # everything read
+    assert model.badge_count() == 0
 
 
 def test_polls_tab_label_attaches_the_badge():
@@ -358,6 +320,21 @@ def test_panel_new_poll_button_emits_new_poll_requested():
     assert fired == [True]
 
 
+def test_panel_clear_drops_the_current_survey():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id)
+    panel = TallyPanel()
+    panel.show_survey(convo_id, survey_id)
+    assert panel.current_survey() == (convo_id, survey_id)
+
+    panel.clear()
+    assert panel.current_survey() is None
+    assert panel._topic_label.text() == "No poll selected"
+    assert panel._vote_button.isEnabled() is False
+    assert panel._close_button.isHidden() is True
+
+
 # ---------------------------------------------------------------------------
 # TallyCreateDialog
 # ---------------------------------------------------------------------------
@@ -405,84 +382,3 @@ def test_create_dialog_removes_and_reorders_custom_slots():
     dialog._slots_list.setCurrentRow(1)
     dialog._remove_selected()
     assert dialog.slots() == ["a", "c"]
-
-
-# ---------------------------------------------------------------------------
-# Window-wiring seams (model sharing, row<->order at the QML boundary)
-# ---------------------------------------------------------------------------
-
-
-def test_timeline_can_share_the_window_owned_source_model():
-    """katzen.py passes the ConversationLogModel it already manages so
-    row_count/redraw hooks stay on one instance."""
-    convo_id, _ = _make_convo_sync()
-    clm = ConversationLogModel(convo_id)
-    clm.row_count = 0
-    tm = TimelineModel(convo_id, source=clm)
-    assert tm.source_model() is clm
-    tm.refresh()
-    assert tm.rowCount() == 0
-
-
-def test_tally_new_is_derived_without_a_refresh():
-    """set_first_unread must not reset the model; the role reads the pointer."""
-    convo_id, peer_id = _make_convo_sync()
-    survey_id = uuid.uuid4().bytes
-    _seed_chat(convo_id, peer_id, 0, "a")
-    _seed_survey(convo_id, survey_id, order=1)
-
-    m = _timeline_for(convo_id, n_chat=1)
-    poll = m.index(1, 0)
-    assert m._rows[1].kind == "poll"
-    assert m.data(poll, ROLE_TALLY_NEW) is True
-    before = m.rowCount()
-    m.set_first_unread(2)
-    assert m.rowCount() == before  # no reset
-    assert m.data(poll, ROLE_TALLY_NEW) is False
-
-
-def test_panel_clear_drops_the_current_survey():
-    convo_id, _ = _make_convo_sync()
-    survey_id = uuid.uuid4().bytes
-    _seed_survey(convo_id, survey_id)
-    panel = TallyPanel()
-    panel.show_survey(convo_id, survey_id)
-    assert panel.current_survey() == (convo_id, survey_id)
-
-    panel.clear()
-    assert panel.current_survey() is None
-    assert panel._topic_label.text() == "No poll selected"
-    assert panel._vote_button.isEnabled() is False
-    assert panel._close_button.isHidden() is True
-
-
-def test_qml_ctx_uses_the_timeline_model_and_row_space_first_unread():
-    """The QML boundary must hand QML the merged model and a row-space
-    first_unread (QML walks rows); katzen.py converts the write-back."""
-    convo_id, peer_id = _make_convo_sync()
-    _seed_chat(convo_id, peer_id, 0, "a")
-    _seed_survey(convo_id, uuid.uuid4().bytes, order=1)  # shares order 1
-    _seed_chat(convo_id, peer_id, 1, "b")
-
-    clm = ConversationLogModel(convo_id)
-    clm.row_count = 2
-    tm = TimelineModel(convo_id, source=clm)
-    tm.refresh()
-    assert [e.order for e in tm._rows] == [0, 1, 1]
-
-    state = ConversationUIState(
-        conversation_id=convo_id,
-        own_peer_id=peer_id,
-        own_peer_name="me",
-        own_peer_bacap_uuid=uuid.uuid4(),
-        chat_lineEdit_buffer="",
-        conversation_log_model=clm,
-        timeline_model=tm,
-        contacts_standard_item=QStandardItem("x"),
-        first_unread=1,  # order space
-    )
-    ctx = state.qml_ctx(None, {})
-    assert ctx.value("chatTreeViewModel") is tm
-    assert ctx.value("first_unread") == tm.order_to_row(1) == 1
-    # And the write-back mapping QML's row counter would go through:
-    assert tm.row_to_order(ctx.value("first_unread")) == 1

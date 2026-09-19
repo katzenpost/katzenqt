@@ -58,7 +58,7 @@ from .models import (GroupChatFileUpload,
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
 from .qt_tally import (PollsTabModel, TallyCreateDialog, TallyPanel,
-                       TimelineModel, polls_tab_label)
+                       polls_tab_label)
 from .tally import controller as tally_controller
 from .tally import events as tally_events
 from .tally import schema as tally_schema
@@ -1142,13 +1142,9 @@ class MainWindow(QMainWindow):
     # -- tally / polls -------------------------------------------------------
 
     def _refresh_tally_views(self, conversation_id: int) -> None:
-        """Re-derive the merged timeline and, when the affected conversation is
-        the one in focus, the Polls tab and the open survey. Runs on the Qt
-        thread (presenter reads are sync-engine), called from the tally
-        listener and after our own local sends."""
-        convo_state = self.conversation_state_by_id.get(conversation_id)
-        if convo_state is not None and convo_state.timeline_model is not None:
-            convo_state.timeline_model.refresh()
+        """Refresh the polls tab/badge and the open survey after a tally
+        notification. The chat rows themselves are refreshed by
+        ``receive_msg_listener`` (tally messages are ordinary log rows)."""
         key = self.tally_panel.current_survey()
         if key is not None and key[0] == conversation_id:
             # A received vote/close may have changed the panel's survey.
@@ -1491,17 +1487,8 @@ class MainWindow(QMainWindow):
             # TODO make which of these to do configurable:
             convo_state.chat_lines_scroll_idx = 1.0
             root = self.ui.qml_ChatLines.rootObject()
-            # QML's first_unread is in row space (it walks visible rows); the
-            # persisted pointer and tally_new are in conversation_order space.
-            new_first_unread_row = root.property("ctx").value("first_unread")
-            tm = convo_state.timeline_model
-            new_first_unread = (
-                tm.row_to_order(new_first_unread_row)
-                if tm is not None else new_first_unread_row
-            )
+            new_first_unread = root.property("ctx").value("first_unread")
             if convo_state.mark_first_unread(new_first_unread):
-                if tm is not None:
-                    tm.set_first_unread(new_first_unread)
                 await self.iothread.run_in_io(
                     network.persist_first_unread(
                         convo_state.conversation_id, new_first_unread,
@@ -1954,14 +1941,7 @@ class MainWindow(QMainWindow):
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
             if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
                 print("old first_unread is", old_ctx.value("first_unread"))
-                old_first_unread_row = old_ctx.value("first_unread")
-                # The QML value is in the old conversation's row space; store
-                # order space.
-                old_tm = old_convo.timeline_model
-                old_first_unread = (
-                    old_tm.row_to_order(old_first_unread_row)
-                    if old_tm is not None else old_first_unread_row
-                )
+                old_first_unread = old_ctx.value("first_unread")
                 if old_convo.mark_first_unread(old_first_unread):
                     await self.iothread.run_in_io(
                         network.persist_first_unread(
@@ -2438,12 +2418,28 @@ class MixSystrayIcon(QSystemTrayIcon):
         print("Someone clicked message", args, kwargs)
 
     
+async def _stage_local_tally(sess, convo, gcm) -> None:
+    """Stage an outbound tally message and append its optimistic chat row.
+
+    Runs inside the caller's ``conversation_log_order_lock``: the row's order is
+    a COUNT subquery evaluated at commit, so it must not race a concurrent
+    append. ``network_status=1`` marks the row pending until the send clears.
+    """
+    final_pwal_id = await tally_send.stage_outbound(sess, convo, gcm)
+    sess.add(persistent.ConversationLog(
+        conversation_id=convo.id,
+        conversation_peer_id=convo.own_peer_id,
+        conversation_order=persistent.next_conversation_order(convo.id),
+        payload=b"F" + gcm.to_cbor(),
+        network_status=1,
+        outgoing_pwal=final_pwal_id,
+    ))
+
+
 async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes | None":
     """Create a survey, persist it and stage its broadcast, on the io loop.
 
-    Runs under the per-conversation order lock: ``TallyState``'s first-sighting
-    ``conversation_order`` is a COUNT subquery evaluated at commit, so it must
-    not race a concurrent chat append. Returns the survey id (None on failure).
+    Returns the survey id (None on failure).
     """
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
@@ -2456,7 +2452,7 @@ async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes |
                 sess, convo, survey_id, topic, mode, slots,
             )
             blob = tally_sync.full_state(doc)
-            await tally_send.stage_outbound(
+            await _stage_local_tally(
                 sess, convo, tally_events.build_create(survey_id, blob),
             )
             await sess.commit()
@@ -2470,15 +2466,16 @@ async def _io_tally_vote(conversation_id: int, survey_id: bytes, choice) -> bool
         convo = await sess.get(persistent.Conversation, conversation_id)
         if convo is None:
             return False
-        version = await tally_controller.INSTANCE.cast_local_vote(
-            sess, convo, survey_id, choice,
-        )
-        if version is None:
-            return False
-        await tally_send.stage_outbound(
-            sess, convo, tally_events.build_vote(survey_id, choice, version),
-        )
-        await sess.commit()
+        async with persistent.conversation_log_order_lock(conversation_id):
+            version = await tally_controller.INSTANCE.cast_local_vote(
+                sess, convo, survey_id, choice,
+            )
+            if version is None:
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_vote(survey_id, choice, version),
+            )
+            await sess.commit()
     await network.check_for_new()
     return True
 
@@ -2489,12 +2486,13 @@ async def _io_tally_close(conversation_id: int, survey_id: bytes) -> bool:
         convo = await sess.get(persistent.Conversation, conversation_id)
         if convo is None:
             return False
-        if not await tally_controller.INSTANCE.close_local(sess, convo, survey_id):
-            return False
-        await tally_send.stage_outbound(
-            sess, convo, tally_events.build_close(survey_id),
-        )
-        await sess.commit()
+        async with persistent.conversation_log_order_lock(conversation_id):
+            if not await tally_controller.INSTANCE.close_local(sess, convo, survey_id):
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_close(survey_id),
+            )
+            await sess.commit()
     await network.check_for_new()
     return True
 
@@ -2507,9 +2505,6 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     qtwi = QStandardItem(convo.name)
     qtwi.conversation_id = convo.id
     clm = ConversationLogModel(convo.id)
-    # QML binds to the timeline wrapper, which proxies chat rows to clm and
-    # interleaves virtual poll placeholders (see qt_tally.TimelineModel).
-    timeline = TimelineModel(convo.id, source=clm)
     convo_state = ConversationUIState(
         own_peer_id=convo.own_peer_id,
         own_peer_name=convo.own_peer.name,
@@ -2518,7 +2513,6 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         contacts_standard_item=qtwi,
         chat_lineEdit_buffer="",
         conversation_log_model=clm,
-        timeline_model=timeline,
         chat_lines_scroll_idx=1.0,
         first_unread=convo.first_unread or 0,
     )
@@ -2547,9 +2541,6 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         ).first()
         convo_state.conversation_log_model.row_count = msg_count
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
-    # Seed the merged timeline now that row_count and first_unread are known.
-    timeline.set_first_unread(convo.first_unread or 0)
-    timeline.refresh()
 
     # Append the new conversation to the "real" model window.all_contacts,
     # then figure out where that sits in the FilterProxyModel used for sorting contacts,

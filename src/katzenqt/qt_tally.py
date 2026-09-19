@@ -5,16 +5,11 @@ Everything here imports PySide6, so nothing in ``katzenqt``, ``persistent``,
 tally protocol derivation stays in ``katzenqt.tally.presenter`` / ``engine``,
 which this module projects into Qt models and widgets.
 
-Three pieces:
+Two pieces:
 
-* :class:`TimelineModel`: a drop-in replacement for
-  :class:`~katzenqt.qt_models.ConversationLogModel` on the QML `chatTreeView`
-  that interleaves the real conversation rows with virtual "poll placeholder"
-  rows (surveys never become ConversationLog rows). Because QML's unread
-  marker lives in *row* space while the DB's ``first_unread`` / survey
-  ``conversation_order`` live in *order* space, it owns the row<->order
-  mapping both directions.
-* :class:`PollsTabModel`: the flat list behind the Polls sibling tab.
+* :class:`PollsTabModel`: the flat list behind the Polls sibling tab. (Tally
+  messages are ordinary chat rows; their display is derived in
+  :mod:`katzenqt.qt_models` via :mod:`katzenqt.tally.presenter`.)
 * :class:`TallyPanel` and :class:`TallyCreateDialog`: the embedded poll panel
   (click-to-cycle voting grid) and the hybrid create dialog (custom options
   + date picks).
@@ -27,7 +22,6 @@ job, in the same `run_in_io` style the chat composer uses.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from PySide6 import QtCore
 from PySide6.QtCore import QModelIndex, Qt, Signal
@@ -49,227 +43,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .qt_models import (
-    ROLE_CHAT_AUTHOR,
-    ROLE_CHAT_NETWORK_STATUS,
-    ConversationLogModel,
-)
 from .tally import presenter, schema
 from .tally.engine import Outcome
 from .tally.presenter import SurveySummary
 from .tally.sync import load_doc
-
-# New role ids, past the chat model's last (ROLE_CHAT_PICTURE_PATH = 0x108).
-ROLE_TALLY_PLACEHOLDER = 0x109  # bool: True for a virtual poll placeholder row
-ROLE_TALLY_SURVEY_ID = 0x10A    # str: survey id hex, for opening the panel
-ROLE_TALLY_NEW = 0x10B          # bool: survey unread (order >= first_unread)
-
-_PLACEHOLDER_AUTHOR = "Unknown"
-
-
-@dataclass(frozen=True)
-class _LayoutEntry:
-    """One timeline row: either a source ConversationLog row or a poll
-    placeholder. ``order`` is shared ordering space; ``src_row`` is the row
-    within the source chat model for chat entries (None for polls)."""
-
-    kind: str  # "chat" | "poll"
-    order: int
-    src_row: "int | None" = None
-    poll: "SurveySummary | None" = None
-
-
-class TimelineModel(QtCore.QAbstractItemModel):
-    """The ``chatTreeView`` model: the conversation's log rows plus one
-    virtual placeholder row per survey, all interleaved by
-    ``conversation_order``. A placeholder at order O precedes the chat row at
-    the same order O: ``conversation_order`` is a live COUNT of log rows, so a
-    survey first sighted while the log holds O rows is stamped O, and the next
-    chat row lands at O as well — the survey came first.
-
-    The chat rows are proxied straight to an owned
-    :class:`ConversationLogModel`, so the QML delegate keeps working
-    untouched; placeholder rows render as a distinct one-liner ("[Poll] …")
-    that the delegate can detect via ``model.tally_placeholder`` and make
-    clickable (see resources/chatview.qml).
-
-    Unread tracking stays in **order** space (``set_first_unread``), while
-    QML needs **row** space (its ``ctx.first_unread`` counter walks visible
-    rows and compares ``first_unread <= row``). :meth:`order_to_row` /
-    :meth:`row_to_order` convert between the two; the write-back path in
-    ``katzen.py`` must run the QML value through :meth:`row_to_order` before
-    persisting, or mid-list placeholders would drift the DB pointer.
-    """
-
-    def __init__(
-        self,
-        convo_id: int,
-        source: "ConversationLogModel | None" = None,
-    ) -> None:
-        super().__init__()
-        self.convo_id = convo_id
-        # Callers in katzen.py already own a ConversationLogModel for the
-        # conversation (row_count bookkeeping, redraw hooks), so they pass it
-        # in; standalone/tests may omit it and one is built here.
-        self._source = source if source is not None else ConversationLogModel(convo_id)
-        self._first_unread = 0
-        self._rows: "list[_LayoutEntry]" = []
-        # Keep the merged layout in step with the chat model's own inserts.
-        self._source.modelReset.connect(self.refresh)
-        self._source.rowsInserted.connect(self.refresh)
-        self._poll_cache: "list[SurveySummary]" = []
-
-    # -- public plumbing for the window wiring --------------------------------------
-
-    def source_model(self) -> ConversationLogModel:
-        """The underlying chat model (row_count bookkeeping, redraw hooks)."""
-        return self._source
-
-    def set_first_unread(self, first_unread_order: int) -> None:
-        """Record the persisted first-unread pointer (order space).
-
-        No model reset: the ``tally_new`` role is derived from this pointer on
-        read (see :meth:`_poll_data`), so read-advance does not disturb the
-        view's scroll/layout."""
-        self._first_unread = int(first_unread_order or 0)
-
-    @property
-    def first_unread_order(self) -> int:
-        return self._first_unread
-
-    @property
-    def first_unread_row(self) -> int:
-        """The row index whose order is >= first_unread (QML marker value)."""
-        return self.order_to_row(self._first_unread)
-
-    def order_to_row(self, order: int) -> int:
-        """The first row whose ``order`` is >= ``order``; rows at and after it
-        are "unread". ``rowCount`` when everything is read."""
-        for i, entry in enumerate(self._rows):
-            if entry.order >= order:
-                return i
-        return len(self._rows)
-
-    def row_to_order(self, row: int) -> int:
-        """Map a timeline row back to order space (for persisting the QML
-        first_unread counter). Values past the end read as last-order + 1."""
-        if not self._rows:
-            return 0
-        if row >= len(self._rows):
-            return self._rows[-1].order + 1
-        if row < 0:
-            return self._rows[0].order
-        return self._rows[row].order
-
-    def survey_id_at_row(self, row: int) -> "str | None":
-        """The survey id hex for the placeholder at ``row``, else None."""
-        if 0 <= row < len(self._rows) and self._rows[row].kind == "poll":
-            assert self._rows[row].poll is not None
-            return self._rows[row].poll.survey_id.hex()
-        return None
-
-    # -- rebuild -------------------------------------------------------------
-
-    def refresh(self, *args: Any) -> None:
-        """Re-derive the merged layout from the chat model + stored surveys
-        and emit a full model reset. Called on chat inserts (via signals) and
-        on tally notifications (the GUI drains ``tally_update_queue``)."""
-        self._poll_cache = self._load_polls()
-        rows: "list[_LayoutEntry]" = []
-        for src_row in range(self._source.rowCount(QModelIndex())):
-            rows.append(_LayoutEntry(kind="chat", order=src_row, src_row=src_row))
-        n_log = self._source.rowCount(QModelIndex())
-        for poll in self._poll_cache:
-            order = n_log if poll.conversation_order is None else poll.conversation_order
-            rows.append(_LayoutEntry(kind="poll", order=order, poll=poll))
-        # A placeholder and a chat share an order when the survey's first
-        # sighting stamped the log COUNT (see the class docstring); the poll
-        # came first, so on equal order polls sort ahead of the chat. Stable
-        # sort keeps the presenter's (order, survey_id) survey order.
-        rows.sort(key=lambda e: (e.order, 0 if e.kind == "poll" else 1))
-        self.beginResetModel()
-        self._rows = rows
-        self.endResetModel()
-
-    def _load_polls(self) -> "list[SurveySummary]":
-        my_voter_id = presenter.own_voter_id(self.convo_id)
-        names = presenter.voter_names(self.convo_id)
-        out: "list[SurveySummary]" = []
-        for survey_id, order in presenter.surveys_for_conversation(self.convo_id):
-            blob = presenter.survey_doc(self.convo_id, survey_id)
-            if blob is None:
-                continue
-            summary = presenter.summarize(
-                load_doc(blob),
-                conversation_id=self.convo_id,
-                conversation_order=order,
-                my_voter_id=my_voter_id,
-                voter_names=names,
-                is_new=order is not None and order >= self._first_unread,
-            )
-            out.append(summary)
-        return out
-
-    # -- QAbstractItemModel --------------------------------------------------
-
-    def roleNames(self) -> dict:
-        names = dict(self._source.roleNames())
-        names[ROLE_TALLY_PLACEHOLDER] = b"tally_placeholder"
-        names[ROLE_TALLY_SURVEY_ID] = b"tally_survey_id"
-        names[ROLE_TALLY_NEW] = b"tally_new"
-        return names
-
-    def rowCount(self, parent: "QModelIndex | None" = None) -> int:
-        if parent is not None and parent.isValid():
-            return 0
-        return len(self._rows)
-
-    def columnCount(self, parent: "QModelIndex | None" = None) -> int:
-        if parent is not None and parent.isValid():
-            return 0
-        return 1
-
-    def index(self, row: int, column: int,
-              parent: "QModelIndex | None" = None) -> QModelIndex:
-        if row < 0 or row >= len(self._rows) or column != 0:
-            return QModelIndex()
-        if parent is not None and parent.isValid():
-            return QModelIndex()
-        return self.createIndex(row, column)
-
-    def parent(self, child: "QModelIndex | None" = None) -> QModelIndex:
-        return QModelIndex()
-
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or index.row() >= len(self._rows):
-            return None
-        row = index.row()
-        entry = self._rows[row]
-        if entry.kind == "poll":
-            return self._poll_data(entry, role)
-        source_index = self._source.index(entry.src_row, 0, QModelIndex())  # type: ignore[arg-type]
-        return self._source.data(source_index, role)
-
-    def _poll_data(self, entry: "_LayoutEntry", role: int):
-        assert entry.poll is not None
-        if role == 0:
-            return presenter.placeholder_text(entry.poll)
-        if role == ROLE_TALLY_PLACEHOLDER:
-            return True
-        if role == ROLE_TALLY_SURVEY_ID:
-            return entry.poll.survey_id.hex()
-        if role == ROLE_TALLY_NEW:
-            # Derived live from the order-space pointer so a read-advance is
-            # visible without a model reset.
-            return entry.order >= self._first_unread
-        if role == ROLE_CHAT_AUTHOR:
-            # Identify the poll's creator; unresolved/legacy polls fall back
-            # to the generic label.
-            return entry.poll.creator_name or _PLACEHOLDER_AUTHOR
-        if role == ROLE_CHAT_NETWORK_STATUS:
-            return 0
-        return None
-
 
 # ---------------------------------------------------------------------------
 # Polls tab model
@@ -299,13 +76,13 @@ class PollsTabModel(QtCore.QAbstractListModel):
             presenter.all_survey_ids()
             if self._conversation_id is None
             else [
-                (self._conversation_id, sid, order)
-                for sid, order in presenter.surveys_for_conversation(self._conversation_id)
+                (self._conversation_id, sid)
+                for sid in presenter.survey_ids_for_conversation(self._conversation_id)
             ]
         )
         rows: "list[SurveySummary]" = []
         names_by_convo: "dict[int, dict[bytes, str]]" = {}
-        for conversation_id, survey_id, order in ids:
+        for conversation_id, survey_id in ids:
             blob = presenter.survey_doc(conversation_id, survey_id)
             if blob is None:
                 continue
@@ -316,11 +93,8 @@ class PollsTabModel(QtCore.QAbstractListModel):
             summary = presenter.summarize(
                 load_doc(blob),
                 conversation_id=conversation_id,
-                conversation_order=order,
                 my_voter_id=presenter.own_voter_id(conversation_id),
                 voter_names=names,
-                is_new=order is not None
-                and order >= presenter.first_unread_order(conversation_id),
             )
             rows.append(summary)
         self.beginResetModel()
@@ -328,8 +102,13 @@ class PollsTabModel(QtCore.QAbstractListModel):
         self.endResetModel()
 
     def badge_count(self) -> int:
-        """New surveys, for the tab title badge."""
-        return presenter.badge_count(self._rows)
+        """Unread poll-create messages for the current filter, for the tab
+        badge."""
+        if self._conversation_id is not None:
+            return presenter.new_poll_count(self._conversation_id)
+        return sum(
+            presenter.new_poll_count(cid) for cid in presenter.conversation_ids()
+        )
 
     def summary_at(self, row: int) -> "SurveySummary | None":
         if 0 <= row < len(self._rows):
@@ -352,7 +131,6 @@ class PollsTabModel(QtCore.QAbstractListModel):
             0x205: b"conversation_name",
             0x206: b"n_voters",
             0x207: b"n_slots",
-            0x208: b"new",
         }
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
@@ -377,8 +155,6 @@ class PollsTabModel(QtCore.QAbstractListModel):
             return s.n_voters
         if role == 0x207:
             return s.n_slots
-        if role == 0x208:
-            return s.is_new
         return None
 
 
@@ -499,17 +275,11 @@ class TallyPanel(QWidget):
         blob = presenter.survey_doc(conversation_id, survey_id)
         if blob is None:
             return False
-        order = next(
-            (o for sid, o in presenter.surveys_for_conversation(conversation_id)
-             if sid == survey_id),
-            None,
-        )
         doc = load_doc(blob)
         names = presenter.voter_names(conversation_id)
         summary = presenter.summarize(
             doc,
             conversation_id=conversation_id,
-            conversation_order=order,
             my_voter_id=presenter.own_voter_id(conversation_id),
             voter_names=names,
         )

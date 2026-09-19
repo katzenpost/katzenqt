@@ -167,12 +167,12 @@ async def _already_has(sess, conv_id: int, intro: "GroupChatPleaseAdd") -> bool:
 
 
 async def _handle_tally(sess, peer, gcm, full_payload) -> "tuple[bool, bool, None, bool]":
-    signal_send = await tally_controller.handle_event(sess, peer, gcm)
-    # A tally message never becomes a ConversationLog row (the timeline shows
-    # a GUI-derived placeholder instead), but it is still an event the GUI
-    # must hear about, so ``tally_added`` is set for the caller to announce
-    # after its commit succeeds.
-    return False, signal_send, None, True
+    result = await tally_controller.handle_event(sess, peer, gcm)
+    # Every tally message is a chat row (displayed from its decoded payload),
+    # so it is appended like any other; ``tally_added`` additionally tells the
+    # caller to refresh the poll views.
+    sess.add(persistent.ConversationLog.append_from(peer, full_payload))
+    return True, result.signal_send, None, True
 
 
 _CHAT_TYPES = (

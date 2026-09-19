@@ -56,7 +56,7 @@ def test_summarize_projects_topic_counts_and_outcome():
     engine.apply_vote(doc, voter_id_from_read_cap(ALICE_CAP), {"s0": "yes"})
 
     summary = presenter.summarize(
-        doc, conversation_id=1, conversation_order=3,
+        doc, conversation_id=1,
         my_voter_id=voter_id_from_read_cap(OWN_CAP),
     )
     assert summary.topic == "lunch?"
@@ -64,7 +64,6 @@ def test_summarize_projects_topic_counts_and_outcome():
     assert summary.status == "open"
     assert summary.n_slots == 2
     assert summary.n_voters == 1
-    assert summary.conversation_order == 3
     assert summary.slots[0].yes == 1
     assert summary.outcome.kind == "winner"
     # The local user has not voted yet.
@@ -166,23 +165,21 @@ def test_own_voter_id_and_voter_names_read_the_group_identity():
     assert names[voter_id_from_read_cap(BOB_CAP)] == "bob"
 
 
-def test_surveys_for_conversation_returns_first_sighting_order():
+def test_survey_ids_for_conversation_lists_the_conversations_surveys():
     convo_id = _make_convo_sync()
     first = uuid.uuid4().bytes
     second = uuid.uuid4().bytes
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.TallyState(
             survey_id=second, conversation_id=convo_id, doc_state=b"x",
-            conversation_order=3,
         ))
         sess.add(persistent.TallyState(
             survey_id=first, conversation_id=convo_id, doc_state=b"x",
-            conversation_order=1,
         ))
         sess.commit()
 
-    got = presenter.surveys_for_conversation(convo_id)
-    assert got == [(first, 1), (second, 3)]
+    got = presenter.survey_ids_for_conversation(convo_id)
+    assert sorted(got) == sorted([first, second])
 
 
 def test_all_survey_ids_lists_every_conversation():
@@ -191,25 +188,43 @@ def test_all_survey_ids_lists_every_conversation():
     s1, s2 = uuid.uuid4().bytes, uuid.uuid4().bytes
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.TallyState(
-            survey_id=s1, conversation_id=one, doc_state=b"x", conversation_order=0,
+            survey_id=s1, conversation_id=one, doc_state=b"x",
         ))
         sess.add(persistent.TallyState(
-            survey_id=s2, conversation_id=two, doc_state=b"x", conversation_order=0,
+            survey_id=s2, conversation_id=two, doc_state=b"x",
         ))
         sess.commit()
 
     got = presenter.all_survey_ids()
-    assert (one, s1, 0) in got and (two, s2, 0) in got
+    assert (one, s1) in got and (two, s2) in got
 
 
-def test_badge_count_counts_new_surveys():
-    summary = presenter.summarize(_doc(), conversation_id=1)
-    old = presenter.summarize(_doc(), conversation_id=1)
-    assert presenter.badge_count([summary, old]) == 0
-    assert presenter.badge_count([
-        presenter.summarize(_doc(), conversation_id=1, is_new=True),
-        old,
-    ]) == 1
+def test_new_poll_count_counts_unread_create_rows():
+    from katzenqt.tally import events, sync
+
+    convo_id = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    doc = schema.new_survey_doc(survey_id, "lunch?", Mode.APPROVAL, ["a"])
+    with persistent.Session(persistent._engine_sync) as sess:
+        convo = sess.get(persistent.Conversation, convo_id)
+        sess.add(persistent.ConversationLog(
+            conversation_id=convo_id, conversation_peer_id=convo.own_peer_id,
+            conversation_order=0,
+            payload=b"F" + events.build_create(
+                survey_id, sync.full_state(doc),
+            ).to_cbor(),
+        ))
+        convo.first_unread = 0
+        sess.add(convo)
+        sess.commit()
+
+    assert presenter.new_poll_count(convo_id) == 1
+    with persistent.Session(persistent._engine_sync) as sess:
+        convo = sess.get(persistent.Conversation, convo_id)
+        convo.first_unread = 9
+        sess.add(convo)
+        sess.commit()
+    assert presenter.new_poll_count(convo_id) == 0
 
 
 def test_is_creator_only_for_the_creator_voter():
@@ -239,7 +254,7 @@ def test_survey_doc_returns_the_persisted_blob_and_none_when_missing():
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.TallyState(
             survey_id=survey_id, conversation_id=convo_id,
-            doc_state=blob, conversation_order=0,
+            doc_state=blob,
         ))
         sess.commit()
     assert presenter.survey_doc(convo_id, survey_id) == blob

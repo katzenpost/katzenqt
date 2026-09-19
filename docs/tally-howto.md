@@ -287,11 +287,10 @@ after a close is still counted. Do not present it as a locked ballot box.
 ## Notice that a survey changed
 
 Inbound tally messages are applied to the document and written to `TallyState`
-by the receive path. Because tally messages deliberately never become
-`ConversationLog` rows, they are **not** announced on
-`network.conversation_update_queue`. Instead, after the transaction commits,
-the receive path pushes the affected `conversation_id` onto
-**`network.tally_update_queue`**:
+by the receive path. Each also becomes a `ConversationLog` row (so the timeline
+shows it) and so wakes `network.conversation_update_queue`; in addition, after
+the transaction commits, the receive path pushes the affected `conversation_id`
+onto **`network.tally_update_queue`** so poll-specific views can refresh:
 
 ```python
 async def tally_listener(on_change):
@@ -303,8 +302,8 @@ async def tally_listener(on_change):
 The queue carries only the conversation id on purpose: the consumer re-derives
 the surveys it cares about from committed `TallyState`, so there is no payload
 that can get out of step with the database and no risk of reading uncommitted
-rows. The GUI's `tally_listener` drains exactly this queue to refresh its
-timeline and Polls tab.
+rows. The GUI's `tally_listener` drains exactly this queue to refresh its Polls
+tab and any open survey panel.
 
 If you would rather poll — for instance a script that is not running the
 network receive path — re-derive on a timer and compare:
@@ -376,8 +375,10 @@ Call `handle_event` yourself only if you are driving the protocol outside the
 normal receive path, e.g. in a test:
 
 ```python
-signal_send = await tally.handle_event(sess, peer, gcm)
-if signal_send:                 # it staged a sync response
+result = await tally.handle_event(sess, peer, gcm)
+# result.status is "applied" | "duplicate" | "rejected"; result.signal_send
+# is True when outbound work was staged and the send loop must be poked.
+if result.signal_send:          # it staged a sync response
     await sess.commit()
     await network.check_for_new()
 ```

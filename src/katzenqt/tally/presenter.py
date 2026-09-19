@@ -8,14 +8,14 @@ testable headlessly.
 
 Two kinds of entry point:
 
-* Pure: :func:`summarize`, :func:`placeholder_text` and :func:`panel_rows`
+* Pure: :func:`summarize`, :func:`tally_row_text` and :func:`panel_rows`
   take a pycrdt ``Doc`` (plus structural metadata) and return
   renderer-friendly data. They never touch the database or the network.
-* Reading: :func:`own_voter_id`, :func:`voter_names`,
-  :func:`surveys_for_conversation` and :func:`all_survey_ids` load persisted
-  data through the **sync** engine (``persistent.Session(_engine_sync)``),
-  the same GUI-thread-safe read path ``qt_models`` already uses. Writes stay
-  on the io loop; nothing here writes.
+* Reading: :func:`own_voter_id`, :func:`voter_names`, :func:`survey_doc` and
+  :func:`survey_ids_for_conversation` load persisted data through the **sync**
+  engine (``persistent.Session(_engine_sync)``), the same GUI-thread-safe read
+  path ``qt_models`` already uses. Writes stay on the io loop; nothing here
+  writes.
 """
 from __future__ import annotations
 
@@ -37,7 +37,6 @@ class SurveySummary:
 
     survey_id: bytes
     conversation_id: int
-    conversation_order: "int | None"
     topic: str
     mode: Mode
     status: str  # "open" | "closed"
@@ -51,7 +50,6 @@ class SurveySummary:
     # Display name for creator_voter_id, resolved by the caller from
     # voter_names(); None when unknown, so the renderer can fall back.
     creator_name: "str | None" = None
-    is_new: bool = False
 
     def voted_slot_ids(self) -> "list[str]":
         """The slot ids the local user has marked. The click-to-cycle voting
@@ -95,10 +93,8 @@ def summarize(
     doc,
     *,
     conversation_id: int,
-    conversation_order: "int | None" = None,
     my_voter_id: "bytes | None" = None,
     voter_names: "dict[bytes, str] | None" = None,
-    is_new: bool = False,
 ) -> SurveySummary:
     """Project one survey ``Doc`` into a renderer-friendly summary. Pure.
 
@@ -122,7 +118,6 @@ def summarize(
     return SurveySummary(
         survey_id=result.survey_id,
         conversation_id=conversation_id,
-        conversation_order=conversation_order,
         topic=schema.topic_of(doc),
         mode=result.mode,
         status=result.status,
@@ -134,7 +129,6 @@ def summarize(
         my_voter_id=my_voter_id,
         my_choices=my_choices,
         creator_name=creator_name,
-        is_new=is_new,
     )
 
 
@@ -170,10 +164,99 @@ def panel_rows(
     )
 
 
+@dataclass(frozen=True)
+class TallyRowText:
+    """A chat-timeline row for one tally wire message.
+
+    ``kind`` is ``"create"``, ``"vote"``, ``"recast"``, ``"close"``,
+    ``"sync"``, or ``"invalid"`` (the message was rejected; ``text`` says why).
+    ``survey_id`` is the survey the row concerns, when the payload names one,
+    so the UI can open it.
+    """
+
+    text: str
+    kind: str
+    survey_id: "bytes | None" = None
+
+
+def _selections(choices: "dict[str, str]", slots: "tuple[SlotTally, ...]") -> str:
+    """Render a ballot as ``slot: availability`` pairs, using slot text."""
+    texts = {s.slot_id: (s.text or s.slot_id) for s in slots}
+    return ", ".join(
+        f"{texts.get(sid, sid)}: {avail}" for sid, avail in sorted(choices.items())
+    ) or "no selections"
+
+
+def tally_row_text(
+    gcm,
+    *,
+    actor_name: str,
+    survey_summary,
+) -> TallyRowText:
+    """Format one tally chat row. Pure.
+
+    ``actor_name`` is the sending peer's display name (the row's author).
+    ``survey_summary`` is the projected survey the message concerns, or None if
+    we do not hold it; a create with no crdt, or a vote/close for a survey we
+    lack, becomes an ``invalid`` row explaining the problem.
+    """
+    from ..models import GroupChatTypeEnum
+
+    tally = getattr(gcm, "tally", None)
+    if tally is None:
+        return TallyRowText(f"{actor_name}: malformed tally message", "invalid")
+    survey_id = tally.survey_id
+    kind = gcm.msg_type
+
+    if kind is GroupChatTypeEnum.TALLY_CREATE:
+        if survey_summary is None:
+            return TallyRowText(
+                f"{actor_name}: could not read the new poll", "invalid", survey_id,
+            )
+        return TallyRowText(
+            f"{actor_name} created {placeholder_text(survey_summary)}",
+            "create", survey_id,
+        )
+
+    if kind is GroupChatTypeEnum.TALLY_VOTE:
+        if survey_summary is None:
+            return TallyRowText(
+                f"{actor_name}: vote for unknown poll {survey_id.hex()}",
+                "invalid", survey_id,
+            )
+        ballot = _selections(tally.choice or {}, survey_summary.slots)
+        verb = "changed vote in" if tally.version > 0 else "voted on"
+        return TallyRowText(
+            f'{actor_name} {verb} "[Poll] {survey_summary.topic}": {ballot}',
+            "recast" if tally.version > 0 else "vote", survey_id,
+        )
+
+    if kind is GroupChatTypeEnum.TALLY_CLOSE:
+        if survey_summary is None:
+            return TallyRowText(
+                f"{actor_name}: close for unknown poll {survey_id.hex()}",
+                "invalid", survey_id,
+            )
+        return TallyRowText(
+            f'{actor_name} closed "[Poll] {survey_summary.topic}"',
+            "close", survey_id,
+        )
+
+    if kind in (GroupChatTypeEnum.TALLY_SYNC_REQ, GroupChatTypeEnum.TALLY_SYNC_RESP):
+        if survey_summary is None:
+            topic = survey_id.hex()
+        else:
+            topic = survey_summary.topic
+        return TallyRowText(
+            f'{actor_name} synced the poll "[Poll] {topic}"', "sync", survey_id,
+        )
+
+    return TallyRowText(f"{actor_name}: unsupported tally message", "invalid", survey_id)
+
+
 def own_voter_id(conversation_id: int) -> "bytes | None":
     """Our voter identity for a conversation, from our provisioned read cap."""
     from .controller import voter_id_from_read_cap
-
     with persistent.Session(persistent._engine_sync) as sess:
         conv = sess.get(persistent.Conversation, conversation_id)
         if conv is None or conv.own_peer_id is None:
@@ -213,20 +296,17 @@ def voter_names(conversation_id: int) -> "dict[bytes, str]":
     return mapping
 
 
-def surveys_for_conversation(conversation_id: int) -> "list[tuple[bytes, int | None]]":
-    """Every survey stored for a conversation, as ``(survey_id,
-    conversation_order)`` pairs ordered by first-sighting position. The caller
-    resolves the Doc (pycrdt load) and projects it with :func:`summarize`."""
+def survey_ids_for_conversation(conversation_id: int) -> "list[bytes]":
+    """Every survey stored for a conversation, ordered deterministically by
+    survey id. The caller resolves each Doc (pycrdt load) and projects it with
+    :func:`summarize`."""
     with persistent.Session(persistent._engine_sync) as sess:
         rows = sess.exec(
             select(persistent.TallyState)
             .where(persistent.TallyState.conversation_id == conversation_id)
-            .order_by(
-                persistent.TallyState.conversation_order,
-                persistent.TallyState.survey_id,
-            )
+            .order_by(persistent.TallyState.survey_id)
         ).all()
-        return [(r.survey_id, r.conversation_order) for r in rows]
+        return [r.survey_id for r in rows]
 
 
 def survey_doc(conversation_id: int, survey_id: bytes) -> "bytes | None":
@@ -242,23 +322,46 @@ def survey_doc(conversation_id: int, survey_id: bytes) -> "bytes | None":
         return row.doc_state if row is not None else None
 
 
-def all_survey_ids() -> "list[tuple[int, bytes, int | None]]":
-    """``(conversation_id, survey_id, conversation_order)`` across every
-    conversation, for building cross-conversation poll lists."""
+def all_survey_ids() -> "list[tuple[int, bytes]]":
+    """``(conversation_id, survey_id)`` across every conversation, ordered by
+    conversation then survey id, for building cross-conversation poll lists."""
     with persistent.Session(persistent._engine_sync) as sess:
         rows = sess.exec(
             select(persistent.TallyState).order_by(
                 persistent.TallyState.conversation_id,
-                persistent.TallyState.conversation_order,
                 persistent.TallyState.survey_id,
             )
         ).all()
-        return [(r.conversation_id, r.survey_id, r.conversation_order) for r in rows]
+        return [(r.conversation_id, r.survey_id) for r in rows]
 
 
-def badge_count(surveys: "list[SurveySummary]") -> int:
-    """How many surveys are new (the Polls-tab badge count)."""
-    return sum(1 for s in surveys if s.is_new)
+def new_poll_count(conversation_id: int) -> int:
+    """How many poll-create messages in a conversation are still unread (the
+    Polls-tab badge): create rows whose conversation_order is at or after the
+    conversation's first-unread pointer."""
+    from ..models import GroupChatMessage, GroupChatTypeEnum
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        conv = sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return 0
+        first_unread = conv.first_unread or 0
+        rows = sess.exec(
+            select(persistent.ConversationLog)
+            .where(persistent.ConversationLog.conversation_id == conversation_id)
+            .where(persistent.ConversationLog.conversation_order >= first_unread)
+        ).all()
+        count = 0
+        for row in rows:
+            if row.payload[:1] != b"F":
+                continue
+            try:
+                gcm = GroupChatMessage.from_cbor(row.payload[1:])
+            except Exception:
+                continue
+            if gcm.msg_type is GroupChatTypeEnum.TALLY_CREATE:
+                count += 1
+        return count
 
 
 def first_unread_order(conversation_id: int) -> int:
@@ -279,3 +382,10 @@ def conversation_names() -> "dict[int, str]":
     with persistent.Session(persistent._engine_sync) as sess:
         rows = sess.exec(select(persistent.Conversation)).all()
         return {r.id: r.name for r in rows}
+
+
+def conversation_ids() -> "list[int]":
+    """Every conversation id."""
+    with persistent.Session(persistent._engine_sync) as sess:
+        rows = sess.exec(select(persistent.Conversation.id)).all()
+        return list(rows)

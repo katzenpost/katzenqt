@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 
 from pycrdt import Doc
 
@@ -32,6 +33,24 @@ logger = logging.getLogger(__name__)
 _MAX_SURVEY_ID_LEN = 64
 
 _MAX_CRDT_BLOB = 512 * 1024
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    """The outcome of applying one inbound tally message.
+
+    ``status`` is ``"applied"`` (state changed), ``"duplicate"`` (well-formed
+    but no effect: an older vote version, or a vote for a survey we do not
+    hold), or ``"rejected"`` (malformed or not accepted: an oversized id or
+    blob, an invalid vote, a close from a non-creator, or an undecodable
+    payload). ``detail`` is a short human phrase describing a rejection, for
+    the timeline row. ``signal_send`` is True when outbound work was staged and
+    the send loop must be poked.
+    """
+
+    status: str
+    detail: str = ""
+    signal_send: bool = False
 
 
 def voter_id_from_read_cap(read_cap: bytes) -> bytes:
@@ -96,15 +115,9 @@ class TallyController:
         blob = sync.full_state(self._docs[(conversation_id, survey_id)])
         row = await sess.get(persistent.TallyState, survey_id)
         if row is None:
-            # First sighting: stamp the survey's timeline position as the next
-            # conversation_order (the receive path calls us inside
-            # conversation_log_order_lock, the GUI/headless create paths must
-            # too). Later events keep the original order so the placeholder row
-            # does not drift forward as votes/closes arrive.
             sess.add(persistent.TallyState(
                 survey_id=survey_id, conversation_id=conversation_id,
                 doc_state=blob,
-                conversation_order=persistent.next_conversation_order(conversation_id),
             ))
         elif row.conversation_id != conversation_id:
             logger.warning(
@@ -203,13 +216,13 @@ class TallyController:
             self._docs[(conversation_id, survey_id)] = loaded
         await self._save(sess, survey_id, conversation_id)
 
-    async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> bool:
-        """Apply an inbound tally message to the local Doc. Returns True when
-        outbound work was staged in ``sess`` and the send loop must be poked."""
+    async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> ApplyResult:
+        """Apply an inbound tally message to the local Doc and report how it
+        was handled (see :class:`ApplyResult`)."""
         tally = gcm.tally
         if tally is None:
             logger.warning("tally message with no payload; dropping")
-            return False
+            return ApplyResult("rejected", "tally message with no payload")
         survey_id = tally.survey_id
         conversation_id = peer.conversation.id
         kind = gcm.msg_type
@@ -219,57 +232,63 @@ class TallyController:
                 "dropping tally message: survey id of %d bytes exceeds cap %d",
                 len(survey_id), _MAX_SURVEY_ID_LEN,
             )
-            return False
+            return ApplyResult(
+                "rejected",
+                f"survey id of {len(survey_id)} bytes exceeds the {_MAX_SURVEY_ID_LEN}-byte cap",
+            )
         if tally.crdt is not None and len(tally.crdt) > _MAX_CRDT_BLOB:
             logger.warning(
                 "dropping tally message: crdt blob of %d bytes exceeds cap %d",
                 len(tally.crdt), _MAX_CRDT_BLOB,
             )
-            return False
+            return ApplyResult(
+                "rejected",
+                f"crdt blob of {len(tally.crdt)} bytes exceeds the {_MAX_CRDT_BLOB}-byte cap",
+            )
 
         if kind is GroupChatTypeEnum.TALLY_CREATE:
             if await self._foreign_conversation(sess, survey_id, conversation_id):
-                return False
+                return ApplyResult("rejected", "survey belongs to another conversation")
             await self._apply_full_or_update(sess, conversation_id, survey_id, tally.crdt)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_VOTE:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
                 logger.warning("vote for unknown survey %s; dropping", survey_id.hex())
-                return False
+                return ApplyResult("duplicate", "vote for unknown survey")
             voter = await _voter_id(sess, peer)
             try:
                 engine.apply_vote(doc, voter, tally.choice or {}, tally.version)
             except ValueError as exc:
                 logger.warning("rejecting invalid vote on %s: %s", survey_id.hex(), exc)
-                return False
+                return ApplyResult("rejected", f"invalid vote: {exc}")
             await self._save(sess, survey_id, conversation_id)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_CLOSE:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
-                return False
+                return ApplyResult("duplicate", "close for unknown survey")
             creator = schema.creator_of(doc)
             sender = await _voter_id(sess, peer)
             if creator is not None and creator != sender:
                 logger.warning("ignoring close of %s from a non-creator", survey_id.hex())
-                return False
+                return ApplyResult("rejected", "close ignored: not the creator")
             engine.close_survey(doc)
             await self._save(sess, survey_id, conversation_id)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_SYNC_RESP:
             if await self._foreign_conversation(sess, survey_id, conversation_id):
-                return False
+                return ApplyResult("rejected", "survey belongs to another conversation")
             await self._apply_full_or_update(sess, conversation_id, survey_id, tally.crdt)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_SYNC_REQ:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
-                return False
+                return ApplyResult("duplicate", "sync request for unknown survey")
             try:
                 diff = sync.diff_since(doc, tally.crdt or b"")
             except ValueError as exc:
@@ -280,12 +299,12 @@ class TallyController:
                     "dropping sync request for survey %s: undecodable state "
                     "vector: %s", survey_id.hex(), exc,
                 )
-                return False
+                return ApplyResult("rejected", f"undecodable state vector: {exc}")
             await send.stage_outbound(sess, peer.conversation, build_sync_response(survey_id, diff))
-            return True
+            return ApplyResult("applied", signal_send=True)
 
         logger.warning("unhandled tally kind %s", kind)
-        return False
+        return ApplyResult("rejected", f"unhandled tally kind {kind}")
 
 
 # The process holds a single controller; the receive dispatch and the headless
@@ -293,5 +312,5 @@ class TallyController:
 INSTANCE = TallyController()
 
 
-async def handle_event(sess, peer, gcm: GroupChatMessage) -> bool:
+async def handle_event(sess, peer, gcm: GroupChatMessage) -> ApplyResult:
     return await INSTANCE.handle_event(sess, peer, gcm)
