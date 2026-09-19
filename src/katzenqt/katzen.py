@@ -97,6 +97,10 @@ class _ResolvedAttachment(NamedTuple):
 _CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
 
 class AsyncioThread(threading.Thread):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.engine_warmed = threading.Event()
+
     def run(self):
         self.loop = asyncio.new_event_loop()
         def report_exception3(loop, exception):
@@ -105,6 +109,7 @@ class AsyncioThread(threading.Thread):
                     return
             print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
+        self.loop.run_until_complete(self.warm_engine())
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
 
@@ -119,6 +124,17 @@ class AsyncioThread(threading.Thread):
         assert ffff.exception() is None
         assert ffff.result() == res
         return res
+
+    async def warm_engine(self):
+        """Establish the async engine's first DB connection on this loop,
+        before anything else here or on the Qt loop uses the engine. The pool's
+        run-once connect guard is an asyncio.Lock bound to the loop that first
+        acquires it, and the two loops used to race for it at startup, so the
+        loser raised "Lock is bound to a different event loop"."""
+        try:
+            await persistent.warm_async_engine()
+        finally:
+            self.engine_warmed.set()
 
     async def async_main(self):
         self.kp_client = None
@@ -2313,30 +2329,16 @@ def rebuild_pydantic_models():
     #ConversationUIState.model_rebuild()
     pass
 
-async def _warm_async_engine_on_io_loop(iothread: AsyncioThread) -> None:
-    """Establish the async engine's first DB connection on the io loop before
-    the Qt loop touches the engine. The pool's run-once connect guard is an
-    asyncio.Lock bound to the loop that first acquires it, and at startup the
-    io loop's resend path and the Qt loop's conversation load used to race for
-    it, so the loser raised "Lock is bound to a different event loop".
-
-    AsyncioThread.run() dies on a startup error async_main does not retry (a
-    stale config, a missing socket path), and a hop to its dead loop never
-    completes. Give up on the warm-up then, so the window still appears.
-    """
-    while getattr(iothread, "loop", None) is None:
-        if not iothread.is_alive():
-            logger.error("io thread exited before its loop started; async engine not warmed")
+async def _wait_for_engine_warmed(iothread: AsyncioThread) -> None:
+    """Hold off the Qt loop's first use of the async engine until the io thread
+    has warmed it. Gives up if the thread died before it could: the window
+    should still appear, as it does when the thread dies later."""
+    while not iothread.engine_warmed.is_set():
+        # re-checked: it may have been set and the thread exited since the test above
+        if not iothread.is_alive() and not iothread.engine_warmed.is_set():
+            logger.error("io thread exited before it warmed the async engine")
             return
         await asyncio.sleep(0.01)
-    warm = asyncio.ensure_future(iothread.run_in_io(persistent.warm_async_engine()))
-    while not warm.done():
-        if not iothread.is_alive():
-            warm.cancel()
-            logger.error("io thread exited before the async engine was warmed")
-            return
-        await asyncio.wait({warm}, timeout=0.25)
-    await warm
 
 
 async def main(window: MainWindow):
@@ -2346,7 +2348,7 @@ async def main(window: MainWindow):
             QTimer.singleShot(0, lambda: QMessageBox.critical(window, f"Exception", f"{m}"))
     asyncio.get_running_loop().set_exception_handler(report_exception2)
 
-    await _warm_async_engine_on_io_loop(window.iothread)
+    await _wait_for_engine_warmed(window.iothread)
 
     rebuild_pydantic_models()
     echomix_icon = QIcon()
