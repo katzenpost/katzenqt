@@ -246,11 +246,18 @@ Remaining sequence, with a review checkpoint after Step 4:
    reset, handler/controller test updates, network-fake test), then the
    presenter read helpers (`survey_doc`, `first_unread_order`,
    `conversation_names`) and their tests. (commits 81d83c9, 6558dbd)
-2. Finish Step 4 in `qt_tally.py`: review the untracked module for ordering /
-   unread-mapping / role-forwarding correctness; add `TallyPanel.show_survey`
-   plus current-survey tracking and a "New poll" dialog host; scope
-   `PollsTabModel` to the current conversation (locked Decision 11). Add
-   `tests/test_qt_tally.py`. Run `make test-uv`.
+2. [x] Finish Step 4 in `qt_tally.py`: reviewed the module for ordering /
+   unread-mapping / role-forwarding correctness (fixed the equal-order
+   tie-break: `conversation_order` is a live COUNT of log rows, so a survey
+   and the next chat share an order number and the poll must sort ahead; a
+   poll with a NULL order hangs off the tail); added `TallyPanel.show_survey`
+   + current-survey tracking and a "New poll" button/`newPollRequested`
+   signal; `PollsTabModel` already supports `set_conversation_filter`
+   (step-5 wiring scopes it per locked Decision 11). Added
+   `tests/test_qt_tally.py` (offscreen QApplication; the three pre-existing
+   Qt test modules now also build a QApplication so the one-per-process
+   singleton is widget-capable regardless of module order). Full unit run
+   green. (commit d048e56)
 3. **PAUSE for user review** once Step 4 is committed.
 4. Step 5 wiring (`katzen.py` + `resources/chatview.qml`): Polls tab +
    badge, `TimelineModel` swap (route `increment_row_count` / `redraw` /
@@ -263,6 +270,9 @@ Remaining sequence, with a review checkpoint after Step 4:
    returns a 4-tuple `(convlog_added, signal_send, peer_added, tally_added)`,
    the tally notification queue, "no GUI yet" and Known gap #1 are obsolete)
    and `docs/tally-howto.md` (the "no tally notification channel" section).
+
+Run the unit suite with `uv run pytest` (not `make test-uv`; the full run is
+454 passed, 14 skipped as of d048e56).
 
 ## Session log
 
@@ -290,9 +300,9 @@ Remaining sequence, with a review checkpoint after Step 4:
       place of `survey_summary`, `placeholder_text` in place of `row_text`,
       and `panel_state` was not written — the panel renders directly in
       `qt_tally.TallyPanel`, so that helper proved unnecessary.
-- [ ] Step 4: Qt-only UI (TimelineModel, PollsTabModel, TallyPanel,
-      TallyCreateDialog, tally_update_queue). In progress: receive-path queue
-      plumbing + presenter read helpers + `qt_tally.py` are written but
-      uncommitted/untested; see "Current working plan" above.
+- [x] Step 4: Qt-only UI (TimelineModel, PollsTabModel, TallyPanel,
+      TallyCreateDialog, tally_update_queue). Booking commit d048e56
+      alongside the step-4 backend batch (81d83c9, 6558dbd); see "Current
+      working plan" above. Remaining: step-5 wiring + docs update.
 - [ ] Step 5: katzen.py wiring + chatview.qml placeholders/click.
 - [ ] Step 6: test suite + final full unit run.
