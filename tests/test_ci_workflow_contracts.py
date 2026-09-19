@@ -70,3 +70,10 @@ def test_listener_configuration_errors_are_not_advisory() -> None:
     assert "kill -0" in probe
     assert "python3" not in probe
     assert "if: always()" in _step(live, "Upload logs")
+
+
+def test_live_tests_declare_epoch_without_docker() -> None:
+    job = _jobs(WORKFLOW.read_text(encoding="utf-8"))["namenlos-integration"]
+    tests = _step(job, "Run integration tests")
+    assert 'KQT_INTEGRATION_TARGET: "namenlos"' in tests
+    assert 'KQT_EPOCH_DURATION_S: "1200"' in tests

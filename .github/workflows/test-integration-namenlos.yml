@@ -95,6 +95,8 @@ jobs:
         continue-on-error: true
         working-directory: katzenqt
         env:
+          KQT_INTEGRATION_TARGET: "namenlos"
+          KQT_EPOCH_DURATION_S: "1200"
           KATZENQT_DOCKER_INTEGRATION: "1"
           KQT_INTEGRATION_PARALLEL: "4"
         run: |
