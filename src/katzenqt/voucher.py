@@ -32,6 +32,7 @@ from .katzen_util import create_task
 from .network import (
     _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _rpc_racing_connection_life,
     check_for_new, conversation_update_queue, ConnectionLifeInterruptedError,
+    _delivery_racing_connection_life,
 )
 
 logger = logging.getLogger("katzen.voucher")
@@ -194,7 +195,7 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                 ),
                 backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
             )
-            await _rpc_racing_connection_life(
+            await _delivery_racing_connection_life(
                 bacap_uuid=_brief(write_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
                     read_cap=None, write_cap=write_cap, message_box_index=None,
@@ -273,7 +274,7 @@ async def _read_box(
                 ),
                 backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
             )
-            resp = await _rpc_racing_connection_life(
+            resp = await _delivery_racing_connection_life(
                 bacap_uuid=_brief(read_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
                     read_cap=read_cap, write_cap=None,

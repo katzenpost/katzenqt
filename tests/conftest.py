@@ -84,6 +84,7 @@ def _reset_network_module_state():
         while not network.substream_progress_queue.empty():
             network.substream_progress_queue.get_nowait()
         network._inflight_reads.clear()
+        network._EPOCH_LOSS_STREAK.clear()
         # Per-conversation log-order locks are plain threading.Locks keyed
         # by conversation_id, and the test session's conversation ids
         # restart at 1 after each `_fresh_tables` wipe. Without this reset,
