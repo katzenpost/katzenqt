@@ -35,10 +35,16 @@ _MAX_CRDT_BLOB = 512 * 1024
 
 
 def voter_id_from_read_cap(read_cap: bytes) -> bytes:
-    """The stable, peer-independent voter identity: a hash of the read
-    capability bytes. Every member derives the same id for the same member,
-    because they all hold the same read cap for them."""
-    return hashlib.blake2b(read_cap, digest_size=16).digest()
+    """The stable, peer-independent voter identity: a hash of the capability's
+    32-byte public-key prefix.
+
+    Only the prefix is hashed. A member's read capability is
+    ``public_key(32) || index(104)``; every member holds the same public key
+    for a given member, but the 104-byte index suffix varies (a joiner's own
+    pre-mutation cap vs. the salt-mutated cap the group holds, and future-only
+    read caps that start at a later index). Keying on the prefix makes every
+    such copy map to one identity."""
+    return hashlib.blake2b(read_cap[:32], digest_size=16).digest()
 
 
 async def _voter_id(sess, peer: "persistent.ConversationPeer") -> bytes:

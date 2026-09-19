@@ -22,6 +22,20 @@ BOB_CAP = bytes([0x03]) * 136
 OWN_CAP = bytes([0x01]) * 136
 
 
+def test_voter_id_ignores_the_read_cap_index_suffix():
+    """Identity is the 32-byte public key, not the 104-byte index suffix: a
+    joiner's pre-mutation cap and the salt-mutated cap the group holds for the
+    same member must hash to the same voter id (and different members must
+    not collide)."""
+    key = bytes([0x0A]) * 32
+    own_copy = key + bytes([0x01]) * 104
+    shared_copy = key + bytes([0x02]) * 104
+    other = bytes([0x0B]) * 32 + bytes([0x03]) * 104
+
+    assert voter_id_from_read_cap(own_copy) == voter_id_from_read_cap(shared_copy)
+    assert voter_id_from_read_cap(other) != voter_id_from_read_cap(shared_copy)
+
+
 async def _make_convo(sess, name, own_cap, peer_caps):
     """Build a conversation with an own peer and named remote peers, each with
     a provisioned read capability. Mirrors headless ``create-conv``."""

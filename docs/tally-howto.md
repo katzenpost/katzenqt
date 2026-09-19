@@ -204,8 +204,9 @@ document (next task).
 
 `engine.tally` aggregates and will not tell you who voted for what. For that,
 read the votes map directly and map voter ids back to peers. A voter id is
-`blake2b` of that member's BACAP read capability, so every member derives the
-same id for the same member:
+`blake2b` of that member's BACAP read capability's 32-byte public-key prefix,
+so every member derives the same id for the same member even though the
+trailing index suffix varies between copies:
 
 ```python
 async def voter_names(sess, conversation) -> dict[str, str]:
@@ -433,8 +434,9 @@ transport at all.
 
 ## Pitfalls
 
-- **Wait for the read capability.** A voter's identity is the hash of their
-  provisioned BACAP read cap. Before it exists the controller logs a warning
+- **Wait for the read capability.** A voter's identity is the hash of the
+  32-byte public-key prefix of their provisioned BACAP read cap. Before it
+  exists the controller logs a warning
   and falls back to a *local-only* id no peer will derive, so such a ballot
   never merges with that voter's others. Do not vote on a conversation that is
   not fully joined.
