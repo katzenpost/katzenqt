@@ -363,9 +363,3 @@ the divergence deliberately.
 - Startup seeding: uploads have no `ConversationPeer` row, so seed from
   PlaintextWAL rows with `indirection IS NOT NULL` (an in-flight upload's
   I-chunk).
-
-### Open question
-
-Item 4 deferred download *cancel*. Decide whether it shares this machinery —
-its prune-and-retire path (drop ReceivedPiece rows, retire the substream peer,
-delete its MixWAL row) is the mirror image of upload cancel.
