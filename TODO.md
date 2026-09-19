@@ -241,11 +241,11 @@ committed separately (same message style: `update TODO.md: ...`).
 
 Remaining sequence, with a review checkpoint after Step 4:
 
-1. Commit the working-tree Step-4 backend as-is: the `tally_update_queue`
+1. [x] Commit the working-tree Step-4 backend as-is: the `tally_update_queue`
    receive-path plumbing (`network.py`, `conversation_handlers.py`, conftest
    reset, handler/controller test updates, network-fake test), then the
    presenter read helpers (`survey_doc`, `first_unread_order`,
-   `conversation_names`) and their tests.
+   `conversation_names`) and their tests. (commits 81d83c9, 6558dbd)
 2. Finish Step 4 in `qt_tally.py`: review the untracked module for ordering /
    unread-mapping / role-forwarding correctness; add `TallyPanel.show_survey`
    plus current-survey tracking and a "New poll" dialog host; scope
