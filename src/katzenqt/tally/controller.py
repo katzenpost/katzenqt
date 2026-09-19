@@ -90,8 +90,15 @@ class TallyController:
         blob = sync.full_state(self._docs[(conversation_id, survey_id)])
         row = await sess.get(persistent.TallyState, survey_id)
         if row is None:
+            # First sighting: stamp the survey's timeline position as the next
+            # conversation_order (the receive path calls us inside
+            # conversation_log_order_lock, the GUI/headless create paths must
+            # too). Later events keep the original order so the placeholder row
+            # does not drift forward as votes/closes arrive.
             sess.add(persistent.TallyState(
-                survey_id=survey_id, conversation_id=conversation_id, doc_state=blob,
+                survey_id=survey_id, conversation_id=conversation_id,
+                doc_state=blob,
+                conversation_order=persistent.next_conversation_order(conversation_id),
             ))
         elif row.conversation_id != conversation_id:
             logger.warning(

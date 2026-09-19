@@ -267,3 +267,45 @@ async def test_undecodable_crdt_is_dropped_not_raised(caplog):
     from katzenqt.tally import sync
     with pytest.raises(ValueError):
         sync.load_doc(b"\xde\xad\xbe\xef" * 8)
+
+
+@pytest.mark.asyncio
+async def test_survey_stamps_the_timeline_order_at_creation_and_keeps_it():
+    """A survey's TallyState carries the next conversation_order at first
+    sighting, and a later vote/close does not move the placeholder forward."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+
+    async with persistent.asession() as sess:
+        convo, own_peer, peers = await _make_convo(
+            sess, "g", OWN_CAP, {"alice": ALICE_CAP},
+        )
+        convo_id = convo.id
+        # A chat row already occupies order 0 (headless create-conv does the
+        # same with its first_post)...
+        sess.add(persistent.ConversationLog(
+            conversation_id=convo_id, conversation_peer_id=own_peer.id,
+            conversation_order=0, payload=b"hello",
+        ))
+        await sess.flush()
+        # ...so the survey lands at the next order.
+        await ctrl.create_local(sess, convo, survey_id, "t", Mode.APPROVAL, ["a"])
+        await sess.commit()
+
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.TallyState, survey_id)
+        assert row.conversation_order == 1
+
+    # A later vote does not rewrite the placeholder position.
+    from katzenqt.conversation_handlers import _conversation_peers
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, convo_id)
+        peers = await _conversation_peers(sess, convo_id)
+        alice = next(p for p in peers if p.name == "alice")
+        await ctrl.handle_event(sess, alice, events.build_vote(survey_id, {"s0": "yes"}))
+        await sess.commit()
+
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.TallyState, survey_id)
+        assert row.conversation_order == 1
+        assert engine.tally(ctrl.get(convo_id, survey_id)).n_voters == 1

@@ -937,3 +937,10 @@ class TallyState(SQLModel, table=True):
     survey_id: bytes = Field(primary_key=True, min_length=1)
     conversation_id: int = Field(foreign_key="conversation.id", index=True)
     doc_state: bytes
+    # The ConversationLog conversation_order at which this survey was first
+    # seen (its create, on receive; the next order, for a local create). It
+    # positions the survey's virtual placeholder row in the chat timeline and is
+    # never moved by later events (votes/closes), so the placeholder keeps
+    # landing where the survey first appeared. NULL for surveys persisted before
+    # this column existed; the Qt timeline falls back to arrival order for them.
+    conversation_order: int | None = Field(default=None, index=True)
