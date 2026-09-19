@@ -30,8 +30,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          make deps
-          uv sync --all-extras --dev --locked
+          bash tools/ci-deps.sh
 
       - name: Run alembic check
         run: |

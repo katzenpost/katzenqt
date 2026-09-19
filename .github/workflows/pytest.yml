@@ -30,8 +30,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          make deps
-          uv sync --all-extras --dev --locked
+          bash tools/ci-deps.sh
 
       - name: Verify the rust audio extension built
         run: uv run python -c "import rustic_audio_tool as r; assert hasattr(r, 'PttAudioEngine')"

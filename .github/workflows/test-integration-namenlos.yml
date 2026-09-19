@@ -47,9 +47,7 @@ jobs:
           set -euo pipefail
           ( cd katzenpost/cmd/kpclientd && go build -o "$GITHUB_WORKSPACE/kpclientd" ) &
           build=$!
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-          uv sync --all-extras --dev --locked
+          bash tools/ci-deps.sh
           wait "$build"
 
       - name: Configure the namenlos listener
@@ -206,9 +204,7 @@ jobs:
           set -euo pipefail
           ( cd katzenqt/katzenpost/docker && make base_port=62331 start wait ) &
           mixnet=$!
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-          ( cd katzenqt && uv sync --all-extras --dev --locked )
+          ( cd katzenqt && bash tools/ci-deps.sh )
           wait "$mixnet"
 
       - name: Brief pause so the mixnet is fully ready
@@ -306,9 +302,7 @@ jobs:
           set -euo pipefail
           ( cd katzenqt/katzenpost/docker && make base_port=62331 epoch_duration=30s start ) &
           mixnet=$!
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-          ( cd katzenqt && uv sync --all-extras --dev --locked )
+          ( cd katzenqt && bash tools/ci-deps.sh )
           wait "$mixnet"
 
       # Not `make wait`: that runs fetch --require-ready, which compares each
