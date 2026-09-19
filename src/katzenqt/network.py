@@ -23,7 +23,7 @@ import uuid
 from asyncio import ensure_future
 from pathlib import Path
 from collections.abc import Awaitable, Callable, Hashable
-from typing import Protocol, TypedDict, TypeVar, Unpack
+from typing import Protocol, TypedDict, TypeVar, Unpack, Literal
 
 import cbor2
 
@@ -472,6 +472,17 @@ class ConnectionLifeInterruptedError(Exception):
     transient failure: release the stream and let the drain loop re-cast
     (a fresh envelope for reads, the same idempotent envelope for writes)."""
 
+    def __init__(
+        self, message: str, *,
+        reason: Literal[
+            "unknown", "epoch", "reconnect", "backstop"
+        ] = "unknown",
+        elapsed_s: float = 0.0,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.elapsed_s = elapsed_s
+
 
 _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
     ThinClientOfflineError, BrokenPipeError, CourierError, ReplicaError,
@@ -494,7 +505,7 @@ async def _rpc_racing_connection_life(
     may never arrive; we give it ``grace_s`` more to answer, then raise
     :class:`ConnectionLifeInterruptedError` for the caller's give-up-and-
     re-cast recovery path. ``backstop_s`` bounds the wait when no signal
-    ever fires.
+    ever fires; a signal retains its separately configured grace period.
 
     Returns the RPC's result unless it raised on its own (that exception
     propagates) or the race was lost.
@@ -507,6 +518,7 @@ async def _rpc_racing_connection_life(
         epoch_marker = _epoch_event
     losses = _EPOCH_LOSS_STREAK.get(bacap_uuid, 0)
     race_epoch = losses < _EPOCH_RACE_MAX_LOSSES
+    started = asyncio.get_running_loop().time()
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
@@ -527,38 +539,30 @@ async def _rpc_racing_connection_life(
         )
         if task in done:
             return task.result()
-        if reconnect_wait in done:
+        reason: Literal["epoch", "reconnect", "backstop"] = "backstop"
+        if reconnect_wait in done or epoch_wait in done:
+            reason = "reconnect" if reconnect_wait in done else "epoch"
             logger.warning(
-                "daemon reconnected mid-%s for bacap_stream=%s; giving the "
-                "in-flight call %s s to answer before treating the reply as "
-                "orphaned", what, bacap_uuid, grace_s,
+                "%s mid-%s for bacap_stream=%s; giving the in-flight call "
+                "%.1f s grace (no-signal backstop %.1f s)",
+                ("daemon reconnected" if reason == "reconnect"
+                 else "PKI epoch rolled over"),
+                what, bacap_uuid, grace_s, backstop_s,
             )
-            try:
-                return await asyncio.wait_for(task, timeout=grace_s)
-            except asyncio.TimeoutError:
-                task.cancel()
-        elif epoch_wait in done:
-            logger.warning(
-                "PKI epoch rolled over mid-%s for bacap_stream=%s; giving the "
-                "in-flight call %s s to answer before treating the envelope "
-                "as stale", what, bacap_uuid, grace_s,
+            grace_done, _grace_pending = await asyncio.wait(
+                {task}, timeout=grace_s,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            try:
-                result = await asyncio.wait_for(task, timeout=grace_s)
-            except asyncio.TimeoutError:
-                task.cancel()
+            if task in grace_done:
+                return task.result()
+            if reason == "epoch":
                 _EPOCH_LOSS_STREAK[bacap_uuid] = losses + 1
-            else:
-                return result
-        else:
-            # Backstop: backstop_s elapsed with no reply and no observed
-            # reconnect or epoch rollover. Should be rare; treat it the same
-            # as a grace-period timeout so the caller's single recovery path
-            # handles all three.
-            task.cancel()
+        task.cancel()
+        elapsed = asyncio.get_running_loop().time() - started
         raise ConnectionLifeInterruptedError(
-            f"{what} for bacap_stream={bacap_uuid} did not answer within "
-            f"{backstop_s} s"
+            f"{what} for bacap_stream={bacap_uuid} interrupted by {reason} "
+            f"after {elapsed:.1f} s (backstop {backstop_s} s)",
+            reason=reason, elapsed_s=elapsed,
         )
     finally:
         for owned in (task, reconnect_wait, epoch_wait):
