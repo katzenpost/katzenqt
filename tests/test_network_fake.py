@@ -2007,9 +2007,8 @@ class TestPauseResumePeerReads:
     """Per-peer pause/resume. A user-initiated pause on a
     peer must cancel the in-flight read ARQ (so the daemon stops
     retransmitting), delete the is_read MixWAL row (so the drain sweep
-    cannot re-cast it), and deactivate the peer so readables_to_mixwal
-    never re-arms it. Resume must flip active back on and poke the re-arm
-    event."""
+    cannot re-cast it), and pause the read cap so readables_to_mixwal
+    never re-arms it. Resume must clear the pause and poke the re-arm event."""
 
     @pytest.mark.asyncio
     async def test_pause_cancels_inflight_read(self, fake_thinclient, monkeypatch):
@@ -2077,7 +2076,9 @@ class TestPauseResumePeerReads:
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
                 persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
             ))).one()
-            assert cp.active is False
+            assert cp.active is True
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.read_paused is True
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
         # The done-callback released the stream from draining_right_now.
         assert setup["bacap_stream"] not in draining
@@ -2085,13 +2086,14 @@ class TestPauseResumePeerReads:
         assert network._inflight_reads.get(setup["bacap_stream"]) is None
 
     @pytest.mark.asyncio
-    async def test_pause_with_no_inflight_read_still_deactivates(
-        self, fake_thinclient, monkeypatch,
-    ):
+    async def test_pause_with_no_inflight_read_keeps_membership(
+        self, fake_thinclient: FakeThinClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """A pause on a stream with no registered in-flight task (the read
         completed on its own, or we are pausing before the loop ever armed
-        it) must still drop the MW row and deactivate the peer -- the two
-        things that keep the sweep from re-casting the dead read forever."""
+        it) must still drop the MW row and pause the read cap without
+        changing membership."""
         setup = await _set_up_read_flow(fake_thinclient, peer_name=":substream:2:abc")
         async with persistent.asession() as sess:
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
@@ -2106,7 +2108,9 @@ class TestPauseResumePeerReads:
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
                 persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
             ))).one()
-            assert cp.active is False
+            assert cp.active is True
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.read_paused is True
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
         # The pause announces itself to the Transfers panel.
         event = network.substream_progress_queue.get_nowait()

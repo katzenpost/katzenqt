@@ -908,6 +908,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
               persistent.ConversationPeer.read_cap_id == mw.bacap_stream,
           )
       )).one_or_none()
+      _pre_rcw = await _pre_sess.get(persistent.ReadCapWAL, bacap_uuid)
+      if _pre_rcw is not None and _pre_rcw.read_paused:
+          draining_right_now.discard(bacap_uuid)
+          return
   is_substream = _cp_row is not None and _cp_row.name.startswith(_SUBSTREAM_NAME_PREFIX)
 
   def give_up() -> None:
@@ -1221,6 +1225,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     cp.active = False
                     rcw.substream_failure = None
                     rcw.substream_missing_since = None
+                    rcw.read_paused = False
                     sess.add(cp)
                     sess.add(rcw)
                     convlog_added = added
@@ -1377,28 +1382,34 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
 
 async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
-    """Stop reading a single peer: cancel the in-flight
-    drain task (which also cancels its ARQ at the daemon), delete any
-    pending is_read MixWAL row so the 15s drain sweep can never re-cast it,
-    and set the peer inactive so readables_to_mixwal never re-arms it.
+    """Pause polling without removing the peer from its conversation.
 
-    ReceivedPiece rows and the ReadCapWAL.next_index cursor are left in
-    place so a resume (or a later "retry" on a dead substream) picks up
-    exactly where reading stopped, and _try_assemble keeps coalescing the
-    chain from the pieces already gathered.
+    Persist the pause before cancelling the reader so a concurrent sweep
+    cannot restart it. Preserve received pieces and the next-index cursor.
     """
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
+        if rcw is None:
+            return
+        peers = (await sess.exec(select(persistent.ConversationPeer).where(
+            persistent.ConversationPeer.read_cap_id == bacap_stream,
+        ))).all()
+        if not any(peer.active for peer in peers):
+            return
+        rcw.read_paused = True
+        sess.add(rcw)
+        await sess.commit()
     task = _inflight_reads.get(bacap_stream)
     if task is not None and not task.done():
         task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, Exception):  # cancellation is the point
+        except asyncio.CancelledError:
             pass
-    # The drain loop's _on_read_done pops this too, but a pause that is
-    # reached from a context without that callback (tests, or a pause on a
-    # stream whose task already finished) must still clear the entry.
+        except Exception:
+            logger.exception("Read failed while pausing %s", bacap_stream)
     _inflight_reads.pop(bacap_stream, None)
-    __resend_queue.discard(bacap_stream)  # it is not "in MixWAL" any more
+    __resend_queue.discard(bacap_stream)
     async with persistent.asession() as sess:
         mw_rows = (await sess.exec(select(persistent.MixWAL).where(
             persistent.MixWAL.bacap_stream == bacap_stream,
@@ -1406,48 +1417,45 @@ async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         ))).all()
         for mw in mw_rows:
             await sess.delete(mw)
-        cp = (await sess.exec(select(persistent.ConversationPeer).where(
+        peers = (await sess.exec(select(persistent.ConversationPeer).where(
             persistent.ConversationPeer.read_cap_id == bacap_stream,
-        ))).one_or_none()
-        if cp is not None:
-            cp.active = False
-            sess.add(cp)
-            is_substream = cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
-        else:
-            is_substream = False
+        ))).all()
+        is_substream = any(
+            peer.name.startswith(_SUBSTREAM_NAME_PREFIX) for peer in peers
+        )
         await sess.commit()
     readables_to_mixwal_event.set()
     __mixwal_updated.set()
     if is_substream:
-        # The Transfers panel mirrors pause state.
         substream_progress_queue.put_nowait(("paused", bacap_stream))
 
 
 async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
-    """Resume reading a paused peer: mark it active and poke
-    readables_to_mixwal so a fresh is_read MixWAL row is armed from the
-    saved ReadCapWAL.next_index. This is also the retry primitive for a
-    dead substream: re-arming reads from the same index,
-    keeping already-gathered ReceivedPiece rows."""
+    """Resume from the saved cursor, keeping already received pieces.
+
+    An explicit retry also clears a terminal transfer failure and starts
+    a fresh missing-box budget.
+    """
     async with persistent.asession() as sess:
-        cp = (await sess.exec(select(persistent.ConversationPeer).where(
-            persistent.ConversationPeer.read_cap_id == bacap_stream,
-        ))).one_or_none()
-        if cp is not None:
-            cp.active = True
-            sess.add(cp)
-            is_substream = cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
-        else:
-            is_substream = False
         rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
-        if rcw is not None:
-            rcw.substream_missing_since = None
-            rcw.substream_failure = None
-            sess.add(rcw)
+        if rcw is None:
+            return
+        rcw.read_paused = False
+        rcw.substream_missing_since = None
+        rcw.substream_failure = None
+        sess.add(rcw)
+        peers = (await sess.exec(select(persistent.ConversationPeer).where(
+            persistent.ConversationPeer.read_cap_id == bacap_stream,
+        ))).all()
+        for peer in peers:
+            peer.active = True
+            sess.add(peer)
+        is_substream = any(
+            peer.name.startswith(_SUBSTREAM_NAME_PREFIX) for peer in peers
+        )
         await sess.commit()
     readables_to_mixwal_event.set()
     if is_substream:
-        # The Transfers panel mirrors resume state.
         substream_progress_queue.put_nowait(("resumed", bacap_stream))
 
 
@@ -1596,6 +1604,10 @@ async def drain_mixwal2(connection: ThinClient):
                     draining_right_now.add(mw.bacap_stream)
                     __resend_queue.add(mw.bacap_stream)
                     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+                    if rcw is not None and rcw.read_paused:
+                        draining_right_now.discard(mw.bacap_stream)
+                        __resend_queue.discard(mw.bacap_stream)
+                        continue
                     if len(rcw.read_cap) != 136:
                         # A malformed row must not take down the whole drain
                         # loop (see drain_mixwal's wrapper, which catches an
@@ -1751,7 +1763,8 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
                 # TODO are these guaranteed to be distinct?
                 readable_peers = (await sess.exec(select(
                     persistent.ConversationPeer, persistent.ReadCapWAL
-                ).where(persistent.ConversationPeer.active==True
+                ).where(persistent.ReadCapWAL.read_paused == False
+                        ).where(persistent.ConversationPeer.active==True
                         ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
                                 ).where(
                                     persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?

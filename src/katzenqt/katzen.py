@@ -1446,7 +1446,8 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == read_cap_id,
                 )
             )).first()
-        active = bool(solo.active) if solo is not None else True
+            rcw = sess.get(persistent.ReadCapWAL, read_cap_id)
+            active = bool(solo and solo.active and rcw and not rcw.read_paused)
         # A throwaway menu so we never clobber the tray's contextMenu().
         api = QMenu(tree)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
@@ -1486,6 +1487,8 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == rcw_id,
                 )
             )).first()
+            rcw = sess.get(persistent.ReadCapWAL, rcw_id)
+            active = bool(solo and solo.active and rcw and not rcw.read_paused)
         # Check if this transfer is marked as failed in the UI model
         transfers_model = view.model()
         row = None
@@ -1504,7 +1507,6 @@ class MainWindow(QMainWindow):
             if chosen is rm:
                 transfers_model.remove_transfer(rcw_id)
         else:
-            active = bool(solo.active) if solo is not None else True
             pgm = api.addAction("Pause download")
             rgm = api.addAction("Resume download")
             pgm.setEnabled(active)
