@@ -4,7 +4,7 @@ from katzenpost_thinclient import (
     ThinClientOfflineError,
     BACAPDecryptionFailedError, StartResendingCancelledError,
     DatabaseFailureError, BoxIDNotFoundError, TombstoneError,
-    CourierError, CourierInvalidEpochError, ReplicaError,
+CourierError, CourierInvalidEpochError, ReplicaError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
@@ -48,8 +48,25 @@ tally_update_queue: "Tuple[int]" = asyncio.Queue()
 # path; the GUI appends the name to the contacts tree in its own listener.
 peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 
+# Substream file-transfer progress for the GUI Transfers panel.
+# Events are ``(kind, rcw_id, *extra)``:
+#   ("started", rcw_id, conversation_id, total_or_None, parent_name)
+#   ("piece",    rcw_id, count_or_None)      # count is pieces received so far
+#   ("completed", rcw_id)
+#   ("paused",   rcw_id)
+#   ("resumed",  rcw_id)
+#   ("failed",   rcw_id, reason_str)         # unprocessable chunk
+# Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
+# written; the GUI's transfers_listener drains it and updates DownloadsModel.
+substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
+
 __resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
+
+# in-flight drain_mixwal_read_single tasks keyed by bacap_stream, so an
+# external pause/cancel can stop just one peer's reads
+# instead of quitting the whole drain loop.
+_inflight_reads: "dict[uuid.UUID, asyncio.Task]" = {}
 
 #__plaintextwal_updated = asyncio.Event()
 #__plaintextwal_updated.set()
@@ -214,6 +231,25 @@ async def _remint_mixwal(mw: persistent.MixWAL, fresh) -> bool:
     return True
 
 
+async def persist_first_unread(conversation_id: int, first_unread: int) -> None:
+    """Persist a conversation's first_unread cursor; io-loop only.
+
+    All conversation writes funnel through this loop's single aiosqlite
+    writer, so callers (Qt-side refresh paths) schedule this via
+    run_in_io rather than opening a session here themselves."""
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.Conversation, conversation_id)
+        if row is None:
+            logger.warning(
+                "persist_first_unread: conversation %d not found; skipping",
+                conversation_id,
+            )
+            return
+        row.first_unread = first_unread
+        sess.add(row)
+        await sess.commit()
+
+
 async def _remint_write_envelope(connection: ThinClient, mw: persistent.MixWAL, wcw: persistent.WriteCapWAL) -> bool:
     """Re-encrypt a stale write envelope at the same index, from the
     PlaintextWAL payload that is retained until the write is ACK'ed."""
@@ -278,11 +314,10 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
           ),
       )
     except ConnectionLifeInterruptedError as e:
-      # A daemon disconnect left one of the RPCs above with no reply and no
-      # exception (the request was sent, then the daemon died, and the reply
-      # went nowhere). The envelope was not (or not yet) ACK'd; leave the MW
-      # for the drainage loop to re-send on the reconnected client -- same
-      # envelope by hash, so the resend is idempotent.
+      # A reconnect or epoch rollover interrupted the RPC above; the request
+      # may have reached the daemon without its reply. The envelope was not
+      # ACK'd, so leave the MixWAL row for the next drain pass to re-send
+      # (idempotent by envelope hash).
       logger.warning(
           "thin client reconnected or epoch rolled over mid-write RPC for "
           "bacap_stream=%s (%s); leaving MixWAL row for the next drain pass",
@@ -342,12 +377,9 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       )
     except ConnectionLifeInterruptedError:
       # The courier ACK for this envelope is already secured; mark_sent only
-      # does local bookkeeping (which nonetheless awaits the thinclient to
-      # resolve BACAP counters, and a disconnect mid-way can orphan that RPC
-      # exactly like the pre-ACK calls above). Leave the MW for the next
-      # drain pass, which re-sends the already-ACKed envelope idempotently
-      # and runs mark_sent to completion; this mirrors the sqlite-busy
-      # branch below rather than wedging the stream on an un-raiseable await.
+      # does local bookkeeping via a thinclient RPC. Leave the MW for the
+      # next drain pass to re-send the already-ACKed envelope and complete
+      # the ACK -- same recovery as the sqlite-busy branch below.
       logger.warning(
           "drain_mixwal_write_single: connection-life signal interrupted ACK "
           "bookkeeping for bacap_stream=%s; leaving MW for the next drain pass",
@@ -397,33 +429,21 @@ READ_WATCHDOG_SECONDS = 1200.0
 # waiting on the old connection; an epoch rollover makes the courier
 # reject the (now-stale) envelope outright.
 #
-# 30s was too tight for encrypt_read/encrypt_write/new_keypair/
-# get_message_box_index_counter under real contention: the docker
-# integration suite runs 4 parallel workers against one shared kpclientd,
-# and these "should be fast, local" RPCs can legitimately queue behind
-# each other's concurrent requests for longer than that -- confirmed by CI
-# (encrypt_write and the pre-existing encrypt_read backstop both tripped
-# in the same run, PR #66's docker-integration job). Both values raised to
-# give real headroom for that contention while staying far short of
-# READ_WATCHDOG_SECONDS above, which is sized for a genuine network
-# round-trip rather than these local calls.
+# These are local daemon RPCs that can legitimately queue behind other
+# workers sharing one kpclientd; the grace is sized to absorb that
+# contention while staying far short of READ_WATCHDOG_SECONDS, which is
+# for a genuine network round-trip.
 _RECONNECT_GRACE_SECONDS = 90.0
 _DAEMON_RPC_TIMEOUT_SECONDS = 90.0
 
-# Upper bound on how long readables_to_mixwal() and
-# send_resendable_plaintexts() park at the __mixnet_connected gate when the
-# latch is cleared. __mixnet_connected is only ever re-set by an
-# is_connected=True on_connection_status report; a full kpclientd restart
-# can clear it and then reconnect the thin client below the callback layer,
-# so no re-set ever arrives. Once this bound elapses both loops proceed
-# anyway and ride real outages out via their per-item error handling
-# instead of stranding forever (see _wait_for_connection_or_shutdown).
+# How long readables_to_mixwal() and send_resendable_plaintexts() wait at
+# the __mixnet_connected gate before proceeding via per-item error handling.
+# Covers the case where on_connection_status never re-sets the latch (a
+# kpclientd restart can reconnect below the callback layer).
 _CONNECTION_IDLE_RETRY_S = 60.0
 
-# Cadence at which readables_to_mixwal() runs an arming pass even when
-# readables_to_mixwal_event is never re-set (see that loop). Matches
-# _CONNECTION_IDLE_RETRY_S so a full kpclientd restart is recovered from
-# on the same timescale as the latch gate above.
+# Cadence at which readables_to_mixwal() runs an arming pass when
+# readables_to_mixwal_event is never re-set (e.g. while the daemon is down).
 _ARMING_SWEEP_S = 60.0
 
 
@@ -432,13 +452,10 @@ _EPOCH_RACE_MAX_LOSSES = 3
 
 
 class ConnectionLifeInterruptedError(Exception):
-    """An in-flight thinclient RPC raced against a daemon reconnect or a PKI
-    epoch rollover and lost; the daemon may have died with the reply in
-    flight (or the envelope may have gone stale after a rollover), so the
-    awaiting coroutine could otherwise never unpend. Callers treat this like
-    a transient failure: release the stream and let the drain loop re-cast
-    (re-encrypting a fresh envelope for reads, re-sending the same
-    idempotent envelope for writes)."""
+    """An in-flight thinclient RPC was interrupted by a daemon reconnect or a
+    PKI epoch rollover, so its reply may never arrive. Callers treat it as a
+    transient failure: release the stream and let the drain loop re-cast
+    (a fresh envelope for reads, the same idempotent envelope for writes)."""
 
 
 _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
@@ -451,18 +468,13 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                                       backstop_s: float = READ_WATCHDOG_SECONDS,
                                       grace_s: "float | None" = None,
                                       reconnect_marker=None, epoch_marker=None):
-    """Run the RPC returned by ``rpc_factory``, racing it against a daemon
-    reconnect or a PKI epoch rollover rather than a flat clock.
+    """Await an RPC, racing it against the daemon-reconnect and PKI-epoch
+    signals rather than a flat clock.
 
-    A disconnect can leave a pending thinclient RPC awaiting forever: the
-    request was sent before the daemon died, the reply is delivered to a
-    query_id whose listener already gave up (dropped), and reconnect-replay
-    never restores it. Every RPC await in the drain paths is exposed to this,
-    so this helper is the single guard. Either connection-life signal means
-    the reply could be orphaned or the envelope stale, so we give the
-    in-flight call a short grace period and then raise
+    If a connection-life signal fires while the RPC is in flight, its reply
+    may never arrive; we give it ``grace_s`` more to answer, then raise
     :class:`ConnectionLifeInterruptedError` for the caller's give-up-and-
-    re-cast recovery path. The backstop bounds the same wait when no signal
+    re-cast recovery path. ``backstop_s`` bounds the wait when no signal
     ever fires.
 
     Returns the RPC's result unless it raised on its own (that exception
@@ -577,8 +589,8 @@ async def _substream_parent(
 
     A synthetic substream peer is named ``:substream:<parent_id>:<nonce>``.
     Returns the parent peer, or None when the name is malformed or the parent
-    no longer exists, so the caller can retire the peer instead of raising in
-    the read loop (a non-integer id used to crash it on every restart).
+    no longer exists, so the caller retires the peer instead of raising
+    inside the read loop.
     """
     parts = name.split(":")
     if len(parts) < 4:
@@ -774,6 +786,17 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   assert len(rcw_read_cap) == 136
   bacap_uuid = mw.bacap_stream
 
+  # Detect substream peers for fail-fast BoxIDNotFound handling: the
+  # I-chunk is gated by after_stream, so the reader only learns of the
+  # substream after every box was written; a not-found is terminal.
+  async with persistent.asession() as _pre_sess:
+      _cp_row = (await _pre_sess.exec(
+          select(persistent.ConversationPeer).where(
+              persistent.ConversationPeer.read_cap_id == mw.bacap_stream,
+          )
+      )).one_or_none()
+  is_substream = _cp_row is not None and _cp_row.name.startswith(_SUBSTREAM_NAME_PREFIX)
+
   def give_up() -> None:
     """Unblocks the mw so it can be scheduled again."""
     draining_right_now.discard(bacap_uuid)
@@ -792,6 +815,17 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   reconnect_marker = _reconnect_event
   epoch_marker = _epoch_event
   try:
+    # Re-encrypt fresh every call rather than reusing mw's persisted
+    # envelope: start_resending_encrypted_message's envelope is only valid
+    # for the PKI epoch it was encrypted under, so a stream that's been
+    # given up on and retried (any give_up() below, on this call or a
+    # previous one) after an epoch rollover must not resend the same now-
+    # stale envelope, which the courier would reject forever (see
+    # voucher.py's _read_box docstring). mw's own envelope_hash/
+    # encrypted_payload/envelope_descriptor/next_message_index columns are
+    # left as they were when readables_to_mixwal() first created the row;
+    # only this fresh result is ever used for the actual RPC.
+    rcr = None
     rcr = await _rpc_racing_connection_life(
         bacap_uuid=bacap_uuid,
         what="encrypt_read",
@@ -836,13 +870,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         no_retry_on_box_id_not_found=True,
     )
   except ConnectionLifeInterruptedError as e:
-    # The daemon reconnected (or the PKI epoch rolled over) while the fresh
-    # encrypt_read was in flight and it never answered. Unlike a lost
-    # start_resending reply there is no in-flight ARQ to cancel here: the
-    # envelope was never even dispatched, so the box is still untouched at
-    # the daemon and re-encrypting the same message_box_index on the now-
-    # reconnected client is safe (see the fresh-envelope comment above).
-    # Release the stream so the drain loop re-casts on the next sweep.
+    # The fresh encrypt_read was interrupted before dispatching anything, so
+    # the daemon's box is untouched; re-encrypting the same message_box_index
+    # on the reconnected client is safe. Release the stream so the drain
+    # loop re-casts on the next sweep.
     logger.warning(
         "drain_mixwal_read_single: %s; re-scheduling the read for "
         "bacap_stream=%s (nothing was dispatched for this envelope)",
@@ -851,12 +882,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
   except asyncio.TimeoutError:
-    # A lost read reply can strand `_send_and_wait` forever: the thinclient's
-    # reconnect-replay may deliver the courier's reply to a query_id with no
-    # listener left (dropped), and the awaiting coroutine never sees an
-    # exception or cancel. The courier keeps the box and re-serves it, so
-    # abort the in-flight ARQ at the daemon and let the drain loop re-cast
-    # the same box with a fresh query id.
+    # No reply within the watchdog: the courier keeps the box and re-serves
+    # it, so abort the in-flight ARQ at the daemon and let the drain loop
+    # re-cast the same box with a fresh query id.
     logger.warning(
         "drain_mixwal_read_single: read for bacap_stream=%s gave up after"
         " %.1f s (watchdog %s s); cancelling the in-flight ARQ and re-scheduling",
@@ -876,6 +904,28 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     await asyncio.sleep(1)
     give_up()
     return
+  except asyncio.CancelledError:
+    # An external pause cancelled the drain task while the
+    # read ARQ was in flight. Cancel the same in-flight ARQ at the daemon
+    # so its retransmits stop too, then re-raise so the drain loop's
+    # done-callback releases the stream from draining_right_now. The MW
+    # row is deleted by the pausing peer, not here, so a resume can.
+    if rcr is not None:
+      try:
+        await asyncio.wait_for(
+            connection.cancel_resending_encrypted_message(rcr.envelope_hash),
+            timeout=10,
+        )
+        logger.debug(
+            "drain_mixwal_read_single: cancelled in-flight ARQ for %s on "
+            "pause", bacap_uuid,
+        )
+      except Exception as _cancele:  # pragma: no cover - defensive best-effort
+        logger.debug(
+            "drain_mixwal_read_single: cancel ARQ on pause best-effort: %s",
+            _cancele,
+        )
+    raise
   except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
           BACAPDecryptionFailedError, StartResendingCancelledError,
           ThinClientOfflineError, BrokenPipeError, OSError) as e:
@@ -884,15 +934,49 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
   except (BoxIDNotFoundError, TombstoneError) as e:
-    # Benign replica read outcomes, not failures (cf. the thin client's
-    # is_expected_outcome). BoxIDNotFound means the stream simply has no
-    # further data yet; the local polling delay handles the next attempt.
-    # Tombstone means the writer deleted this box. Neither warrants an
-    # error to the user: release the stream and wait for more, rather than
-    # wedging it (an uncaught one would strand the stream in
-    # draining_right_now exactly as DatabaseFailure once did).
-    logger.debug("drain_mixwal_read_single: benign replica outcome, nothing to advance: %s", e)
-    await asyncio.sleep(5)
+    if is_substream:
+      # A substream box is unrecoverable: the I-chunk is gated by
+      # after_stream (models.serialize:155), so the reader only learns
+      # of the substream after every box was ACK'd at the courier; a
+      # not-found here means the courier's async replica dispatch failed
+      # and nothing will ever resurrect these boxes.  Deactivate the
+      # peer and delete the MixWAL to stop the amplification.
+      logger.warning(
+          "drain_mixwal_read_single: substream %s (bacap=%s) hit %s; "
+          "deactivating peer — box is unrecoverable",
+          _cp_row.name if _cp_row else "?",
+          bacap_uuid,
+          e,
+      )
+      try:
+          async with persistent.asession() as _deact_sess:
+              cp = (await _deact_sess.exec(
+                  select(persistent.ConversationPeer).where(
+                      persistent.ConversationPeer.read_cap_id == mw.bacap_stream,
+                  )
+              )).one_or_none()
+              if cp is not None:
+                  cp.active = False
+                  _deact_sess.add(cp)
+              mw_obj = await _deact_sess.get(persistent.MixWAL, mw.id)
+              if mw_obj is not None:
+                  await _deact_sess.delete(mw_obj)
+              await _deact_sess.commit()
+      except Exception:
+          logger.exception(
+              "drain_mixwal_read_single: failed to deactivate dead "
+              "substream bacap=%s", bacap_uuid,
+          )
+    else:
+      # Benign replica read outcomes, not failures (cf. the thin client's
+      # is_expected_outcome). BoxIDNotFound means the stream simply has no
+      # further data yet; the local polling delay handles the next attempt.
+      # Tombstone means the writer deleted this box. Neither warrants an
+      # error to the user: release the stream and wait for more, rather than
+      # wedging it (an uncaught one would strand the stream in
+      # draining_right_now exactly as DatabaseFailure once did).
+      logger.debug("drain_mixwal_read_single: benign replica outcome, nothing to advance: %s", e)
+      await asyncio.sleep(5)
     give_up()
     return
   except DatabaseFailureError:
@@ -975,6 +1059,19 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 chunk=chunk_body,
             ))
 
+    # Substream progress events, held until the transaction
+    # commits and fired for the GUI's transfers_listener. count() runs in
+    # the same (unflushed) transaction, so it already includes the row
+    # just added above -- matching the ReceivedPiece count the Transfers
+    # panel shows.
+    substream_progress = []
+    if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+        piece_count = (await sess.exec(
+            select(persistent.sa.func.count()).select_from(persistent.ReceivedPiece)
+            .where(persistent.ReceivedPiece.read_cap == mw.bacap_stream)
+        )).one()
+        substream_progress.append(("piece", mw.bacap_stream, int(piece_count)))
+
     assembled = await _try_assemble(
         sess, mw.bacap_stream, mw.current_message_index[:8],
     )
@@ -1040,6 +1137,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     cp.active = False
                     sess.add(cp)
                     convlog_added = added
+                    # The transfer is complete (terminal F
+                    # assembled and routed). Held until commit.
+                    substream_progress.append(("completed", mw.bacap_stream))
                 else:
                     # Top-level F (single-box or contiguous on the parent stream):
                     # route by message type, chat into the log, tally into the
@@ -1053,11 +1153,32 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         elif assembled is not None and assembled[0] == "I":
             _, substream_read_cap, _ = assembled
             if len(substream_read_cap) == 136:
+                # Legacy 136-byte I-chunk: no total carried; the download
+                # renders with an indeterminate denominator.
                 new_rcw = persistent.ReadCapWAL(
                     id=uuid.uuid4(),
                     read_cap=substream_read_cap,
                     next_index=substream_read_cap[-104:],
                 )
+            elif len(substream_read_cap) == 140:
+                # Extended I-chunk: bytes 0-3 carry the total
+                # plaintext chunk count (C-chunks + final F), bytes 4-139 are
+                # the 136-byte read cap. Parse defensively: an out-of-range
+                # count still just means indeterminate progress, never a crash.
+                total_chunks = struct.unpack(">I", substream_read_cap[:4])[0]
+                read_cap_bytes = substream_read_cap[4:]
+                new_rcw = persistent.ReadCapWAL(
+                    id=uuid.uuid4(),
+                    read_cap=read_cap_bytes,
+                    next_index=read_cap_bytes[-104:],
+                    substream_total_chunks=total_chunks,
+                )
+            else:
+                logger.warning(
+                    "ignoring indirection with malformed read cap length %d",
+                    len(substream_read_cap),
+                )
+            if len(substream_read_cap) in (136, 140):
                 sess.add(new_rcw)
                 substream_peer = persistent.ConversationPeer(
                     name=f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:{secrets.token_hex(2)}",
@@ -1066,11 +1187,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     conversation=cp.conversation,
                 )
                 sess.add(substream_peer)
-            else:
-                logger.warning(
-                    "ignoring indirection with malformed read cap length %d",
-                    len(substream_read_cap),
-                )
+                # Announce the new download. Held until commit.
+                substream_progress.append((
+                    "started", new_rcw.id, cp.conversation.id,
+                    new_rcw.substream_total_chunks,
+                    cp.name,
+                ))
 
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
@@ -1092,23 +1214,52 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       give_up()
       return
     except Exception as e:
-      logger.error(
-          "drain_mixwal_read_single: dropping unprocessable message on "
-          "bacap_stream=%s: %s: %s; advancing past it",
-          mw.bacap_stream, type(e).__name__, e,
-      )
-      await sess.rollback()
-      async with persistent.asession() as drop_sess:
-        rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-        if rcw_row is not None:
-          rcw_row.next_index = rcr.next_message_box_index
-          drop_sess.add(rcw_row)
-        mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
-        if mw_row is not None:
-          await drop_sess.delete(mw_row)
-        await drop_sess.commit()
-      give_up()
-      return
+      # Check if this is a substream peer (look up the peer by bacap_stream)
+      async with persistent.asession() as _cp_sess:
+          _cp = (await _cp_sess.exec(select(persistent.ConversationPeer).where(
+              persistent.ConversationPeer.read_cap_id == mw.bacap_stream,
+          ))).first()
+      is_substream = _cp is not None and _cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+      
+      if is_substream:
+          # Substream: deactivate peer and fire failed event. Rollback the
+          # original session first to release any locks held by the failed
+          # transaction.
+          await sess.rollback()
+          async with persistent.asession() as drop_sess:
+              _cp_row = await drop_sess.get(persistent.ConversationPeer, _cp.id)
+              if _cp_row is not None:
+                  _cp_row.active = False
+                  drop_sess.add(_cp_row)
+              rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+              if rcw_row is not None:
+                  rcw_row.next_index = rcr.next_message_box_index
+                  drop_sess.add(rcw_row)
+              mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
+              if mw_row is not None:
+                  await drop_sess.delete(mw_row)
+              await drop_sess.commit()
+          substream_progress_queue.put_nowait(("failed", str(mw.bacap_stream), f"{type(e).__name__}: {e}"))
+          give_up()
+          return
+      else:
+          logger.error(
+              "drain_mixwal_read_single: dropping unprocessable message on "
+              "bacap_stream=%s: %s: %s; advancing past it",
+              mw.bacap_stream, type(e).__name__, e,
+          )
+          await sess.rollback()
+          async with persistent.asession() as drop_sess:
+              rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+              if rcw_row is not None:
+                  rcw_row.next_index = rcr.next_message_box_index
+                  drop_sess.add(rcw_row)
+              mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
+              if mw_row is not None:
+                  await drop_sess.delete(mw_row)
+              await drop_sess.commit()
+          give_up()
+          return
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
@@ -1127,6 +1278,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     peer_added_queue.put_nowait(peer_added)
     readables_to_mixwal_event.set()
 
+  if substream_progress:
+    # Fire held substream events for the GUI Transfers panel,
+    # after the commit so listeners never observe uncommitted pieces.
+    for event in substream_progress:
+      substream_progress_queue.put_nowait(event)
+
   if signal_send:
     # A tally sync request staged a reply on the outgoing stream; poke the
     # send loop now that the receive transaction has committed.
@@ -1138,6 +1295,76 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   __mixwal_updated.set()
 
 
+async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
+    """Stop reading a single peer: cancel the in-flight
+    drain task (which also cancels its ARQ at the daemon), delete any
+    pending is_read MixWAL row so the 15s drain sweep can never re-cast it,
+    and set the peer inactive so readables_to_mixwal never re-arms it.
+
+    ReceivedPiece rows and the ReadCapWAL.next_index cursor are left in
+    place so a resume (or a later "retry" on a dead substream) picks up
+    exactly where reading stopped, and _try_assemble keeps coalescing the
+    chain from the pieces already gathered.
+    """
+    task = _inflight_reads.get(bacap_stream)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # cancellation is the point
+            pass
+    # The drain loop's _on_read_done pops this too, but a pause that is
+    # reached from a context without that callback (tests, or a pause on a
+    # stream whose task already finished) must still clear the entry.
+    _inflight_reads.pop(bacap_stream, None)
+    __resend_queue.discard(bacap_stream)  # it is not "in MixWAL" any more
+    async with persistent.asession() as sess:
+        mw_rows = (await sess.exec(select(persistent.MixWAL).where(
+            persistent.MixWAL.bacap_stream == bacap_stream,
+            persistent.MixWAL.is_read,
+        ))).all()
+        for mw in mw_rows:
+            await sess.delete(mw)
+        cp = (await sess.exec(select(persistent.ConversationPeer).where(
+            persistent.ConversationPeer.read_cap_id == bacap_stream,
+        ))).one_or_none()
+        if cp is not None:
+            cp.active = False
+            sess.add(cp)
+            is_substream = cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+        else:
+            is_substream = False
+        await sess.commit()
+    readables_to_mixwal_event.set()
+    __mixwal_updated.set()
+    if is_substream:
+        # The Transfers panel mirrors pause state.
+        substream_progress_queue.put_nowait(("paused", bacap_stream))
+
+
+async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
+    """Resume reading a paused peer: mark it active and poke
+    readables_to_mixwal so a fresh is_read MixWAL row is armed from the
+    saved ReadCapWAL.next_index. This is also the retry primitive for a
+    dead substream: re-arming reads from the same index,
+    keeping already-gathered ReceivedPiece rows."""
+    async with persistent.asession() as sess:
+        cp = (await sess.exec(select(persistent.ConversationPeer).where(
+            persistent.ConversationPeer.read_cap_id == bacap_stream,
+        ))).one_or_none()
+        if cp is not None:
+            cp.active = True
+            sess.add(cp)
+            is_substream = cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+        else:
+            is_substream = False
+        await sess.commit()
+    readables_to_mixwal_event.set()
+    if is_substream:
+        # The Transfers panel mirrors resume state.
+        substream_progress_queue.put_nowait(("resumed", bacap_stream))
+
+
 async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool:
     """Block until either __mixnet_connected is set or __should_quit fires.
 
@@ -1146,14 +1373,11 @@ async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool
     pause cleanly during outages instead of burning cycles against a
     daemon that will only raise ThinClientOfflineError back at them.
 
-    ``idle_retry_s`` guards against a status notification that is lost and
-    never re-sent: ``__mixnet_connected`` is ONLY re-set by an
-    is_connected=True on_connection_status report, and a full kpclientd
-    restart can surface the disconnect while the thin-client library
-    reconnects below the callback layer, so no re-set ever arrives. With
-    ``idle_retry_s`` > 0 the wait is bounded: once it elapses the caller
-    proceeds anyway (returning True) so its own per-item error handling
-    rides out a real outage instead of stranding forever on a stale latch.
+    ``idle_retry_s`` bounds the wait: after it elapses the caller proceeds
+    anyway (returning True) and relies on its own per-item error handling.
+    Covers the case where ``__mixnet_connected`` is never re-set (a
+    kpclientd restart can reconnect below the on_connection_status callback
+    layer).
     """
     if __should_quit.is_set():
         return False
@@ -1304,8 +1528,10 @@ async def drain_mixwal2(connection: ThinClient):
                         __resend_queue.discard(mw.bacap_stream)
                         continue
                     read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
+                    _inflight_reads[mw.bacap_stream] = read_task
 
                     def _on_read_done(task, stream=mw.bacap_stream) -> None:
+                        _inflight_reads.pop(stream, None)
                         # The drain loop never awaits read_task, so without
                         # this an unhandled exception (e.g. an OS-level send
                         # failure mid-bounce) would strand the stream in
@@ -1416,12 +1642,9 @@ async def readables_to_mixwal(connection):
     while not __should_quit.is_set():
         # Pause while the mixnet is unreachable so the loop does not
         # try to encrypt_read against a daemon that cannot route. The
-        # wait is bounded: a full kpclientd restart can clear the
-        # connected latch without ever re-setting it (the thin client
-        # reconnects below the on_connection_status callback layer), so
-        # we re-attempt arming on a fixed cadence rather than stranding
-        # the read-arming loop -- the only source of is_read MixWAL rows
-        # -- forever.
+        # wait is bounded by _CONNECTION_IDLE_RETRY_S so a kpclientd
+        # restart (which can leave the latch cleared) does not strand
+        # the read-arming loop, the only source of is_read MixWAL rows.
         if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
         logger.debug("SLEEPING FOR READABLES_TO_MIXWAL"*2)
@@ -1432,47 +1655,68 @@ async def readables_to_mixwal(connection):
         if __should_quit.is_set():
             continue
         readables_to_mixwal_event.clear()
-        # Run the pass whether the event fired or the 60s timeout elapsed.
-        # After a kpclientd restart nothing re-signals arming (deliveries
-        # and writes -- the usual pokes -- stop while it is down), so the
-        # event-only wakeup would leave any stream whose MixWAL row was
-        # consumed permanently un-armed. A fixed cadence re-arms it within
-        # ~60s of the daemon coming back, exactly as drain_mixwal2's sweep
-        # keeps re-casting rows it already has.
+        # Run the pass whether the event fired or the _ARMING_SWEEP_S timeout
+        # elapsed: the fixed cadence re-arms streams even while the daemon
+        # is down and nothing pokes the event.
         logger.debug("IN READABLES_TO_MIXWAL_LOOP")
         retry_needed = False
-        async with persistent.asession() as sess:
-            # TODO are these guaranteed to be distinct?
-            readable_peers = (await sess.exec(select(
-                persistent.ConversationPeer, persistent.ReadCapWAL
-            ).where(persistent.ConversationPeer.active==True
-                    ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
-                            ).where(
-                                persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?
-                            )
-                )
-            ).all()
-            logger.debug("readable_peers: %d", len(readable_peers))
-            for (cpeer, rcw) in readable_peers:
-                logger.debug("going to process_box", cpeer.name, rcw.next_index[:8].hex())
+        try:
+            async with persistent.asession() as sess:
+                # TODO are these guaranteed to be distinct?
+                readable_peers = (await sess.exec(select(
+                    persistent.ConversationPeer, persistent.ReadCapWAL
+                ).where(persistent.ConversationPeer.active==True
+                        ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
+                                ).where(
+                                    persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?
+                                )
+                    )
+                ).all()
+                logger.debug("readable_peers: %d", len(readable_peers))
+                # Two ConversationPeer rows can transiently alias the same
+                # ReadCapWAL (e.g. a stale duplicate self-peer). bacap_stream
+                # is MixWAL's primary key, so an arming pass that adds the
+                # same stream twice raises IntegrityError on its single
+                # commit (UNIQUE constraint failed: mixwal.bacap_stream);
+                # arm each read cap at most once per pass.
+                armed = set()
+                for (cpeer, rcw) in readable_peers:
+                    if rcw.id in armed:
+                        logger.warning(
+                            "readables_to_mixwal: skipping duplicate rcw=%s (%s)",
+                            rcw.id, cpeer.name,
+                        )
+                        continue
+                    armed.add(rcw.id)
+                    logger.debug("going to process_box", cpeer.name, rcw.next_index[:8].hex())
+                    try:
+                      mw = await process_box(cpeer, rcw)
+                    except Exception as e:
+                      logger.warning("Read setup failed; retrying: %s", e)
+                      retry_needed = True
+                      continue
+                    sess.add(mw)
+                    logger.debug("finished one peer: %s", cpeer.name)
+                logger.debug("readables_to_mixwal: committing")
                 try:
-                  mw = await process_box(cpeer, rcw)
-                except Exception as e:
-                  logger.warning("Read setup failed; retrying: %s", e)
-                  retry_needed = True
-                  continue
-                sess.add(mw)
-                logger.debug("finished one peer: %s", cpeer.name)
-            logger.debug("readables_to_mixwal: committing")
-            try:
-                await sess.commit()
-            except OperationalError as e:
-                if not _is_transient_sqlite_busy(e):
-                    raise
-                logger.warning(
-                    "readables_to_mixwal: sqlite busy; retrying on the next sweep: %s", e,
-                )
-                continue
+                    await sess.commit()
+                except OperationalError as e:
+                    if not _is_transient_sqlite_busy(e):
+                        raise
+                    logger.warning(
+                        "readables_to_mixwal: sqlite busy; retrying on the next sweep: %s", e,
+                    )
+                    continue
+        except Exception as e:
+            # readables_to_mixwal is the session's only read-arming task, so
+            # a failed pass must NEVER kill the loop: every read would wedge
+            # for the rest of the session. The uncommitted pass is rolled back
+            # by the session; the same streams are re-selected and armed on the
+            # next sweep.
+            logger.warning(
+                "readables_to_mixwal: pass failed; re-arming next sweep: %s", e,
+            )
+            retry_needed = True
         logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))
         if len(readable_peers):
             __mixwal_updated.set()
@@ -1510,11 +1754,9 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     __resend_queue_populated.set()
     while not __should_quit.is_set():
         # Pause while the mixnet is unreachable; encrypt_write/
-        # start_resending need a live route through kpclientd. Bounded the
-        # same way as readables_to_mixwal's gate: a kpclientd restart can
-        # leave __mixnet_connected cleared with no re-set ever arriving,
-        # so degrade to a fixed retry cadence instead of stranding the
-        # write path forever.
+        # start_resending need a live route through kpclientd. Bounded by
+        # _CONNECTION_IDLE_RETRY_S the same way as readables_to_mixwal's
+        # gate.
         if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             continue
         try:
@@ -1549,7 +1791,17 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                         row.id, row.indirection,
                     )
                     rcw = await sess.get(persistent.ReadCapWAL, row.indirection)
-                    payload = b'I' + rcw.read_cap
+                    # Extended I-chunk carries the total plaintext
+                    # chunk count (C-chunks + final F) as a 4-byte big-endian
+                    # prefix, so the reader can render progress n/total. rcw is
+                    # the sender's indirection ReadCapWAL created in
+                    # models.serialize(); when it predates the column this
+                    # falls back to a legacy 136-byte I-chunk.
+                    total = rcw.substream_total_chunks if rcw is not None else None
+                    if total is None:
+                        payload = b'I' + rcw.read_cap
+                    else:
+                        payload = b'I' + struct.pack(">I", total) + rcw.read_cap
                     pwal_orm = await sess.get(persistent.PlaintextWAL, row.id)
                     if pwal_orm is not None:
                         pwal_orm.bacap_payload = payload

@@ -28,6 +28,7 @@ import pytest
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role,
     find_kpclientd_container, find_same_network_container, podman,
+    PhaseStopwatch,
 )
 
 
@@ -65,18 +66,22 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
     )
 
     gateway_paused = False
+    tw = PhaseStopwatch("mixnet_reconnect")
     try:
         # Give Alice's read time to actually reach the daemon before we
         # sever its mixnet route.
         time.sleep(10.0)
+        tw.mark("alice_read_registered")
 
         podman(["pause", gateway])
         gateway_paused = True
         saw_disconnect = _poll_for(alice_err, "reports disconnected from mixnet", 60.0)
+        tw.mark("disconnect_seen")
 
         podman(["unpause", gateway])
         gateway_paused = False
         saw_reconnect = _poll_for(alice_err, "reports reconnected to mixnet", 90.0)
+        tw.mark("reconnect_seen")
 
         # Bob's send happens only once we believe the daemon has
         # reconnected: Alice's read is still pending at that point (Bob
@@ -84,6 +89,7 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
         # before the read itself resolves.
         send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=750.0)
         assert send.returncode == 0, send.stdout + send.stderr
+        tw.mark("bob_sent")
 
         alice_proc.wait(timeout=750.0)
     except Exception:

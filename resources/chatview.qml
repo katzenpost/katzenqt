@@ -221,12 +221,12 @@ TreeView {
 	  RowLayout {
 	       spacing: 1
 	       id : entry_picture_row
-	       visible: model.picture_path ? model.picture_path : false
+	       visible: model.picture_path ? true : false
 	       Image {
-                 id: entry_picture
-                 source: "image://ChatImageProvider/" + model.picture_path
-                 // QQmlEngine.addImageProvider(QQuickImageProvider(def requestImage())
-                 // https://stackoverflow.com/a/20693161
+	         id: entry_picture
+	         source: model.picture_path ? "image://ChatImageProvider/" + model.picture_path : ""
+	         // QQmlEngine.addImageProvider(QQuickImageProvider(def requestImage())
+	         // https://stackoverflow.com/a/20693161
 	         asynchronous: true
 	         fillMode: Image.PreserveAspectFit
 	     }

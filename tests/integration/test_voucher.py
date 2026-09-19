@@ -30,6 +30,36 @@ _PYTHON = os.environ.get(
     str(_VENV_PY) if _VENV_PY.exists() else sys.executable,
 )
 
+# Opt-in per-phase timing for the slow-path investigation (REPORT.md) and the
+# per-hop daemon-leg table. Off by default so normal runs are unaffected.
+_TIMING = os.environ.get("KQT_INTEGRATION_TIMING") == "1"
+
+# Outer subprocess bound for the "send" verb: comfortably above
+# _send_one_gcm's own wall-clock budget (KQT_SEND_BUDGET_FLOOR_S, default
+# 120s; see katzenqt.headless._actions._send_one_gcm), so raising that
+# floor for CI can't silently eat this margin again.
+_SEND_TIMEOUT_S = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0")) + 180.0
+
+_VOUCHER_MARKERS = (
+    " returned after ",
+    " not present yet after ",
+    "retrying in ",
+    "still not present after ",
+)
+
+
+def _timed_run(what: str, role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
+    """Run a role subprocess, printing wall-clock elapsed plus any voucher
+    round-timing lines from its captured stderr when KQT_INTEGRATION_TIMING=1."""
+    t0 = time.perf_counter()
+    proc = _run_role(role_state, *cli_args, timeout=timeout)
+    if _TIMING:
+        print(f"[KQT-TIMING] {what}: {time.perf_counter() - t0:.2f}s", flush=True)
+        for line in _output(proc).splitlines():
+            if any(m in line for m in _VOUCHER_MARKERS):
+                print(f"[KQT-VOUCHER] {line.strip()}", flush=True)
+    return proc
+
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
 # / KATZENQT_KPCLIENTD_PORT, matching conftest).
@@ -38,6 +68,19 @@ _KP_ADDR = "{}:{}".format(
     os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331"),
 )
 _CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
+
+
+def _read_deadline_s() -> str:
+    """The read verb's poll deadline in seconds as a CLI arg string. Epoch-
+    derived with the same +480s headroom as the watchdog read budget: a peer
+    connection rides out at least one epoch boundary, and a send may have
+    consumed the full _send_one_gcm budget before the message lands."""
+    return str(int(epoch_duration_s() + 480.0))
+
+
+def _read_timeout_s() -> float:
+    """Outer subprocess bound for the read verbs, above their poll deadline."""
+    return epoch_duration_s() + 540.0
 
 
 def _role_command(role_state: Path, *cli_args: str) -> list[str]:
@@ -119,35 +162,35 @@ def test_voucher_handshake_then_bidirectional(kpclientd_endpoint, tmp_path_facto
     bob_state = tmp_path_factory.mktemp("bob") / "state"
 
     # Each party provisions its own MessageStream (write/read cap).
-    _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
-    _assert_ok(_run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv")
+    _assert_ok(_timed_run("alice create-conv", alice_state, "create-conv", "demo", "alice"), "alice create-conv")
+    _assert_ok(_timed_run("bob create-conv", bob_state, "create-conv", "demo", "bob"), "bob create-conv")
 
     # Bob mints a Voucher and publishes his payload to box 0.
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
+    mint = _timed_run("bob voucher-mint", bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
     _assert_ok(mint, "bob voucher-mint")
     voucher = _expect_token(mint, "VOUCHER=")
     assert voucher, "empty voucher"
 
     # Alice inducts Bob with the out-of-band voucher.
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
+    induct = _timed_run("alice voucher-induct", alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
     _assert_ok(induct, "alice voucher-induct")
     assert "INDUCTED=" in _output(induct)
 
     # Bob polls box 1, opens the reply, and joins.
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
+    joined = _timed_run("bob voucher-await", bob_state, "voucher-await", "demo", timeout=300.0)
     _assert_ok(joined, "bob voucher-await")
     assert "JOINED" in _output(joined)
 
     # Alice -> Bob: Bob holds Alice's read cap from the WhoReply.
-    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", "--timeout", "450", timeout=750.0), "alice send")
-    read_bob = _run_role(bob_state, "read", "demo", "450", "hello from alice", timeout=600.0)
+    _assert_ok(_timed_run("alice send", alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
+    read_bob = _timed_run("bob read", bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
     _assert_ok(read_bob, "bob read")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
     # Bob -> Alice on the salt-mutated stream: Alice holds Bob's mutated
     # read cap from induction. This is the cross-mutation crux.
-    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", "--timeout", "450", timeout=750.0), "bob send")
-    read_alice = _run_role(alice_state, "read", "demo", "450", "hello from bob", timeout=600.0)
+    _assert_ok(_timed_run("bob send", bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
+    read_alice = _timed_run("alice read", alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
     _assert_ok(read_alice, "alice read")
     assert _expect_token(read_alice, "RECV=") == "hello from bob"
 
@@ -213,6 +256,7 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
         carol_state, "voucher-await", "demo",
         stdout_path=await_out, stderr_path=await_err,
     )
+    t_spawn = time.perf_counter()
     try:
         # Give the poll time to reach the daemon and span at least one PKI
         # epoch BEFORE the reply appears. That epoch-crossing is the core of
@@ -222,8 +266,19 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
         # guarantees the poll observed one boundary (the next is at most an
         # epoch away).
         time.sleep(epoch_duration_s() + 20.0)
+        if _TIMING:
+            print(
+                f"[KQT-TIMING] overlap sleep_done: {time.perf_counter() - t_spawn:.2f}s",
+                flush=True,
+            )
+        t_induct = time.perf_counter()
         induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=900.0)
         _assert_ok(induct, "alice voucher-induct carol")
+        if _TIMING:
+            print(
+                f"[KQT-TIMING] overlap induct: {time.perf_counter() - t_induct:.2f}s",
+                flush=True,
+            )
         await_proc.wait(timeout=900.0)
     finally:
         if await_proc.poll() is None:
@@ -270,13 +325,13 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(joined_bob, "bob voucher-await")
     assert "JOINED" in _output(joined_bob)
 
-    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", "--timeout", "450", timeout=750.0), "alice send")
-    read_bob = _run_role(bob_state, "read", "demo", "450", "hello from alice", timeout=600.0)
+    _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
+    read_bob = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
     _assert_ok(read_bob, "bob read alice")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
-    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", "--timeout", "450", timeout=750.0), "bob send")
-    read_alice_bob = _run_role(alice_state, "read", "demo", "450", "hello from bob", timeout=600.0)
+    _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
+    read_alice_bob = _run_role(alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
     _assert_ok(read_alice_bob, "alice read bob")
     assert _expect_token(read_alice_bob, "RECV=") == "hello from bob"
 
@@ -295,25 +350,25 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     _assert_ok(joined_carol, "carol voucher-await")
     assert "JOINED" in _output(joined_carol)
 
-    _assert_ok(_run_role(carol_state, "send", "demo", "hello from carol", "--timeout", "450", timeout=750.0), "carol send")
-    read_bob_carol = _run_role(bob_state, "read", "demo", "450", "hello from carol", timeout=600.0)
+    _assert_ok(_run_role(carol_state, "send", "demo", "hello from carol", timeout=_SEND_TIMEOUT_S), "carol send")
+    read_bob_carol = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from carol", timeout=_read_timeout_s())
     _assert_ok(read_bob_carol, "bob read carol")
     assert _expect_token(read_bob_carol, "RECV=") == "hello from carol"
 
     # Alice must learn about Carol from the INTRODUCTION Bob wrote to his own
     # stream, then read Carol's message without any further coordination.
-    read_alice_carol = _run_role(alice_state, "read", "demo", "450", "hello from carol", timeout=600.0)
+    read_alice_carol = _run_role(alice_state, "read", "demo", _read_deadline_s(), "hello from carol", timeout=_read_timeout_s())
     _assert_ok(read_alice_carol, "alice read carol")
     alice_out = _output(read_alice_carol)
     assert "RECV_ADD=bob added carol" in alice_out, alice_out
     assert _expect_token(read_alice_carol, "RECV=") == "hello from carol"
 
     # Carol sees the group's pre-join history.
-    read_carol_alice = _run_role(carol_state, "read", "demo", "450", "hello from alice", timeout=600.0)
+    read_carol_alice = _run_role(carol_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
     _assert_ok(read_carol_alice, "carol read alice")
     assert _expect_token(read_carol_alice, "RECV=") == "hello from alice"
 
-    read_carol_bob = _run_role(carol_state, "read", "demo", "450", "hello from bob", timeout=600.0)
+    read_carol_bob = _run_role(carol_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
     _assert_ok(read_carol_bob, "carol read bob")
     assert _expect_token(read_carol_bob, "RECV=") == "hello from bob"
 

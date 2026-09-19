@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._bounce_helpers import bootstrap_voucher as _bootstrap_voucher
 from tests.integration._process import run_logged
 
 
@@ -74,25 +75,6 @@ def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
 
 def _sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
-
-
-def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
-    """Establish contact via the Contact Voucher handshake: both create their
-    own MessageStream, Bob mints a voucher, Alice inducts him, Bob joins.
-    Afterwards Bob holds Alice's read cap and can read her stream."""
-    for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = _run_role(state, "create-conv", "demo", name, timeout=450.0)
-        assert create.returncode == 0, create.stdout + create.stderr
-
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
-    assert mint.returncode == 0, mint.stdout + mint.stderr
-    voucher = _expect_token(mint, "VOUCHER=")
-
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
-    assert induct.returncode == 0, induct.stdout + induct.stderr
-
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
-    assert joined.returncode == 0, joined.stdout + joined.stderr
 
 
 @pytest.mark.integration
