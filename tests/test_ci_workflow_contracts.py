@@ -40,3 +40,33 @@ def test_serial_phase_runs_after_parallel_failure_only() -> None:
     assert "steps.start_mixnet.outcome == 'success'" in condition
     assert "steps.install_deps" not in condition
     assert "success()" not in condition
+
+
+def test_live_failure_is_classified_before_allowing_fallback() -> None:
+    jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
+    live = jobs["namenlos-integration"]
+    assert "continue-on-error: true" in _step(live, "Run integration tests")
+    classification = _step(live, "Check the namenlos result")
+    assert "continue-on-error" not in classification
+    assert "!cancelled()" in classification
+    assert "steps.tests.outputs.exit_code" in classification
+    assert "--report=integration-results/namenlos.json" in classification
+    assert "steps.result.outputs.verdict" in live
+    fallback = jobs["docker-integration"]
+    assert "!cancelled()" in fallback
+    assert (
+        "needs.namenlos-integration.outputs.verdict != 'passed'" in fallback
+    )
+
+
+def test_listener_configuration_errors_are_not_advisory() -> None:
+    live = _jobs(WORKFLOW.read_text(encoding="utf-8"))["namenlos-integration"]
+    config = _step(live, "Configure the namenlos listener")
+    assert "continue-on-error" not in config
+    assert "client.toml Listen block moved" in config
+    probe = _step(live, "Start kpclientd against namenlos")
+    assert "continue-on-error: true" in probe
+    assert "verdict=deadline" in probe
+    assert "kill -0" in probe
+    assert "python3" not in probe
+    assert "if: always()" in _step(live, "Upload logs")

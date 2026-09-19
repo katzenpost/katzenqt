@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       tests: ${{ steps.tests.outcome }}
+      verdict: ${{ steps.result.outputs.verdict }}
 
     steps:
       - name: Checkout katzenqt
@@ -51,9 +52,7 @@ jobs:
           uv sync --all-extras --dev --locked
           wait "$build"
 
-      - name: Start kpclientd against namenlos
-        id: connect
-        continue-on-error: true
+      - name: Configure the namenlos listener
         working-directory: katzenqt
         run: |
           set -euo pipefail
@@ -66,13 +65,28 @@ jobs:
           assert t.count(old) == 1, "client.toml Listen block moved"
           p.write_text(t.replace(old, new, 1))
           PY
+
+      - name: Start kpclientd against namenlos
+        id: connect
+        continue-on-error: true
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
           "$GITHUB_WORKSPACE/kpclientd" --config config/client.toml > "$GITHUB_WORKSPACE/kpclientd.log" 2>&1 &
+          daemon=$!
           for _ in $(seq 60); do
+            if ! kill -0 "$daemon" 2>/dev/null; then
+              echo "verdict=failed" >> "$GITHUB_OUTPUT"
+              cat "$GITHUB_WORKSPACE/kpclientd.log"
+              exit 1
+            fi
             if grep -q 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; then
+              echo "verdict=passed" >> "$GITHUB_OUTPUT"
               echo "kpclientd is on the mixnet:"; grep -m1 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; exit 0
             fi
             sleep 2
           done
+          echo "verdict=deadline" >> "$GITHUB_OUTPUT"
           echo "kpclientd never reached a namenlos gateway"; cat "$GITHUB_WORKSPACE/kpclientd.log"; exit 1
 
       - name: Run integration tests
@@ -85,10 +99,30 @@ jobs:
           KQT_INTEGRATION_PARALLEL: "4"
         run: |
           mkdir -p integration-results
-          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+          rm -f integration-results/namenlos.json
+          status=0
+          .venv/bin/python -m pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
             --dist loadscope -m "not serial_docker and not epoch_driven" \
             --basetemp=integration-results/namenlos \
-            --junitxml=integration-results/namenlos.xml
+            --junitxml=integration-results/namenlos.xml \
+            -p tests.integration._report \
+            --integration-report=integration-results/namenlos.json || status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Check the namenlos result
+        id: result
+        if: ${{ !cancelled() }}
+        working-directory: katzenqt
+        env:
+          CONNECT: ${{ steps.connect.outcome }}
+          PROBE: ${{ steps.connect.outputs.verdict }}
+          TESTS: ${{ steps.tests.outcome }}
+          TEST_EXIT: ${{ steps.tests.outputs.exit_code }}
+        run: |
+          python3 -m tools.integration_result live \
+            --connect="$CONNECT" --probe="$PROBE" --tests="$TESTS" \
+            --exit-code="$TEST_EXIT" --report=integration-results/namenlos.json
 
       - name: Upload logs
         uses: actions/upload-artifact@v7
@@ -97,6 +131,7 @@ jobs:
           name: namenlos-${{ github.run_id }}-${{ github.job }}
           path: |
             katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.json
             katzenqt/integration-results/**/*.out
             katzenqt/integration-results/**/*.err
             kpclientd.log
@@ -104,7 +139,7 @@ jobs:
 
   docker-integration:
     needs: [namenlos-integration]
-    if: always() && needs.namenlos-integration.outputs.tests != 'success'
+    if: ${{ !cancelled() && (needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
     permissions:
       contents: read
       packages: write
@@ -214,6 +249,7 @@ jobs:
           name: mixnet-${{ github.run_id }}-${{ github.job }}
           path: |
             katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.json
             katzenqt/integration-results/**/*.out
             katzenqt/integration-results/**/*.err
             katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
@@ -316,6 +352,28 @@ jobs:
           name: epoch-${{ github.run_id }}-${{ github.job }}
           path: |
             katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.json
             katzenqt/integration-results/**/*.out
             katzenqt/integration-results/**/*.err
             katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
+
+  integration-result:
+    needs: [namenlos-integration, docker-integration, epoch-integration]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check integration results
+        env:
+          LIVE_JOB: ${{ needs.namenlos-integration.result }}
+          LIVE: ${{ needs.namenlos-integration.outputs.verdict }}
+          DOCKER: ${{ needs.docker-integration.result }}
+          EPOCH: ${{ needs.epoch-integration.result }}
+        run: |
+          python3 -m tools.integration_result final \
+            --live-job="$LIVE_JOB" --live="$LIVE" \
+            --docker="$DOCKER" --epoch="$EPOCH"
