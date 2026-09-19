@@ -1196,7 +1196,7 @@ class MainWindow(QMainWindow):
         the pre-mutation stream is never read by the group. An owner who has
         not yet inducted anyone also has no audience. Both are exactly
         ``not conversation_is_joined``. Returns True (and warns) when the send
-        should be abandoned; the caller leaves the user's input in place.
+        should be abandoned; the caller keeps the user's input for a later try.
         """
         if await self.iothread.run_in_io(
             conversation_is_joined(conversation_id)
@@ -1209,21 +1209,28 @@ class MainWindow(QMainWindow):
         ))
         return True
 
+    def _restore_unsent_text(self, convo_state, msg: str) -> None:
+        if self.convo_state_or_none() is not convo_state:
+            convo_state.chat_lineEdit_buffer = msg
+        elif not self.ui.chat_lineEdit.text():
+            self.ui.chat_lineEdit.setText(msg)
+
     @async_cb
     async def chat_msg_single_line(self):
         """Send a single line message to the currently selected chat window."""
         msg = self.ui.chat_lineEdit.text()
+        self.ui.chat_lineEdit.setText("")
         convo_state = self.convo_state()
         if not convo_state:
             return
+        convo_state.chat_lineEdit_buffer = ''
         if not msg.strip():
             return
-        # Refuse (and keep the typed text) until we are actually a member:
-        # sending earlier commits to a stream the group will not read.
+        # Cleared above, before any await, so a second Enter cannot resend the
+        # text; a refusal gives it back.
         if await self._refuse_unless_joined(convo_state.conversation_id):
+            self._restore_unsent_text(convo_state, msg)
             return
-        self.ui.chat_lineEdit.setText("")
-        convo_state.chat_lineEdit_buffer = ''
 
         # Stamp the real membership hash before serialize.
         # Computed on the io loop; never open asession on the Qt loop.
