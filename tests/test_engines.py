@@ -5,8 +5,20 @@ loop) from failing instantly with ``database is locked``, which used to
 crash a drain task mid-commit and strand its stream.
 """
 import pytest
+from sqlmodel import select
 
 from katzenqt import persistent
+
+
+@pytest.mark.asyncio
+async def test_warm_async_engine_opens_a_connection_on_this_loop():
+    """The GUI calls this on the io loop before the Qt loop touches the async
+    engine, so the pool's run-once connect mutex binds to the io loop instead
+    of racing. Smoke-test that it completes and leaves the engine usable."""
+    await persistent.warm_async_engine()
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.Conversation))).all()
+    assert rows == []
 
 
 @pytest.mark.asyncio
