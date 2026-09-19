@@ -1623,14 +1623,12 @@ class TestDrainMixwalReadSingle:
         TombstoneError("tombstone"),
     ])
     @pytest.mark.asyncio
-    async def test_substream_not_found_deactivates_peer(self, fake_thinclient, monkeypatch, benign):
-        """A substream read that hits BoxIDNotFound/Tombstone on its FIRST
-        attempt must fail fast (no_retry_on_box_id_not_found=True) and
-        deactivate the peer: the I-chunk is gated by after_stream so the
-        reader only learns of the substream after every box was written;
-        a not-found means the courier's async replica dispatch failed and
-        nothing will resurrect the box. Deactivating + deleting the MixWAL
-        stops the drain loop re-casting the dead read forever."""
+    async def test_substream_tombstone_is_terminal_but_not_found_retries(
+        self, fake_thinclient: FakeThinClient,
+        monkeypatch: pytest.MonkeyPatch, benign: Exception,
+    ) -> None:
+        """A missing box retries at the same index; a tombstone retires
+        the transfer and publishes its failure after the commit."""
         setup = await _set_up_read_flow(
             fake_thinclient, peer_name=":substream:2:abc",
         )
@@ -1660,13 +1658,13 @@ class TestDrainMixwalReadSingle:
         )
         assert recorded["no_retry_on_box_id_not_found"] is True
         async with persistent.asession() as sess:
-            # Peer deactivated AND its MixWAL row gone, so the drain loop
-            # can never re-cast this dead read.
+            # Only a tombstone retires the transfer on its first attempt.
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
                 persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
             ))).one()
-            assert cp.active is False
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            assert cp.active is (not isinstance(benign, TombstoneError))
+            remaining = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert (remaining is None) is isinstance(benign, TombstoneError)
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio

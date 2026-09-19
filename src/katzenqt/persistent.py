@@ -351,6 +351,8 @@ class ReadCapWAL(SQLModel, table=True):
     # a legacy (136-byte) I-chunk, so the denominator is unknown and progress
     # renders as an indeterminate count.
     substream_total_chunks: int | None = Field(None)
+    substream_missing_since: float | None = Field(default=None)
+    substream_failure: str | None = Field(default=None)
     @classmethod
     async def get_by_bacap_stream(cls, stream: uuid.UUID):
         return (await sess.exec(select(cls).where(id=stream))).one()
