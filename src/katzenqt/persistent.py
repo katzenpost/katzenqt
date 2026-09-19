@@ -875,6 +875,19 @@ class Conversation(SQLModel, table=True):
         description="a Contact Voucher handshake completed successfully for this conversation",
     )
 
+async def peer_named_in_conversation(
+    sess: AsyncSession, conversation_id: int, name: str,
+) -> ConversationPeer | None:
+    peers = (await sess.exec(
+        select(ConversationPeer)
+        .join(ConversationPeerLink,
+              ConversationPeerLink.conversation_peer_id == ConversationPeer.id)
+        .where(ConversationPeerLink.conversation_id == conversation_id,
+               ConversationPeer.name == name)
+    )).all()
+    return peers[0] if len(peers) == 1 else None
+
+
 class ConversationLog(SQLModel, table=True):
     """CBOR messages in a conversation.
 

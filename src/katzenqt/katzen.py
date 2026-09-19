@@ -1381,7 +1381,9 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
-    async def _process_peer_added(self, conversation_id, name) -> None:
+    async def _process_peer_added(
+        self, conversation_id: int, name: str,
+    ) -> None:
         # A dynamically-announced peer could be a synthetic substream; never
         # render those into the contacts tree.
         if name.startswith(network._SUBSTREAM_NAME_PREFIX):
@@ -1402,10 +1404,9 @@ class MainWindow(QMainWindow):
         # too. The queue only carries (conversation_id, name); resolve the
         # read cap/own-ness from the DB.
         async with persistent.asession() as _sess:
-            peer_row = (await _sess.exec(
-                select(persistent.ConversationPeer)
-                .where(persistent.ConversationPeer.name == name)
-            )).first()
+            peer_row = await persistent.peer_named_in_conversation(
+                _sess, conversation_id, name,
+            )
         if peer_row is not None:
             new_item.peer_read_cap_id = peer_row.read_cap_id
             new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
@@ -2046,10 +2047,9 @@ class MainWindow(QMainWindow):
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on dynamically-announced members too.
             async with persistent.asession() as _sess:
-                peer_row = (await _sess.exec(
-                    select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == name)
-                )).first()
+                peer_row = await persistent.peer_named_in_conversation(
+                    _sess, convo.conversation_id, name,
+                )
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -2139,10 +2139,9 @@ class MainWindow(QMainWindow):
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on inducted members too.
             async with persistent.asession() as _sess:
-                peer_row = (await _sess.exec(
-                    select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == joiner_name)
-                )).first()
+                peer_row = await persistent.peer_named_in_conversation(
+                    _sess, convo.conversation_id, joiner_name,
+                )
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
