@@ -112,6 +112,7 @@ async def append_outbound_chat(
     db_entries: list[SQLModel],
     payload: bytes,
     final_pwal_id: uuid.UUID | None = None,
+    log_id: uuid.UUID | None = None,
 ) -> None:
     """Append one outbound chat message's WAL rows and its ConversationLog entry.
 
@@ -120,6 +121,10 @@ async def append_outbound_chat(
     shared across the Qt loop and the io loop, under the per-conversation
     writer lock, so the ``conversation_order`` count-subquery (evaluated at
     COMMIT) is stamped atomically with respect to the receive/voucher appends.
+
+    ``log_id`` lets a caller pre-assign the ConversationLog primary key so it
+    can key cached side-data (e.g. a sent voice note's playback clip) to the
+    id the renderer will resolve against.
     """
     async with conversation_log_order_lock(conversation_id):
         async with asession() as sess:
@@ -128,6 +133,7 @@ async def append_outbound_chat(
             for obj in db_entries:
                 sess.add(obj)
             sess.add(ConversationLog(
+                id=log_id or uuid.uuid4(),
                 conversation_id=conversation_id,
                 conversation_peer_id=conversation_peer_id,
                 conversation_order=next_conversation_order(conversation_id),
@@ -248,6 +254,24 @@ async def asession() -> "AsyncContextManager[sqlmodel.ext.asyncio.session.AsyncS
         except asyncio.CancelledError:
             await close
             raise
+
+
+async def warm_async_engine() -> None:
+    """Open and close one async session to establish the engine's first
+    connection on the calling event loop.
+
+    SQLAlchemy guards the pool's ``connect`` event with a run-once
+    ``asyncio.Lock`` bound to whichever loop first acquires it
+    (``_exec_w_sync_on_first_run``). The GUI runs the async engine from two
+    loops -- the QtAsyncio loop and the ``AsyncioThread`` io loop -- and at
+    startup both could race to create the very first connection, so the loser
+    raised ``RuntimeError: ... is bound to a different event loop``. Calling
+    this once on the io loop (before the Qt loop touches the engine) consumes
+    the guard there and removes the race. Later connections do not take the
+    mutex, so they are unaffected.
+    """
+    async with asession():
+        pass
 
 def _restrict_state_file_perms(path: Path) -> None:
     """Tighten the on-disk state database to owner-only (0600).
