@@ -39,6 +39,7 @@ from sqlmodel import select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
 from . import attachment_images
+from . import conversation_handlers
 from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
@@ -1197,7 +1198,16 @@ class MainWindow(QMainWindow):
         if not msg.strip():
             return
 
-        group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
+        # Stamp the real membership hash before serialize.
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(
+                convo_state.conversation_id
+            )
+        )
+        group_chat_message = GroupChatMessage(
+            version=0, membership_hash=membership_hash, text=msg
+        )
 
         # TODO: this is general code that should live in a shared place:
         send_op = SendOperation(
@@ -1456,10 +1466,10 @@ class MainWindow(QMainWindow):
     @async_cb
     async def transfers_context_menu(self, pos) -> None:
         """Right-click a Transfers row: Pause / Resume that substream
-        download. Reuses the item-5 per-stream primitive (pause freezes the
-        BACAP cursor + cancels the in-flight ARQ; resume re-arms from the
-        saved next_index), so the main conversation keeps flowing either
-        way."""
+        download, or Remove a failed one. Reuses the item-5 per-stream
+        primitive (pause freezes the BACAP cursor + cancels the in-flight
+        ARQ; resume re-arms from the saved next_index), so the main
+        conversation keeps flowing either way."""
         view = self.transfers_view
         idx = view.indexAt(pos)
         if not idx.isValid():
@@ -1476,21 +1486,38 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == rcw_id,
                 )
             )).first()
-        active = bool(solo.active) if solo is not None else True
+        # Check if this transfer is marked as failed in the UI model
+        transfers_model = view.model()
+        row = None
+        for i, rid in enumerate(transfers_model._order):
+            if rid == str(rcw_id):
+                row = i
+                break
+        is_failed = (
+            row is not None and
+            transfers_model._rows.get(rcw_id, {}).get("failed", False)
+        )
         api = QMenu(view)
-        pgm = api.addAction("Pause download")
-        rgm = api.addAction("Resume download")
-        pgm.setEnabled(active)
-        rgm.setEnabled(not active)
-        chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-        if chosen is pgm and active:
-            await self.iothread.run_in_io(
-                network.pause_peer_reads(bacap_stream=rcw_id),
-            )
-        elif chosen is rgm and not active:
-            await self.iothread.run_in_io(
-                network.resume_peer_reads(bacap_stream=rcw_id),
-            )
+        if is_failed:
+            rm = api.addAction("Remove")
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is rm:
+                transfers_model.remove_transfer(rcw_id)
+        else:
+            active = bool(solo.active) if solo is not None else True
+            pgm = api.addAction("Pause download")
+            rgm = api.addAction("Resume download")
+            pgm.setEnabled(active)
+            rgm.setEnabled(not active)
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is pgm and active:
+                await self.iothread.run_in_io(
+                    network.pause_peer_reads(bacap_stream=rcw_id),
+                )
+            elif chosen is rgm and not active:
+                await self.iothread.run_in_io(
+                    network.resume_peer_reads(bacap_stream=rcw_id),
+                )
 
     async def transfers_listener(self) -> None:
         """Drain network.substream_progress_queue into the Transfers model.
@@ -1519,6 +1546,8 @@ class MainWindow(QMainWindow):
                     self.transfers_model.set_paused(rcw_id, paused=True)
                 elif kind == "resumed":
                     self.transfers_model.set_paused(rcw_id, paused=False)
+                elif kind == "failed":
+                    self.transfers_model.fail_transfer(rcw_id, event[2])
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1564,6 +1593,10 @@ class MainWindow(QMainWindow):
 
         voice_note_drafts = []
         audio = getattr(self, "_ptt_audio", None)
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(convo.conversation_id)
+        )
         # One SendOperation per file; unserialize() only decodes one GCM.
         for fn in sorted(convo.attached_files):
             f_path = Path(fn)
@@ -1600,7 +1633,7 @@ class MainWindow(QMainWindow):
             upload = GroupChatFileUpload.from_path(f_path)
             gcm = GroupChatMessage(
                 version=0,
-                membership_hash=b"TODO" * (32 // 4),  # TODO: convo_state.group_chat_state.membership_hash
+                membership_hash=membership_hash,
                 file_upload=upload,
             )
 
@@ -2007,7 +2040,18 @@ class MainWindow(QMainWindow):
             # Synthetic substream peers are never rendered.
             if name.startswith(network._SUBSTREAM_NAME_PREFIX):
                 continue
-            convo.contacts_standard_item.appendRow(QStandardItem(name))
+            new_item = QStandardItem(name)
+            # Tag like add_conversation's peers so the per-peer pause/resume
+            # context menu works on dynamically-announced members too.
+            async with persistent.asession() as _sess:
+                peer_row = (await _sess.exec(
+                    select(persistent.ConversationPeer)
+                    .where(persistent.ConversationPeer.name == name)
+                )).first()
+            if peer_row is not None:
+                new_item.peer_read_cap_id = peer_row.read_cap_id
+                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+            convo.contacts_standard_item.appendRow(new_item)
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(
             n for n in added if not n.startswith(network._SUBSTREAM_NAME_PREFIX)
@@ -2089,7 +2133,18 @@ class MainWindow(QMainWindow):
 
         # Synthetic substream peers are never rendered.
         if not joiner_name.startswith(network._SUBSTREAM_NAME_PREFIX):
-            convo.contacts_standard_item.appendRow(QStandardItem(joiner_name))
+            new_item = QStandardItem(joiner_name)
+            # Tag like add_conversation's peers so the per-peer pause/resume
+            # context menu works on inducted members too.
+            async with persistent.asession() as _sess:
+                peer_row = (await _sess.exec(
+                    select(persistent.ConversationPeer)
+                    .where(persistent.ConversationPeer.name == joiner_name)
+                )).first()
+            if peer_row is not None:
+                new_item.peer_read_cap_id = peer_row.read_cap_id
+                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+            convo.contacts_standard_item.appendRow(new_item)
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         QTimer.singleShot(0, lambda: self._info_plain(
@@ -2406,7 +2461,17 @@ def cli():
     # reliably everywhere; set QT_QUICK_BACKEND yourself to override. Must be
     # set before the QApplication is constructed.
     os.environ.setdefault("QT_QUICK_BACKEND", "software")
+    # QML and icons are referenced by repo-root-relative paths
+    # ("resources/..."), so the app only worked when launched from the repo
+    # root. Anchor the cwd to the resources root so it works from any launch
+    # directory (a NoneType rootObject() -> setProperty crash otherwise, and
+    # the window icon silently fails to load).
+    _res_root = Path(__file__).resolve().parent.parent.parent
+    if (_res_root / "resources").is_dir():
+        os.chdir(_res_root)
     app = QApplication(sys.argv)
+    if (_res_root / "resources" / "echomix_256.png").is_file():
+        app.setWindowIcon(QIcon("resources/echomix_256.png"))
     parser = argparse.ArgumentParser()
     add_log_args(parser)
     args = parser.parse_args()

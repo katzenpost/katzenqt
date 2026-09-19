@@ -1695,6 +1695,130 @@ class TestDrainMixwalReadSingle:
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
+    async def test_substream_unprocessable_chunk_fires_failed_event(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """A substream peer that hits an unprocessable exception during
+        response processing should deactivate the peer, advance the cursor,
+        delete the MixWAL, and fire a 'failed' event."""
+        from katzenqt import conversation_handlers
+        
+        # Set up a parent peer so the substream name resolves correctly.
+        # Substream name format is ":substream:{parent_id}:{nonce}".
+        async with persistent.asession() as sess:
+            wcw_id = uuid.uuid4()
+            wcw = persistent.WriteCapWAL(
+                id=wcw_id, write_cap=b"\xab" * 168, next_index=b"\x00" * 104,
+            )
+            rcw = persistent.ReadCapWAL(
+                id=wcw_id, write_cap_id=wcw_id,
+                read_cap=b"\xac" * 136, next_index=b"\x00" * 104,
+            )
+            sess.add_all((wcw, rcw))
+            await sess.flush()
+            parent_peer = persistent.ConversationPeer(
+                name="carol",
+                read_cap_id=wcw_id,
+                active=True,
+            )
+            sess.add(parent_peer)
+            await sess.flush()
+            parent_id = parent_peer.id
+            await sess.commit()
+            parent_conv = persistent.Conversation(
+                name="carol-conv", own_peer_id=parent_id,
+                write_cap=wcw_id,
+            )
+            sess.add(parent_conv)
+            await sess.commit()
+            await sess.refresh(parent_conv)
+            link = persistent.ConversationPeerLink(
+                conversation_peer_id=parent_id,
+                conversation_id=parent_conv.id,
+            )
+            sess.add(link)
+            await sess.commit()
+            assert parent_id == 1
+        
+        # Use an F-chunk (terminal chunk) to exercise the dispatch path.
+        setup = await _set_up_read_flow(
+            fake_thinclient,
+            peer_name=f":substream:{parent_id}:abc",
+            plaintext=_make_F_payload("test file"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        
+        # Monkeypatch conversation_handlers.dispatch to raise an exception.
+        # This simulates a processing error (e.g., CBOR decode failure, CRDT
+        # error) that gets caught by the generic exception handler.
+        async def failing_dispatch(sess, peer, gcm, full_payload):
+            raise ValueError("malformed chunk data")
+        
+        monkeypatch.setattr(conversation_handlers, "dispatch", failing_dispatch)
+        
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        
+        # The dispatch fails, so the "piece" event is never fired (the
+        # ReceivedPiece add is rolled back). Only the "failed" event appears.
+        event = network.substream_progress_queue.get_nowait()
+        assert event[0] == "failed"
+        assert event[1] == str(setup["bacap_stream"])
+        assert "ValueError: malformed chunk data" in event[2]
+        assert network.substream_progress_queue.empty()
+        
+        # Verify peer deactivated
+        async with persistent.asession() as sess:
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is False
+        # Verify stream released from draining
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
+    async def test_normal_peer_unprocessable_chunk_advances_without_failing(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """A normal (non-substream) peer that hits an unprocessable exception
+        during processing should advance past it without deactivating the peer
+        or firing a 'failed' event."""
+        from katzenqt import conversation_handlers
+        
+        setup = await _set_up_read_flow(
+            fake_thinclient, peer_name="alice",
+            plaintext=_make_F_payload("test"),  # F-chunk triggers dispatch
+        )
+        
+        async def failing_dispatch(sess, peer, gcm, full_payload):
+            raise ValueError("bad data")
+        
+        monkeypatch.setattr(conversation_handlers, "dispatch", failing_dispatch)
+        
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        
+        # Verify peer still active
+        async with persistent.asession() as sess:
+            cp = (await sess.exec(select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
+            ))).one()
+            assert cp.active is True
+        # Verify no 'failed' event fired
+        assert network.substream_progress_queue.empty()
+        # Verify stream released from draining
+        assert setup["bacap_stream"] not in draining
+
+    @pytest.mark.asyncio
     async def test_lost_encrypt_read_is_recovered_after_reconnect(
         self, fake_thinclient, monkeypatch,
     ):
@@ -3457,3 +3581,48 @@ async def test_absent_box_returns_to_polling_without_advancing(monkeypatch, fake
         assert rcw.next_index == setup["rcr"].next_message_box_index
         rows = (await sess.exec(select(persistent.ConversationLog))).all()
         assert len(rows) == 1 and rows[0].payload == _make_F_payload("hello")
+class TestSafeBasename:
+    @pytest.mark.parametrize("raw,expected", [
+        ("ev\x00il.txt", "ev_il.txt"),
+        ("../../etc/passwd", "_.._etc_passwd"),
+        ("caf\u00e9.txt", "caf_.txt"),
+        ("\u4e2d\u6587.png", "__.png"),
+        ("ok name (1).png", "ok name (1).png"),
+        ("..hidden", "hidden"),
+        ("", "unnamed"),
+    ])
+    def test_reduces_a_peer_name_to_seven_bit_ascii(self, raw, expected):
+        got = network._safe_basename(raw)
+        assert got == expected
+        assert all(ord(c) < 128 for c in got)
+class TestUnprocessableContentDoesNotWedgeTheStream:
+    @pytest.mark.asyncio
+    async def test_a_raising_handler_advances_and_drops_the_row(
+        self, fake_thinclient, monkeypatch, caplog
+    ):
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("poison"),
+        )
+        async def boom(*_a, **_k):
+            raise ValueError("undecodable peer content")
+        monkeypatch.setattr(network.conversation_handlers, "dispatch", boom)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            before = (await sess.get(
+                persistent.ReadCapWAL, setup["bacap_stream"])).next_index
+        draining: set = {setup["bacap_stream"]}
+        with caplog.at_level(logging.ERROR, logger="katzen.network"):
+            await network.drain_mixwal_read_single(
+                connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now=draining,
+            )
+        assert any("dropping unprocessable message" in r.message
+                   for r in caplog.records), [r.message for r in caplog.records]
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None, (
+                "row retained: the stream is wedged, no later message arrives"
+            )
+            after = (await sess.get(
+                persistent.ReadCapWAL, setup["bacap_stream"])).next_index
+            assert after != before, "index did not advance past the poisoned box"
+        assert setup["bacap_stream"] not in draining
