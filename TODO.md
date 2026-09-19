@@ -330,3 +330,9 @@ Run the unit suite with `uv run pytest` (not `make test-uv`; the full run is
       per-test reset block — kept both) and the hidden second issue was two
       alembic heads (re-chained `3b19e0386cdd` onto `c4f1a8b2e9d7`). (commit
       35fb4bd)
+- [x] Manual-testing fix: chat poll placeholders now name their creator
+      instead of the generic "Polls" label (`summarize` carries `creator_name`
+      resolved from `presenter.voter_names`; the timeline author role uses it,
+      falling back only when unresolved). (commit d0cb65b)
+- [ ] Manual-testing bug still open: a first attempt to create a poll did not
+      create one, a later attempt did. Not yet investigated.
