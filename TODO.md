@@ -62,8 +62,11 @@ way to see, create, vote on, or close a survey.
 9. Placeholder rows are **clickable** and open that survey in the poll panel
    (raising the Polls tab).
 10. Testing: **both** Qt-free presenter/engine unit tests *and* offscreen Qt
-    widget/model tests (`QT_QPA_PLATFORM=offscreen`, pattern from
-    `tests/test_conversation_log_model.py`).
+     widget/model tests (`QT_QPA_PLATFORM=offscreen`, pattern from
+     `tests/test_conversation_log_model.py`).
+11. The Polls sibling tab lists the **currently selected conversation's**
+     surveys only (the in-chat placeholders already show that conversation's
+     surveys), and its badge counts that conversation's new polls.
 
 ## Architecture constraints (must hold)
 
@@ -86,6 +89,11 @@ way to see, create, vote on, or close a survey.
 
 ## Key code locations
 
+- Reference documentation for the tally feature: `docs/tally-api.md`
+  (protocol/API reference) and `docs/tally-howto.md` (task recipes, including
+  the exact session-scoped create/vote/close patterns step 5 wires). NOTE the
+  directory is `docs/`, not `doc/`; these two .md files are important context
+  for this work.
 - Receive dispatch / order lock: `network.py` `drain_mixwal_read_single`,
   holds `conversation_log_order_lock(notify_conv_id)` at `network.py:994`;
   dispatches per message at `network.py:1019` (substream) and `:1038`
@@ -222,6 +230,40 @@ Read supplied data via sync `persistent.Session(_engine_sync)` reads as needed
 - Protocol semantics, persistence format, and headless verbs are unchanged; this
   work only adds a GUI-facing view over the existing controller.
 
+## Current working plan (session restarted 2026-09-19)
+
+The previous session committed Step 3 (`83fd5ef`) but never marked it done
+here, drifted into Step 4 (receive-path tally notification plumbing, presenter
+read helpers, and an untracked `qt_tally.py`) while uncommitted, then lost the
+thread. This file is being kept up to date **continuously** this time: every
+sub-phase lands as its own code commit, with the matching TODO.md status
+committed separately (same message style: `update TODO.md: ...`).
+
+Remaining sequence, with a review checkpoint after Step 4:
+
+1. Commit the working-tree Step-4 backend as-is: the `tally_update_queue`
+   receive-path plumbing (`network.py`, `conversation_handlers.py`, conftest
+   reset, handler/controller test updates, network-fake test), then the
+   presenter read helpers (`survey_doc`, `first_unread_order`,
+   `conversation_names`) and their tests.
+2. Finish Step 4 in `qt_tally.py`: review the untracked module for ordering /
+   unread-mapping / role-forwarding correctness; add `TallyPanel.show_survey`
+   plus current-survey tracking and a "New poll" dialog host; scope
+   `PollsTabModel` to the current conversation (locked Decision 11). Add
+   `tests/test_qt_tally.py`. Run `make test-uv`.
+3. **PAUSE for user review** once Step 4 is committed.
+4. Step 5 wiring (`katzen.py` + `resources/chatview.qml`): Polls tab +
+   badge, `TimelineModel` swap (route `increment_row_count` / `redraw` /
+   `row_count` to the wrapped source), first-unread row<->order mapping,
+   `tally_update_queue` listener, io-loop create/vote/close (pattern from
+   `headless/_actions.py`), QML placeholder rows + `openPoll(surveyId)`.
+5. Step 6 remainder: migration-bootstrap coverage for the
+   `TallyState.conversation_order` column, full unit run.
+6. Small docs update once the GUI lands: `docs/tally-api.md` (dispatch now
+   returns a 4-tuple `(convlog_added, signal_send, peer_added, tally_added)`,
+   the tally notification queue, "no GUI yet" and Known gap #1 are obsolete)
+   and `docs/tally-howto.md` (the "no tally notification channel" section).
+
 ## Session log
 
 - [x] Confirmed with the user the protocol/persistence model, resolving the
@@ -231,7 +273,7 @@ Read supplied data via sync `persistent.Session(_engine_sync)` reads as needed
       receive prior polls; TALLY_SYNC_REQ is edge-case repair -> deferred.
       Corrected a wrong earlier claim: tally messages ARE persisted (as CRDT
       Doc blobs in TallyState), just not as ConversationLog rows.
-- [x] Locked all 12 design decisions (see Decisions above).
+- [x] Locked all 11 design decisions (see Decisions above).
 - [x] Verified schema, receive path, expect blocks, model patterns, test style.
 - [x] Step 1: order capture. Added nullable `TallyState.conversation_order`
       (persistent.py + migration `3b19e0386cdd`); `_save` stamps it with
@@ -243,8 +285,14 @@ Read supplied data via sync `persistent.Session(_engine_sync)` reads as needed
       version, choices; `tally()` now reuses it). Controller drops malformed
       TALLY_SYNC_REQ state vectors (ValueError -> log + drop, no staged reply).
       Tests added. (commit be767a6)
-- [ ] Step 3: Qt-free presenter + tests.
+- [x] Step 3: Qt-free presenter + tests (commit 83fd5ef, committed before the
+      TODO update was made). Divergences from the plan text: `summarize` in
+      place of `survey_summary`, `placeholder_text` in place of `row_text`,
+      and `panel_state` was not written — the panel renders directly in
+      `qt_tally.TallyPanel`, so that helper proved unnecessary.
 - [ ] Step 4: Qt-only UI (TimelineModel, PollsTabModel, TallyPanel,
-      TallyCreateDialog, tally_update_queue).
+      TallyCreateDialog, tally_update_queue). In progress: receive-path queue
+      plumbing + presenter read helpers + `qt_tally.py` are written but
+      uncommitted/untested; see "Current working plan" above.
 - [ ] Step 5: katzen.py wiring + chatview.qml placeholders/click.
 - [ ] Step 6: test suite + final full unit run.
