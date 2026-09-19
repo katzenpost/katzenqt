@@ -259,11 +259,14 @@ Remaining sequence, with a review checkpoint after Step 4:
    singleton is widget-capable regardless of module order). Full unit run
    green. (commit d048e56)
 3. **PAUSE for user review** once Step 4 is committed.
-4. Step 5 wiring (`katzen.py` + `resources/chatview.qml`): Polls tab +
-   badge, `TimelineModel` swap (route `increment_row_count` / `redraw` /
-   `row_count` to the wrapped source), first-unread row<->order mapping,
-   `tally_update_queue` listener, io-loop create/vote/close (pattern from
-   `headless/_actions.py`), QML placeholder rows + `openPoll(surveyId)`.
+4. [x] Step 5 wiring (`katzen.py` + `resources/chatview.qml`): Polls tab +
+   badge, `TimelineModel` swap (the window-owned `ConversationLogModel` is
+   passed into the wrapper; chat inserts already drive `TimelineModel.refresh`
+   via its `rowsInserted`/`modelReset` connections, so no separate routing was
+   needed), first-unread row<->order mapping at the `qml_ctx` boundary, the
+   supervised `tally_listener` draining `network.tally_update_queue`, io-loop
+   create/vote/close helpers, and QML placeholder styling +
+   `chatController.openPoll(surveyId)`. (commit b841b8e)
 5. Step 6 remainder: migration-bootstrap coverage for the
    `TallyState.conversation_order` column, full unit run.
 6. Small docs update once the GUI lands: `docs/tally-api.md` (dispatch now
@@ -304,5 +307,11 @@ Run the unit suite with `uv run pytest` (not `make test-uv`; the full run is
       TallyCreateDialog, tally_update_queue). Booking commit d048e56
       alongside the step-4 backend batch (81d83c9, 6558dbd); see "Current
       working plan" above. Remaining: step-5 wiring + docs update.
-- [ ] Step 5: katzen.py wiring + chatview.qml placeholders/click.
+- [x] Step 5: katzen.py wiring + chatview.qml placeholders/click (commit
+      b841b8e). Divergences from the plan text: no separate
+      `increment_row_count`/`redraw` routing was needed (TimelineModel listens
+      to its source model's signals); a `TallyPanel.clear()` was added for
+      conversation switches; `tally_new` is now derived live from the
+      order-space pointer instead of a stored `is_new` so read-advance needs no
+      model reset.
 - [ ] Step 6: test suite + final full unit run.
