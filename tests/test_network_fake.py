@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import uuid
 
 import cbor2
@@ -38,6 +39,7 @@ from katzenpost_thinclient import (
 from katzenpost_thinclient.core import MKEMDecryptionFailedError
 
 from katzenqt import models, network, persistent
+from tests.fakes.thinclient import FakeThinClient
 
 
 def _make_F_payload(text: str = "hello") -> bytes:
@@ -1327,9 +1329,10 @@ class TestDrainMixwalReadSingle:
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("extended", [False, True])
     async def test_substream_terminal_f_fires_completed_event(
-        self, fake_thinclient,
-    ):
+        self, fake_thinclient: FakeThinClient, extended: bool,
+    ) -> None:
         """Assembling the substream's terminal F (through a
         parent peer that resolves from the substream name) retires the
         substream and queues a single ``completed`` event so the Transfers
@@ -1377,6 +1380,14 @@ class TestDrainMixwalReadSingle:
             plaintext=_make_F_payload("finalised"),
         )
         async with persistent.asession() as sess:
+            release = setup["read_cap"]
+            if extended:
+                release = struct.pack(">I", 1) + release
+            sess.add(persistent.ReceivedPiece(
+                read_cap=wcw_id, bacap_index=bytes(8),
+                chunk_type=b"I", chunk=release,
+            ))
+            await sess.commit()
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         await network.drain_mixwal_read_single(
             connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
@@ -1390,6 +1401,11 @@ class TestDrainMixwalReadSingle:
         assert event[0] == "completed"
         assert event[1] == setup["bacap_stream"]
         assert network.substream_progress_queue.empty()
+
+        async with persistent.asession() as sess:
+            assert await sess.get(
+                persistent.ReceivedPiece, (wcw_id, bytes(8)),
+            ) is None
 
     @pytest.mark.asyncio
     async def test_invalid_prefix_deactivates_peer(self, fake_thinclient):
