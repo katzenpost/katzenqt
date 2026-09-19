@@ -339,3 +339,36 @@ clean:
 	@rm -r $(VENV)
 	@rm $(SYSTEM_STAMP)
 
+
+ACT_ARGS ?=
+
+.PHONY: ci-local
+ci-local:
+	@command -v act >/dev/null || { printf '%s\n' 'act is required' >&2; exit 1; }
+	command -v curl >/dev/null || { printf '%s\n' 'curl is required' >&2; exit 1; }
+	endpoint="$${DOCKER_HOST:-unix://$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}/podman/podman.sock}"
+	case "$$endpoint" in
+		unix:///*) socket="$${endpoint#unix://}" ;;
+		*) printf '%s\n' 'ci-local requires a local Unix socket' >&2; exit 1 ;;
+	esac
+	if [[ ! -S "$$socket" ]]; then
+		printf 'Podman socket is unavailable: %s\n' "$$socket" >&2
+		printf '%s\n' 'Start it with: systemctl --user start podman.socket' >&2
+		exit 1
+	fi
+	if ! reply=$$(curl --disable --fail --silent --show-error --max-time 5 \
+		--noproxy '*' --unix-socket "$$socket" http://localhost/_ping); then
+		printf 'Podman API is not responding on %s\n' "$$socket" >&2
+		exit 1
+	fi
+	if [[ "$$reply" != OK ]]; then
+		printf 'Unexpected Podman API response on %s\n' "$$socket" >&2
+		exit 1
+	fi
+	export DOCKER_HOST="$$endpoint"
+	mkdir -p "$(CURDIR)/.ci-local"
+	exec act --concurrent-jobs 1 --network host \
+		--container-daemon-socket "$$endpoint" \
+		--container-options '--volume "$(CURDIR)/.ci-local:$(CURDIR)/.ci-local"' \
+		--artifact-server-path "$(CURDIR)/.ci-local/artifacts" \
+		--artifact-server-addr 127.0.0.1 $(ACT_ARGS)
