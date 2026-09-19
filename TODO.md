@@ -77,8 +77,11 @@ the bugs they guarded").
   `/home/kpdev/katzenpost/replica/proxy_request_manager.go`,
   `/home/kpdev/katzenpost/replica/connector.go`.
 - Dockerized testnet: `/home/kpdev/katzenpost/docker/mixnet-alpine/`.
-  Makefile targets in that dir: if a full containerized-mixnet restart is ever
-  needed, pass `base_port=62331` so kpclientd lands on `127.0.0.1:64331`.
+  **Runs under rootless podman + podman-compose, not Docker**: `podman ps`,
+  `podman stats`, `podman top <ctr>` all work from the host without sudo.
+  Makefile: `/home/kpdev/katzenpost/docker/Makefile`; if a full
+  containerized-mixnet restart is ever needed, pass `base_port=62331` so
+  kpclientd lands on `127.0.0.1:64331`.
 - The webtop container (runs the 3 client GUI apps) is `katzenqt_webtop`, with
   the repo mounted read-write at `/config/katzenqt`. Client DBs live **inside
   webtop**, not on the host: `/config/.local/share/katzenqt/{a,b,c}.sqlite3`
@@ -105,56 +108,45 @@ the bugs they guarded").
 
 ---
 
-## 1. Investigate the katzenpost replica proxy-sweep storm (root cause bug)
+## 1. katzenpost replica proxy-sweep storm (RESOLVED)
 
-Investigate and fix the replica-side proxy storm that has been hammering this
-5-replica testnet and was the root cause of the failed first delivery.
+Root cause: the dead-substream read amplification removed by item 3 was the
+dominant driver; the replica proxy machinery itself works to spec and is
+bounded. Verified 2026-09-19 on the running 5-replica testnet (rev
+`2609c423`, binary built 09-07; `replica/` at HEAD differs only in hpqc error
+plumbing).
 
-### Symptoms / evidence
+### Evidence
 
-- Tens of thousands of `proxy sweep budget exhausted` errors in replica logs:
-  `replica1=~72,800`, `replica3=~35,000`, `replica4=~25,300`, `replica5=~34,000`
-  (paths: `/home/kpdev/katzenpost/docker/mixnet-alpine/replica{1..5}/katzenpost.log`).
-- Replicas stuck at 50-85% CPU for days, even while reads were still
-  completing on the second attempt.
-- `err=9` (ReplicationFailed) <-> `err=1` (BoxIDNotFound) churn in
-  `/home/kpdev/katzenpost/docker/mixnet-alpine/servicenode{1,2,3}/courier/courier.log`.
-- Restarting the 5 replicas dropped CPU 50% -> 3-4% for ~2 min, then it crept
-  back to 26-85% as the clients' dead-substream read loops re-engaged. Removing
-  the dead-substream reads (item 3) gave steady ~1 crate/min progress with
-  only transient stalls.
+- `proxy sweep budget exhausted` per replica/day: peak ~40k (09-10/11), ~5-6k
+  steady (09-12..17, before item 3 landed in the webtop clients), ~3.5k
+  (09-18), and 19-207 today (09-19 half-day) —
+  `/home/kpdev/katzenpost/docker/mixnet-alpine/replica{1..5}/katzenpost.log`.
+  The logs are time-only; a day boundary is a backward timestamp jump > 8h,
+  with the second startup marker as a known anchor.
+- The replicas still sit at ~0.85 core each (`podman stats`), but that is the
+  CTIDH1024 cost of the 3 webtop clients polling at the usual rate, not a
+  storm: today ~42k local shard reads (100% miss) + ~21k proxied reads against
+  ~0 writes. Apportioned to item 10.
 
-### Code to inspect
+### Disposition of the three suspects
 
-- `/home/kpdev/katzenpost/replica/handlers.go`:
-  - `proxySweepBudget` / `proxyAttemptTimeout` around `handlers.go:627-656`;
-    `errProxySweepBudgetExhausted` at `handlers.go:662`.
-  - The proxy-failover read path (`proxyReadRequest`, "trying the next holder",
-    `errorCodeProxyReadTimeout` etc). A recently-rewritten proxy failover
-    segment is a strong suspect (self-inflicted probe loops between replicas).
-- `/home/kpdev/katzenpost/replica/proxy_request_manager.go` — proxy worker slot
-  allocation at `proxy_request_manager.go:125` (`ProxyWorkerCount=0` default?).
-- `/home/kpdev/katzenpost/replica/connector.go` — replication dispatch / queue
-  for retry at `connector.go:334-388` ("Only dispatched to M/N targets (others
-  queued for retry)").
-- `/home/kpdev/katzenpost/pigeonhole/errors.go` — replica error codes 0-11.
-- Replica `replica.toml` currently uses `ProxyRequestTimeout = 0` and
-  `ProxyWorkerCount = 0` (inferred defaults); question whether 0 is actually a
-  sane default and whether these need explicit non-zero values.
-
-### Suspects to pursue
-
-1. Infinite/long-lived proxy probe loop when a box genuinely does not exist
-   durable, amplified by every client retrying the read. This client no longer
-   contributes to that amplification — every read now casts
-   `no_retry_on_box_id_not_found=True` and re-polls locally instead of riding
-   out BoxIDNotFound in the daemon — but the mixnet/courier-side investigation
-   is still open.
-2. Replication acknowledged to the client before durability (item 3), so the
-   proxy machinery spins trying to satisfy reads for boxes that will never
-   appear.
-3. `ProxyWorkerCount` / `ProxyRequestTimeout` defaults of 0 interacting badly
-   with the rewritten proxy manager.
+1. No unbounded probe loop: the failover sweep is budget-bounded
+   (`proxySweepBudget`/`proxyAttemptTimeout`, `handlers.go:617-667`), the read
+   reply comes from the first authoritative holder
+   (`proxyReadSweep`/`proxyReadRequest`, `handlers.go:802-941`), read-repair is
+   double-gated (`handlers.go:920-924`), and dead-peer waiters are released
+   immediately (`FailPeer`/`FailRequest`, `proxy_request_manager.go:100-139`).
+2. Ack-before-durability is by design, not a bug: the courier ACK is
+   explicitly "accepted, not durable" (`ackReply`,
+   `courier/server/plugin.go`), replica dispatch is async and bounded by the
+   in-flight collapse + `dispatchSem` (`scheduleReplicaDispatch`), and
+   `CacheReply` overwrites transient `err=1`/`err=9` (BoxIDNotFound=1,
+   ReplicationFailed=9, `pigeonhole/errors.go`) as writes propagate.
+3. `ProxyRequestTimeout = 0` / `ProxyWorkerCount = 0` in `replica.toml` are
+   sane: the startup log prints `Replica runtime defaults:
+   ProxyWorkerCount=6, IncomingQueueSize=192, ProxyRequestTimeout=30s`
+   (config.ApplyRuntimeDefaults).
 
 ---
 
@@ -363,3 +355,49 @@ the divergence deliberately.
 - Startup seeding: uploads have no `ConversationPeer` row, so seed from
   PlaintextWAL rows with `indirection IS NOT NULL` (an in-flight upload's
   I-chunk).
+
+---
+
+## 10. Client read-poll cadence keeps the replicas at the CTIDH ceiling
+
+The 3 webtop GUI clients poll their streams at a fixed cadence and, with the
+item-1 storm gone, the 5 replicas now sit at ~0.85 core each on that polling
+cost alone. Today's replica traffic: ~42k local shard reads (100% miss) +
+~21k proxied reads against ~0 writes — every one pays a CTIDH1024 op.
+
+### How the cadence is wired
+
+- The client re-polls a read cap every ~5s: `await asyncio.sleep(5)` in
+  `drain_mixwal_read_single` (`network.py:835`), casting
+  `no_retry_on_box_id_not_found=True` (`network.py:863`) so the daemon adds no
+  ARQ noise on misses.
+- Reads land on a random replica ~60%+ of the time and are proxied to the
+  shard holder (`PROXY_REQUEST`, replica3 ≈ 9-23k/day), each costing another
+  2-4 CTIDH ops.
+
+### Question
+
+Can the poll cadence relax (longer backoff on repeat misses, or notification
+instead of polling) without hurting delivery latency, and can reads be routed
+to a shard holder directly to skip the proxy hop? Pure perf/cost; not a
+correctness bug. A different Sphinx/CTIDH geometry for the testnet is the
+other lever. Evaluate when the item-9 transfer work next touches the read
+path.
+
+---
+
+## 11. Per-epoch authority handshake churn (cosmetic noise)
+
+Every ~120s (once per epoch) each servicenode courier's voting client fails
+its first authority handshake, then retries cleanly:
+
+```
+WARN pki/voting/client/connector: authority authN: attempt 1 failed: peer authN
+... handshake failed at message_4_receive ... use of closed network connection
+```
+
+Uniform across `servicenode{1,2,3}` (~6000 occurrences each since 09-07 in
+`courier/courier.log`); the retry succeeds and `onGetConsensus` stays healthy
+on the authority side, so it is noise, not an outage. Suspect a connection
+teardown race at the epoch boundary in `pki/voting/client/connector`. Worth a
+look the next time that code is touched.
