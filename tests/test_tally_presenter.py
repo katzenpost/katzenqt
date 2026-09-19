@@ -83,6 +83,23 @@ def test_summarize_records_my_choices_from_my_voter_id():
     assert summary.my_score_on("s1") is None
 
 
+def test_summarize_resolves_the_creator_name_from_voter_names():
+    creator = voter_id_from_read_cap(ALICE_CAP)
+    doc = schema.new_survey_doc(
+        uuid.uuid4().bytes, "lunch?", Mode.APPROVAL, ["a"], creator=creator,
+    )
+
+    # Without a mapping (or without the creator in it) the name is unknown and
+    # the renderer falls back; with it, the display name is carried through.
+    assert presenter.summarize(doc, conversation_id=1).creator_name is None
+    assert presenter.summarize(
+        doc, conversation_id=1, voter_names={b"\x00" * 16: "someone"},
+    ).creator_name is None
+    assert presenter.summarize(
+        doc, conversation_id=1, voter_names={creator: "alice"},
+    ).creator_name == "alice"
+
+
 def test_placeholder_text_reflects_state_and_participation():
     doc = _doc()
     open_none = presenter.summarize(doc, conversation_id=1)

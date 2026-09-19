@@ -21,7 +21,11 @@ from PySide6.QtGui import QStandardItem  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
-from katzenqt.qt_models import ConversationLogModel, ConversationUIState  # noqa: E402
+from katzenqt.qt_models import (  # noqa: E402
+    ROLE_CHAT_AUTHOR,
+    ConversationLogModel,
+    ConversationUIState,
+)
 from katzenqt.qt_tally import (  # noqa: E402
     ROLE_TALLY_NEW,
     ROLE_TALLY_PLACEHOLDER,
@@ -47,8 +51,8 @@ def _qt_app() -> Iterator[QApplication]:
 
 
 def _make_convo_sync(name: str = "lobby") -> "tuple[int, int]":
-    """A committed conversation with an own peer, returning
-    ``(conversation_id, own_peer_id)``."""
+    """A committed conversation with an own peer ("me") and one active remote
+    peer ("alice"), returning ``(conversation_id, own_peer_id)``."""
     wcap = persistent.WriteCapWAL(id=uuid.uuid4())
     own_rcap = persistent.ReadCapWAL(
         id=uuid.uuid4(), write_cap_id=wcap.id, read_cap=OWN_CAP,
@@ -63,6 +67,11 @@ def _make_convo_sync(name: str = "lobby") -> "tuple[int, int]":
         sess.add(own_rcap)
         sess.add(convo)
         sess.add(own_peer)
+        alice_rcap = persistent.ReadCapWAL(id=uuid.uuid4(), read_cap=ALICE_CAP)
+        sess.add(alice_rcap)
+        sess.add(persistent.ConversationPeer(
+            name="alice", read_cap_id=alice_rcap.id, conversation=convo,
+        ))
         sess.commit()
         return convo.id, own_peer.id
 
@@ -197,6 +206,34 @@ def test_timeline_unknown_conversation_has_no_rows():
     assert m.rowCount() == 0
     assert m.order_to_row(0) == 0
     assert m.row_to_order(0) == 0
+
+
+def test_timeline_poll_author_is_the_creator():
+    """The placeholder row must say who opened the poll, not a generic label."""
+    convo_id, _ = _make_convo_sync()
+    own_sid = uuid.uuid4().bytes
+    alice_sid = uuid.uuid4().bytes
+    _seed_survey(convo_id, own_sid, order=0)  # creator defaults to us
+    _seed_survey(
+        convo_id, alice_sid, topic="alice's", order=1,
+        creator_voter_id=voter_id_from_read_cap(ALICE_CAP),
+    )
+
+    m = _timeline_for(convo_id, n_chat=0)
+    row_by_sid = {entry.poll.survey_id: i for i, entry in enumerate(m._rows)}
+    assert m.data(m.index(row_by_sid[own_sid], 0), ROLE_CHAT_AUTHOR) == "me"
+    assert m.data(m.index(row_by_sid[alice_sid], 0), ROLE_CHAT_AUTHOR) == "alice"
+
+
+def test_timeline_poll_author_falls_back_when_the_creator_is_unknown():
+    """A creator id with no resolvable peer name keeps the generic label."""
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id, order=0, creator_voter_id=b"\xaa" * 16,
+    )
+    m = _timeline_for(convo_id, n_chat=0)
+    assert m.data(m.index(0, 0), ROLE_CHAT_AUTHOR) == "Polls"
 
 
 # ---------------------------------------------------------------------------

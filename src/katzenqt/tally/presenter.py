@@ -48,6 +48,9 @@ class SurveySummary:
     creator_voter_id: "bytes | None"
     my_voter_id: "bytes | None"
     my_choices: "dict[str, str]"
+    # Display name for creator_voter_id, resolved by the caller from
+    # voter_names(); None when unknown, so the renderer can fall back.
+    creator_name: "str | None" = None
     is_new: bool = False
 
     def voted_slot_ids(self) -> "list[str]":
@@ -94,9 +97,15 @@ def summarize(
     conversation_id: int,
     conversation_order: "int | None" = None,
     my_voter_id: "bytes | None" = None,
+    voter_names: "dict[bytes, str] | None" = None,
     is_new: bool = False,
 ) -> SurveySummary:
-    """Project one survey ``Doc`` into a renderer-friendly summary. Pure."""
+    """Project one survey ``Doc`` into a renderer-friendly summary. Pure.
+
+    ``voter_names`` (see :func:`voter_names`) is optional and only used to
+    resolve the creator's display name; a doc whose creator is unknown (or a
+    legacy doc predating the ``creator`` field) yields ``creator_name=None``.
+    """
     result = engine.tally(doc)
     my_choices: "dict[str, str]" = {}
     if my_voter_id is not None:
@@ -104,6 +113,12 @@ def summarize(
             if voter.voter_id == my_voter_id:
                 my_choices = dict(voter.choices)
                 break
+    creator_voter_id = schema.creator_of(doc)
+    creator_name = (
+        voter_names.get(creator_voter_id)
+        if voter_names is not None and creator_voter_id is not None
+        else None
+    )
     return SurveySummary(
         survey_id=result.survey_id,
         conversation_id=conversation_id,
@@ -115,9 +130,10 @@ def summarize(
         slots=tuple(result.slots),
         n_voters=result.n_voters,
         outcome=engine.outcome(result),
-        creator_voter_id=schema.creator_of(doc),
+        creator_voter_id=creator_voter_id,
         my_voter_id=my_voter_id,
         my_choices=my_choices,
+        creator_name=creator_name,
         is_new=is_new,
     )
 

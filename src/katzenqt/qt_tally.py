@@ -193,6 +193,7 @@ class TimelineModel(QtCore.QAbstractItemModel):
 
     def _load_polls(self) -> "list[SurveySummary]":
         my_voter_id = presenter.own_voter_id(self.convo_id)
+        names = presenter.voter_names(self.convo_id)
         out: "list[SurveySummary]" = []
         for survey_id, order in presenter.surveys_for_conversation(self.convo_id):
             blob = presenter.survey_doc(self.convo_id, survey_id)
@@ -203,6 +204,7 @@ class TimelineModel(QtCore.QAbstractItemModel):
                 conversation_id=self.convo_id,
                 conversation_order=order,
                 my_voter_id=my_voter_id,
+                voter_names=names,
                 is_new=order is not None and order >= self._first_unread,
             )
             out.append(summary)
@@ -261,7 +263,9 @@ class TimelineModel(QtCore.QAbstractItemModel):
             # visible without a model reset.
             return entry.order >= self._first_unread
         if role == ROLE_CHAT_AUTHOR:
-            return _PLACEHOLDER_AUTHOR
+            # Identify the poll's creator; unresolved/legacy polls fall back
+            # to the generic label.
+            return entry.poll.creator_name or _PLACEHOLDER_AUTHOR
         if role == ROLE_CHAT_NETWORK_STATUS:
             return 0
         return None
@@ -300,15 +304,21 @@ class PollsTabModel(QtCore.QAbstractListModel):
             ]
         )
         rows: "list[SurveySummary]" = []
+        names_by_convo: "dict[int, dict[bytes, str]]" = {}
         for conversation_id, survey_id, order in ids:
             blob = presenter.survey_doc(conversation_id, survey_id)
             if blob is None:
                 continue
+            names = names_by_convo.get(conversation_id)
+            if names is None:
+                names = presenter.voter_names(conversation_id)
+                names_by_convo[conversation_id] = names
             summary = presenter.summarize(
                 load_doc(blob),
                 conversation_id=conversation_id,
                 conversation_order=order,
                 my_voter_id=presenter.own_voter_id(conversation_id),
+                voter_names=names,
                 is_new=order is not None
                 and order >= presenter.first_unread_order(conversation_id),
             )
@@ -495,18 +505,17 @@ class TallyPanel(QWidget):
             None,
         )
         doc = load_doc(blob)
+        names = presenter.voter_names(conversation_id)
         summary = presenter.summarize(
             doc,
             conversation_id=conversation_id,
             conversation_order=order,
             my_voter_id=presenter.own_voter_id(conversation_id),
+            voter_names=names,
         )
         self._survey_key = (conversation_id, survey_id)
         self.set_summary(summary)
-        self.set_voters(presenter.panel_rows(
-            doc,
-            presenter.voter_names(conversation_id),
-        ))
+        self.set_voters(presenter.panel_rows(doc, names))
         return True
 
     def current_survey(self) -> "tuple[int, bytes] | None":
