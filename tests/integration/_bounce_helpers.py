@@ -21,6 +21,7 @@ instead of assuming the docker mixnet's 2m default.
 from __future__ import annotations
 
 import functools
+import math
 import os
 import re
 import socket
@@ -29,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from tests.integration._process import run_logged
+from tests.integration._process import run_logged, spawn_logged
 
 # Opt-in per-phase timing for the integration-suite slow-path investigation
 # (REPORT.md). Off by default so normal runs are unaffected.
@@ -75,15 +76,31 @@ def _parse_go_duration(text: str) -> float:
     """Parse a Go time.ParseDuration-style string ("2m", "1h30m", "45s")
     into seconds. Only h/m/s/ms are needed here: genconfig's --epochDuration
     flag is passed straight through as this string."""
+    terms = list(_GO_DURATION_TERM_RE.finditer(text))
+    offset = 0
     total = 0.0
-    matched = False
-    for amount, unit in _GO_DURATION_TERM_RE.findall(text):
-        matched = True
+    for term in terms:
+        if term.start() != offset:
+            raise ValueError(f"not a Go duration string: {text!r}")
+        amount, unit = term.groups()
         scale = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}[unit]
         total += float(amount) * scale
-    if not matched:
+        offset = term.end()
+    if not terms or offset != len(text):
         raise ValueError(f"not a Go duration string: {text!r}")
-    return total
+    return _positive_epoch_seconds(total)
+
+
+def _positive_epoch_seconds(value: str | float) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "epoch duration must be positive finite seconds"
+        ) from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("epoch duration must be positive finite seconds")
+    return seconds
 
 
 @functools.lru_cache(maxsize=1)
@@ -99,8 +116,14 @@ def epoch_duration_s() -> float:
     rather than a second guess at it.
     """
     override = os.environ.get("KQT_EPOCH_DURATION_S")
-    if override:
-        return float(override)
+    if override is not None:
+        return _positive_epoch_seconds(override)
+    target = os.environ.get("KQT_INTEGRATION_TARGET", "docker")
+    if target != "docker":
+        raise RuntimeError(
+            f"KQT_EPOCH_DURATION_S is required for target {target!r}; "
+            "a local Docker configuration does not describe a live network"
+        )
     compose_path = Path(os.environ.get(
         "KATZENPOST_DOCKER_COMPOSE",
         str(REPO_ROOT / "katzenpost" / "docker" / "mixnet-alpine" / "docker-compose.yml"),
@@ -131,7 +154,9 @@ KP_ADDR = "{}:{}".format(
 CONN_ARGS = ("--address", KP_ADDR, "--network", "tcp")
 
 
-def run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
+def run_role(
+    role_state: Path, *cli_args: str, timeout: float = 300.0,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     env["PYTHONUNBUFFERED"] = "1"
@@ -141,7 +166,9 @@ def run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
     )
 
 
-def spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path) -> subprocess.Popen:
+def spawn_role(
+    role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path,
+) -> subprocess.Popen[str]:
     """Popen variant for long-running chat-session subprocesses that we
     want running in parallel. We redirect stdout/stderr to files instead
     of pipes to avoid the classic 64 KB pipe-buffer deadlock: when one
@@ -153,11 +180,9 @@ def spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path:
     env["KQT_STATE"] = str(role_state)
     env["PYTHONUNBUFFERED"] = "1"
     cmd = [PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *CONN_ARGS]
-    return subprocess.Popen(
+    return spawn_logged(
         cmd, env=env, cwd=str(REPO_ROOT),
-        stdout=open(stdout_path, "w"),
-        stderr=open(stderr_path, "w"),
-        text=True,
+        stdout_path=stdout_path, stderr_path=stderr_path,
     )
 
 

@@ -22,6 +22,8 @@ import traceback
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
+from collections.abc import Awaitable, Callable, Hashable
+from typing import Protocol, TypedDict, TypeVar, Unpack, Literal
 
 import cbor2
 
@@ -296,7 +298,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
     try:
-      resp = await _rpc_racing_connection_life(
+      resp = await _delivery_racing_connection_life(
           bacap_uuid=mw.bacap_stream,
           what="start_resending_encrypted_message",
           rpc_factory=lambda: connection.start_resending_encrypted_message(
@@ -440,8 +442,28 @@ _CONNECTION_IDLE_RETRY_S = 60.0
 _ARMING_SWEEP_S = 60.0
 
 
-_EPOCH_LOSS_STREAK: "dict[object, int]" = {}
+_EPOCH_LOSS_STREAK: dict[Hashable, int] = {}
 _EPOCH_RACE_MAX_LOSSES = 3
+_RpcResult = TypeVar("_RpcResult")
+_Reply_co = TypeVar("_Reply_co", covariant=True)
+
+
+class _ResendingArguments(TypedDict, total=False):
+    read_cap: bytes | None
+    write_cap: bytes | None
+    message_box_index: bytes | None
+    reply_index: int | None
+    envelope_descriptor: bytes | None
+    message_ciphertext: bytes | None
+    envelope_hash: bytes | None
+    no_retry_on_box_id_not_found: bool
+    no_idempotent_box_already_exists: bool
+
+
+class _ResendingClient(Protocol[_Reply_co]):
+    def start_resending_encrypted_message(
+        self, **kwargs: Unpack[_ResendingArguments],
+    ) -> Awaitable[_Reply_co]: ...
 
 
 class ConnectionLifeInterruptedError(Exception):
@@ -450,6 +472,17 @@ class ConnectionLifeInterruptedError(Exception):
     transient failure: release the stream and let the drain loop re-cast
     (a fresh envelope for reads, the same idempotent envelope for writes)."""
 
+    def __init__(
+        self, message: str, *,
+        reason: Literal[
+            "unknown", "epoch", "reconnect", "backstop"
+        ] = "unknown",
+        elapsed_s: float = 0.0,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.elapsed_s = elapsed_s
+
 
 _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
     ThinClientOfflineError, BrokenPipeError, CourierError, ReplicaError,
@@ -457,10 +490,14 @@ _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
 )
 
 
-async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
-                                      backstop_s: float = READ_WATCHDOG_SECONDS,
-                                      grace_s: "float | None" = None,
-                                      reconnect_marker=None, epoch_marker=None):
+async def _rpc_racing_connection_life(
+    *, bacap_uuid: Hashable, what: str,
+    rpc_factory: Callable[[], Awaitable[_RpcResult]],
+    backstop_s: float = READ_WATCHDOG_SECONDS,
+    grace_s: float | None = None,
+    reconnect_marker: asyncio.Event | None = None,
+    epoch_marker: asyncio.Event | None = None,
+) -> _RpcResult:
     """Await an RPC, racing it against the daemon-reconnect and PKI-epoch
     signals rather than a flat clock.
 
@@ -468,7 +505,7 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
     may never arrive; we give it ``grace_s`` more to answer, then raise
     :class:`ConnectionLifeInterruptedError` for the caller's give-up-and-
     re-cast recovery path. ``backstop_s`` bounds the wait when no signal
-    ever fires.
+    ever fires; a signal retains its separately configured grace period.
 
     Returns the RPC's result unless it raised on its own (that exception
     propagates) or the race was lost.
@@ -481,10 +518,13 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
         epoch_marker = _epoch_event
     losses = _EPOCH_LOSS_STREAK.get(bacap_uuid, 0)
     race_epoch = losses < _EPOCH_RACE_MAX_LOSSES
+    started = asyncio.get_running_loop().time()
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
-    racing = {task, reconnect_wait}
+    racing: set[asyncio.Future[_RpcResult] | asyncio.Future[bool]] = {
+        task, reconnect_wait,
+    }
     if race_epoch:
         racing.add(epoch_wait)
     else:
@@ -498,41 +538,31 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
             racing, timeout=backstop_s, return_when=asyncio.FIRST_COMPLETED,
         )
         if task in done:
-            _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
             return task.result()
-        if reconnect_wait in done:
+        reason: Literal["epoch", "reconnect", "backstop"] = "backstop"
+        if reconnect_wait in done or epoch_wait in done:
+            reason = "reconnect" if reconnect_wait in done else "epoch"
             logger.warning(
-                "daemon reconnected mid-%s for bacap_stream=%s; giving the "
-                "in-flight call %s s to answer before treating the reply as "
-                "orphaned", what, bacap_uuid, grace_s,
+                "%s mid-%s for bacap_stream=%s; giving the in-flight call "
+                "%.1f s grace (no-signal backstop %.1f s)",
+                ("daemon reconnected" if reason == "reconnect"
+                 else "PKI epoch rolled over"),
+                what, bacap_uuid, grace_s, backstop_s,
             )
-            try:
-                return await asyncio.wait_for(task, timeout=grace_s)
-            except asyncio.TimeoutError:
-                task.cancel()
-        elif epoch_wait in done:
-            logger.warning(
-                "PKI epoch rolled over mid-%s for bacap_stream=%s; giving the "
-                "in-flight call %s s to answer before treating the envelope "
-                "as stale", what, bacap_uuid, grace_s,
+            grace_done, _grace_pending = await asyncio.wait(
+                {task}, timeout=grace_s,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            try:
-                result = await asyncio.wait_for(task, timeout=grace_s)
-            except asyncio.TimeoutError:
-                task.cancel()
+            if task in grace_done:
+                return task.result()
+            if reason == "epoch":
                 _EPOCH_LOSS_STREAK[bacap_uuid] = losses + 1
-            else:
-                _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
-                return result
-        else:
-            # Backstop: backstop_s elapsed with no reply and no observed
-            # reconnect or epoch rollover. Should be rare; treat it the same
-            # as a grace-period timeout so the caller's single recovery path
-            # handles all three.
-            task.cancel()
+        task.cancel()
+        elapsed = asyncio.get_running_loop().time() - started
         raise ConnectionLifeInterruptedError(
-            f"{what} for bacap_stream={bacap_uuid} did not answer within "
-            f"{backstop_s} s"
+            f"{what} for bacap_stream={bacap_uuid} interrupted by {reason} "
+            f"after {elapsed:.1f} s (backstop {backstop_s} s)",
+            reason=reason, elapsed_s=elapsed,
         )
     finally:
         for owned in (task, reconnect_wait, epoch_wait):
@@ -540,9 +570,30 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
         await asyncio.gather(task, reconnect_wait, epoch_wait, return_exceptions=True)
 
 
-async def _await_read_reply(connection, *, read_watchdog_s: float,
-                             reconnect_grace_s: float, bacap_uuid,
-                             reconnect_marker=None, epoch_marker=None, **kwargs):
+async def _delivery_racing_connection_life(
+    *, bacap_uuid: Hashable, what: str,
+    rpc_factory: Callable[[], Awaitable[_RpcResult]],
+    backstop_s: float = READ_WATCHDOG_SECONDS,
+    grace_s: float | None = None,
+    reconnect_marker: asyncio.Event | None = None,
+    epoch_marker: asyncio.Event | None = None,
+) -> _RpcResult:
+    result = await _rpc_racing_connection_life(
+        bacap_uuid=bacap_uuid, what=what, rpc_factory=rpc_factory,
+        backstop_s=backstop_s, grace_s=grace_s,
+        reconnect_marker=reconnect_marker, epoch_marker=epoch_marker,
+    )
+    _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
+    return result
+
+
+async def _await_read_reply(
+    connection: _ResendingClient[_RpcResult], *,
+    read_watchdog_s: float, reconnect_grace_s: float, bacap_uuid: Hashable,
+    reconnect_marker: asyncio.Event | None = None,
+    epoch_marker: asyncio.Event | None = None,
+    **kwargs: Unpack[_ResendingArguments],
+) -> _RpcResult:
     """Await start_resending_encrypted_message, racing it against a daemon
     reconnect or a PKI epoch rollover rather than a flat clock.
 
@@ -563,7 +614,7 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
     either the grace period or the backstop elapses first.
     """
     try:
-        return await _rpc_racing_connection_life(
+        return await _delivery_racing_connection_life(
             bacap_uuid=bacap_uuid,
             what="wait",
             rpc_factory=lambda: connection.start_resending_encrypted_message(**kwargs),
@@ -1597,7 +1648,7 @@ async def provision_read_caps(connection: ThinClient):
                     continue
             await sess.commit()
 
-async def readables_to_mixwal(connection):
+async def readables_to_mixwal(connection: ThinClient) -> None:
     """
     Look up all of our read caps, start sending reads for all the "active" ones that we
     aren't currently trying to read.
@@ -1663,7 +1714,7 @@ async def readables_to_mixwal(connection):
                 # same stream twice raises IntegrityError on its single
                 # commit (UNIQUE constraint failed: mixwal.bacap_stream);
                 # arm each read cap at most once per pass.
-                armed = set()
+                armed: set[uuid.UUID] = set()
                 for (cpeer, rcw) in readable_peers:
                     if rcw.id in armed:
                         logger.warning(
@@ -1682,25 +1733,19 @@ async def readables_to_mixwal(connection):
                     sess.add(mw)
                     logger.debug("finished one peer: %s", cpeer.name)
                 logger.debug("readables_to_mixwal: committing")
-                try:
-                    await sess.commit()
-                except OperationalError as e:
-                    if not _is_transient_sqlite_busy(e):
-                        raise
-                    logger.warning(
-                        "readables_to_mixwal: sqlite busy; retrying on the next sweep: %s", e,
-                    )
-                    continue
-        except Exception as e:
-            # readables_to_mixwal is the session's only read-arming task, so
-            # a failed pass must NEVER kill the loop: every read would wedge
-            # for the rest of the session. The uncommitted pass is rolled back
-            # by the session; the same streams are re-selected and armed on the
-            # next sweep.
+                await sess.commit()
+        except OperationalError as e:
+            # Retry SQLite lock contention without publishing a failed pass.
+            # Other database errors must retain their traceback.
+            if not _is_transient_sqlite_busy(e):
+                raise
             logger.warning(
-                "readables_to_mixwal: pass failed; re-arming next sweep: %s", e,
+                "readables_to_mixwal: sqlite busy; retrying next sweep: %s",
+                e,
             )
-            retry_needed = True
+            await asyncio.sleep(5)
+            readables_to_mixwal_event.set()
+            continue
         logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))
         if len(readable_peers):
             __mixwal_updated.set()

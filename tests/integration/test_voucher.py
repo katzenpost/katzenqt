@@ -21,7 +21,8 @@ from pathlib import Path
 import pytest
 
 from tests.integration._bounce_helpers import epoch_duration_s
-from tests.integration._process import run_logged
+from tests.integration._process import run_logged, spawn_logged
+from tests.integration._outcomes import check_roles
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -89,13 +90,15 @@ def _role_command(role_state: Path, *cli_args: str) -> list[str]:
     return [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *conn_args]
 
 
-def _role_env(role_state: Path) -> dict:
+def _role_env(role_state: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     return env
 
 
-def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
+def _run_role(
+    role_state: Path, *cli_args: str, timeout: float = 180.0,
+) -> subprocess.CompletedProcess[str]:
     return run_logged(
         role_state, _role_command(role_state, *cli_args), env=_role_env(role_state),
         cwd=str(_REPO_ROOT), timeout=timeout,
@@ -104,15 +107,12 @@ def _run_role(role_state: Path, *cli_args: str, timeout: float = 180.0) -> subpr
 
 def _spawn_role(
     role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path,
-) -> subprocess.Popen:
+) -> subprocess.Popen[str]:
     """Keep a role running with file output so full pipes cannot block it."""
-    with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open(
-        "w", encoding="utf-8"
-    ) as err:
-        return subprocess.Popen(
-            _role_command(role_state, *cli_args), env=_role_env(role_state),
-            cwd=str(_REPO_ROOT), stdout=out, stderr=err, text=True,
-        )
+    return spawn_logged(
+        _role_command(role_state, *cli_args), env=_role_env(role_state),
+        cwd=str(_REPO_ROOT), stdout_path=stdout_path, stderr_path=stderr_path,
+    )
 
 
 def _output(proc: subprocess.CompletedProcess) -> str:
@@ -285,6 +285,7 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
             await_proc.kill()
             await_proc.wait()
 
+    check_roles([(await_proc.returncode, await_err)])
     output = await_out.read_text(encoding="utf-8") + await_err.read_text(encoding="utf-8")
     assert await_proc.returncode == 0, (
         f"overlapping await failed (rc={await_proc.returncode}):\n{output}"
