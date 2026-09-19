@@ -241,10 +241,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
     async def seed_from_db(self) -> None:
         """Populate rows for resumable substream transfers already on disk.
 
-        A substream is resumable when its peer is still active (currently
-        reading) *or* it has ReceivedPiece rows (paused mid-transfer). The
-        Transfers panel is where substream transfers are paused/resumed, so
-        this seeding keeps the panel populated across a GUI restart.
+        Include paused transfers before their first piece and persisted
+        failures. Completed or dismissed transfers have no active peer,
+        pause flag, failure, or remaining pieces.
         """
         async with persistent.asession() as sess:
             from . import network
@@ -263,17 +262,19 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                     .where(persistent.ReceivedPiece.read_cap == rcw.id)
                 )).one()
                 parent = await _substream_parent_name(sess, cp)
-                # Resumable = active, or received something but not yet
-                # assembled to the terminal F (still has pieces outstanding).
-                if cp.active or int(recv_count):
+                # Keep paused and failed transfers visible across restart.
+                if (cp.active or rcw.read_paused or rcw.substream_failure
+                        or int(recv_count)):
                     self.start_transfer(
                         rcw.id, cp.conversation.id, parent,
                         rcw.substream_total_chunks,
                     )
                     if int(recv_count):
                         self.notify_piece(rcw.id, int(recv_count))
-                    if not cp.active:
+                    if rcw.read_paused or not cp.active:
                         self.set_paused(rcw.id, paused=True)
+                    if rcw.substream_failure is not None:
+                        self.fail_transfer(rcw.id, rcw.substream_failure)
 
 
 async def _substream_parent_name(sess, cp) -> str:
