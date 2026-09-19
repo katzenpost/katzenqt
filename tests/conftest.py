@@ -24,7 +24,21 @@ from tests.fakes.thinclient import FakeThinClient
 
 @pytest.fixture(autouse=True)
 def _fresh_tables(request):
-    """Reset unit-test tables; integration subprocesses own their state."""
+    """Drop + recreate all tables before every test.
+
+    We skip alembic (it would try to read the repo's migrations/) and use
+    sqlmodel's metadata directly, which is the source of truth the test
+    subjects (MixWAL, PlaintextWAL, etc.) are actually defined against.
+
+    The docker integration tests are excluded: they drive the real app via
+    ``katzenqt.integration_runner`` subprocesses with per-test state dirs
+    and never touch this in-process engine, so dropping/recreating here
+    would be wasted work -- and, under pytest-xdist, an actual race: every
+    worker inherits the master's ``KQT_STATE`` (root conftest sets it
+    per-PID, but workers are spawned with the master's env already in
+    place), so all workers would share one scratch SQLite file and fight
+    over the drop/create.
+    """
     if request.node.get_closest_marker("integration"):
         yield
         return
@@ -66,6 +80,10 @@ def _reset_network_module_state():
             setattr(network, name, asyncio.Event())
         getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
+        # Transfers-panel events must not leak across tests.
+        while not network.substream_progress_queue.empty():
+            network.substream_progress_queue.get_nowait()
+        network._inflight_reads.clear()
         # Per-conversation log-order locks are plain threading.Locks keyed
         # by conversation_id, and the test session's conversation ids
         # restart at 1 after each `_fresh_tables` wipe. Without this reset,

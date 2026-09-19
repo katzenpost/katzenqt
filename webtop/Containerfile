@@ -1,0 +1,16 @@
+FROM ghcr.io/astral-sh/uv:latest AS uv_source
+
+FROM ghcr.io/linuxserver/webtop:ubuntu-xfce
+# see https://docs.linuxserver.io/images/docker-webtop/ for list of distro/DE tags
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt --update install -y --no-install-recommends \
+    git curl vim less \
+    build-essential pkg-config \
+    libxcb-cursor0 libegl1 libpulse0 libfontconfig1 libxkbcommon0
+
+COPY --from=uv_source /uv /uvx /usr/local/bin
+

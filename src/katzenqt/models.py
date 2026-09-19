@@ -184,7 +184,17 @@ class SendOperation(BaseModel):
 
         # Put the release in the original bacap stream:
         # 1. We need a ReadCapWal that points to the `agg_bacap_stream`:
-        rcw = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=agg_bacap_stream, active=False)
+        #    substream_total_chunks counts the C-chunks plus the
+        #    final F chunk, so the reader/GUI can render download progress as
+        #    n/total over this substream's ReceivedPiece rows. None means a
+        #    legacy (136-byte) I-chunk where the total is unknowable.
+        total_c_chunks = len([
+            pc for pc in agg if pc.bacap_payload[:1] == b'C'
+        ])
+        rcw = persistent.ReadCapWAL(
+            id=uuid.uuid4(), write_cap_id=agg_bacap_stream,
+            active=False, substream_total_chunks=total_c_chunks + 1,
+        )
         agg.append(rcw)
         # 2. the b'I'ndirection entry needs to point to rcw.id, so the read
         #    cap can be filled once we have received it from clientd, and

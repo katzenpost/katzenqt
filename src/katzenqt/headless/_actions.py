@@ -286,7 +286,11 @@ async def _send_one_gcm(
     PlaintextWAL to land in SentLog. The budget scales with the
     number of chunks so a multi-box attachment is given enough time
     to clear (sixty seconds per chunk on the local docker mixnet,
-    one-hundred-twenty seconds minimum).
+    one-hundred-twenty seconds minimum by default). KQT_SEND_BUDGET_FLOOR_S
+    overrides the floor for slower environments, e.g. CI's 4-way
+    concurrent load on a shared kpclientd (see test-integration-docker.yml)
+    -- left as an opt-in override rather than a raised default so a real
+    send failure isn't detected twice as slowly for every caller.
     """
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -325,7 +329,9 @@ async def _send_one_gcm(
             sess.add(obj)
         await sess.commit()
 
-    budget_s = max(120.0, num_pwals * 60.0) if timeout is None else timeout
+    budget_floor_s = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0"))
+    budget_s = max(budget_floor_s, num_pwals * 60.0) if timeout is None else timeout
+    connection, bg = await _connect_and_start()
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
