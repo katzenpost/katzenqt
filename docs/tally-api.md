@@ -12,13 +12,18 @@ vote, read the result, catch up after missing messages — see
 
 ## Status
 
-The protocol core, the persistence, the receive-side routing and the headless
-CLI verbs exist and are covered by unit, property and docker-integration tests.
-There is **no GUI yet**, and two pieces of the design are deliberately still
-open; both are called out under [What is not enforced](#what-is-not-enforced)
-and [Known gaps](#known-gaps). Nothing in the API below is frozen, but all of
-it is in use by the CLI and the integration tests, so changes should be made
-deliberately rather than by accident.
+The protocol core, the persistence, the receive-side routing, the headless
+CLI verbs and the Qt GUI all exist and are covered by unit, property and
+docker-integration tests. The GUI (`katzenqt.qt_tally` plus the wiring in
+`katzenqt.katzen`) renders each survey as a virtual placeholder row in the
+chat timeline and hosts a Polls panel/tab; it reads state through
+`katzenqt.tally.presenter` and performs every write on the io loop under the
+same controller calls the CLI uses. Two pieces of the protocol design are
+deliberately still open; both are called out under [What is not
+enforced](#what-is-not-enforced) and [Known gaps](#known-gaps). Nothing in the
+API below is frozen, but all of it is in use by the CLI, the GUI and the
+integration tests, so changes should be made deliberately rather than by
+accident.
 
 ## Concepts
 
@@ -46,6 +51,8 @@ The core is Qt-free and network-free, and must stay so.
 | `katzenqt.tally.events` | `katzenqt.models` | Builders for the five wire messages. Pure. |
 | `katzenqt.tally.controller` | persistent, models, all of the above | Owns one in-memory `Doc` per survey, reconciles it with the database, applies inbound events, mutates for local actions. |
 | `katzenqt.tally.send` | persistent, models | Stages an outbound tally message onto the conversation's BACAP write stream. |
+| `katzenqt.tally.presenter` | persistent, engine, schema | Projects a `Doc` plus persisted identity into plain GUI-ready data (summaries, placeholder text, per-voter rows, badges). Qt-free. |
+| `katzenqt.qt_tally` | PySide6, presenter | Qt-only models/widgets: the chat-timeline `TimelineModel`, the Polls-tab `PollsTabModel`, the vote panel and the create dialog. |
 
 `katzenqt.tally`'s package namespace re-exports the protocol core only:
 `Mode`, `Outcome`, `SlotTally`, `TallyResult`, `apply_vote`, `close_survey`,
@@ -325,13 +332,18 @@ The caller commits, then calls `network.check_for_new()`.
 **never touch `ConversationLog`**, so they do not surface as empty chat lines:
 
 ```python
-async def dispatch(sess, peer, gcm, full_payload) -> tuple[bool, bool]
-    # -> (convlog_added, signal_send)
+async def dispatch(sess, peer, gcm, full_payload) -> tuple[bool, bool, tuple[int, str] | None, bool]
+    # -> (convlog_added, signal_send, peer_added, tally_added)
 ```
 
-Because `convlog_added` is `False` for tally messages, the network layer does
-**not** push onto `network.conversation_update_queue` — see
-[Known gaps](#known-gaps).
+`convlog_added` is `False` for tally messages, so they are **not** pushed onto
+`network.conversation_update_queue` (the chat-log refresh queue). Instead
+`tally_added` is `True`, and after its transaction commits the network receive
+path pushes the `conversation_id` onto **`network.tally_update_queue`** — a
+dedicated notification channel the GUI drains (via its `tally_listener`) to
+re-read `TallyState` and refresh the timeline/polls views. The queue carries no
+payload beyond the conversation id: the GUI re-derives everything from
+committed state, which keeps the notification race-free with send-side commits.
 
 ## Security properties
 
@@ -416,22 +428,28 @@ Exit codes:
 Each of these has a workaround, where one exists, in
 [tally-howto.md](tally-howto.md).
 
-1. **No change notification.** Applying an inbound tally event updates
-   `TallyState` and the in-memory `Doc` but signals nothing — the chat's
-   `network.conversation_update_queue` is only poked for `ConversationLog`
-   rows. A view must poll, or the receive path must gain a queue of its own.
+1. ~~**No change notification.**~~ **Resolved.** After a tally transaction
+   commits, the receive path pushes the conversation id onto
+   `network.tally_update_queue`; the GUI's `tally_listener` drains it and
+   re-reads committed state. (The queue carries only the conversation id on
+   purpose: the views derive everything from `TallyState`, so there is no
+   payload to get out of step with the database.)
 2. **The catch-up request is never sent.** `events.build_sync_request` exists
    and the receive side answers `TALLY_SYNC_REQ` correctly, but nothing calls
    the builder, so a peer that joins after a survey was created only learns
    about it if someone re-broadcasts. Wiring the request is a GUI-visible
-   feature ("refresh this survey").
+   feature ("refresh this survey"); it is deliberately deferred — a true late
+   joiner already reads every member stream from box 0, so a sync request only
+   repairs offline windows / pruned boxes / dropped messages.
 3. **Closing does not stop voting** (see above).
 4. **No per-voter view in the derived result.** `TallyResult` aggregates;
-   showing "who voted for what" means reading `schema.votes_map` directly.
-5. **A malformed sync request raises out of the receive path.**
-   `handle_event` passes `tally.crdt or b""` straight to `diff_since`, which
-   rejects an empty vector with `ValueError` rather than treating it as "send
-   me everything".
+   `engine.per_voter(doc)` now exposes per-voter ballots, which the GUI's poll
+   panel renders ("show who voted"), but the CLI's `tally-result` still emits
+   the aggregate only.
+5. ~~**A malformed sync request raises out of the receive path.**~~
+   **Resolved.** `handle_event` now wraps `diff_since` in `try/except
+   ValueError`, logs and drops the request (returning `False`) so a garbage
+   state vector cannot wedge the receive loop.
 
 ## Tests as documentation
 
@@ -441,5 +459,7 @@ Each of these has a workaround, where one exists, in
 | `tests/test_tally_sync.py` | Late-joiner catch-up, symmetric merge of concurrent votes. |
 | `tests/test_tally_convergence.py` | Property test: event order never changes the tally. |
 | `tests/test_tally_controller.py` | Votes keyed to the authenticated sender, persistence round-trip, creator-only close, dispatch routing. |
+| `tests/test_tally_presenter.py` | The Qt-free projection: `summarize`, `placeholder_text`, per-voter rows, badge counts. |
+| `tests/test_qt_tally.py` | Offscreen Qt: `TimelineModel` merge/roles/unread mapping, panel vote cycle + close, create dialog, Polls tab filter/badge. |
 | `tests/test_models_tally.py` | CBOR round-trip of every kind, integer `msg_type` on the wire, large CRDT blobs through `SendOperation`. |
 | `tests/integration/test_tally.py` | The whole path over a docker mixnet, two peers, convergent counts. |

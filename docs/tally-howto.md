@@ -47,13 +47,19 @@ this: they touch only the local database.
 Headless callers have one event loop and can run all four steps on it.
 
 The GUI runs two: Qt's loop for the widgets, and `AsyncioThread`'s loop
-(`katzen.py:65`), which owns the thin-client connection. There, follow what
-`MainWindow.chat_msg_single_line` (`katzen.py:467`) does — database work
-directly on the Qt loop, network calls handed to the other loop:
+(`katzen.py`), which owns the thin-client connection. Anything that opens an
+async DB session or touches the network must run on the io loop, handed over
+with `MainWindow.iothread.run_in_io`:
 
 ```python
 await self.iothread.run_in_io(network.check_for_new())
 ```
+
+The GUI's tally bridge follows this exactly: `_io_tally_create`,
+`_io_tally_vote` and `_io_tally_close` (`katzen.py`) each perform the whole
+four-step task in a single `run_in_io` hop, so the Qt thread never opens an
+`asession`. `MainWindow.chat_msg_single_line` does the same for an ordinary
+chat message through `network.notify_outbound_chat_sent`.
 
 ### Getting the conversation
 
@@ -280,11 +286,27 @@ after a close is still counted. Do not present it as a locked ballot box.
 ## Notice that a survey changed
 
 Inbound tally messages are applied to the document and written to `TallyState`
-by the receive path, which signals nothing: tally messages deliberately never
-become `ConversationLog` rows, and `network.conversation_update_queue` is only
-poked for those. There is no tally notification channel today.
+by the receive path. Because tally messages deliberately never become
+`ConversationLog` rows, they are **not** announced on
+`network.conversation_update_queue`. Instead, after the transaction commits,
+the receive path pushes the affected `conversation_id` onto
+**`network.tally_update_queue`**:
 
-So to follow a survey, re-derive it on a timer and compare:
+```python
+async def tally_listener(on_change):
+    while True:
+        conversation_id = await network.tally_update_queue.get()
+        await on_change(conversation_id)
+```
+
+The queue carries only the conversation id on purpose: the consumer re-derives
+the surveys it cares about from committed `TallyState`, so there is no payload
+that can get out of step with the database and no risk of reading uncommitted
+rows. The GUI's `tally_listener` drains exactly this queue to refresh its
+timeline and Polls tab.
+
+If you would rather poll — for instance a script that is not running the
+network receive path — re-derive on a timer and compare:
 
 ```python
 async def watch(conversation_id: int, survey_id: bytes, on_change, interval=1.0):
