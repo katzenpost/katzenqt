@@ -2161,7 +2161,8 @@ class MainWindow(QMainWindow):
             )
             replace_box.setDefaultButton(QMessageBox.StandardButton.No)
             result = await _dialog_finished(replace_box)
-            if replace_box.standardButton(result) != QMessageBox.StandardButton.Yes:
+            # finished() returns the clicked StandardButton, not a widget.
+            if result != QMessageBox.StandardButton.Yes:
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
