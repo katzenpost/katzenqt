@@ -64,7 +64,7 @@ ROLE_TALLY_PLACEHOLDER = 0x109  # bool: True for a virtual poll placeholder row
 ROLE_TALLY_SURVEY_ID = 0x10A    # str: survey id hex, for opening the panel
 ROLE_TALLY_NEW = 0x10B          # bool: survey unread (order >= first_unread)
 
-_PLACEHOLDER_AUTHOR = "Polls"
+_PLACEHOLDER_AUTHOR = "Unknown"
 
 
 @dataclass(frozen=True)
