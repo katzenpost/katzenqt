@@ -599,6 +599,7 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
         logger.error(
             "send_introduction_message: failed to write INTRODUCTION for "
             "%r in conversation %d: %s", display_name, conversation_id, e,
+            exc_info=True,
         )
         return
 
