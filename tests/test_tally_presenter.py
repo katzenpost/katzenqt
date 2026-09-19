@@ -186,3 +186,31 @@ def test_is_creator_only_for_the_creator_voter():
         doc, conversation_id=1, my_voter_id=voter_id_from_read_cap(OWN_CAP),
     )
     assert theirs.is_creator() is False
+
+
+def test_survey_doc_returns_the_persisted_blob_and_none_when_missing():
+    from katzenqt.tally import sync
+
+    convo_id = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    blob = sync.full_state(schema.new_survey_doc(survey_id, "dinner", Mode.APPROVAL, ["a"]))
+    with persistent.Session(persistent._engine_sync) as sess:
+        sess.add(persistent.TallyState(
+            survey_id=survey_id, conversation_id=convo_id,
+            doc_state=blob, conversation_order=0,
+        ))
+        sess.commit()
+    assert presenter.survey_doc(convo_id, survey_id) == blob
+    assert presenter.survey_doc(convo_id, uuid.uuid4().bytes) is None
+
+
+def test_first_unread_and_conversation_names_read_the_conversation():
+    convo_id = _make_convo_sync("lobby")
+    with persistent.Session(persistent._engine_sync) as sess:
+        conv = sess.get(persistent.Conversation, convo_id)
+        conv.first_unread = 7
+        sess.add(conv)
+        sess.commit()
+    assert presenter.first_unread_order(convo_id) == 7
+    assert presenter.conversation_names().get(convo_id) == "lobby"
+    assert presenter.first_unread_order(0xFFFFFF) == 0  # unknown conversation

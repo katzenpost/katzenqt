@@ -213,6 +213,19 @@ def surveys_for_conversation(conversation_id: int) -> "list[tuple[bytes, int | N
         return [(r.survey_id, r.conversation_order) for r in rows]
 
 
+def survey_doc(conversation_id: int, survey_id: bytes) -> "bytes | None":
+    """The persisted CRDT blob for one survey (the ``TallyState.doc_state`` the
+    caller feeds to :func:`sync.load_doc`), or ``None`` if the row is gone."""
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.exec(
+            select(persistent.TallyState).where(
+                persistent.TallyState.conversation_id == conversation_id,
+                persistent.TallyState.survey_id == survey_id,
+            )
+        ).first()
+        return row.doc_state if row is not None else None
+
+
 def all_survey_ids() -> "list[tuple[int, bytes, int | None]]":
     """``(conversation_id, survey_id, conversation_order)`` across every
     conversation, for building cross-conversation poll lists."""
@@ -230,3 +243,23 @@ def all_survey_ids() -> "list[tuple[int, bytes, int | None]]":
 def badge_count(surveys: "list[SurveySummary]") -> int:
     """How many surveys are new (the Polls-tab badge count)."""
     return sum(1 for s in surveys if s.is_new)
+
+
+def first_unread_order(conversation_id: int) -> int:
+    """The persisted first-unread pointer for a conversation. The chat model
+    keeps unread markers in *conversation_order* space; ``None`` (no pointer
+    yet) reads as 0 so everything is initially "new", matching the chat
+    view's marker semantics."""
+    with persistent.Session(persistent._engine_sync) as sess:
+        conv = sess.get(persistent.Conversation, conversation_id)
+        if conv is None or conv.first_unread is None:
+            return 0
+        return conv.first_unread
+
+
+def conversation_names() -> "dict[int, str]":
+    """Every conversation id -> display name, for cross-conversation poll
+    lists."""
+    with persistent.Session(persistent._engine_sync) as sess:
+        rows = sess.exec(select(persistent.Conversation)).all()
+        return {r.id: r.name for r in rows}
