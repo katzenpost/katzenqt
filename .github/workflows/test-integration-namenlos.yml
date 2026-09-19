@@ -192,7 +192,7 @@ jobs:
 
       - name: Run serial watchdog integration tests
         working-directory: katzenqt
-        if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' && steps.install_deps.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' }}
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
