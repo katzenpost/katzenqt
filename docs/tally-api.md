@@ -29,7 +29,7 @@ deliberately rather than by accident.
 | **mode** | `approval` (availability domain `yes`/`no`) or `availability` (`yes`/`maybe`/`no`, Doodle-style). Fixed at creation. |
 | **availability** | One voter's answer *for one slot*: a string from the mode's domain. |
 | **choice** | One voter's whole ballot: a `dict[slot_id, availability]`. Omitted slots count as `no`. |
-| **voter id** | 16 bytes, `blake2b(peer's BACAP read capability, digest_size=16)`. Peer-independent: every member derives the same id for the same member, because they all hold the same read cap for them. |
+| **voter id** | 16 bytes, `blake2b(peer's BACAP read capability's 32-byte public-key prefix, digest_size=16)`. Peer-independent: every member holds the same public key for a given member, so they derive the same id. Only the 32-byte prefix is hashed because the trailing 104-byte index suffix varies per copy (a joiner's pre-mutation cap vs. the salt-mutated cap the group holds, and future-only caps that start at a later index). |
 | **version** | A per-voter monotonic counter carrying intent order, so a recast supersedes an earlier ballot whatever the arrival order. |
 | **status** | `open` or `closed`. Closing is advisory (see below). |
 | **outcome** | The declared result: `winner`, `tie`, or `no_winner`, derived purely from yes counts. |
@@ -249,8 +249,12 @@ the sync path has prior state to diff against. The migration is
 ## `katzenqt.tally.controller`
 
 ```python
-def voter_id_from_read_cap(read_cap: bytes) -> bytes   # blake2b, 16 bytes
+def voter_id_from_read_cap(read_cap: bytes) -> bytes   # blake2b(read_cap[:32]), 16 bytes
 ```
+
+The id is a hash of the read capability's 32-byte public-key prefix only, so
+that every copy of a member's capability (pre-mutation, salt-mutated, or a
+future-only cap starting at a later index) maps to the same voter id.
 
 ```python
 class TallyController:
