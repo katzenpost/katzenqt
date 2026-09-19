@@ -57,6 +57,13 @@ from .models import (GroupChatFileUpload,
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
+from .qt_tally import (PollsTabModel, TallyCreateDialog, TallyPanel,
+                       TimelineModel, polls_tab_label)
+from .tally import controller as tally_controller
+from .tally import events as tally_events
+from .tally import schema as tally_schema
+from .tally import send as tally_send
+from .tally import sync as tally_sync
 from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
 from .ui_mixchat import Ui_MainWindow  # ui_mixchat.py
 
@@ -1122,6 +1129,127 @@ class MainWindow(QMainWindow):
         self.transfers_view.setMinimumHeight(80)
         self.ui.gridLayout_2.addWidget(self.transfers_view, 2, 0, 1, 1)
 
+        # Polls panel: a sibling tab in the chat tab bar (locked decision 2).
+        # It lists the currently selected conversation's surveys and hosts the
+        # create/vote/close flows; clicking an in-chat placeholder raises it.
+        self.tally_panel = TallyPanel()
+        self.polls_model = PollsTabModel()
+        self.tally_panel.voteSubmitted.connect(self.tally_vote)
+        self.tally_panel.closeRequested.connect(self.tally_close)
+        self.tally_panel.newPollRequested.connect(self.new_poll)
+        self.ui.chatTabs.addTab(self.tally_panel, polls_tab_label(0))
+
+    # -- tally / polls -------------------------------------------------------
+
+    def _refresh_tally_views(self, conversation_id: int) -> None:
+        """Re-derive the merged timeline and, when the affected conversation is
+        the one in focus, the Polls tab and the open survey. Runs on the Qt
+        thread (presenter reads are sync-engine), called from the tally
+        listener and after our own local sends."""
+        convo_state = self.conversation_state_by_id.get(conversation_id)
+        if convo_state is not None and convo_state.timeline_model is not None:
+            convo_state.timeline_model.refresh()
+        key = self.tally_panel.current_survey()
+        if key is not None and key[0] == conversation_id:
+            # A received vote/close may have changed the panel's survey.
+            self.tally_panel.show_survey(*key)
+        if self._selected_conversation_id() == conversation_id:
+            self._update_polls_tab()
+
+    def _selected_conversation_id(self) -> "int | None":
+        convo_state = self.convo_state_or_none()
+        return convo_state.conversation_id if convo_state is not None else None
+
+    def _update_polls_tab(self) -> None:
+        """Re-list the selected conversation's surveys and refresh the badge."""
+        if not hasattr(self, "polls_model"):
+            return
+        self.polls_model.set_conversation_filter(self._selected_conversation_id())
+        index = self.ui.chatTabs.indexOf(self.tally_panel)
+        if index >= 0:
+            self.ui.chatTabs.setTabText(
+                index, polls_tab_label(self.polls_model.badge_count())
+            )
+
+    @Slot(str)
+    def openPoll(self, survey_id_hex: str) -> None:
+        """Open a survey in the panel (QML placeholder click)."""
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        try:
+            survey_id = bytes.fromhex(survey_id_hex)
+        except ValueError:
+            return
+        if self.tally_panel.show_survey(convo_state.conversation_id, survey_id):
+            self.ui.chatTabs.setCurrentWidget(self.tally_panel)
+
+    @async_cb
+    async def tally_vote(self, choice) -> None:
+        """Persist the panel's edited selection and broadcast it."""
+        convo_state = self.convo_state_or_none()
+        key = self.tally_panel.current_survey()
+        if convo_state is None or key is None:
+            return
+        conversation_id, survey_id = key
+        if conversation_id != convo_state.conversation_id:
+            return
+        await self.iothread.run_in_io(
+            _io_tally_vote(conversation_id, survey_id, dict(choice))
+        )
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def tally_close(self) -> None:
+        """Close the open survey (only the creator may) and broadcast it."""
+        convo_state = self.convo_state_or_none()
+        key = self.tally_panel.current_survey()
+        if convo_state is None or key is None:
+            return
+        conversation_id, survey_id = key
+        if conversation_id != convo_state.conversation_id:
+            return
+        await self.iothread.run_in_io(
+            _io_tally_close(conversation_id, survey_id)
+        )
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def new_poll(self) -> None:
+        """Open the create dialog and, on accept, create + broadcast a survey."""
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        dialog = TallyCreateDialog(self)
+        await _dialog_finished(dialog)
+        if dialog.result() != QDialog.DialogCode.Accepted:
+            return
+        topic, mode, slots = dialog.topic(), dialog.mode(), dialog.slots()
+        if not topic or not slots:
+            return
+        survey_id = await self.iothread.run_in_io(
+            _io_tally_create(convo_state.conversation_id, topic, mode, slots)
+        )
+        self._refresh_tally_views(convo_state.conversation_id)
+        if survey_id is not None:
+            self.openPoll(survey_id.hex())
+
+    async def tally_listener(self) -> None:
+        """Refresh the poll views when the receive path consumed a tally event
+        (mirrors receive_msg_listener for the chat log)."""
+        while True:
+            try:
+                conversation_id = await self.iothread.run_in_io(
+                    network.tally_update_queue.get()
+                )
+                self._refresh_tally_views(conversation_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "tally_listener: dropping an item after %s", e, exc_info=e,
+                )
+
     async def _enqueue_outgoing_gcm(
         self,
         convo_state: "ConversationUIState",
@@ -1338,8 +1466,17 @@ class MainWindow(QMainWindow):
             # TODO make which of these to do configurable:
             convo_state.chat_lines_scroll_idx = 1.0
             root = self.ui.qml_ChatLines.rootObject()
-            new_first_unread = root.property("ctx").value("first_unread")
+            # QML's first_unread is in row space (it walks visible rows); the
+            # persisted pointer and tally_new are in conversation_order space.
+            new_first_unread_row = root.property("ctx").value("first_unread")
+            tm = convo_state.timeline_model
+            new_first_unread = (
+                tm.row_to_order(new_first_unread_row)
+                if tm is not None else new_first_unread_row
+            )
             if convo_state.mark_first_unread(new_first_unread):
+                if tm is not None:
+                    tm.set_first_unread(new_first_unread)
                 await self.iothread.run_in_io(
                     network.persist_first_unread(
                         convo_state.conversation_id, new_first_unread,
@@ -1787,7 +1924,14 @@ class MainWindow(QMainWindow):
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
             if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
                 print("old first_unread is", old_ctx.value("first_unread"))
-                old_first_unread = old_ctx.value("first_unread")
+                old_first_unread_row = old_ctx.value("first_unread")
+                # The QML value is in the old conversation's row space; store
+                # order space.
+                old_tm = old_convo.timeline_model
+                old_first_unread = (
+                    old_tm.row_to_order(old_first_unread_row)
+                    if old_tm is not None else old_first_unread_row
+                )
                 if old_convo.mark_first_unread(old_first_unread):
                     await self.iothread.run_in_io(
                         network.persist_first_unread(
@@ -1873,6 +2017,13 @@ class MainWindow(QMainWindow):
 
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
+
+        # Scope the Polls tab to the newly selected conversation and drop a
+        # panel survey that belonged to the previous one.
+        key = self.tally_panel.current_survey()
+        if key is not None and key[0] != convo_state.conversation_id:
+            self.tally_panel.clear()
+        self._update_polls_tab()
 
         self.systray.has_read_messages()
 
@@ -2254,6 +2405,67 @@ class MixSystrayIcon(QSystemTrayIcon):
         print("Someone clicked message", args, kwargs)
 
     
+async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes | None":
+    """Create a survey, persist it and stage its broadcast, on the io loop.
+
+    Runs under the per-conversation order lock: ``TallyState``'s first-sighting
+    ``conversation_order`` is a COUNT subquery evaluated at commit, so it must
+    not race a concurrent chat append. Returns the survey id (None on failure).
+    """
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            logger.error("tally create: conversation %d not found", conversation_id)
+            return None
+        async with persistent.conversation_log_order_lock(conversation_id):
+            doc = await tally_controller.INSTANCE.create_local(
+                sess, convo, survey_id, topic, mode, slots,
+            )
+            blob = tally_sync.full_state(doc)
+            await tally_send.stage_outbound(
+                sess, convo, tally_events.build_create(survey_id, blob),
+            )
+            await sess.commit()
+    await network.check_for_new()
+    return survey_id
+
+
+async def _io_tally_vote(conversation_id: int, survey_id: bytes, choice) -> bool:
+    """Record our vote locally and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        version = await tally_controller.INSTANCE.cast_local_vote(
+            sess, convo, survey_id, choice,
+        )
+        if version is None:
+            return False
+        await tally_send.stage_outbound(
+            sess, convo, tally_events.build_vote(survey_id, choice, version),
+        )
+        await sess.commit()
+    await network.check_for_new()
+    return True
+
+
+async def _io_tally_close(conversation_id: int, survey_id: bytes) -> bool:
+    """Close a survey we created and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        if not await tally_controller.INSTANCE.close_local(sess, convo, survey_id):
+            return False
+        await tally_send.stage_outbound(
+            sess, convo, tally_events.build_close(survey_id),
+        )
+        await sess.commit()
+    await network.check_for_new()
+    return True
+
+
 async def add_conversation(window, convo: persistent.Conversation) -> None:
     window.conversation_log_models = getattr(window, "conversation_log_models", dict())
 
@@ -2262,6 +2474,9 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     qtwi = QStandardItem(convo.name)
     qtwi.conversation_id = convo.id
     clm = ConversationLogModel(convo.id)
+    # QML binds to the timeline wrapper, which proxies chat rows to clm and
+    # interleaves virtual poll placeholders (see qt_tally.TimelineModel).
+    timeline = TimelineModel(convo.id, source=clm)
     convo_state = ConversationUIState(
         own_peer_id=convo.own_peer_id,
         own_peer_name=convo.own_peer.name,
@@ -2270,6 +2485,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         contacts_standard_item=qtwi,
         chat_lineEdit_buffer="",
         conversation_log_model=clm,
+        timeline_model=timeline,
         chat_lines_scroll_idx=1.0,
         first_unread=convo.first_unread or 0,
     )
@@ -2296,6 +2512,9 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         )).first()
         convo_state.conversation_log_model.row_count = msg_count
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
+    # Seed the merged timeline now that row_count and first_unread are known.
+    timeline.set_first_unread(convo.first_unread or 0)
+    timeline.refresh()
 
     # Append the new conversation to the "real" model window.all_contacts,
     # then figure out where that sits in the FilterProxyModel used for sorting contacts,
@@ -2367,12 +2586,18 @@ async def main(window: MainWindow):
         for convo in a:
             await add_conversation(window, convo)
 
+    # Seed the Polls tab from whatever the selection (or lack of one) is now.
+    window._update_polls_tab()
+
     window.show()
     window._supervised_listener(
         "receive_msg_listener", window.receive_msg_listener, restart_on_finish=True,
     )
     window._supervised_listener(
         "peer_added_listener", window.peer_added_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
+        "tally_listener", window.tally_listener, restart_on_finish=True,
     )
     window._supervised_listener(
         "transfers_listener", window.transfers_listener, restart_on_finish=True,

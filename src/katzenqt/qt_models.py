@@ -667,6 +667,10 @@ class ConversationUIState(BaseModel):
     own_peer_bacap_uuid: uuid.UUID
     chat_lineEdit_buffer : str
     conversation_log_model: ConversationLogModel
+    # The QML-facing timeline: a katzenqt.qt_tally.TimelineModel that wraps
+    # conversation_log_model and interleaves poll placeholders. Typed Any to
+    # avoid qt_models importing qt_tally (qt_tally imports qt_models).
+    timeline_model: Any = None
     contacts_standard_item : QStandardItem = Field(description="the entry in the Contacts pane for the conversation")
     chat_lines_scroll_idx : float = 0.0
     # TODO: should store scroll state of self.ui.ChatLines
@@ -679,12 +683,23 @@ class ConversationUIState(BaseModel):
     # hasn't "read" yet - it doesn't have to exist in ConversationLog yet.
 
     def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
+        # The QML unread marker walks visible *rows* (ctx.first_unread <= row),
+        # while the persisted pointer and tally_new are in conversation_order
+        # space. Mirror TimelineModel's row<->order mapping for the model we
+        # hand QML: order_to_row first_unread on the way in; katzen.py runs the
+        # value QML writes back through row_to_order before persisting.
+        view_model = self.timeline_model or self.conversation_log_model
+        first_unread_row = (
+            self.timeline_model.order_to_row(self.first_unread)
+            if self.timeline_model is not None
+            else self.first_unread
+        )
         props = QQmlPropertyMap(rootObject)
         props.insert({
             **settings,
-            "chatTreeViewModel": self.conversation_log_model,
+            "chatTreeViewModel": view_model,
             "conversation_scroll": self.chat_lines_scroll_idx,
-            "first_unread": self.first_unread,
+            "first_unread": first_unread_row,
             "chat_text_size": 11, # governs text size of chat messages
             "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
         })

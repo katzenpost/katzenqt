@@ -17,9 +17,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QStandardItem  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
+from katzenqt.qt_models import ConversationLogModel, ConversationUIState  # noqa: E402
 from katzenqt.qt_tally import (  # noqa: E402
     ROLE_TALLY_NEW,
     ROLE_TALLY_PLACEHOLDER,
@@ -366,3 +368,84 @@ def test_create_dialog_removes_and_reorders_custom_slots():
     dialog._slots_list.setCurrentRow(1)
     dialog._remove_selected()
     assert dialog.slots() == ["a", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Step-5 wiring seams (model sharing, row<->order at the QML boundary)
+# ---------------------------------------------------------------------------
+
+
+def test_timeline_can_share_the_window_owned_source_model():
+    """katzen.py passes the ConversationLogModel it already manages so
+    row_count/redraw hooks stay on one instance."""
+    convo_id, _ = _make_convo_sync()
+    clm = ConversationLogModel(convo_id)
+    clm.row_count = 0
+    tm = TimelineModel(convo_id, source=clm)
+    assert tm.source_model() is clm
+    tm.refresh()
+    assert tm.rowCount() == 0
+
+
+def test_tally_new_is_derived_without_a_refresh():
+    """set_first_unread must not reset the model; the role reads the pointer."""
+    convo_id, peer_id = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_chat(convo_id, peer_id, 0, "a")
+    _seed_survey(convo_id, survey_id, order=1)
+
+    m = _timeline_for(convo_id, n_chat=1)
+    poll = m.index(1, 0)
+    assert m._rows[1].kind == "poll"
+    assert m.data(poll, ROLE_TALLY_NEW) is True
+    before = m.rowCount()
+    m.set_first_unread(2)
+    assert m.rowCount() == before  # no reset
+    assert m.data(poll, ROLE_TALLY_NEW) is False
+
+
+def test_panel_clear_drops_the_current_survey():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id)
+    panel = TallyPanel()
+    panel.show_survey(convo_id, survey_id)
+    assert panel.current_survey() == (convo_id, survey_id)
+
+    panel.clear()
+    assert panel.current_survey() is None
+    assert panel._topic_label.text() == "No poll selected"
+    assert panel._vote_button.isEnabled() is False
+    assert panel._close_button.isHidden() is True
+
+
+def test_qml_ctx_uses_the_timeline_model_and_row_space_first_unread():
+    """The QML boundary must hand QML the merged model and a row-space
+    first_unread (QML walks rows); katzen.py converts the write-back."""
+    convo_id, peer_id = _make_convo_sync()
+    _seed_chat(convo_id, peer_id, 0, "a")
+    _seed_survey(convo_id, uuid.uuid4().bytes, order=1)  # shares order 1
+    _seed_chat(convo_id, peer_id, 1, "b")
+
+    clm = ConversationLogModel(convo_id)
+    clm.row_count = 2
+    tm = TimelineModel(convo_id, source=clm)
+    tm.refresh()
+    assert [e.order for e in tm._rows] == [0, 1, 1]
+
+    state = ConversationUIState(
+        conversation_id=convo_id,
+        own_peer_id=peer_id,
+        own_peer_name="me",
+        own_peer_bacap_uuid=uuid.uuid4(),
+        chat_lineEdit_buffer="",
+        conversation_log_model=clm,
+        timeline_model=tm,
+        contacts_standard_item=QStandardItem("x"),
+        first_unread=1,  # order space
+    )
+    ctx = state.qml_ctx(None, {})
+    assert ctx.value("chatTreeViewModel") is tm
+    assert ctx.value("first_unread") == tm.order_to_row(1) == 1
+    # And the write-back mapping QML's row counter would go through:
+    assert tm.row_to_order(ctx.value("first_unread")) == 1

@@ -215,7 +215,8 @@ TreeView {
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
 	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)
-	    color: (model.network_status > 0 ? "red" : sysPalette.text)
+	    font.italic: model.tally_placeholder === true
+	    color: (model.network_status > 0 ? "red" : (model.tally_placeholder ? sysPalette.highlight : sysPalette.text))
           }
 
 	  RowLayout {
@@ -257,7 +258,9 @@ TreeView {
             //selectByMouse: true
             text: model.display
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
-	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
+	    font.pointSize: (ctx["messageText.font.pointSize"] ?ctx["messageText.font.pointSize"] : 11)
+	    font.italic: model.tally_placeholder === true
+	    color: model.tally_placeholder === true ? sysPalette.highlight : sysPalette.text
 	    background: Rectangle {
 	      color: hovered ? sysPalette.alternateBase : sysPalette.base
 	    }
@@ -298,6 +301,13 @@ TreeView {
 
           } // Column messageColumn
 } // contentItem: Row
+
+          // A virtual poll placeholder row opens that survey in the Polls
+          // panel (locked decision 9). Chat rows leave tally_placeholder unset.
+          TapHandler {
+            enabled: model.tally_placeholder === true
+            onTapped: chatController.openPoll(model.tally_survey_id)
+          }
         } // delegate: TreeViewDelegate
 
 } // TreeView

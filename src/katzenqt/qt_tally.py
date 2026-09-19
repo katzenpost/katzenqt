@@ -101,10 +101,17 @@ class TimelineModel(QtCore.QAbstractItemModel):
     persisting, or mid-list placeholders would drift the DB pointer.
     """
 
-    def __init__(self, convo_id: int) -> None:
+    def __init__(
+        self,
+        convo_id: int,
+        source: "ConversationLogModel | None" = None,
+    ) -> None:
         super().__init__()
         self.convo_id = convo_id
-        self._source = ConversationLogModel(convo_id)
+        # Callers in katzen.py already own a ConversationLogModel for the
+        # conversation (row_count bookkeeping, redraw hooks), so they pass it
+        # in; standalone/tests may omit it and one is built here.
+        self._source = source if source is not None else ConversationLogModel(convo_id)
         self._first_unread = 0
         self._rows: "list[_LayoutEntry]" = []
         # Keep the merged layout in step with the chat model's own inserts.
@@ -119,11 +126,12 @@ class TimelineModel(QtCore.QAbstractItemModel):
         return self._source
 
     def set_first_unread(self, first_unread_order: int) -> None:
-        """Record the persisted first-unread pointer (order space) and re-derive
-        the layout, so the ``tally_new`` roles stay in step with the pointer."""
+        """Record the persisted first-unread pointer (order space).
+
+        No model reset: the ``tally_new`` role is derived from this pointer on
+        read (see :meth:`_poll_data`), so read-advance does not disturb the
+        view's scroll/layout."""
         self._first_unread = int(first_unread_order or 0)
-        if self._rows:
-            self.refresh()
 
     @property
     def first_unread_order(self) -> int:
@@ -249,7 +257,9 @@ class TimelineModel(QtCore.QAbstractItemModel):
         if role == ROLE_TALLY_SURVEY_ID:
             return entry.poll.survey_id.hex()
         if role == ROLE_TALLY_NEW:
-            return entry.poll.is_new
+            # Derived live from the order-space pointer so a read-advance is
+            # visible without a model reset.
+            return entry.order >= self._first_unread
         if role == ROLE_CHAT_AUTHOR:
             return _PLACEHOLDER_AUTHOR
         if role == ROLE_CHAT_NETWORK_STATUS:
@@ -502,6 +512,24 @@ class TallyPanel(QWidget):
         """``(conversation_id, survey_id)`` of the poll being shown, so a
         refresh can re-render it (e.g. on a received TALLY_CLOSE), else None."""
         return self._survey_key
+
+    def clear(self) -> None:
+        """Drop the current survey (e.g. when the selected conversation
+        changes so a poll from another conversation is not left on screen)."""
+        self._survey_key = None
+        self._summary = None
+        self._submit_base = {}
+        self._selection = {}
+        self._cycle = []
+        self._voters_text = ""
+        self._clear_grid()
+        self._topic_label.setText("No poll selected")
+        self._status_label.setText("")
+        self._meta_label.setText("")
+        self._outcome_label.setText("")
+        self._voters_label.setText("")
+        self._vote_button.setEnabled(False)
+        self._close_button.hide()
 
     # -- rendering helpers -----------------------------------------------------
 
