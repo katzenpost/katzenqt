@@ -72,15 +72,16 @@ class PendingVoucherExistsError(Exception):
 
 
 async def conversation_is_joined(conversation_id: int) -> bool:
-    """True if the conversation already has a real member: an active peer that
-    is not a synthetic substream peer. The client's own peer is inactive, so it
-    does not count."""
+    """True if the conversation already has a real member: a peer other than
+    the client's own that is not a synthetic substream peer. Pausing or
+    deactivating a member does not make the conversation unjoined."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if conv is None:
             return False
         return any(
-            p.active and not p.name.startswith(_SUBSTREAM_NAME_PREFIX)
+            p.id != conv.own_peer_id
+            and not p.name.startswith(_SUBSTREAM_NAME_PREFIX)
             for p in conv.peers
         )
 
