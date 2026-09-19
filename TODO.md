@@ -287,7 +287,9 @@ Run the unit suite with `uv run pytest` (not `make test-uv`).
 
 ## Planned change: tally member-identity fix
 
-Status: planned (session 2026-09-19), then executed.
+Status: done (session 2026-09-19). Branch `fix/tally-member-identity`
+(commit 196863e) merged into `deckard-tally` (merge e2f441d); the branch is
+kept for a PR. Presenter regression added on this branch (9376b92).
 
 Problem: poll placeholders shown by other members as "Polls" instead of the
 creator's name (e.g. bob's poll on alice's and carol's clients), because a
@@ -378,6 +380,7 @@ branch (to open a PR).
       falling back only when unresolved). (commit d0cb65b)
 - [ ] Manual-testing bug still open: a first attempt to create a poll did not
       create one, a later attempt did. Not yet investigated.
-- [ ] Planned: tally member-identity fix (voucher own-cap replacement; voter id
-      and membership hash keyed on the 32-byte public-key prefix). See "Planned
-      change: tally member-identity fix" above. Not started.
+- [x] Tally member-identity fix (voucher own-cap replacement; voter id and
+      membership hash keyed on the 32-byte public-key prefix). See "Planned
+      change: tally member-identity fix" above. (commit 196863e, merge e2f441d,
+      presenter regression 9376b92)
