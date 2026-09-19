@@ -25,6 +25,8 @@ import time
 
 import pytest
 
+from tests.integration._outcomes import check_roles
+
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role, epoch_duration_s,
 )
@@ -98,6 +100,7 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
         )):
             print(f"[epoch-rollover] {line}")
 
+    check_roles([(alice_proc.returncode, alice_err)])
     assert alice_proc.returncode == 0, (
         f"alice chat-session failed rc={alice_proc.returncode}\n{alice_err.read_text()[-4000:]}"
     )

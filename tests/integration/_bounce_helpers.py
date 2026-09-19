@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-from tests.integration._process import run_logged
+from tests.integration._process import run_logged, spawn_logged
 
 # Opt-in per-phase timing for the integration-suite slow-path investigation
 # (REPORT.md). Off by default so normal runs are unaffected.
@@ -131,7 +131,9 @@ KP_ADDR = "{}:{}".format(
 CONN_ARGS = ("--address", KP_ADDR, "--network", "tcp")
 
 
-def run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
+def run_role(
+    role_state: Path, *cli_args: str, timeout: float = 300.0,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     env["PYTHONUNBUFFERED"] = "1"
@@ -141,7 +143,9 @@ def run_role(role_state: Path, *cli_args: str, timeout: float = 300.0):
     )
 
 
-def spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path) -> subprocess.Popen:
+def spawn_role(
+    role_state: Path, *cli_args: str, stdout_path: Path, stderr_path: Path,
+) -> subprocess.Popen[str]:
     """Popen variant for long-running chat-session subprocesses that we
     want running in parallel. We redirect stdout/stderr to files instead
     of pipes to avoid the classic 64 KB pipe-buffer deadlock: when one
@@ -153,11 +157,9 @@ def spawn_role(role_state: Path, *cli_args: str, stdout_path: Path, stderr_path:
     env["KQT_STATE"] = str(role_state)
     env["PYTHONUNBUFFERED"] = "1"
     cmd = [PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *CONN_ARGS]
-    return subprocess.Popen(
+    return spawn_logged(
         cmd, env=env, cwd=str(REPO_ROOT),
-        stdout=open(stdout_path, "w"),
-        stderr=open(stderr_path, "w"),
-        text=True,
+        stdout_path=stdout_path, stderr_path=stderr_path,
     )
 
 
