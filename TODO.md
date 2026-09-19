@@ -267,12 +267,21 @@ Remaining sequence, with a review checkpoint after Step 4:
    supervised `tally_listener` draining `network.tally_update_queue`, io-loop
    create/vote/close helpers, and QML placeholder styling +
    `chatController.openPoll(surveyId)`. (commit b841b8e)
-5. Step 6 remainder: migration-bootstrap coverage for the
-   `TallyState.conversation_order` column, full unit run.
-6. Small docs update once the GUI lands: `docs/tally-api.md` (dispatch now
-   returns a 4-tuple `(convlog_added, signal_send, peer_added, tally_added)`,
-   the tally notification queue, "no GUI yet" and Known gap #1 are obsolete)
-   and `docs/tally-howto.md` (the "no tally notification channel" section).
+5. [x] Step 6 remainder: migration coverage for
+   `TallyState.conversation_order` + full unit run. Placed in
+   `tests/migrations/test_upgrade.py` (not `test_runner_migration_bootstrap.py`):
+   `_helper.py` now snapshots each table's columns and a new case upgrades from
+   `35cec50b9604` (the tally migration's parent) to head and asserts the column
+   was added — a table-set check could not see a missing column. The helper
+   already exercises the `init_and_migrate` bootstrap.
+6. [x] Docs update: `docs/tally-api.md` (dispatch 4-tuple, the
+   `tally_update_queue` notification, GUI/presenter modules, tests table, and
+   Known gaps 1/5 marked resolved) and `docs/tally-howto.md` (the
+   `tally_update_queue` recipe replaces "no notification channel"; corrected the
+   GUI event-loop guidance). (commit cfdd99c)
+
+Also: dropped TODO step/decision references from code comments so they read
+standalone (commit 89ec754).
 
 Run the unit suite with `uv run pytest` (not `make test-uv`; the full run is
 454 passed, 14 skipped as of d048e56).
@@ -314,4 +323,10 @@ Run the unit suite with `uv run pytest` (not `make test-uv`; the full run is
       conversation switches; `tally_new` is now derived live from the
       order-space pointer instead of a stored `is_new` so read-advance needs no
       model reset.
-- [ ] Step 6: test suite + final full unit run.
+- [x] Step 6: migration coverage + final full unit run. Full suite:
+      497 passed, 14 skipped. (commits b04aee3, cfdd99c, 89ec754)
+- [x] Merged `main` (was accidentally branched from a stale local main): the
+      one conflict was `tests/conftest.py` (both branches added an independent
+      per-test reset block — kept both) and the hidden second issue was two
+      alembic heads (re-chained `3b19e0386cdd` onto `c4f1a8b2e9d7`). (commit
+      35fb4bd)
