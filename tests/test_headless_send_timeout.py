@@ -1,5 +1,6 @@
 import logging
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -39,8 +40,10 @@ def test_send_timeout_rejects_invalid_values(command, value):
     ],
 )
 async def test_unacknowledged_send_expires_and_preserves_pending(
-    monkeypatch, tmp_path, caplog, command, timeout, expected_seconds, expected_pending,
-):
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    caplog: pytest.LogCaptureFixture, command: str, timeout: float | None,
+    expected_seconds: float, expected_pending: int,
+) -> None:
     monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
     stream = uuid.uuid4()
     async with persistent.asession() as sess:
@@ -59,7 +62,7 @@ async def test_unacknowledged_send_expires_and_preserves_pending(
 
     clock = SimpleNamespace(now=0.0)
 
-    async def advance(delay):
+    async def advance(delay: float) -> None:
         clock.now += 60
 
     monkeypatch.setattr(_actions, "asyncio", SimpleNamespace(
@@ -68,9 +71,8 @@ async def test_unacknowledged_send_expires_and_preserves_pending(
     ))
     connection, background = object(), object()
     shutdown = AsyncMock()
-    monkeypatch.setattr(_actions, "_connect_and_start", AsyncMock(
-        return_value=(connection, background),
-    ))
+    start = AsyncMock(return_value=(connection, background))
+    monkeypatch.setattr(_actions, "_connect_and_start", start)
     monkeypatch.setattr(_actions, "_shutdown", shutdown)
     monkeypatch.setattr(_actions.network, "check_for_new", AsyncMock())
 
@@ -85,6 +87,7 @@ async def test_unacknowledged_send_expires_and_preserves_pending(
     args = _actions._build_parser().parse_args(argv)
 
     assert await args.func(args) == 3
+    start.assert_awaited_once_with()
     assert clock.now == expected_seconds
     assert "send timed out waiting for SentLog" in caplog.text
     assert "SENT" not in caplog.text
