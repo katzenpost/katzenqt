@@ -41,6 +41,10 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Select the Rust toolchain
+        working-directory: katzenqt
+        run: bash tools/ci-rust.sh
+
       - name: Build kpclientd and install deps in parallel
         working-directory: katzenqt
         run: |
@@ -193,6 +197,10 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Select the Rust toolchain
+        working-directory: katzenqt
+        run: bash tools/ci-rust.sh
+
       - name: Log in to GitHub Container Registry
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -291,6 +299,10 @@ jobs:
 
       - name: Set up Python
         run: uv python install 3.12
+
+      - name: Select the Rust toolchain
+        working-directory: katzenqt
+        run: bash tools/ci-rust.sh
 
       - name: Log in to GitHub Container Registry
         run: |

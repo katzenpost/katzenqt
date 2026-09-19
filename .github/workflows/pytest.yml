@@ -28,6 +28,9 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Select the Rust toolchain
+        run: bash tools/ci-rust.sh
+
       - name: Install dependencies
         run: |
           bash tools/ci-deps.sh
