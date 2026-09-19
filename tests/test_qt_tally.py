@@ -233,7 +233,7 @@ def test_timeline_poll_author_falls_back_when_the_creator_is_unknown():
         convo_id, survey_id, order=0, creator_voter_id=b"\xaa" * 16,
     )
     m = _timeline_for(convo_id, n_chat=0)
-    assert m.data(m.index(0, 0), ROLE_CHAT_AUTHOR) == "Polls"
+    assert m.data(m.index(0, 0), ROLE_CHAT_AUTHOR) == "Unknown"
 
 
 # ---------------------------------------------------------------------------
