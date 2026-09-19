@@ -1194,6 +1194,9 @@ class MainWindow(QMainWindow):
         conversation_id, survey_id = key
         if conversation_id != convo_state.conversation_id:
             return
+        # The vote is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
         await self.iothread.run_in_io(
             _io_tally_vote(conversation_id, survey_id, dict(choice))
         )
@@ -1209,6 +1212,9 @@ class MainWindow(QMainWindow):
         conversation_id, survey_id = key
         if conversation_id != convo_state.conversation_id:
             return
+        # The close is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
         await self.iothread.run_in_io(
             _io_tally_close(conversation_id, survey_id)
         )
@@ -1219,6 +1225,10 @@ class MainWindow(QMainWindow):
         """Open the create dialog and, on accept, create + broadcast a survey."""
         convo_state = self.convo_state_or_none()
         if convo_state is None:
+            return
+        # Creating a poll publishes it on the same stream as chat; refuse
+        # before opening the dialog so no work is discarded.
+        if await self._refuse_unless_joined(convo_state.conversation_id):
             return
         dialog = TallyCreateDialog(self)
         await _dialog_finished(dialog)
