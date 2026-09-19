@@ -233,8 +233,16 @@ Read supplied data via sync `persistent.Session(_engine_sync)` reads as needed
       Doc blobs in TallyState), just not as ConversationLog rows.
 - [x] Locked all 12 design decisions (see Decisions above).
 - [x] Verified schema, receive path, expect blocks, model patterns, test style.
-- [ ] Step 1: order capture column + ingest thread-through.
-- [ ] Step 2: gap fixes (malformed sync-req, per-voter detail).
+- [x] Step 1: order capture. Added nullable `TallyState.conversation_order`
+      (persistent.py + migration `3b19e0386cdd`); `_save` stamps it with
+      `next_conversation_order` **only on first insert** (later votes/closes
+      keep the placeholder pinned to first-sighting). Receive path already
+      calls us under `conversation_log_order_lock`. Test
+      `test_survey_stamps_the_timeline_order...`. (commit b2e8fdf)
+- [x] Step 2: gap fixes. New pure `engine.per_voter(doc)` (VoterChoice: id,
+      version, choices; `tally()` now reuses it). Controller drops malformed
+      TALLY_SYNC_REQ state vectors (ValueError -> log + drop, no staged reply).
+      Tests added. (commit be767a6)
 - [ ] Step 3: Qt-free presenter + tests.
 - [ ] Step 4: Qt-only UI (TimelineModel, PollsTabModel, TallyPanel,
       TallyCreateDialog, tally_update_queue).
