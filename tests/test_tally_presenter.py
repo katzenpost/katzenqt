@@ -100,6 +100,31 @@ def test_summarize_resolves_the_creator_name_from_voter_names():
     ).creator_name == "alice"
 
 
+def test_creator_resolves_across_read_cap_index_suffix_variants():
+    """Regression for the manual-testing bug: an inducted member's poll was
+    attributed to "Polls" on other clients because the creator's own client
+    hashed the pre-mutation read cap while everyone else held the salt-mutated
+    one. The two share the 32-byte public key and differ only in the 104-byte
+    index suffix, so the creator must still resolve."""
+    key = b"\x10" * 32
+    own_cap = key + b"\x01" * 104       # what the creator's own client hashed
+    shared_cap = key + b"\x02" * 104    # what the other members hold
+
+    doc = schema.new_survey_doc(
+        uuid.uuid4().bytes, "whenbob", Mode.APPROVAL, ["a"],
+        creator=voter_id_from_read_cap(own_cap),
+    )
+    summary = presenter.summarize(
+        doc, conversation_id=1,
+        my_voter_id=voter_id_from_read_cap(shared_cap),
+        voter_names={voter_id_from_read_cap(shared_cap): "bob"},
+    )
+    assert summary.creator_name == "bob"
+    # The creator's own client derives the same id from its differently
+    # suffixed copy, so it (and only it) recognises itself as the creator.
+    assert summary.is_creator() is True
+
+
 def test_placeholder_text_reflects_state_and_participation():
     doc = _doc()
     open_none = presenter.summarize(doc, conversation_id=1)
