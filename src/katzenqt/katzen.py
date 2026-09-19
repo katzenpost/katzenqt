@@ -1302,17 +1302,44 @@ class MainWindow(QMainWindow):
             )
         )
 
+    async def _refuse_unless_joined(self, conversation_id: int) -> bool:
+        """True if an outbound send must be refused because this client is not
+        yet a member of the conversation.
+
+        A conversation before membership has only our own (inactive) peer.
+        Sending then is unsafe for a joiner: ``voucher.await_and_open``
+        salt-mutates our write stream at induction, so anything committed on
+        the pre-mutation stream is never read by the group. An owner who has
+        not yet inducted anyone also has no audience. Both are exactly
+        ``not conversation_is_joined``. Returns True (and warns) when the send
+        should be abandoned; the caller leaves the user's input in place.
+        """
+        if await self.iothread.run_in_io(
+            conversation_is_joined(conversation_id)
+        ):
+            return False
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, APP_NAME,
+            "You have not joined this conversation yet. Wait until you are "
+            "inducted (or induct someone) before sending messages.",
+        ))
+        return True
+
     @async_cb
     async def chat_msg_single_line(self):
         """Send a single line message to the currently selected chat window."""
         msg = self.ui.chat_lineEdit.text()
-        self.ui.chat_lineEdit.setText("")
         convo_state = self.convo_state()
         if not convo_state:
             return
-        convo_state.chat_lineEdit_buffer = ''
         if not msg.strip():
             return
+        # Refuse (and keep the typed text) until we are actually a member:
+        # sending earlier commits to a stream the group will not read.
+        if await self._refuse_unless_joined(convo_state.conversation_id):
+            return
+        self.ui.chat_lineEdit.setText("")
+        convo_state.chat_lineEdit_buffer = ''
 
         # Stamp the real membership hash before serialize.
         # Computed on the io loop; never open asession on the Qt loop.
@@ -1715,6 +1742,10 @@ class MainWindow(QMainWindow):
         the chat view does not store megabytes inline.
         """
         convo = self.convo_state()
+        # Refuse (and keep the queued attachments) until we are a member;
+        # see _refuse_unless_joined.
+        if await self._refuse_unless_joined(convo.conversation_id):
+            return
         print("should send files", convo.attached_files)
 
         voice_note_drafts = []
