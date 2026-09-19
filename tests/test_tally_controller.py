@@ -270,6 +270,22 @@ async def test_undecodable_crdt_is_dropped_not_raised(caplog):
 
 
 @pytest.mark.asyncio
+async def test_malformed_sync_request_is_dropped_not_raised(caplog):
+    """A TALLY_SYNC_REQ carrying a garbage state vector must not raise out of
+    dispatch (which would wedge the receive loop); it is dropped like any other
+    undecodable tally payload, and no reply is staged (False return)."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
+        # A sender with no useful history sends a malformed state vector.
+        await ctrl.create_local(sess, convo, survey_id, "t", Mode.APPROVAL, ["a"])
+        bad_req = events.build_sync_request(survey_id, b"\xde\xad\xbe\xef" * 16)
+        assert await ctrl.handle_event(sess, peers["alice"], bad_req) is False
+        await sess.commit()
+
+
+@pytest.mark.asyncio
 async def test_survey_stamps_the_timeline_order_at_creation_and_keeps_it():
     """A survey's TallyState carries the next conversation_order at first
     sighting, and a later vote/close does not move the placeholder forward."""

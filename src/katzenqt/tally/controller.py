@@ -264,7 +264,17 @@ class TallyController:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
                 return False
-            diff = sync.diff_since(doc, tally.crdt or b"")
+            try:
+                diff = sync.diff_since(doc, tally.crdt or b"")
+            except ValueError as exc:
+                # A malformed state vector must not wedge the receive loop with
+                # a raise out of dispatch; drop the request like any other
+                # undecodable tally payload.
+                logger.warning(
+                    "dropping sync request for survey %s: undecodable state "
+                    "vector: %s", survey_id.hex(), exc,
+                )
+                return False
             await send.stage_outbound(sess, peer.conversation, build_sync_response(survey_id, diff))
             return True
 
