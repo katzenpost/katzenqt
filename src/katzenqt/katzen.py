@@ -2403,7 +2403,7 @@ async def main(window: MainWindow):
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
-    for conv_id in await pending_joiner_join_conversation_ids():
+    for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)

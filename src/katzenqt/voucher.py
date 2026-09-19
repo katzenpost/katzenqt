@@ -117,7 +117,7 @@ async def cancel_pending_voucher(pending_id) -> None:
             await sess.commit()
 
 
-async def pending_joiner_join_conversation_ids() -> "list[int]":
+def pending_joiner_join_conversation_ids() -> "list[int]":
     """Conversation ids whose joiner handshake a restart should resume.
 
     The joiner is net-promised a reply on the rendezvous stream only after the
@@ -125,14 +125,17 @@ async def pending_joiner_join_conversation_ids() -> "list[int]":
     while the app is down). Such vouchers are stuck in the DB precisely so a
     restart can pick them back up. ``awaiting`` is the only step with a persisted
     box-1 index we can poll yet; ``minted`` lacks it and is abandoned (the minted
-    box 0 would duplicate if re-run)."""
-    async with persistent.asession() as sess:
-        rows = (await sess.exec(
+    box 0 would duplicate if re-run).
+
+    Sync engine: main() calls this on the Qt loop, which must not open the async
+    engine (see persistent.warm_async_engine)."""
+    with persistent.Session(persistent._engine_sync) as sess:
+        rows = sess.exec(
             select(persistent.PendingVoucher).where(
                 persistent.PendingVoucher.role == "joiner",
                 persistent.PendingVoucher.step == STEP_AWAITING,
             )
-        )).all()
+        ).all()
         return [r.conversation_id for r in rows]
 
 

@@ -143,13 +143,13 @@ async def test_resume_picks_awaiting_joiner_only():
             step="inducting", voucher=b"w" * 32,
         ))
         await sess.commit()
-    assert await voucher.pending_joiner_join_conversation_ids() == [awaiting]
+    assert voucher.pending_joiner_join_conversation_ids() == [awaiting]
 
 
 @pytest.mark.asyncio
 async def test_resume_empty_when_no_join_in_flight():
     await _make_conversation()
-    assert await voucher.pending_joiner_join_conversation_ids() == []
+    assert voucher.pending_joiner_join_conversation_ids() == []
 
 
 @pytest.mark.asyncio
