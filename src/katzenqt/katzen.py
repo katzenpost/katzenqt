@@ -674,7 +674,14 @@ class PacketsDialog(QDialog):
         super().hideEvent(event)
 
 
+def mixnet_status_text(connected: bool) -> "tuple[str, str]":
+    if connected:
+        return ("Mixnet: connected", "#268bd2")
+    return ("Mixnet: offline", "#dc322f")
+
+
 class MainWindow(QMainWindow):
+    mixnet_status_changed = Signal(bool)
     def X_keyPressEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key pressed", key)
@@ -1667,6 +1674,21 @@ class MainWindow(QMainWindow):
                 logger.error(
                     "tally_listener: dropping an item after %s", e, exc_info=e,
                 )
+        self.mixnet_status_label = QLabel()
+        self.ui.statusbar.addPermanentWidget(self.mixnet_status_label)
+        self.mixnet_status_changed.connect(self.render_mixnet_status)
+        network.add_status_listener(self.mixnet_status_changed.emit)
+        self.render_mixnet_status(network.mixnet_connected())
+
+    def render_mixnet_status(self, connected: bool) -> None:
+        text, color = mixnet_status_text(connected)
+        self.mixnet_status_label.setText(text)
+        self.mixnet_status_label.setStyleSheet(f"color: {color};")
+        menu = self.ui.menuMixnetStatus
+        menu.setEnabled(True)
+        menu.clear()
+        current = menu.addAction(text)
+        current.setEnabled(False)
 
     async def _enqueue_outgoing_gcm(
         self,
