@@ -283,8 +283,50 @@ Remaining sequence, with a review checkpoint after Step 4:
 Also: dropped TODO step/decision references from code comments so they read
 standalone (commit 89ec754).
 
-Run the unit suite with `uv run pytest` (not `make test-uv`; the full run is
-454 passed, 14 skipped as of d048e56).
+Run the unit suite with `uv run pytest` (not `make test-uv`).
+
+## Planned change: tally member-identity fix
+
+Status: planned (session 2026-09-19), then executed.
+
+Problem: poll placeholders shown by other members as "Polls" instead of the
+creator's name (e.g. bob's poll on alice's and carol's clients), because a
+joiner's own peer retains the pre-mutation read cap from
+`provision_read_caps`, while peers hold the salt-mutated read cap from the
+voucher handshake. `voter_id_from_read_cap` hashes the whole 136-byte cap, so
+the creator's own voter id and everyone else's id for them diverge.
+
+Root cause (confirmed against live webtop state): `voucher.await_and_open`
+mutates `WriteCapWAL.write_cap` but never updates the conversation own-peer
+`ReadCapWAL.read_cap`. Bob's `write_cap[32:]` hashes to the id the other
+members hold (`ac1bda7d...`); his own-peer cap hashes to the id recorded as the
+poll's creator (`cd28f715...`). The two share the 32-byte public key and differ
+only in the 104-byte index/mutation suffix.
+
+Fix 1: `await_and_open` also sets own-peer
+`ReadCapWAL.read_cap = mutated_message_write_cap[32:]` (and its `next_index`),
+so the retained un-mutated sequence is replaced by the one the group uses.
+
+Fix 2 (capability-design alignment): `voter_id_from_read_cap` hashes the
+invariant 32-byte public-key prefix (`read_cap[:32]`), so a future-only
+per-reader read cap for the same member (same public key, later index) maps to
+the same identity. Needed for the planned "induct a member without history"
+feature.
+
+Fix 3: `models.canonical_membership_hash` hashes and dedupes on `cap[:32]` too,
+so membership agrees across differing read-cap variants for the same reason.
+`MEMBERSHIP_DOMAIN` stays `v1` (feature unshipped).
+
+Breaking scope: tally voter identity and the `membership_hash` wire field only;
+no non-tally chat impact. Existing polls/votes are not migrated (no users).
+
+Tests: voucher-guard own-cap replacement; `voter_id_from_read_cap` prefix
+equality; membership-hash prefix dedupe; presenter creator-resolution
+regression (added on this branch, since `presenter.py` is branch-local).
+
+Workflow: branch `fix/tally-member-identity` off `main` in a throwaway
+worktree, merge back into `deckard-tally`, remove the worktree but keep the
+branch (to open a PR).
 
 ## Session log
 
@@ -336,3 +378,6 @@ Run the unit suite with `uv run pytest` (not `make test-uv`; the full run is
       falling back only when unresolved). (commit d0cb65b)
 - [ ] Manual-testing bug still open: a first attempt to create a poll did not
       create one, a later attempt did. Not yet investigated.
+- [ ] Planned: tally member-identity fix (voucher own-cap replacement; voter id
+      and membership hash keyed on the 32-byte public-key prefix). See "Planned
+      change: tally member-identity fix" above. Not started.
