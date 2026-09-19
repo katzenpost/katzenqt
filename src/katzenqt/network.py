@@ -1459,6 +1459,44 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         substream_progress_queue.put_nowait(("resumed", bacap_stream))
 
 
+async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
+        if rcw is None:
+            return
+        if rcw.substream_failure is None:
+            raise ValueError("Only failed transfers can be dismissed")
+        peers = (await sess.exec(select(persistent.ConversationPeer).where(
+            persistent.ConversationPeer.read_cap_id == bacap_stream,
+        ))).all()
+        if not peers or any(
+            not peer.name.startswith(_SUBSTREAM_NAME_PREFIX) for peer in peers
+        ):
+            raise ValueError("Read cap is not a transfer")
+        for peer in peers:
+            parent = await _substream_parent(sess, peer.name)
+            if parent is not None and rcw.read_cap is not None:
+                await _discard_substream_release(
+                    sess, parent.read_cap_id, rcw.read_cap,
+                )
+            peer.active = False
+            sess.add(peer)
+        for piece in (await sess.exec(select(persistent.ReceivedPiece).where(
+            persistent.ReceivedPiece.read_cap == bacap_stream,
+        ))).all():
+            await sess.delete(piece)
+        for row in (await sess.exec(select(persistent.MixWAL).where(
+            persistent.MixWAL.bacap_stream == bacap_stream,
+            persistent.MixWAL.is_read,
+        ))).all():
+            await sess.delete(row)
+        rcw.substream_failure = None
+        rcw.substream_missing_since = None
+        rcw.read_paused = False
+        sess.add(rcw)
+        await sess.commit()
+
+
 async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool:
     """Block until either __mixnet_connected is set or __should_quit fires.
 
