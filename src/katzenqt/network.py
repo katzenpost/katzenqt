@@ -36,6 +36,13 @@ logger = logging.getLogger("katzen.network")
 
 conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
 
+# Tally events consumed off the receive path, as conversation ids. Pushed only
+# after the consuming transaction has committed (same discipline as
+# conversation_update_queue/peer_added_queue), so the GUI never refreshes
+# against uncommitted TallyState rows. The GUI drains this in a queued
+# connection and repaints its poll list / timeline placeholders / tab badge.
+tally_update_queue: "Tuple[int]" = asyncio.Queue()
+
 # Peers the local client learned of via an INTRODUCTION announcement, as
 # ``(conversation_id, display_name)``. Announced on the io loop by the receive
 # path; the GUI appends the name to the contacts tree in its own listener.
@@ -974,6 +981,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     convlog_added = False
     signal_send = False
     peer_added = None
+    tally_added = False
     notify_conv_id = cp.conversation.id
     parent_peer = None
 
@@ -1016,9 +1024,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # Substream's terminal F: commit the assembled message into the
                     # parent peer's ConversationLog, prune the parent's indirection
                     # piece, and retire this synthetic peer.
-                    added, sig, pa = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
+                    added, sig, pa, ta = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
                     signal_send = signal_send or sig
                     peer_added = peer_added or pa
+                    tally_added = tally_added or ta
                     parent_i = (await sess.exec(
                         select(persistent.ReceivedPiece).where(
                             persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
@@ -1035,8 +1044,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # Top-level F (single-box or contiguous on the parent stream):
                     # route by message type, chat into the log, tally into the
                     # controller.
-                    convlog_added, sig, peer_added = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
+                    convlog_added, sig, peer_added, tally_added2 = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
                     signal_send = signal_send or sig
+                    tally_added = tally_added or tally_added2
             for rp in chain:
                 await sess.delete(rp)
 
@@ -1102,6 +1112,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
+
+  if tally_added:
+    # A tally event was consumed and its transaction committed. The GUI lists
+    # surveys from committed TallyState, so refreshing here is both safe and
+    # race-free with the send-side commits (both go through SQLite).
+    tally_update_queue.put_nowait(notify_conv_id)
 
   if peer_added:
     # Only announced once the transaction that added them has actually

@@ -126,18 +126,25 @@ async def test_dispatch_routes_tally_off_the_log_and_chat_into_it():
 
         blob = sync.full_state(schema.new_survey_doc(survey_id, "t", Mode.APPROVAL, ["a"]))
         create = events.build_create(survey_id, blob)
-        added, _sig, _pa = await conversation_handlers.dispatch(sess, peers["alice"], create, b"ignored")
+        added, _sig, _pa, tally_added = await conversation_handlers.dispatch(
+            sess, peers["alice"], create, b"ignored",
+        )
         assert added is False  # tally create does not add a chat row
+        assert tally_added is True  # ...but the caller must refresh the GUI
 
         vote = events.build_vote(survey_id, {"s0": "yes"})
-        added, _sig, _pa = await conversation_handlers.dispatch(sess, peers["alice"], vote, b"ignored")
+        added, _sig, _pa, tally_added = await conversation_handlers.dispatch(
+            sess, peers["alice"], vote, b"ignored",
+        )
         assert added is False
+        assert tally_added is True
 
         text = models.GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
-        added, _sig, _pa = await conversation_handlers.dispatch(
+        added, _sig, _pa, tally_added = await conversation_handlers.dispatch(
             sess, peers["alice"], text, b"F" + text.to_cbor(),
         )
         assert added is True  # ordinary chat still lands in the log
+        assert tally_added is False
         convo_id = convo.id  # capture before commit expires the attribute
         await sess.commit()
 
