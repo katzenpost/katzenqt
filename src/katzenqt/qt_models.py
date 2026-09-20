@@ -560,8 +560,12 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         # refresh_row_count() (called on a conversation-update notification).
         # Deriving it from the log, rather than incrementing a counter at each
         # writer, means a writer that forgets to notify cannot desync the view
-        # permanently: the next notification re-reads the truth.
+        # permanently: the next notification re-reads the truth. ``_row_count``
+        # is the DB truth (what rowCount() returns); ``_view_count`` is how many
+        # rows Qt has actually been told about, which drives insert/reset
+        # transitions.
         self._row_count = 0
+        self._view_count = 0
 
     def roleNames(self):
         """These map names used in QML to ints used in QAbstractItemModel
@@ -621,44 +625,53 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
 
     def set_row_count(self, count: int) -> None:
         """Seed the cached count without emitting signals (startup, when the
-        view has no rows yet)."""
+        view has no rows yet). Both the DB-truth count and the count Qt has
+        been told about start equal, so the first later insert uses a range the
+        view can accept."""
         self._row_count = int(count)
+        self._view_count = int(count)
         self._clear_data_caches()
 
     def refresh_row_count(self) -> None:
         """Re-read the log's row count and reconcile the view.
 
-        Emits a row insertion for growth, resets the model for a shrink
-        (a future message-deletion path), and repaints on no change. Because
-        the count comes from the log, a writer that appends a row without
-        notifying this model self-heals on the next notification instead of
-        desyncing the view permanently.
+        Transitions are driven by ``_view_count`` (rows Qt has actually been
+        told about), never by the raw DB count: seeding the count at startup
+        without an insert means the view's bookkeeping can lag the model's, and
+        emitting a range computed from the DB count then crashes the view.
+        Growth inserts the missing tail, a shrink resets the model, and no
+        change repaints in place. Because the count comes from the log, a
+        writer that appends a row without notifying this model self-heals on
+        the next notification instead of desyncing the view permanently.
         """
         new_count = self._query_row_count()
-        old_count = self._row_count
-        if new_count == old_count:
-            self.redraw_network_status()
-            return
-        if new_count > old_count:
-            # Growth appends at the end: existing indices keep their meaning,
-            # so the per-index data() cache stays valid and is left alone.
+        if new_count > self._view_count:
             qmi = QModelIndex()
-            self.beginInsertRows(qmi, old_count, new_count - 1)
+            self.beginInsertRows(qmi, self._view_count, new_count - 1)
             self._row_count = new_count
+            self._view_count = new_count
             self.endInsertRows()
             return
-        # Shrink: rows were removed. Reset rather than compute a delta, so any
-        # shifted indices and stale cached cells are dropped wholesale.
-        self.beginResetModel()
-        self._row_count = new_count
-        self._clear_data_caches()
-        self.endResetModel()
+        if new_count < self._view_count:
+            # Shrink: rows were removed. Reset rather than compute a delta, so
+            # any shifted indices and stale cached cells are dropped wholesale.
+            # Clear the caches before the transition, not between begin/end.
+            self._clear_data_caches()
+            self.beginResetModel()
+            self._row_count = new_count
+            self._view_count = new_count
+            self.endResetModel()
+            return
+        # Count unchanged: repaint in place (no transition).
+        self.redraw_network_status()
 
     def redraw_network_status(self):
-        """Force the view to refresh without actually changing anything."""
-        qmi = QModelIndex()
-        self.beginInsertRows(qmi, 1,0)
-        self.endInsertRows()
+        """Repaint the network-status column without changing the row set."""
+        if self._view_count == 0:
+            return
+        top = self.index(0, 0, QModelIndex())
+        bottom = self.index(self._view_count - 1, 0, QModelIndex())
+        self.dataChanged.emit(top, bottom, [ROLE_CHAT_NETWORK_STATUS])
 
     def _clear_data_caches(self) -> None:
         """Drop cached model lookups after the row count changed.
@@ -713,6 +726,10 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                         persistent.ConversationLog.conversation_order == index_row,
                     )
                 ).first()
+                if cl is None:
+                    # The count can briefly outrun the committed rows (or a
+                    # reset can race a paint); never deref None for a role.
+                    return None
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
                     if cl.network_status == 1:

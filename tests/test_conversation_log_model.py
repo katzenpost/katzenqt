@@ -134,3 +134,44 @@ def test_row_count_shrink_resets_and_clears_caches() -> None:
     model.refresh_row_count()
     assert model.rowCount(None) == 2
     assert resets == [True]
+
+
+def test_seed_then_append_inserts_exactly_the_new_row() -> None:
+    """A seeded count (startup) must make the first later append emit an
+    insert range the view can accept: [_view_count, new-1], not a range
+    derived from the raw DB count."""
+    convo_id = 1237
+    for order in range(4):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+    model.set_row_count(4)  # startup seed, no transition
+
+    grown: "list[tuple[int, int]]" = []
+    model.rowsInserted.connect(lambda _p, first, last: grown.append((first, last)))
+
+    _append_row(convo_id, 4)
+    model.refresh_row_count()
+    assert model.rowCount(None) == 5
+    assert grown == [(4, 4)]
+
+
+def test_equal_count_emits_no_insert_or_reset() -> None:
+    """A notification with no new rows repaints in place, emitting neither a
+    row insertion nor a reset."""
+    convo_id = 1238
+    for order in range(3):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+    model.refresh_row_count()
+
+    inserts: "list[tuple[int, int]]" = []
+    resets: "list[bool]" = []
+    changed: "list[bool]" = []
+    model.rowsInserted.connect(lambda _p, f, l: inserts.append((f, l)))
+    model.modelReset.connect(lambda: resets.append(True))
+    model.dataChanged.connect(lambda *a: changed.append(True))
+
+    model.refresh_row_count()  # no new rows
+    assert inserts == []
+    assert resets == []
+    assert changed == [True]
