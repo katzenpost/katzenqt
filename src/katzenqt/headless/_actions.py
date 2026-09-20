@@ -89,6 +89,7 @@ from pathlib import Path
 
 import cbor2
 import sqlalchemy as sa
+from katzenpost_thinclient import ThinClient
 from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
@@ -116,7 +117,7 @@ def set_connection_config(path: "str | None") -> None:
     _CONNECTION_CONFIG = path
 
 
-async def _connect_and_start():
+async def _connect_and_start() -> tuple[ThinClient, asyncio.Task[None]]:
     """Connect to kpclientd and kick the background threads running.
 
     Returns ``(connection, background_task)``. The caller is responsible for
@@ -129,7 +130,9 @@ async def _connect_and_start():
     return connection, bg
 
 
-async def _shutdown(bg, connection):
+async def _shutdown(
+    bg: asyncio.Task[None], connection: ThinClient, timeout: float = 5.0,
+) -> None:
     """Tear down a session opened by :func:`_connect_and_start`.
 
     Sets the network's shutdown event, waits for the background task
@@ -140,10 +143,14 @@ async def _shutdown(bg, connection):
     """
     network.shutdown()
     try:
-        await asyncio.wait_for(bg, timeout=5)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        bg.cancel()
-    connection.stop()
+        done, _ = await asyncio.wait({bg}, timeout=timeout)
+        if bg in done and not bg.cancelled():
+            bg.result()
+    finally:
+        try:
+            await network._cancel_and_join((bg,))
+        finally:
+            connection.stop()
 
 
 async def _action_create_conv(args):
