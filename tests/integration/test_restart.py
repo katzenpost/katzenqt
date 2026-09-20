@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._outcomes import check_roles
+
 from katzenqt import models
 from tests.integration._bounce_helpers import (
     REPO_ROOT as _REPO_ROOT,
@@ -158,6 +160,10 @@ def _run_concurrent_session(
             if any(t in line for t in ("STEP_OK", "STEP_FAIL", "STEP_POLL", "SESSION_DONE")):
                 print(f"[{round_label}][{who}] {line}")
 
+    check_roles([
+        (alice_proc.returncode, alice_err_path),
+        (bob_proc.returncode, bob_err_path),
+    ])
     assert alice_proc.returncode == 0, (
         f"[{round_label}] alice chat-session failed rc={alice_proc.returncode}\n"
         f"stdout tail:\n{alice_out[-3000:]}\nstderr tail:\n{alice_err[-3000:]}"
