@@ -2019,6 +2019,9 @@ class MainWindow(QMainWindow):
             rm = api.addAction("Remove")
             chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
             if chosen is rm:
+                await self.iothread.run_in_io(
+                    network.dismiss_failed_transfer(bacap_stream=rcw_id),
+                )
                 transfers_model.remove_transfer(rcw_id)
             return
         if row_data.get("direction", "download") != "download":
