@@ -1900,7 +1900,9 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
-    async def _process_peer_added(self, conversation_id, name) -> None:
+    async def _process_peer_added(
+        self, conversation_id: int, name: str,
+    ) -> None:
         # A dynamically-announced peer could be a synthetic substream; never
         # render those into the contacts tree.
         if name.startswith(network._SUBSTREAM_NAME_PREFIX):
@@ -1924,8 +1926,17 @@ class MainWindow(QMainWindow):
         with persistent.Session(persistent._engine_sync) as _sess:
             peer_row = _sess.exec(
                 select(persistent.ConversationPeer)
-                .where(persistent.ConversationPeer.name == name)
+                .join(
+                    persistent.ConversationPeerLink,
+                    persistent.ConversationPeerLink.conversation_peer_id ==
+                    persistent.ConversationPeer.id,
+                )
+                .where(
+                    persistent.ConversationPeerLink.conversation_id == conversation_id,
+                    persistent.ConversationPeer.name == name,
+                )
             ).first()
+
         if peer_row is not None:
             new_item.peer_read_cap_id = peer_row.read_cap_id
             new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
@@ -2622,9 +2633,11 @@ class MainWindow(QMainWindow):
         try:
             added = await self._wait_and_open_with_retries(convo.conversation_id)
         except Exception as e:
-            logging.warning("voucher await failed: %s", e)
+            detail = str(e)
+            logging.warning("voucher await failed: %s", detail)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
-                self, f"ERROR: {APP_NAME}", f"The voucher join did not complete:\n{e}",
+                self, f"ERROR: {APP_NAME}",
+                f"The voucher join did not complete:\n{detail}",
             ))
             return
         for name in added:
@@ -2633,16 +2646,16 @@ class MainWindow(QMainWindow):
                 continue
             new_item = QStandardItem(name)
             # Tag like add_conversation's peers so the per-peer pause/resume
-            # context menu works on dynamically-announced members too.
-            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            # context menu works on dynamically-announced members too. Sync
+            # engine: the Qt loop must not open the async engine (see
+            # persistent.warm_async_engine).
             with persistent.Session(persistent._engine_sync) as _sess:
-                peer_row = _sess.exec(
-                    select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == name)
-                ).first()
-            if peer_row is not None:
-                new_item.peer_read_cap_id = peer_row.read_cap_id
-                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+                peer_row = persistent.peer_named_in_conversation_sync(
+                    _sess, convo.conversation_id, name,
+                )
+                if peer_row is not None:
+                    new_item.peer_read_cap_id = peer_row.read_cap_id
+                    new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
             convo.contacts_standard_item.appendRow(new_item)
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(
@@ -2732,8 +2745,17 @@ class MainWindow(QMainWindow):
             with persistent.Session(persistent._engine_sync) as _sess:
                 peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == joiner_name)
+                    .join(
+                        persistent.ConversationPeerLink,
+                        persistent.ConversationPeerLink.conversation_peer_id ==
+                        persistent.ConversationPeer.id,
+                    )
+                    .where(
+                        persistent.ConversationPeerLink.conversation_id == convo.conversation_id,
+                        persistent.ConversationPeer.name == joiner_name,
+                    )
                 ).first()
+
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
