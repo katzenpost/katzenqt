@@ -829,6 +829,26 @@ async def _try_assemble(sess, rcw_id: "uuid.UUID", terminal_idx_8b: bytes):
     return ("F", chunks, chain, gcm)
 
 
+async def _discard_substream_release(
+    sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
+    read_cap: bytes,
+) -> None:
+    pieces = (await sess.exec(
+        select(persistent.ReceivedPiece).where(
+            persistent.ReceivedPiece.read_cap == parent_cap_id,
+            persistent.ReceivedPiece.chunk_type == b"I",
+            persistent.sa.func.length(
+                persistent.ReceivedPiece.chunk,
+            ).in_((136, 140)),
+            persistent.sa.func.substr(
+                persistent.ReceivedPiece.chunk, -136,
+            ) == read_cap,
+        )
+    )).all()
+    for piece in pieces:
+        await sess.delete(piece)
+
+
 async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS, reconnect_grace_s: float = _RECONNECT_GRACE_SECONDS):
   """Given a single persisten.MixWAL with is_read==True:
     - Send it to the network.
@@ -1178,15 +1198,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     added, sig, pa = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
                     signal_send = signal_send or sig
                     peer_added = peer_added or pa
-                    parent_i = (await sess.exec(
-                        select(persistent.ReceivedPiece).where(
-                            persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
-                            persistent.ReceivedPiece.chunk_type == b"I",
-                            persistent.ReceivedPiece.chunk == rcw.read_cap,
-                        )
-                    )).first()
-                    if parent_i is not None:
-                        await sess.delete(parent_i)
+                    await _discard_substream_release(
+                        sess, parent_peer.read_cap_id, rcw.read_cap,
+                    )
                     cp.active = False
                     sess.add(cp)
                     convlog_added = added
