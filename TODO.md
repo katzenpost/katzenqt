@@ -60,8 +60,10 @@ Low priority; re-evaluate when we do the next dependency refresh.
 
 Progress: Phase 1 (display) landed in `f901bf8` ("transfers: show in-progress
 uploads in the Transfers panel"); Phase 2 (pause/resume) landed in `42c0125`
-("transfers: pause and resume in-progress uploads"). Phase 3 (cancel +
-ordering) remains; see the per-phase headings below for the exact steps.
+("transfers: pause and resume in-progress uploads"); Phase 3's ordering
+prerequisite landed in `b24b9fb` ("conversation log: order from MAX+1 and render
+by actual order"). The `cancel_upload` half of Phase 3 remains; see the
+per-phase headings below for the exact steps.
 
 The Transfers panel is receive-only today (`DownloadsModel` seeds from
 substream `ConversationPeer` rows). An in-progress upload has no row of its
@@ -139,10 +141,12 @@ upload is to wait it out.
 - Add `_inflight_writes: dict[uuid.UUID, asyncio.Task]` (the missing write-side
   analogue of `_inflight_reads`, `network.py:69`); register where `write_task`
   is created (`network.py:1582`), pop in `_on_write_done`.
-- `pause_upload(agg_bacap_stream)`: set the marker; cancel the in-flight write
-  task; delete pending `is_read=False` MixWAL rows for the stream; discard
-  `__resend_queue` (`draining_right_now` is cleared by the done-callback); poke
-  `resendable_event` / `__mixwal_updated`; fire `upload_paused`.
+- `pause_upload(rcw_id)`: resolve the agg stream via `_upload_stream_for_rcw`
+  (non-null `substream_total_chunks`); set the marker; cancel the in-flight
+  write task; delete pending `is_read=False` MixWAL rows for the stream;
+  discard `__resend_queue` (`draining_right_now` is cleared by the
+  done-callback); poke `resendable_event` / `__mixwal_updated`; fire
+  `upload_paused`.
 - `resume_upload`: clear the marker, poke, fire `upload_resumed`.
 - `transfers_context_menu` (`katzen.py:1639-1693`) branches on direction;
   Pause/Resume enabled per that row's own direction and state (mirror
@@ -150,24 +154,22 @@ upload is to wait it out.
 
 ### Phase 3 — cancel (requires order-based rendering first)
 
-Cancel exists only while the upload is live (remaining agg PWAL > 0 and the
-I-chunk `PlaintextWAL.indirection == rcw_id` still present); if the substream
-has completed, refuse. **Prerequisite:** deleting a middle `ConversationLog`
-row exposes the COUNT-based ordering hazard, so land the backlog ordering fix
-first:
-
+Ordering prerequisite done in `b24b9fb`:
 - `persistent.next_conversation_order` -> `coalesce(func.max(conversation_order),
   -1) + 1` (keep the per-conversation lock).
-- Make `ConversationLogModel` gap-tolerant: cache the ordered
-  `conversation_order` values and map `index.row()` -> actual order in
-  `data()` / `index()`; fetch new orders on growth, reset on shrink. Drop the
-  `index_row == conversation_order` assumption (`qt_models.py:741`).
+- `ConversationLogModel` gap-tolerant: caches the ordered
+  `conversation_order` values and maps `index.row()` -> actual order in
+  `data()` / `index()`; inserts the tail on unchanged-prefix growth, resets on
+  any other change. The `index_row == conversation_order` assumption is gone.
 
-Then `cancel_upload(rcw_id)`: cancel the in-flight write; in one transaction
-delete the agg C/F `PlaintextWAL` rows, the I-chunk `PlaintextWAL`, the
-indirection `ReadCapWAL`, the `agg_bacap_stream` `WriteCapWAL`, that stream's
-MixWAL rows, and the optimistic `ConversationLog` row (its `outgoing_pwal` FK
-forces this); discard `__resend_queue`; fire `upload_cancelled` and wake
+Remaining: `cancel_upload(rcw_id)`. Cancel exists only while the upload is
+live (remaining agg PWAL > 0 and the I-chunk `PlaintextWAL.indirection ==
+rcw_id` still present); if the substream has completed, refuse. It cancels the
+in-flight write, then in one transaction deletes the agg C/F `PlaintextWAL`
+rows, the I-chunk `PlaintextWAL`, the indirection `ReadCapWAL`, the
+`agg_bacap_stream` `WriteCapWAL`, that stream's MixWAL rows, and the optimistic
+`ConversationLog` row (its `outgoing_pwal` FK forces this); discards
+`__resend_queue`; fires `upload_cancelled` and wakes
 `conversation_update_queue`.
 
 ### Tests
