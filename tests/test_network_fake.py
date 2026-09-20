@@ -3213,8 +3213,8 @@ class TestStartBackgroundThreads:
     @pytest.mark.asyncio
     async def test_smoke_orchestrates_and_shuts_down(self, live_network):
         """All four background loops boot, register, and shut down clean
-        when network.shutdown() is called. Exercises the gather +
-        as_completed orchestration that nothing else touches."""
+        when network.shutdown() is called. Exercises the worker-wait
+        orchestration that nothing else touches."""
         # live_network has already started start_background_threads in a
         # task. Confirm __resend_queue_populated was set by the
         # send_resendable_plaintexts boot (the fixture waits on it).
