@@ -104,6 +104,10 @@ class _ResolvedAttachment(NamedTuple):
 _CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
 
 class AsyncioThread(threading.Thread):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.engine_warmed = threading.Event()
+
     def run(self):
         self.loop = asyncio.new_event_loop()
         def report_exception3(loop, exception):
@@ -112,6 +116,7 @@ class AsyncioThread(threading.Thread):
                     return
             print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
+        self.loop.run_until_complete(self.warm_engine())
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
 
@@ -126,6 +131,17 @@ class AsyncioThread(threading.Thread):
         assert ffff.exception() is None
         assert ffff.result() == res
         return res
+
+    async def warm_engine(self):
+        """Establish the async engine's first DB connection on this loop,
+        before anything else here or on the Qt loop uses the engine. The pool's
+        run-once connect guard is an asyncio.Lock bound to the loop that first
+        acquires it, and the two loops used to race for it at startup, so the
+        loser raised "Lock is bound to a different event loop"."""
+        try:
+            await persistent.warm_async_engine()
+        finally:
+            self.engine_warmed.set()
 
     async def async_main(self):
         self.kp_client = None
@@ -1318,7 +1334,7 @@ class MainWindow(QMainWindow):
         the pre-mutation stream is never read by the group. An owner who has
         not yet inducted anyone also has no audience. Both are exactly
         ``not conversation_is_joined``. Returns True (and warns) when the send
-        should be abandoned; the caller leaves the user's input in place.
+        should be abandoned; the caller keeps the user's input for a later try.
         """
         if await self.iothread.run_in_io(
             conversation_is_joined(conversation_id)
@@ -1331,21 +1347,28 @@ class MainWindow(QMainWindow):
         ))
         return True
 
+    def _restore_unsent_text(self, convo_state, msg: str) -> None:
+        if self.convo_state_or_none() is not convo_state:
+            convo_state.chat_lineEdit_buffer = msg
+        elif not self.ui.chat_lineEdit.text():
+            self.ui.chat_lineEdit.setText(msg)
+
     @async_cb
     async def chat_msg_single_line(self):
         """Send a single line message to the currently selected chat window."""
         msg = self.ui.chat_lineEdit.text()
+        self.ui.chat_lineEdit.setText("")
         convo_state = self.convo_state()
         if not convo_state:
             return
+        convo_state.chat_lineEdit_buffer = ''
         if not msg.strip():
             return
-        # Refuse (and keep the typed text) until we are actually a member:
-        # sending earlier commits to a stream the group will not read.
+        # Cleared above, before any await, so a second Enter cannot resend the
+        # text; a refusal gives it back.
         if await self._refuse_unless_joined(convo_state.conversation_id):
+            self._restore_unsent_text(convo_state, msg)
             return
-        self.ui.chat_lineEdit.setText("")
-        convo_state.chat_lineEdit_buffer = ''
 
         # Stamp the real membership hash before serialize.
         # Computed on the io loop; never open asession on the Qt loop.
@@ -2568,6 +2591,18 @@ def rebuild_pydantic_models():
     #ConversationUIState.model_rebuild()
     pass
 
+async def _wait_for_engine_warmed(iothread: AsyncioThread) -> None:
+    """Hold off the Qt loop's first use of the async engine until the io thread
+    has warmed it. Gives up if the thread died before it could: the window
+    should still appear, as it does when the thread dies later."""
+    while not iothread.engine_warmed.is_set():
+        # re-checked: it may have been set and the thread exited since the test above
+        if not iothread.is_alive() and not iothread.engine_warmed.is_set():
+            logger.error("io thread exited before it warmed the async engine")
+            return
+        await asyncio.sleep(0.01)
+
+
 async def main(window: MainWindow):
     def report_exception2(*args):
         for m in args:
@@ -2575,16 +2610,7 @@ async def main(window: MainWindow):
             QTimer.singleShot(0, lambda: QMessageBox.critical(window, f"Exception", f"{m}"))
     asyncio.get_running_loop().set_exception_handler(report_exception2)
 
-    # Establish the async engine's first DB connection on the io loop before
-    # the Qt loop touches the engine. The pool's run-once connect guard is an
-    # asyncio.Lock bound to the loop that first acquires it, and at startup the
-    # io loop's resend path and this loop's conversation load used to race for
-    # it, so the loser raised "Lock is bound to a different event loop".
-    # AsyncioThread sets `.loop` as its first action; wait for it (the hop
-    # below is the first cross-thread call).
-    while getattr(window.iothread, "loop", None) is None:
-        await asyncio.sleep(0.01)
-    await window.iothread.run_in_io(persistent.warm_async_engine())
+    await _wait_for_engine_warmed(window.iothread)
 
     rebuild_pydantic_models()
     echomix_icon = QIcon()
@@ -2647,7 +2673,7 @@ async def main(window: MainWindow):
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
-    for conv_id in await pending_joiner_join_conversation_ids():
+    for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)
