@@ -2236,8 +2236,12 @@ class MainWindow(QMainWindow):
                 )
             )
         except Exception as e:
+            # Bind the text before scheduling the dialog: the except variable
+            # is deleted when the handler exits, so a lambda that read it
+            # would raise NameError when Qt runs it on the next event loop.
+            detail = str(e)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
-                self, f"ERROR: {APP_NAME}", f"Induction failed:\n{e}",
+                self, f"ERROR: {APP_NAME}", f"Induction failed:\n{detail}",
             ))
             return
 
