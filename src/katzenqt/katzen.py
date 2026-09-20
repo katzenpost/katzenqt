@@ -1465,7 +1465,9 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
-    async def _process_peer_added(self, conversation_id, name) -> None:
+    async def _process_peer_added(
+        self, conversation_id: int, name: str,
+    ) -> None:
         # A dynamically-announced peer could be a synthetic substream; never
         # render those into the contacts tree.
         if name.startswith(network._SUBSTREAM_NAME_PREFIX):
@@ -1489,8 +1491,17 @@ class MainWindow(QMainWindow):
         with persistent.Session(persistent._engine_sync) as _sess:
             peer_row = _sess.exec(
                 select(persistent.ConversationPeer)
-                .where(persistent.ConversationPeer.name == name)
+                .join(
+                    persistent.ConversationPeerLink,
+                    persistent.ConversationPeerLink.conversation_peer_id ==
+                    persistent.ConversationPeer.id,
+                )
+                .where(
+                    persistent.ConversationPeerLink.conversation_id == conversation_id,
+                    persistent.ConversationPeer.name == name,
+                )
             ).first()
+
         if peer_row is not None:
             new_item.peer_read_cap_id = peer_row.read_cap_id
             new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
@@ -2142,12 +2153,22 @@ class MainWindow(QMainWindow):
             new_item = QStandardItem(name)
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on dynamically-announced members too.
-            # Sync engine (Qt loop; see persistent.warm_async_engine).
-            with persistent.Session(persistent._engine_sync) as _sess:
-                peer_row = _sess.exec(
-                    select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == name)
-                ).first()
+        # read cap/own-ness from the DB. Sync engine: the Qt loop must not
+        # open the async engine (see persistent.warm_async_engine).
+        with persistent.Session(persistent._engine_sync) as _sess:
+            peer_row = _sess.exec(
+                select(persistent.ConversationPeer)
+                .join(
+                    persistent.ConversationPeerLink,
+                    persistent.ConversationPeerLink.conversation_peer_id ==
+                    persistent.ConversationPeer.id,
+                )
+                .where(
+                    persistent.ConversationPeerLink.conversation_id == conversation_id,
+                    persistent.ConversationPeer.name == name,
+                )
+            ).first()
+
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -2240,8 +2261,17 @@ class MainWindow(QMainWindow):
             with persistent.Session(persistent._engine_sync) as _sess:
                 peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == joiner_name)
+                    .join(
+                        persistent.ConversationPeerLink,
+                        persistent.ConversationPeerLink.conversation_peer_id ==
+                        persistent.ConversationPeer.id,
+                    )
+                    .where(
+                        persistent.ConversationPeerLink.conversation_id == convo.conversation_id,
+                        persistent.ConversationPeer.name == joiner_name,
+                    )
                 ).first()
+
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
