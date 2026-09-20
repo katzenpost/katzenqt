@@ -190,3 +190,27 @@ async def test_permanent_pass_failure_is_not_swallowed(
     assert caught.value is failure
     assert state.pass_no == 1
     assert not state.published
+
+
+async def test_supervisor_restarts_after_an_unexpected_pass_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quit_event = asyncio.Event()
+    calls: list[int] = []
+
+    async def flaky(connection: object) -> None:
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            raise RuntimeError("invariant bug")
+        quit_event.set()
+
+    async def immediate_wait(*, idle_retry_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(network, "__should_quit", quit_event)
+    monkeypatch.setattr(network, "readables_to_mixwal", flaky)
+    monkeypatch.setattr(
+        network, "_wait_for_connection_or_shutdown", immediate_wait,
+    )
+    await network.readables_to_mixwal_supervised(object())
+    assert len(calls) == 2

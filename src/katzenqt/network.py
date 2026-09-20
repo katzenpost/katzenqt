@@ -196,7 +196,7 @@ async def start_background_threads(connection: ThinClient) -> None:
         workers.extend((
             create_task(drain_mixwal(connection)),
             create_task(send_resendable_plaintexts(connection)),
-            create_task(readables_to_mixwal(connection)),
+            create_task(readables_to_mixwal_supervised(connection)),
         ))
         done, _ = await asyncio.wait(
             [*workers, stopping], return_when=asyncio.FIRST_COMPLETED,
@@ -1913,6 +1913,33 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
         if retry_needed:
             await asyncio.sleep(5)
             readables_to_mixwal_event.set()
+
+
+async def readables_to_mixwal_supervised(connection: ThinClient) -> None:
+    """Keep the read-arming loop alive across an unexpected pass failure.
+
+    ``readables_to_mixwal`` is the session's only source of is_read MixWAL
+    rows, and it deliberately re-raises invariant errors (a transient sqlite
+    lock is handled inside it) rather than swallow them. Without this wrapper
+    a single unexpected error would end the task and wedge every read for the
+    rest of the session, so log the traceback loudly and restart the loop.
+    The bounded wait keeps a persistently failing pass from spinning.
+    """
+    while not __should_quit.is_set():
+        try:
+            await readables_to_mixwal(connection)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.critical(
+                "readables_to_mixwal died; restarting the read-arming loop",
+                exc_info=True,
+            )
+            if await _wait_for_connection_or_shutdown(
+                idle_retry_s=_CONNECTION_IDLE_RETRY_S,
+            ):
+                readables_to_mixwal_event.set()
+
 
 def on_error(task, func, *args, **kwargs):
     """Attach ``func(*args, **kwargs)`` to ``task``'s completion, firing only
