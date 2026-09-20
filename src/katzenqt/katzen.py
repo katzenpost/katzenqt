@@ -672,12 +672,16 @@ class PacketsDialog(QDialog):
     def hideEvent(self, event) -> None:
         self._timer.stop()
         super().hideEvent(event)
+# Fixed, not theme-driven: theme.py has no semantic "status" color yet, and
+# both read at a contrast that stays legible against either palette.
+_MIXNET_CONNECTED_COLOR = "#268bd2"
+_MIXNET_OFFLINE_COLOR = "#dc322f"
 
 
 def mixnet_status_text(connected: bool) -> "tuple[str, str]":
     if connected:
-        return ("Mixnet: connected", "#268bd2")
-    return ("Mixnet: offline", "#dc322f")
+        return ("Mixnet: connected", _MIXNET_CONNECTED_COLOR)
+    return ("Mixnet: offline", _MIXNET_OFFLINE_COLOR)
 
 
 class MainWindow(QMainWindow):
