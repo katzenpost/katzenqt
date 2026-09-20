@@ -24,8 +24,9 @@ import traceback
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
+from collections.abc import Awaitable, Callable, Hashable
 from datetime import datetime, timezone
-from typing import NamedTuple
+from typing import NamedTuple, Protocol, TypedDict, TypeVar, Unpack
 
 import cbor2
 
@@ -871,7 +872,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         label=upload_label(mw.bacap_stream),
     )
     try:
-      resp = await _rpc_racing_connection_life(
+      resp = await _delivery_racing_connection_life(
           bacap_uuid=mw.bacap_stream,
           what="start_resending_encrypted_message",
           rpc_factory=lambda: connection.start_resending_encrypted_message(
@@ -1029,8 +1030,28 @@ _CONNECTION_IDLE_RETRY_S = 60.0
 _ARMING_SWEEP_S = 60.0
 
 
-_EPOCH_LOSS_STREAK: "dict[object, int]" = {}
+_EPOCH_LOSS_STREAK: dict[Hashable, int] = {}
 _EPOCH_RACE_MAX_LOSSES = 3
+_RpcResult = TypeVar("_RpcResult")
+_Reply_co = TypeVar("_Reply_co", covariant=True)
+
+
+class _ResendingArguments(TypedDict, total=False):
+    read_cap: bytes | None
+    write_cap: bytes | None
+    message_box_index: bytes | None
+    reply_index: int | None
+    envelope_descriptor: bytes | None
+    message_ciphertext: bytes | None
+    envelope_hash: bytes | None
+    no_retry_on_box_id_not_found: bool
+    no_idempotent_box_already_exists: bool
+
+
+class _ResendingClient(Protocol[_Reply_co]):
+    def start_resending_encrypted_message(
+        self, **kwargs: Unpack[_ResendingArguments],
+    ) -> Awaitable[_Reply_co]: ...
 
 
 class ConnectionLifeInterruptedError(Exception):
@@ -1046,11 +1067,15 @@ _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
 )
 
 
-async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
-                                      backstop_s: float = READ_WATCHDOG_SECONDS,
-                                      grace_s: "float | None" = None,
-                                      reconnect_marker=None, epoch_marker=None,
-                                      packet_context=None):
+async def _rpc_racing_connection_life(
+    *, bacap_uuid: Hashable, what: str,
+    rpc_factory: Callable[[], Awaitable[_RpcResult]],
+    backstop_s: float = READ_WATCHDOG_SECONDS,
+    grace_s: float | None = None,
+    reconnect_marker: asyncio.Event | None = None,
+    epoch_marker: asyncio.Event | None = None,
+    packet_context: PacketContext | None = None,
+) -> _RpcResult:
     """Await an RPC, racing it against the daemon-reconnect and PKI-epoch
     signals rather than a flat clock.
 
@@ -1080,7 +1105,9 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
-    racing = {task, reconnect_wait}
+    racing: set[asyncio.Future[_RpcResult] | asyncio.Future[bool]] = {
+        task, reconnect_wait,
+    }
     if race_epoch:
         racing.add(epoch_wait)
     else:
@@ -1094,7 +1121,6 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
             racing, timeout=backstop_s, return_when=asyncio.FIRST_COMPLETED,
         )
         if task in done:
-            _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
             return task.result()
         if reconnect_wait in done:
             logger.warning(
@@ -1118,7 +1144,6 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                 task.cancel()
                 _EPOCH_LOSS_STREAK[bacap_uuid] = losses + 1
             else:
-                _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
                 return result
         else:
             # Backstop: backstop_s elapsed with no reply and no observed
@@ -1139,10 +1164,39 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
         await asyncio.gather(task, reconnect_wait, epoch_wait, return_exceptions=True)
 
 
-async def _await_read_reply(connection, *, read_watchdog_s: float,
-                             reconnect_grace_s: float, bacap_uuid,
-                             reconnect_marker=None, epoch_marker=None,
-                             packet_context=None, **kwargs):
+async def _delivery_racing_connection_life(
+    *, bacap_uuid: Hashable, what: str,
+    rpc_factory: Callable[[], Awaitable[_RpcResult]],
+    backstop_s: float = READ_WATCHDOG_SECONDS,
+    grace_s: float | None = None,
+    reconnect_marker: asyncio.Event | None = None,
+    epoch_marker: asyncio.Event | None = None,
+    packet_context: PacketContext | None = None,
+) -> _RpcResult:
+    result = await _rpc_racing_connection_life(
+        bacap_uuid=bacap_uuid,
+        what=what,
+        rpc_factory=rpc_factory,
+        backstop_s=backstop_s,
+        grace_s=grace_s,
+        reconnect_marker=reconnect_marker,
+        epoch_marker=epoch_marker,
+        packet_context=packet_context,
+    )
+    _EPOCH_LOSS_STREAK.pop(bacap_uuid, None)
+    return result
+
+
+async def _await_read_reply(
+    connection: _ResendingClient[_RpcResult], *,
+    read_watchdog_s: float,
+    reconnect_grace_s: float,
+    bacap_uuid: Hashable,
+    reconnect_marker: asyncio.Event | None = None,
+    epoch_marker: asyncio.Event | None = None,
+    packet_context: PacketContext | None = None,
+    **kwargs: Unpack[_ResendingArguments],
+) -> _RpcResult:
     """Await start_resending_encrypted_message, racing it against a daemon
     reconnect or a PKI epoch rollover rather than a flat clock.
 
@@ -1169,7 +1223,7 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
     if packet_context is not None:
         kwargs.setdefault("_packet_context", packet_context)
     try:
-        return await _rpc_racing_connection_life(
+        return await _delivery_racing_connection_life(
             bacap_uuid=bacap_uuid,
             what="wait",
             rpc_factory=lambda: connection.start_resending_encrypted_message(**kwargs),

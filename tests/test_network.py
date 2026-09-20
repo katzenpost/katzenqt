@@ -403,16 +403,16 @@ class TestEpochRaceLivelock:
         assert elapsed >= 0.5, f"returned after {elapsed:.2f}s, did not use the backstop"
 
     @pytest.mark.asyncio
-    async def test_a_success_clears_the_streak(self):
+    async def test_a_delivery_success_clears_the_streak(self) -> None:
         network._EPOCH_LOSS_STREAK.clear()
         uid = "recovering-stream"
         network._EPOCH_LOSS_STREAK[uid] = network._EPOCH_RACE_MAX_LOSSES - 1
 
-        async def answers():
+        async def answers() -> str:
             return "ok"
 
-        got = await network._rpc_racing_connection_life(
-            bacap_uuid=uid, what="encrypt_read", rpc_factory=answers,
+        got = await network._delivery_racing_connection_life(
+            bacap_uuid=uid, what="wait", rpc_factory=answers,
             backstop_s=5.0, grace_s=0.05,
         )
         assert got == "ok"
