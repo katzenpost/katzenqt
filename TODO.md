@@ -58,6 +58,10 @@ Low priority; re-evaluate when we do the next dependency refresh.
 
 - [ ] Give uploads their own Transfers-panel rows, pausable and cancelable.
 
+Progress: Phase 1 (display) landed in `f901bf8` ("transfers: show in-progress
+uploads in the Transfers panel"). Phases 2 (pause) and 3 (cancel + ordering)
+remain; see the per-phase headings below for the exact steps.
+
 The Transfers panel is receive-only today (`DownloadsModel` seeds from
 substream `ConversationPeer` rows). An in-progress upload has no row of its
 own; the chat bubble is already visible (pending) but the only way to stop an
@@ -93,7 +97,7 @@ upload is to wait it out.
   is therefore no cancel-after-I-chunk case: once the I-chunk can dispatch the
   upload is already complete.
 
-### Phase 1 — display in-progress uploads
+### Phase 1 — display in-progress uploads (done, `f901bf8`)
 
 - Row key: the indirection `ReadCapWAL.id`, known at send time.
 - Numerator: `substream_total_chunks - COUNT(PlaintextWAL WHERE bacap_stream =
