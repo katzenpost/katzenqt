@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import cbor2
 import struct
 
 import pytest
@@ -121,6 +122,18 @@ class TestEventSignals:
 
 
 class TestOnConnectionStatus:
+    @pytest.fixture(autouse=True)
+    def _reset_transition_state(self):
+        # on_connection_status tracks the previous report so it can log
+        # transitions only once; reset it so each test starts from "no
+        # prior report" rather than leaking state from test run order.
+        # Redundant with conftest._reset_network_module_state (which now
+        # nulls _last_connected module-wide before every test); kept as
+        # harmless defence-in-depth.
+        network._last_connected = None
+        yield
+        network._last_connected = None
+
     @pytest.mark.asyncio
     async def test_connected_sets_mixnet_connected(self):
         ev = getattr(network, "__mixnet_connected")
@@ -140,6 +153,30 @@ class TestOnConnectionStatus:
         with caplog.at_level(logging.WARNING, logger="katzen.network"):
             await on_connection_status({"is_connected": False, "err": None})
         assert any("disconnected" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_disconnected_warns_once_per_transition(self, caplog):
+        # A daemon retry loop reports the same disconnected state every
+        # ~15-30s during an outage; the warning must fire once, on the
+        # transition, not on every repeated report.
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({"is_connected": True, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+            await on_connection_status({"is_connected": False, "err": None})
+        warnings = [r for r in caplog.records if "disconnected" in r.message]
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_with_err_does_not_also_warn(self, caplog):
+        # A disconnect that also carries an err payload is fully captured by
+        # the ERROR log below; it must not also emit the plain WARNING for
+        # what is a single event.
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            await on_connection_status({
+                "is_connected": False, "err": {"Op": "read"},
+            })
+        assert not any("disconnected" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_err_payload_does_not_raise(self):
@@ -292,7 +329,7 @@ class TestOnError:
         # The done callback must NOT re-raise the task's exception: a
         # callback raise only surfaces as a spurious "Exception in
         # callback" traceback via the loop's exception handler (seen in
-        # the kpclientd-restart integration test when a resendable
+        # the client-reconnect integration test when a resendable
         # plaintext hit the dead link during a bounce).
         loop = asyncio.get_running_loop()
         fired = []
@@ -318,3 +355,65 @@ class TestOnError:
 
         assert fired == ["fired"]
         assert handler_calls == []
+
+
+class TestEpochRaceLivelock:
+    @pytest.mark.real_sleeps
+    @pytest.mark.asyncio
+    async def test_gives_up_racing_the_epoch_after_repeated_losses(self, caplog):
+        network._EPOCH_LOSS_STREAK.clear()
+        uid = "livelock-stream"
+        rolls = 0
+
+        async def never_answers():
+            await asyncio.sleep(3600)
+
+        async def roll_epoch():
+            await asyncio.sleep(0.01)
+            await network.on_new_pki_document(
+                {"payload": cbor2.dumps({"Epoch": 9000 + rolls})}
+            )
+
+        for attempt in range(network._EPOCH_RACE_MAX_LOSSES):
+            rolls += 1
+            roller = asyncio.ensure_future(roll_epoch())
+            with pytest.raises(network.ConnectionLifeInterruptedError):
+                await network._rpc_racing_connection_life(
+                    bacap_uuid=uid, what="encrypt_read",
+                    rpc_factory=never_answers,
+                    backstop_s=5.0, grace_s=0.05,
+                )
+            await roller
+            assert network._EPOCH_LOSS_STREAK[uid] == attempt + 1
+
+        rolls += 1
+        roller = asyncio.ensure_future(roll_epoch())
+        caplog.set_level(logging.WARNING, logger="katzen.network")
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(network.ConnectionLifeInterruptedError):
+            await network._rpc_racing_connection_life(
+                bacap_uuid=uid, what="encrypt_read",
+                rpc_factory=never_answers,
+                backstop_s=0.5, grace_s=0.05,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+        await roller
+        assert any("letting this attempt run to the" in r.message
+                   for r in caplog.records), [r.message for r in caplog.records]
+        assert elapsed >= 0.5, f"returned after {elapsed:.2f}s, did not use the backstop"
+
+    @pytest.mark.asyncio
+    async def test_a_success_clears_the_streak(self):
+        network._EPOCH_LOSS_STREAK.clear()
+        uid = "recovering-stream"
+        network._EPOCH_LOSS_STREAK[uid] = network._EPOCH_RACE_MAX_LOSSES - 1
+
+        async def answers():
+            return "ok"
+
+        got = await network._rpc_racing_connection_life(
+            bacap_uuid=uid, what="encrypt_read", rpc_factory=answers,
+            backstop_s=5.0, grace_s=0.05,
+        )
+        assert got == "ok"
+        assert uid not in network._EPOCH_LOSS_STREAK

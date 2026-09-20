@@ -1,0 +1,42 @@
+services:
+  webtop:
+    image: katzenqt_webtop:latest
+    build: .
+    container_name: katzenqt_webtop
+    environment:
+      - TZ=Europe/Berlin
+      - PIXELFLUX_WAYLAND=true
+
+      # we can't access $UID/$GID because these are special bash vars and not
+      # in the env. so, the Makefile start target sets these vars for us.
+      - PUID=${HOST_UID:-1000}
+      - PGID=${HOST_GID:-1000}
+
+    network_mode: "pasta:--map-host-loopback,169.254.127.1"
+
+    extra_hosts:
+      - "host_localhost:169.254.127.1"
+
+    ports:
+      # we expose http port only on localhost, for use with ssh tunnel.
+      # in the future maybe we'll add linuxserver.io's SWAG container here to
+      # do letsencrypt and basic auth to use this without needing an ssh
+      # tunnel.
+      - "127.0.0.1:3000:3000"
+
+    volumes:
+      - "../:/config/katzenqt"
+      - "./uv_cache:/config/.cache/uv"
+
+    restart: never
+
+    # this makes the directories mounted from the host keep their UID
+    userns_mode: "keep-id"
+
+    # needed for webtop to start from compose
+    group_add:
+      - keep-groups
+
+x-podman:
+  # needed for keep-id option, because userns_mode is incompatible with --pod
+  in_pod: false

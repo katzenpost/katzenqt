@@ -123,6 +123,22 @@ def test_outcome_declares_a_clear_winner():
     assert out.top_yes == 2
 
 
+def test_per_voter_lists_each_vote_with_its_choices_and_version():
+    doc = schema.new_survey_doc(_sid(), "x", Mode.AVAILABILITY, ["a", "b"])
+    engine.apply_vote(doc, b"alice", {"s0": "yes"}, version=1)
+    engine.apply_vote(doc, b"bob", {"s1": "maybe"}, version=0)
+    # An all-no vote is still a recorded vote (empty choices).
+    engine.apply_vote(doc, b"carol", {}, version=3)
+
+    got = {v.voter_id: v for v in engine.per_voter(doc)}
+    assert set(got) == {b"alice", b"bob", b"carol"}
+    assert got[b"alice"].choices == {"s0": "yes"} and got[b"alice"].version == 1
+    assert got[b"bob"].choices == {"s1": "maybe"} and got[b"bob"].version == 0
+    assert got[b"carol"].choices == {} and got[b"carol"].version == 3
+    # The per-voter view and the aggregate tally agree on the roster.
+    assert len(got) == engine.tally(doc).n_voters
+
+
 def test_outcome_declares_a_tie():
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
     engine.apply_vote(doc, b"v1", {"s0": "yes"})

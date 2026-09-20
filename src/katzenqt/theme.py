@@ -1,10 +1,14 @@
-"""Light, dark, and window-manager-aware theming for katzenqt.
+# SPDX-FileCopyrightText: Copyright (C) 2026 David Stainton
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Light, dark, Solarized, and window-manager-aware theming for katzenqt.
 
 The desktop's own preference is honoured through Qt's colour-scheme
 machinery. ``setColorScheme(Unknown)`` follows the window manager (the
 freedesktop appearance portal on Linux, the native setting on macOS and
-Windows); ``Light`` and ``Dark`` force the choice. The Fusion style
-renders a proper palette for whichever scheme is in force.
+Windows); ``Light`` and ``Dark`` (and the Solarized variants) force the
+choice. The Fusion style renders a proper palette for whichever scheme
+is in force.
 
 Two colour sources in the generated UI do not follow a themed palette on
 their own: a handful of widgets carry palettes pinned by the designer,
@@ -17,8 +21,8 @@ The chosen mode persists in the ``AppSetting`` table under
 
 import logging
 
-from PySide6.QtCore import Qt, QObject, QTimer
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QObject, QSize, Qt, QTimer
+from PySide6.QtGui import QIcon, QImage, QColor, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QRadioButton, QVBoxLayout,
 )
@@ -35,8 +39,13 @@ _SCHEME = {
     "system": Qt.ColorScheme.Unknown,
     "light": Qt.ColorScheme.Light,
     "dark": Qt.ColorScheme.Dark,
+    "solarized_light": Qt.ColorScheme.Light,
+    "solarized_dark": Qt.ColorScheme.Dark,
 }
 DEFAULT_MODE = "system"
+
+_DARK_MODES = frozenset({"dark", "solarized_dark"})
+_LIGHT_MODES = frozenset({"light", "solarized_light"})
 
 # Widgets whose palettes the generated Ui_MainWindow pins by hand; named by
 # their attribute on the Ui object. We reset these so they follow the theme.
@@ -47,35 +56,68 @@ _PINNED_PALETTE_WIDGETS = (
     "toolBar",
 )
 
+_TOOLBAR_ICON_SIZE = 27
+_INVITE_BUTTON_ICON_SIZE = 25
+
+# Toolbar actions whose icons are re-tinted for dark mode (black SVG/PNG -> white).
+_THEMED_ACTIONS = (
+    ("action_accept_invitation", "resources/accept.svg"),
+    ("action_invite_contact", "resources/invite.svg"),
+    ("action_quit", "resources/quit.svg"),
+    ("action_new_conversation", "resources/3-chat.svg"),
+    ("action_display_font", "fugue-icons-3.5.6/icons/edit-small-caps.png"),
+    ("action_display_language", "fugue-icons-3.5.6/icons/edit-language.png"),
+    ("action_theme", "fugue-icons-3.5.6/icons/contrast.png"),
+    ("actionDocumentation", "resources/information.svg"),
+)
+
+
+def themed_icon(path, foreground, size=_TOOLBAR_ICON_SIZE):
+    """Load ``path`` (SVG or PNG) at ``size`` and recolor opaque pixels to
+    ``foreground``. Used in dark mode so black toolbar glyphs stay visible."""
+    pixmap = QIcon(path).pixmap(QSize(size, size))
+    if pixmap.isNull():
+        return QIcon()
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(image.rect(), foreground)
+    painter.end()
+    return QIcon(QPixmap.fromImage(image))
+
 
 def normalize_mode(mode):
     """Coerce an arbitrary value to a known mode, defaulting to system."""
     return mode if mode in _SCHEME else DEFAULT_MODE
 
 
-def _build_dark_palette():
-    """A consistent dark palette for the Fusion style. The light palette is
-    taken from the style's own standard palette; only dark needs building,
-    since most desktops' default Qt palette is light."""
-    p = QPalette()
-    window = QColor(0x35, 0x35, 0x35)
-    base = QColor(0x23, 0x23, 0x23)
-    text = QColor(0xff, 0xff, 0xff)
-    disabled = QColor(0x7f, 0x7f, 0x7f)
-    highlight = QColor(0x2a, 0x82, 0xda)
+def _fill_palette(
+    p,
+    *,
+    window,
+    base,
+    text,
+    button,
+    alternate_base,
+    highlight,
+    highlighted_text,
+    bright_text,
+    disabled,
+):
+    """Apply a full QPalette from the given colours."""
     p.setColor(QPalette.ColorRole.Window, window)
     p.setColor(QPalette.ColorRole.WindowText, text)
     p.setColor(QPalette.ColorRole.Base, base)
-    p.setColor(QPalette.ColorRole.AlternateBase, window)
+    p.setColor(QPalette.ColorRole.AlternateBase, alternate_base)
     p.setColor(QPalette.ColorRole.ToolTipBase, window)
     p.setColor(QPalette.ColorRole.ToolTipText, text)
     p.setColor(QPalette.ColorRole.Text, text)
-    p.setColor(QPalette.ColorRole.Button, window)
+    p.setColor(QPalette.ColorRole.Button, button)
     p.setColor(QPalette.ColorRole.ButtonText, text)
-    p.setColor(QPalette.ColorRole.BrightText, QColor(0xff, 0x55, 0x55))
+    p.setColor(QPalette.ColorRole.BrightText, bright_text)
     p.setColor(QPalette.ColorRole.Link, highlight)
     p.setColor(QPalette.ColorRole.Highlight, highlight)
-    p.setColor(QPalette.ColorRole.HighlightedText, base)
+    p.setColor(QPalette.ColorRole.HighlightedText, highlighted_text)
     p.setColor(QPalette.ColorRole.PlaceholderText, disabled)
     for role in (
         QPalette.ColorRole.WindowText,
@@ -84,6 +126,73 @@ def _build_dark_palette():
     ):
         p.setColor(QPalette.ColorGroup.Disabled, role, disabled)
     return p
+
+
+def _build_dark_palette():
+    """A consistent dark palette for the Fusion style. The light palette is
+    taken from the style's own standard palette; only dark needs building,
+    since most desktops' default Qt palette is light."""
+    return _fill_palette(
+        QPalette(),
+        window=QColor(0x35, 0x35, 0x35),
+        base=QColor(0x23, 0x23, 0x23),
+        text=QColor(0xff, 0xff, 0xff),
+        button=QColor(0x35, 0x35, 0x35),
+        alternate_base=QColor(0x35, 0x35, 0x35),
+        highlight=QColor(0x2a, 0x82, 0xda),
+        highlighted_text=QColor(0x23, 0x23, 0x23),
+        bright_text=QColor(0xff, 0x55, 0x55),
+        disabled=QColor(0x7f, 0x7f, 0x7f),
+    )
+
+
+def _build_solarized_light_palette():
+    """Solarized Light (Ethan Schoonover canonical palette)."""
+    base3 = QColor(0xfd, 0xf6, 0xe3)
+    base2 = QColor(0xee, 0xe8, 0xd5)
+    base00 = QColor(0x65, 0x7b, 0x83)
+    base1 = QColor(0x93, 0xa2, 0xa1)
+    blue = QColor(0x26, 0x8b, 0xd2)
+    return _fill_palette(
+        QPalette(),
+        window=base3,
+        base=base3,
+        text=base00,
+        button=base2,
+        alternate_base=base2,
+        highlight=blue,
+        highlighted_text=base3,
+        bright_text=QColor(0xdc, 0x32, 0x2f),
+        disabled=base1,
+    )
+
+
+def _build_solarized_dark_palette():
+    """Solarized Dark (Ethan Schoonover canonical palette)."""
+    base03 = QColor(0x00, 0x2b, 0x36)
+    base02 = QColor(0x07, 0x36, 0x42)
+    base1 = QColor(0x93, 0xa2, 0xa1)
+    base01 = QColor(0x58, 0x6e, 0x75)
+    blue = QColor(0x26, 0x8b, 0xd2)
+    return _fill_palette(
+        QPalette(),
+        window=base03,
+        base=base02,
+        text=base1,
+        button=base03,
+        alternate_base=base03,
+        highlight=blue,
+        highlighted_text=base02,
+        bright_text=QColor(0xcb, 0x4b, 0x16),
+        disabled=base01,
+    )
+
+
+_PALETTE_BUILDERS = {
+    "dark": _build_dark_palette,
+    "solarized_light": _build_solarized_light_palette,
+    "solarized_dark": _build_solarized_dark_palette,
+}
 
 
 class ThemeManager(QObject):
@@ -107,7 +216,7 @@ class ThemeManager(QObject):
         self.apply(self._load_mode(), persist=False)
 
     def apply(self, mode, persist=True):
-        """Switch to ``mode`` ("system", "light", or "dark")."""
+        """Switch to a known ``mode`` (system, light, dark, or Solarized)."""
         mode = normalize_mode(mode)
         self._mode = mode
         # Requesting a scheme alone is unreliable (some platforms, and the
@@ -124,16 +233,20 @@ class ThemeManager(QObject):
     def _resolve_scheme(self):
         """Return "dark" or "light" for the current mode; system follows
         the desktop's reported scheme."""
-        if self._mode == "dark":
+        if self._mode in _DARK_MODES:
             return "dark"
-        if self._mode == "light":
+        if self._mode in _LIGHT_MODES:
             return "light"
         desktop = self._app.styleHints().colorScheme()
         return "dark" if desktop == Qt.ColorScheme.Dark else "light"
 
     def _apply_palette(self):
-        scheme = self._resolve_scheme()
-        if scheme == "dark":
+        builder = _PALETTE_BUILDERS.get(self._mode)
+        if builder is not None:
+            palette = builder()
+        elif self._mode == "light":
+            palette = self._app.style().standardPalette()
+        elif self._resolve_scheme() == "dark":
             palette = _build_dark_palette()
         else:
             palette = self._app.style().standardPalette()
@@ -168,6 +281,7 @@ class ThemeManager(QObject):
             qml.setClearColor(themed.base().color())
             qml.update()
         self._sync_themed_stylesheets(ui, themed)
+        self._sync_action_icons(ui, themed)
         # A live palette change does not fully re-propagate to every widget:
         # toolbar buttons and group-box titles keep the previous scheme's text
         # colour (e.g. white "Conversations and contacts" on a light panel
@@ -215,6 +329,31 @@ class ThemeManager(QObject):
                 "}"
             )
 
+    def _sync_action_icons(self, ui, pal):
+        """Re-apply toolbar icons; in dark mode tint black SVG glyphs to white."""
+        scheme = self._resolve_scheme()
+        if scheme == "dark":
+            fg = pal.buttonText().color()
+            for name, path in _THEMED_ACTIONS:
+                action = getattr(ui, name, None)
+                if action is not None:
+                    action.setIcon(themed_icon(path, fg, _TOOLBAR_ICON_SIZE))
+            invite_btn = getattr(ui, "invite_contact_toolButton", None)
+            if invite_btn is not None:
+                invite_btn.setIcon(
+                    themed_icon(
+                        "resources/invite.svg", fg, _INVITE_BUTTON_ICON_SIZE
+                    )
+                )
+        else:
+            for name, path in _THEMED_ACTIONS:
+                action = getattr(ui, name, None)
+                if action is not None:
+                    action.setIcon(QIcon(path))
+            invite_btn = getattr(ui, "invite_contact_toolButton", None)
+            if invite_btn is not None:
+                invite_btn.setIcon(QIcon("resources/invite.svg"))
+
     def _load_mode(self):
         try:
             with persistent.Session(persistent._engine_sync) as sess:
@@ -240,12 +379,14 @@ class ThemeManager(QObject):
 
 
 class ThemeDialog(QDialog):
-    """A small modal chooser: follow the window manager, light, or dark."""
+    """A small modal chooser for display mode and colour theme."""
 
     _CHOICES = (
         ("system", "Follow window manager (system)"),
         ("light", "Light"),
         ("dark", "Dark"),
+        ("solarized_light", "Solarized Light"),
+        ("solarized_dark", "Solarized Dark"),
     )
 
     def __init__(self, manager, parent=None):

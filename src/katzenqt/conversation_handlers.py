@@ -13,28 +13,101 @@ from __future__ import annotations
 import logging
 
 from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import persistent
+from . import models, persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
 from .tally import controller as tally_controller
 
 logger = logging.getLogger(__name__)
 
 
-async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool]":
-    """Handle ``gcm`` for ``peer``. Returns ``(convlog_added, signal_send)``:
-    whether a ConversationLog row was added (so the chat view is notified) and
-    whether outbound work was staged that the send loop must be poked for."""
+async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[int, str] | None, bool]":
+    """Handle ``gcm`` for ``peer``. Returns ``(convlog_added, signal_send,
+    peer_added, tally_added)``: whether a ConversationLog row was added (so the
+    chat view is notified), whether outbound work was staged that the send loop
+    must be poked for, whether a newcomer peer was added (their
+    ``(conversation_id, display_name)`` for the caller to announce to the UI
+    *after* its commit succeeds), and whether a tally event was consumed (so
+    the caller can notify the GUI after its commit succeeds — the tally rows
+    never touch the log)."""
+    await _verify_membership_advisory(sess, peer, gcm)
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
 
 
-async def _handle_chat(sess, peer, gcm, full_payload) -> "tuple[bool, bool]":
+async def _conversation_peers(
+    sess: AsyncSession, conv_id: int
+) -> "list[persistent.ConversationPeer]":
+    rows = (await sess.exec(
+        select(persistent.ConversationPeer)
+        .where(
+            persistent.ConversationPeer.id
+            == persistent.ConversationPeerLink.conversation_peer_id
+        )
+        .where(persistent.ConversationPeerLink.conversation_id == conv_id)
+    )).all()
+    return list(rows)
+
+
+async def local_membership_hash(
+    sess: AsyncSession, conv: persistent.Conversation
+) -> bytes:
+    """Our own view of the conversation membership as the canonical hash
+    (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
+    plus ourself as ``write_cap[32:]`` rather than the possibly stale own-peer
+    read cap."""
+    peers = await _conversation_peers(sess, conv.id)
+    caps: "set[bytes]" = set()
+    for p in peers:
+        if p.id == conv.own_peer_id:
+            continue
+        if not p.active or p.name.startswith(models.SUBSTREAM_NAME_PREFIX):
+            continue
+        rcw = await sess.get(persistent.ReadCapWAL, p.read_cap_id)
+        if rcw is not None and rcw.read_cap is not None:
+            caps.add(rcw.read_cap)
+    wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
+    if wcw is not None and wcw.write_cap is not None:
+        caps.add(wcw.write_cap[32:])
+    return models.canonical_membership_hash(caps)
+
+
+async def membership_hash_for(conversation_id: int) -> bytes:
+    """Convenience for the send choke points: open a session (on the io loop,
+    reached via ``iothread.run_in_io`` -- never the Qt loop), load the
+    conversation, and return its current local membership hash."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        return await local_membership_hash(sess, conv)
+
+
+async def _verify_membership_advisory(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+) -> None:
+    """Advisory membership check: a sender that computed a real hash and
+    disagrees with our view is logged, never dropped. Every shipping client
+    still sends a sentinel, so this does no work until a real hash appears."""
+    got = gcm.membership_hash
+    if models.is_membership_sentinel(got):
+        return
+    local = await local_membership_hash(sess, peer.conversation)
+    if got != local:
+        logger.info(
+            "membership_hash mismatch on conversation %s (advisory): peer "
+            "sent %s, local view %s", peer.conversation.id, got.hex()[:16],
+            local.hex()[:16],
+        )
+
+
+async def _handle_chat(sess, peer, gcm, full_payload) -> "tuple[bool, bool, bool, bool]":
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
-    return True, False
+    return True, False, False, False
 
 
-async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bool]":
+async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[int, str] | None, bool]":
     """A member announced a newcomer: add the newcomer as a peer so their
     stream gets read, unless the announcement is about ourselves or someone we
     already know. The message itself is always stored, so every member's
@@ -45,54 +118,61 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
     write cap, and an announcement for someone already present (possibly under
     an original, unmutated read cap we already hold) is skipped rather than
     polling the same stream twice.
+
+    The peer-added notification (UI queue + read-loop wakeup) is NOT fired
+    here: this runs inside the caller's transaction, which can still be
+    rolled back (e.g. sqlite lock contention retried by
+    drain_mixwal_read_single). Firing here would leak a notification for a
+    peer that a retry then never actually commits. Instead the newcomer is
+    returned for the caller to announce only once its commit has actually
+    succeeded.
     """
-    intro = gcm.introduction
-    if intro is not None:
+    peer_added = None
+    if intro := gcm.as_introduction:
         conv = peer.conversation
-        wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
-        own_cap = wcw.write_cap[32:] if wcw is not None and wcw.write_cap is not None else None
+        own_cap = await persistent.own_read_cap(sess, conv)
         if own_cap != intro.read_cap and not await _already_has(sess, conv.id, intro):
-            from .voucher import _add_peer
-            _add_peer(sess, conv, intro.display_name, intro.read_cap)
-            from .network import peer_added_queue, readables_to_mixwal_event
-            peer_added_queue.put_nowait((conv.id, intro.display_name))
-            readables_to_mixwal_event.set()
+            from .voucher import (
+                MAX_GROUP_MEMBERS, _active_member_count, _add_peer, _sanitize_peer_name,
+            )
+            if await _active_member_count(sess, conv.id) >= MAX_GROUP_MEMBERS:
+                logger.warning("conversation %s reached its member limit", conv.id)
+            else:
+                _add_peer(sess, conv, intro.display_name, intro.read_cap)
+                peer_added = (conv.id, _sanitize_peer_name(intro.display_name))
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
-    return True, False
+    return True, False, peer_added, False
 
 
 async def _already_has(sess, conv_id: int, intro: "GroupChatPleaseAdd") -> bool:
-    """True if the conversation already has a peer that this announcement
-    addresses: the same name (a duplicate under a different read cap) or the
-    same read cap (a re-announcement under a different name).
+    """True if the conversation already has a peer with this exact read cap.
 
-    Uses explicit queries rather than relationship traversal: the receive path
-    runs in SQLAlchemy's async session, where touching a ``conv.peers`` lazy
-    relationship raises ``MissingGreenlet``.
+    The read cap is the newcomer's unique cryptographic identity; matching
+    on it alone (rather than also treating a display_name match as "already
+    known") avoids silently and permanently hiding a genuinely distinct
+    member who happens to share a display name with someone already
+    present, including ourselves — there is no uniqueness enforced on
+    display names anywhere in the mint/induct flow.
+
+    Delegates to ``persistent.peer_has_read_cap``, the same dedup check the
+    voucher induction paths use for their "already inducted" guard, so one
+    query stays correct everywhere. That helper uses an explicit join rather
+    than relationship traversal: the receive path runs in SQLAlchemy's async
+    session, where touching a ``conv.peers`` lazy relationship raises
+    ``MissingGreenlet``.
     """
-    rows = (await sess.exec(
-        select(persistent.ConversationPeer, persistent.ReadCapWAL)
-        .join(
-            persistent.ConversationPeerLink,
-            persistent.ConversationPeerLink.conversation_peer_id
-            == persistent.ConversationPeer.id,
-        )
-        .join(
-            persistent.ReadCapWAL,
-            persistent.ReadCapWAL.id == persistent.ConversationPeer.read_cap_id,
-        )
-        .where(persistent.ConversationPeerLink.conversation_id == conv_id)
-    )).all()
-    return any(
-        peer.name == intro.display_name
-        or (rcw is not None and rcw.read_cap == intro.read_cap)
-        for peer, rcw in rows
-    )
+    if intro.read_cap is None:
+        return False
+    return await persistent.peer_has_read_cap(sess, conv_id, intro.read_cap)
 
 
-async def _handle_tally(sess, peer, gcm, full_payload) -> "tuple[bool, bool]":
-    signal_send = await tally_controller.handle_event(sess, peer, gcm)
-    return False, signal_send
+async def _handle_tally(sess, peer, gcm, full_payload) -> "tuple[bool, bool, None, bool]":
+    result = await tally_controller.handle_event(sess, peer, gcm)
+    # Every tally message is a chat row (displayed from its decoded payload),
+    # so it is appended like any other; ``tally_added`` additionally tells the
+    # caller to refresh the poll views.
+    sess.add(persistent.ConversationLog.append_from(peer, full_payload))
+    return True, result.signal_send, None, True
 
 
 _CHAT_TYPES = (

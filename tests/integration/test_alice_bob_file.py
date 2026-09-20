@@ -22,6 +22,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._bounce_helpers import bootstrap_voucher as _bootstrap_voucher
+from tests.integration._process import run_logged
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
@@ -48,9 +51,8 @@ def _run_role(
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
-    return subprocess.run(
-        cmd, env=env, cwd=str(_REPO_ROOT),
-        capture_output=True, text=True, timeout=timeout,
+    return run_logged(
+        role_state, cmd, env=env, cwd=str(_REPO_ROOT), timeout=timeout,
     )
 
 
@@ -75,25 +77,6 @@ def _sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def _bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
-    """Establish contact via the Contact Voucher handshake: both create their
-    own MessageStream, Bob mints a voucher, Alice inducts him, Bob joins.
-    Afterwards Bob holds Alice's read cap and can read her stream."""
-    for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = _run_role(state, "create-conv", "demo", name, timeout=180.0)
-        assert create.returncode == 0, create.stdout + create.stderr
-
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
-    assert mint.returncode == 0, mint.stdout + mint.stderr
-    voucher = _expect_token(mint, "VOUCHER=")
-
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
-    assert induct.returncode == 0, induct.stdout + induct.stderr
-
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=300.0)
-    assert joined.returncode == 0, joined.stdout + joined.stderr
-
-
 @pytest.mark.integration
 def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
     """A ~2 KB file spans two BACAP boxes (one substream chain plus the
@@ -115,8 +98,8 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
 
     t0 = time.monotonic()
     send = _run_role(
-        alice_state, "send-file", "demo", str(src),
-        timeout=900.0,
+        alice_state, "send-file", "demo", str(src), "--timeout", "900",
+        timeout=1200.0,
     )
     assert send.returncode == 0 and "SENT" in _output(send), (
         f"send-file failed:\nstdout:\n{send.stdout}\nstderr:\n{send.stderr}"
@@ -127,8 +110,8 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
     read = _run_role(
         bob_state, "read-file", "demo",
         "--to-dir", str(dst_dir),
-        "--timeout", "600",
-        timeout=700.0,
+        "--timeout", "900",
+        timeout=1000.0,
     )
     assert read.returncode == 0, (
         f"read-file failed:\nstdout tail:\n{read.stdout[-2000:]}\n"

@@ -1,0 +1,15 @@
+# ThinClient config used by client instances launched inside the webtop
+# container (see `make launch-3` in ./Makefile, run from within the
+# container).
+#
+# The default tomls dial the abstract Unix socket @katzenpost, which only
+# exists on hosts that run kpclientd on the same machine. Inside webtop
+# there is no such socket; we dial the host's loopback over TCP instead.
+# The webtop container maps the host loopback to 169.254.127.1 (pasta
+# `--map-host-loopback`), exposed as the hostname `host_localhost`, where
+# the docker mixnet's kpclientd is published on port 64331.
+
+[Dial]
+  [Dial.Tcp]
+    Address = "host_localhost:64331"
+    Network = "tcp"

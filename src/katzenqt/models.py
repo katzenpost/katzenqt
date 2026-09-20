@@ -9,14 +9,64 @@ import io
 from . import persistent
 import hashlib
 from base64 import b64encode, b64decode
+from collections.abc import Iterable
 from typing import List
+from pathlib import Path
+
+# --- membership hash (GROUP_CHAT_PROTOCOL.md section 6b) ------------------
+# The recipe is fixed so that independent implementations compute the same
+# 32-byte digest over the same member set.
+
+SUBSTREAM_NAME_PREFIX = ":substream:"
+
+MEMBERSHIP_DOMAIN = b"KP:membership:v1"
+
+MEMBERSHIP_SENTINELS = (b"TODO" * 8, bytes(32))
+
+
+def is_membership_sentinel(digest: bytes) -> bool:
+    """Whether ``digest`` is a 'no membership hash' sentinel accepted
+    without comparison during the migration window."""
+    return digest in MEMBERSHIP_SENTINELS
+
+
+def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
+    """Order-independent membership hash of a set of member read caps:
+    take each cap's 32-byte public-key prefix, dedupe and sort those
+    byte-wise, concatenate, and SHA-256 under :data:`MEMBERSHIP_DOMAIN`.
+
+    Hashing the prefix (not the whole cap) keeps the digest stable across
+    the index/mutation suffix variants of the same member's read cap — a
+    joiner's pre-mutation cap, the salt-mutated cap the group holds, and
+    future-only read caps starting at a later index all collapse to one
+    member. The caller represents itself as ``write_cap[32:]``."""
+    digest = hashlib.sha256()
+    digest.update(MEMBERSHIP_DOMAIN)
+    for key in sorted({cap[:32] for cap in read_caps}):
+        digest.update(key)
+    return digest.digest()
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
-# importer of this module — including the headless integration runner
-# and pytest collection — to load PySide6 and the Qt runtime libraries.
+# importer of this module, including the headless integration runner
+# and pytest collection, to load PySide6 and the Qt runtime libraries.
 # It now lives in ``katzenqt.qt_models``; import it from there if you
 # need it.
+
+MAX_MESSAGE_CHARS = 16 * 1024
+_TEXT_TRUNCATION_MARKER = "\n[message truncated]"
+
+
+def clamp_message_text(text: str) -> str:
+    """Clamp ``text`` to :data:`MAX_MESSAGE_CHARS`, appending a short marker
+    when it is truncated. Idempotent: because the slice happens before the
+    marker is appended, clamping an already-clamped string returns the same
+    result, so an ingest-time clamp and a render-time clamp compose without
+    stacking markers."""
+    if len(text) <= MAX_MESSAGE_CHARS:
+        return text
+    return text[:MAX_MESSAGE_CHARS] + _TEXT_TRUNCATION_MARKER
+
 
 class GroupChatTEXT(BaseModel):
     model_config = {
@@ -139,7 +189,17 @@ class SendOperation(BaseModel):
 
         # Put the release in the original bacap stream:
         # 1. We need a ReadCapWal that points to the `agg_bacap_stream`:
-        rcw = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=agg_bacap_stream, active=False)
+        #    substream_total_chunks counts the C-chunks plus the
+        #    final F chunk, so the reader/GUI can render download progress as
+        #    n/total over this substream's ReceivedPiece rows. None means a
+        #    legacy (136-byte) I-chunk where the total is unknowable.
+        total_c_chunks = len([
+            pc for pc in agg if pc.bacap_payload[:1] == b'C'
+        ])
+        rcw = persistent.ReadCapWAL(
+            id=uuid.uuid4(), write_cap_id=agg_bacap_stream,
+            active=False, substream_total_chunks=total_c_chunks + 1,
+        )
         agg.append(rcw)
         # 2. the b'I'ndirection entry needs to point to rcw.id, so the read
         #    cap can be filled once we have received it from clientd, and
@@ -165,6 +225,25 @@ class GroupChatFileUpload(BaseModel):
     payload : bytes
     filetype: str # "image, sound, arbitrary"
     basename: str
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> "GroupChatFileUpload":
+        from . import attachment_images
+
+        file_path = Path(path)
+        # Voice notes reuse the generic file-upload transport, so the filetype
+        # tag is the only signal the renderer needs to switch to audio UI.
+        # Images get an image/* tag so the renderer can show a thumbnail;
+        # everything else falls back to the generic "arbitrary" marker.
+        if file_path.suffix.lower() == ".opus":
+            filetype = "audio/opus"
+        else:
+            filetype = attachment_images.guess_image_filetype(file_path)
+        return cls(
+            payload=file_path.read_bytes(),
+            filetype=filetype,
+            basename=file_path.name,
+        )
 
 class GroupChatTally(BaseModel):
     """The payload carried by every tally message. Which fields are populated
@@ -232,6 +311,16 @@ class GroupChatMessage(BaseModel):
     def _serialize_msg_type(self, value: GroupChatTypeEnum, _info):
         return value.value
 
+    @property
+    def as_introduction(self) -> "GroupChatPleaseAdd | None":
+        """The announcement payload if this is a well-formed INTRODUCTION
+        message, else None. Centralizes the (msg_type, introduction-present)
+        check otherwise duplicated across the row-rendering and headless
+        read-matching code paths."""
+        if self.msg_type == GroupChatTypeEnum.INTRODUCTION and self.introduction is not None:
+            return self.introduction
+        return None
+
     def to_cbor(self):
         """A group chat message consists of one CBOR messages potentially
         serialized over one or more BACAP boxes.
@@ -263,10 +352,10 @@ def unserialize(chunks) -> "GroupChatMessage | None":
     ordered by BACAP index. ``chunk_type`` is the single-byte framing
     marker emitted by :meth:`SendOperation.serialize`:
 
-    * ``b'C'`` — continuation; carries an interior slice of the
+    * ``b'C'``: continuation; carries an interior slice of the
       CBOR-encoded message,
-    * ``b'F'`` — final; carries the last slice, terminating the chain,
-    * ``b'I'`` — indirection; reserved for the network-layer coalescer
+    * ``b'F'``: final; carries the last slice, terminating the chain,
+    * ``b'I'``: indirection; reserved for the network-layer coalescer
       which follows the embedded read cap and feeds the substream's
       chunks back in. The data layer refuses to treat it as payload.
 
@@ -308,5 +397,5 @@ def unserialize(chunks) -> "GroupChatMessage | None":
     return None
 
 
-# ConversationUIState moved to katzenqt.qt_models — see banner near the
+# ConversationUIState moved to katzenqt.qt_models; see banner near the
 # top of this file for rationale.

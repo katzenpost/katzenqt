@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
-from katzenqt import network, persistent, voucher
+from katzenqt import models, network, persistent, voucher
 from sqlmodel import Session, select
 
 
@@ -41,7 +42,7 @@ async def _make_conversation(name: str = "demo", own: str = "me") -> int:
         return convo.id
 
 
-async def _add_active_peer(conversation_id: int, name: str) -> None:
+async def _add_peer(conversation_id: int, name: str, *, active: bool = True) -> None:
     rcw = persistent.ReadCapWAL(
         id=uuid.uuid4(), read_cap=b"\x01" * 136, next_index=b"\x01" * 104,
     )
@@ -49,7 +50,7 @@ async def _add_active_peer(conversation_id: int, name: str) -> None:
         conv = await sess.get(persistent.Conversation, conversation_id)
         sess.add(rcw)
         sess.add(persistent.ConversationPeer(
-            name=name, read_cap_id=rcw.id, active=True, conversation=conv,
+            name=name, read_cap_id=rcw.id, active=active, conversation=conv,
         ))
         await sess.commit()
 
@@ -75,21 +76,36 @@ async def test_fresh_conversation_is_not_joined():
 @pytest.mark.asyncio
 async def test_active_member_counts_as_joined():
     conv_id = await _make_conversation()
-    await _add_active_peer(conv_id, "alice")
+    await _add_peer(conv_id, "alice")
+    assert await voucher.conversation_is_joined(conv_id) is True
+
+
+@pytest.mark.asyncio
+async def test_paused_member_still_counts_as_joined():
+    conv_id = await _make_conversation()
+    await _add_peer(conv_id, "alice", active=False)
     assert await voucher.conversation_is_joined(conv_id) is True
 
 
 @pytest.mark.asyncio
 async def test_substream_peer_does_not_count_as_joined():
     conv_id = await _make_conversation()
-    await _add_active_peer(conv_id, f"{network._SUBSTREAM_NAME_PREFIX}1:ab")
+    await _add_peer(conv_id, f"{network._SUBSTREAM_NAME_PREFIX}1:ab")
     assert await voucher.conversation_is_joined(conv_id) is False
 
 
 @pytest.mark.asyncio
 async def test_mint_refuses_when_already_joined():
     conv_id = await _make_conversation()
-    await _add_active_peer(conv_id, "alice")
+    await _add_peer(conv_id, "alice")
+    with pytest.raises(voucher.AlreadyJoinedError):
+        await voucher.mint_and_publish(None, conv_id, "me")
+
+
+@pytest.mark.asyncio
+async def test_mint_refuses_when_the_only_member_is_paused():
+    conv_id = await _make_conversation()
+    await _add_peer(conv_id, "alice", active=False)
     with pytest.raises(voucher.AlreadyJoinedError):
         await voucher.mint_and_publish(None, conv_id, "me")
 
@@ -142,13 +158,13 @@ async def test_resume_picks_awaiting_joiner_only():
             step="inducting", voucher=b"w" * 32,
         ))
         await sess.commit()
-    assert await voucher.pending_joiner_join_conversation_ids() == [awaiting]
+    assert voucher.pending_joiner_join_conversation_ids() == [awaiting]
 
 
 @pytest.mark.asyncio
 async def test_resume_empty_when_no_join_in_flight():
     await _make_conversation()
-    assert await voucher.pending_joiner_join_conversation_ids() == []
+    assert voucher.pending_joiner_join_conversation_ids() == []
 
 
 @pytest.mark.asyncio
@@ -308,3 +324,207 @@ async def test_same_loop_contention_does_not_deadlock():
 
     assert acquired_order == ["a", "b"]
     assert sorted(results.values()) == [0, 1]
+
+
+class TestPeerHasReadCap:
+    @pytest.mark.asyncio
+    async def test_distinct_cap_is_not_held(self):
+        conversation_id = await _make_conversation()
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x09" * 136,
+            ) is False
+
+    @pytest.mark.asyncio
+    async def test_active_peers_cap_is_held(self):
+        conversation_id = await _make_conversation()
+        await _add_peer(conversation_id, "alice")
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x01" * 136,
+            ) is True
+
+    @pytest.mark.asyncio
+    async def test_own_peers_cap_is_held(self):
+        conversation_id = await _make_conversation()
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x00" * 136,
+            ) is True
+
+    @pytest.mark.asyncio
+    async def test_same_cap_in_another_conversation_is_not_held(self):
+        conv_a = await _make_conversation("a")
+        conv_b = await _make_conversation("b")
+        await _add_peer(conv_a, "alice")
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conv_b, b"\x01" * 136,
+            ) is False
+
+
+class TestAlreadyInductedGuard:
+    @pytest.mark.asyncio
+    async def test_derive_rerun_does_not_duplicate_member(self, monkeypatch):
+        """A re-run of the induction (naive retry after a failed post-commit
+        ack) must not add a second peer for the same read cap, must not
+        re-send the INTRODUCTION announcement, and must report the retry to
+        the caller (via a None return) rather than a fresh joiner name."""
+        conversation_id = await _make_conversation()
+
+        class Induct:
+            display_name = "bob"
+            mutated_message_read_cap = b"\x03" * 136
+            sealed_reply = b"sealed_reply"
+
+        async def fake_read_box(*_a, **_k):
+            return (b"voucher_payload", b"\x00" * 104)
+
+        async def fake_publish_box(*_a, **_k):
+            return b"\x00" * 104
+
+        sent_announcements: list = []
+
+        async def fake_send_intro(cid, display_name, read_cap):
+            sent_announcements.append((cid, display_name, read_cap))
+
+        monkeypatch.setattr(voucher, "_read_box", fake_read_box)
+        monkeypatch.setattr(voucher, "_publish_box", fake_publish_box)
+        monkeypatch.setattr(voucher, "send_introduction_message", fake_send_intro)
+
+        class Connection:
+            async def voucher_derive_stream(self, *, voucher):
+                return SimpleNamespace(
+                    voucher_write_cap=b"\x04" * 168,
+                    voucher_read_cap=b"\x04" * 136,
+                )
+
+            async def voucher_induct(self, *, voucher, voucher_payload, who_reply):
+                return Induct()
+
+        conn = Connection()
+        assert await voucher.derive_read_and_induct(
+            conn, conversation_id, "bob", b"v" * 32,
+        ) == "bob"
+        assert await voucher.derive_read_and_induct(
+            conn, conversation_id, "bob", b"v" * 32,
+        ) is None
+
+        async with persistent.asession() as sess:
+            caps = (await sess.exec(
+                select(persistent.ReadCapWAL.read_cap).where(
+                    persistent.ReadCapWAL.read_cap == Induct.mutated_message_read_cap,
+                )
+            )).all()
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.name == "bob",
+                )
+            )).all()
+        assert len(caps) == 1
+        assert len(peers) == 1
+        # Only the first, genuine induction announces; the retry's would-be
+        # duplicate is skipped along with the duplicate peer add.
+        assert len(sent_announcements) == 1
+
+    @pytest.mark.asyncio
+    async def test_await_and_open_rerun_does_not_duplicate_members(
+        self, monkeypatch,
+    ):
+        conversation_id = await _make_conversation()
+        await _add_pending(conversation_id)
+
+        who_reply = models.GroupChatReplyWho(please_adds=[
+            models.GroupChatPleaseAdd(display_name="alice", read_cap=b"\x05" * 136),
+            models.GroupChatPleaseAdd(display_name="bob", read_cap=b"\x06" * 136),
+        ])
+
+        async def fake_read_box(*_a, **_k):
+            return (b"sealed reply", b"\x00" * 104)
+
+        monkeypatch.setattr(voucher, "_read_box", fake_read_box)
+        monkeypatch.setattr(
+            models.GroupChatReplyWho, "from_cbor", lambda _cbor: who_reply,
+        )
+
+        class Opened:
+            who_reply = b"who_reply cbor"
+            mutated_message_write_cap = b"\x07" * 168
+
+        class Connection:
+            async def voucher_open(self, *, voucher_secret_key, sealed_reply, message_write_cap):
+                return Opened()
+
+        conn = Connection()
+        first_added = await voucher.await_and_open(conn, conversation_id)
+        await _add_pending(conversation_id)
+        rerun_added = await voucher.await_and_open(conn, conversation_id)
+
+        assert sorted(first_added) == ["alice", "bob"]
+        # The rerun's members are all already-held read caps, so nothing new
+        # is reported back to the caller (no duplicate contact rows).
+        assert rerun_added == []
+
+        async with persistent.asession() as sess:
+            caps = (await sess.exec(
+                select(persistent.ReadCapWAL.read_cap).where(
+                    persistent.ReadCapWAL.read_cap.in_([b"\x05" * 136, b"\x06" * 136]),
+                )
+            )).all()
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.name.in_(["alice", "bob"]),
+                )
+            )).all()
+            # The own peer's read cap must be the salt-mutated one (the write
+            # cap's 32-byte-key + index), not the un-mutated cap provisioned
+            # before the handshake. Own voter identity and membership hash
+            # both depend on it.
+            conv = await sess.get(persistent.Conversation, conversation_id)
+            own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
+            own_rcw = await sess.get(persistent.ReadCapWAL, own_peer.read_cap_id)
+        assert sorted(caps) == sorted([
+            b"\x05" * 136, b"\x06" * 136,
+        ])
+        assert sorted(peer.name for peer in peers) == ["alice", "bob"]
+        assert own_rcw.read_cap == b"\x07" * 136
+
+
+async def _finish(conversation_id: int, pv_id: uuid.UUID) -> None:
+    """Drive the same completion step await_and_open/derive_read_and_induct run:
+    mark the conversation's voucher used and delete the pending row in one
+    commit."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        row = await sess.get(persistent.PendingVoucher, pv_id)
+        await voucher._finish_pending_voucher(sess, conv, row)
+        await sess.commit()
+
+
+@pytest.mark.asyncio
+async def test_fresh_conversation_voucher_not_used():
+    conv_id = await _make_conversation()
+    assert await voucher.voucher_used_for(conv_id) is False
+    assert await voucher.list_used_vouchers() == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_conversation_voucher_not_used():
+    assert await voucher.voucher_used_for(9999) is False
+
+
+@pytest.mark.asyncio
+async def test_pending_transitions_to_used_on_finish():
+    conv_id = await _make_conversation()
+    other_id = await _make_conversation(name="other")
+    pv_id = await _add_pending(conv_id)
+
+    assert await voucher.voucher_used_for(conv_id) is False
+    await _finish(conv_id, pv_id)
+
+    assert await voucher.pending_voucher_for(conv_id) is None
+    assert await voucher.voucher_used_for(conv_id) is True
+    assert (conv_id, "demo") in await voucher.list_used_vouchers()
+
+    # an untouched conversation is unaffected
+    assert await voucher.voucher_used_for(other_id) is False

@@ -78,6 +78,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -91,7 +92,7 @@ import sqlalchemy as sa
 from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
-from .. import models, network, persistent
+from .. import conversation_handlers, models, network, persistent
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
 from ..tally import schema as tally_schema
@@ -265,7 +266,19 @@ async def _action_voucher_await(args):
         await _shutdown(bg, connection)
 
 
-async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
+def _positive_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number") from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number")
+    return timeout
+
+
+async def _send_one_gcm(
+    conv_name: str, gcm: "models.GroupChatMessage", *, timeout: float | None = None,
+) -> int:
     """Common send path for ``_action_send`` and ``_action_send_file``.
 
     Serialises ``gcm`` into the conversation's outgoing BACAP stream,
@@ -273,7 +286,11 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
     PlaintextWAL to land in SentLog. The budget scales with the
     number of chunks so a multi-box attachment is given enough time
     to clear (sixty seconds per chunk on the local docker mixnet,
-    one-hundred-twenty seconds minimum).
+    one-hundred-twenty seconds minimum by default). KQT_SEND_BUDGET_FLOOR_S
+    overrides the floor for slower environments, e.g. CI's 4-way
+    concurrent load on a shared kpclientd (see test-integration-docker.yml)
+    -- left as an opt-in override rather than a raised default so a real
+    send failure isn't detected twice as slowly for every caller.
     """
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -290,6 +307,9 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
         # requires the PWAL's bacap_stream to match a fully-provisioned
         # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
         own_bacap_stream = convo.write_cap
+        gcm.membership_hash = await conversation_handlers.local_membership_hash(
+            sess, convo
+        )
 
     send_op = models.SendOperation(
         bacap_stream=own_bacap_stream, messages=[gcm],
@@ -309,7 +329,9 @@ async def _send_one_gcm(conv_name: str, gcm: "models.GroupChatMessage") -> int:
             sess.add(obj)
         await sess.commit()
 
-    budget_s = max(120.0, num_pwals * 60.0)
+    budget_floor_s = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0"))
+    budget_s = max(budget_floor_s, num_pwals * 60.0) if timeout is None else timeout
+    connection, bg = await _connect_and_start()
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
@@ -335,7 +357,7 @@ async def _action_send(args):
     gcm = models.GroupChatMessage(
         version=0, membership_hash=b"TODO" * 8, text=args.text,
     )
-    return await _send_one_gcm(args.conv_name, gcm)
+    return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
 async def _action_send_file(args):
@@ -358,7 +380,7 @@ async def _action_send_file(args):
     gcm = models.GroupChatMessage(
         version=0, membership_hash=b"TODO" * 8, file_upload=file_upload,
     )
-    return await _send_one_gcm(args.conv_name, gcm)
+    return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
 async def _action_read_file(args):
@@ -450,8 +472,14 @@ async def _action_multi_send(args):
     texts = args.texts.split("|")
     final_pwal_ids: list = []
     for text in texts:
+        # Recompute per send: membership can change mid-session (an
+        # INTRODUCTION between sends), so the hash is fetched here, not once
+        # up front.
+        membership_hash = await conversation_handlers.membership_hash_for(
+            conversation_id
+        )
         gcm = models.GroupChatMessage(
-            version=0, membership_hash=b"TODO" * 8, text=text,
+            version=0, membership_hash=membership_hash, text=text,
         )
         send_op = models.SendOperation(
             bacap_stream=own_bacap_stream, messages=[gcm],
@@ -485,6 +513,42 @@ async def _action_multi_send(args):
         await _shutdown(bg, connection)
 
 
+_READ_DEADLINE_DEFAULT_S = 360.0
+_READ_DEADLINE_MIN_S = 60.0
+_READ_DEADLINE_MAX_S = 7200.0
+
+
+def _parse_read_step(payload: str, *, step_idx: int) -> "tuple[str, float]":
+    """Split a READ step's payload into (target_text, deadline_s).
+
+    The optional "...:<deadline_s>" suffix is only recognised if the text
+    after the LAST colon actually parses as a float in range; otherwise the
+    whole payload (colons included) is the literal target text. Splitting
+    from the right, and only on a successful parse, means target text that
+    itself contains a colon is never truncated by mistake.
+    """
+    deadline_s = _READ_DEADLINE_DEFAULT_S
+    last_colon = payload.rfind(":")
+    if last_colon == -1:
+        return payload, deadline_s
+    candidate = payload[last_colon + 1:]
+    try:
+        parsed = float(candidate)
+    except ValueError:
+        return payload, deadline_s
+    target = payload[:last_colon]
+    if _READ_DEADLINE_MIN_S <= parsed <= _READ_DEADLINE_MAX_S:
+        deadline_s = parsed
+    else:
+        logger.warning(
+            "STEP:%d: READ deadline_s=%r out of range [%.0f,%.0f]; "
+            "using default %.0fs",
+            step_idx, candidate, _READ_DEADLINE_MIN_S, _READ_DEADLINE_MAX_S,
+            deadline_s,
+        )
+    return target, deadline_s
+
+
 async def _action_chat_session(args):
     """Long-lived session that runs multiple SEND / READ / SLEEP steps in
     ONE subprocess against a shared background-thread ThinClient, then
@@ -493,7 +557,9 @@ async def _action_chat_session(args):
     subprocess we know the last committed state on disk is the one that
     matters.
 
-    Timeouts (send=300s, read=180s) are shared across steps.
+    Timeouts (send=300s, read=180s) are shared across steps. A READ step's
+    target text may carry an optional "...:<deadline_s>" suffix (60-7200) to
+    override the default 360s wait for that one step, e.g. "READ:m1:1800".
     """
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -517,8 +583,12 @@ async def _action_chat_session(args):
         for step_idx, raw in enumerate(args.steps):
             kind, _, payload = raw.partition(":")
             if kind == "SEND":
+                # Recompute per send: membership can change mid-session (F3).
+                membership_hash = await conversation_handlers.membership_hash_for(
+                    conversation_id
+                )
                 gcm = models.GroupChatMessage(
-                    version=0, membership_hash=b"TODO" * 8, text=payload,
+                    version=0, membership_hash=membership_hash, text=payload,
                 )
                 send_op = models.SendOperation(
                     bacap_stream=own_bacap_stream, messages=[gcm],
@@ -531,26 +601,18 @@ async def _action_chat_session(args):
                     for obj in db_entries:
                         sess.add(obj)
                     await sess.commit()
+                # Marker for the reconnect integration test: the write is now
+                # committed to MixWAL but has not yet been handed to the
+                # drain, so a subprocess killed on this token is killed with
+                # the message unsent (or, at worst, sent-but-unacked).
+                logger.info(f"STEP_WAITING_ACK:{step_idx}:SEND:{payload}")
                 await network.check_for_new()
                 # Ten minutes: a chat-session shares its kpclientd
                 # connection with the test's other concurrent role and
                 # the two compete for daemon CPU on a loaded CI runner,
                 # which pushes per-step wall time well above the
                 # single-role baseline.
-                deadline = asyncio.get_event_loop().time() + 600.0
-                ok = False
-                while asyncio.get_event_loop().time() < deadline:
-                    async with persistent.asession() as sess:
-                        hit = (await sess.exec(
-                            select(persistent.SentLog).where(
-                                persistent.SentLog.id == final_pwal_id
-                            )
-                        )).first()
-                        if hit is not None:
-                            ok = True
-                            break
-                    await asyncio.sleep(0.25)
-                if not ok:
+                if not await persistent.wait_for_sent(final_pwal_id, deadline_s=600.0):
                     logger.error(f"STEP_FAIL:{step_idx}:send-timeout:{payload}")
                     return 3
                 logger.info(f"STEP_OK:{step_idx}:SEND:{payload}:ts={time.time():.3f}")
@@ -558,13 +620,7 @@ async def _action_chat_session(args):
             elif kind == "READ":
                 # Nudge the read loop in case no event is outstanding.
                 await network.signal_readables_to_mixwal()
-                payload, _, _extra = payload.partition(":")
-                try:
-                    deadline_s = float(_extra)
-                    if not (60.0 <= deadline_s <= 7200.0):
-                        raise ValueError
-                except ValueError:
-                    deadline_s = 360.0
+                payload, deadline_s = _parse_read_step(payload, step_idx=step_idx)
                 # Six minutes by default: enough for the loaded CI mixnet's
                 # propagation-and-poll round trip without giving up
                 # on a session that is otherwise progressing. The
@@ -661,8 +717,7 @@ async def _action_read(args):
                         gcm = models.GroupChatMessage.from_cbor(cl.payload[1:])
                     except Exception:
                         continue
-                    if (gcm.msg_type == models.GroupChatTypeEnum.INTRODUCTION
-                            and gcm.introduction is not None):
+                    if intro := gcm.as_introduction:
                         # A membership announcement, e.g. "bob added carol".
                         # Surface it once per row even when the caller is
                         # waiting for a specific text message, then keep
@@ -671,7 +726,7 @@ async def _action_read(args):
                             surfaced.add(cl.id)
                             logger.info(
                                 "RECV_ADD=%s added %s",
-                                cl.conversation_peer.name, gcm.introduction.display_name,
+                                cl.conversation_peer.name, intro.display_name,
                             )
                         continue
                     if not gcm.text:
@@ -811,7 +866,10 @@ async def _action_tally_create(args):
         blob = tally_sync.full_state(doc)
         await sess.commit()
 
-    rc = await _send_one_gcm(args.conv_name, tally_events.build_create(survey_id, blob))
+    rc = await _send_one_gcm(
+        args.conv_name, tally_events.build_create(survey_id, blob),
+        timeout=args.timeout,
+    )
     if rc == 0:
         logger.info("TALLY_CREATED=%s", survey_id.hex())
     return rc
@@ -1026,6 +1084,18 @@ def resolve_connection_config(args) -> "tuple[str, str | None]":
     return path, path
 
 
+async def _action_membership_hash(args: argparse.Namespace) -> int:
+    """Print the conversation's locally computed membership hash. Offline;
+    needs no daemon. Prints one ``MEMBERSHIP_HASH=<hex>`` line."""
+    conv_id = await _conv_id_by_name(args.conv_name)
+    if conv_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    digest = await conversation_handlers.membership_hash_for(conv_id)
+    logger.info("MEMBERSHIP_HASH=%s", digest.hex())
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="katzenqt-headless",
@@ -1060,6 +1130,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_send = sub.add_parser("send", parents=[conn])
     p_send.add_argument("conv_name")
     p_send.add_argument("text")
+    p_send.add_argument(
+        "--timeout", type=_positive_timeout, default=None,
+        help="seconds to wait for delivery; default scales with message size",
+    )
     p_send.set_defaults(func=_action_send)
 
     p_multi = sub.add_parser("multi-send", parents=[conn])
@@ -1086,6 +1160,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_send_file.add_argument("path", help="path to the file to send")
     p_send_file.add_argument("--basename", default=None)
     p_send_file.add_argument("--filetype", default=None)
+    p_send_file.add_argument(
+        "--timeout", type=_positive_timeout, default=None,
+        help="seconds to wait for delivery; default scales with message size",
+    )
     p_send_file.set_defaults(func=_action_send_file)
 
     p_read_file = sub.add_parser("read-file", parents=[conn])
@@ -1121,6 +1199,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--slot", action="append", required=True,
         help="descriptive text for one slot; repeat for each slot",
     )
+    p_tally_create.add_argument("--timeout", type=float, default=600.0)
     p_tally_create.set_defaults(func=_action_tally_create)
 
     p_tally_vote = sub.add_parser("tally-vote", parents=[conn])
@@ -1151,5 +1230,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tally_list = sub.add_parser("tally-list")
     p_tally_list.add_argument("conv_name")
     p_tally_list.set_defaults(func=_action_tally_list)
+
+    p_mhash = sub.add_parser("membership-hash")
+    p_mhash.add_argument("conv_name")
+    p_mhash.set_defaults(func=_action_membership_hash)
 
     return parser

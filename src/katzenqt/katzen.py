@@ -4,39 +4,42 @@ APP_NAME = "KatzenQt"
 import argparse
 import asyncio
 import fcntl
+import hashlib
 import logging
 import math
 import os
+import shutil
 import sys
 import threading
 import time
 import uuid
-from asyncio import ensure_future
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import NamedTuple, Optional, TYPE_CHECKING
+
+import cbor2
 
 import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
-                            QSettings, QSize, QThread, QUrl, Signal, QTimer)
-from PySide6.QtGui import (QAction, QIcon, QKeySequence, QPixmap, QShortcut,
-                           QStandardItem, QStandardItemModel)
-from PySide6.QtMultimedia import (QAudioBufferInput, QAudioBufferOutput,
-                                  QAudioFormat, QAudioInput,
-                                  QMediaCaptureSession, QMediaRecorder)
+                            QSettings, QSize, Property, Slot, QThread, QUrl,
+                            Signal, QTimer)
+from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
+                           QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
-                               QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QFormLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
-                               QTextBrowser, QToolButton, QTreeView,
+                               QTextBrowser, QTableView, QToolButton, QTreeView,
                                QTreeWidgetItem, QVBoxLayout)
 from sqlalchemy import func
 from sqlmodel import select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
+from . import attachment_images
+from . import conversation_handlers
 from . import network  # this is network.py
 from . import persistent
 from . import theme  # theme.py: light/dark/system theming
@@ -46,13 +49,21 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
                      pending_joiner_join_conversation_ids, pending_voucher_for)
-from .katzen_util import create_task
+from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
+from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
-# qt_models.py — also re-exports ConversationUIState (moved here so the
+# qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
+from .qt_tally import (PollsTabModel, TallyCreateDialog, TallyPanel,
+                       polls_tab_label)
+from .tally import controller as tally_controller
+from .tally import events as tally_events
+from .tally import schema as tally_schema
+from .tally import send as tally_send
+from .tally import sync as tally_sync
 from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
 from .ui_mixchat import Ui_MainWindow  # ui_mixchat.py
 
@@ -63,7 +74,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
 
+
+def _peer_is_displayable(peer) -> bool:
+    """Whether a ConversationPeer belongs in the contacts tree.
+
+    Synthetic substream peers (``:substream:<parent>:<nonce>``; created on
+    I-chunk receive in network.py) are internal download machinery and must
+    not leak into the user-visible contact list; their download progress
+    lives in the Transfers panel instead.
+    """
+    return not peer.name.startswith(network._SUBSTREAM_NAME_PREFIX)
+
+class _AttachmentError(Exception):
+    """User-facing attachment problem (missing file, checksum mismatch,
+    oversized body that was dropped on receive)."""
+
+
+class _ResolvedAttachment(NamedTuple):
+    """On-disk path for a chat attachment, looked up from ConversationLog."""
+    basename: str
+    filetype: str | None
+    path: Path
+    received: bool = True
+
+# Bound on how long receive_msg_listener/peer_added_listener wait for a
+# conversation_id to appear in conversation_state_by_id before giving up on
+# that one queue item. The UI can briefly lag the io thread at startup, but a
+# stale or deleted conversation_id must not starve every later item forever.
+_CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
+
 class AsyncioThread(threading.Thread):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.engine_warmed = threading.Event()
+
     def run(self):
         self.loop = asyncio.new_event_loop()
         def report_exception3(loop, exception):
@@ -72,6 +116,7 @@ class AsyncioThread(threading.Thread):
                     return
             print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
+        self.loop.run_until_complete(self.warm_engine())
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
 
@@ -87,6 +132,17 @@ class AsyncioThread(threading.Thread):
         assert ffff.result() == res
         return res
 
+    async def warm_engine(self):
+        """Establish the async engine's first DB connection on this loop,
+        before anything else here or on the Qt loop uses the engine. The pool's
+        run-once connect guard is an asyncio.Lock bound to the loop that first
+        acquires it, and the two loops used to race for it at startup, so the
+        loser raised "Lock is bound to a different event loop"."""
+        try:
+            await persistent.warm_async_engine()
+        finally:
+            self.engine_warmed.set()
+
     async def async_main(self):
         self.kp_client = None
         while self.kp_client is None:
@@ -101,7 +157,7 @@ class AsyncioThread(threading.Thread):
 # https://www.datacamp.com/tutorial/introduction-to-pyside6-for-building-gui-applications-with-python
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtQml/QQmlEngine.html
-# offlineStoragePathᅟ - The directory for storing offline user data
+# offlineStoragePath - The directory for storing offline user data
 # clearComponentCache()
 
 def todo_unicode():
@@ -135,10 +191,89 @@ def todo_keys():
     shiftPgDown = QKeySequence(QKeySequence.StandardKey.SelectPreviousPage)
 
 def async_cb(method):
-    """this wraps async MainWindow methods and calls them """
+    """This wraps async MainWindow methods and runs them as tasks.
+
+    Transient UI actions executed this way never block the loop, and a failing
+    action leaves a logged traceback (create_task) instead of vanishing
+    silently.
+    """
     def f(*args, **kwargs):
-        return ensure_future(method(*args, **kwargs))
+        return create_task(method(*args, **kwargs))
     return f
+
+
+async def _dialog_finished(dialog):
+    """Open a dialog without exec() and await its ``finished`` signal.
+
+    dialog.exec() spins a nested Qt event loop; run inside a QtAsyncio task
+    step, that loop may step another task and trip asyncio's re-entrancy check,
+    corrupting whichever task got stepped. open() defers the same interaction
+    to the normal event processing and resumes this coroutine via the finished
+    signal instead.
+    """
+    fut = asyncio.get_event_loop().create_future()
+    dialog.finished.connect(fut.set_result)
+    dialog.open()
+    return await fut
+
+
+async def _menu_chosen(menu, global_pos):
+    """Show a popup menu non-blocking and return the triggered QAction.
+
+    menu.exec() spins a nested Qt event loop; run inside a QtAsyncio task
+    step, that loop can step another task and trip asyncio's re-entrancy
+    check. popup() returns immediately and this coroutine resumes when the
+    menu hides, yielding the action the user picked (None if dismissed).
+    """
+    loop = asyncio.get_event_loop()
+    hidden = loop.create_future()
+    local = []
+
+    def _chosen(action):
+        local.append(action)
+
+    def _hidden():
+        if not hidden.done():
+            hidden.set_result(None)
+
+    menu.triggered.connect(_chosen)
+    menu.aboutToHide.connect(_hidden)
+    menu.popup(global_pos)
+    await hidden
+    return local[0] if local else None
+
+
+async def _commit_new_conversation(
+    wcapwal: persistent.WriteCapWAL,
+    rcapwal: persistent.ReadCapWAL,
+    convo: persistent.Conversation,
+    own_peer: persistent.ConversationPeer,
+    first_post: persistent.ConversationLog,
+) -> None:
+    """Persist a freshly-built conversation's ORM objects on the io loop.
+
+    Runs via ``MainWindow.iothread.run_in_io`` from ``new_conversation`` (never
+    on the Qt thread): the async engine's aiosqlite session is bound to the loop
+    that created it, and every other ConversationLog write already funnels
+    through this single-writer path, so the GUI-thread ``_engine_sync`` circuit
+    is no longer a second writer. The refreshes happen in place, so the SAME
+    object instances — still referenced by the caller's ``convo`` — carry the
+    generated ids/FKs back to ``add_conversation`` on the Qt thread. It is a
+    one-shot owned by ``new_conversation``; a stray repeat re-adds the (clean,
+    detached) instances and so emits UPDATEs that change nothing.
+    """
+    async with persistent.asession() as sess:
+        sess.add(wcapwal)
+        sess.add(rcapwal)
+        sess.add(convo)
+        sess.add(own_peer)
+        sess.add(first_post)
+        await sess.commit()
+        await sess.refresh(convo)
+        await sess.refresh(own_peer)
+        await sess.refresh(wcapwal)
+        await sess.refresh(rcapwal)
+        await sess.refresh(first_post)
 
 
 class FirewallNetworkAccessManager(QtNetwork.QNetworkAccessManager):
@@ -222,79 +357,525 @@ class MainWindow(QMainWindow):
     def X_keyReleaseEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key released", key)
+
+    def _push_to_talk_audio(self) -> PttAudioBridge | None:
+        if getattr(self, "_ptt_audio_failed", False):
+            return None
+        if audio := getattr(self, "_ptt_audio", None):
+            return audio
+        try:
+            self._ptt_audio = PttAudioBridge()
+        except AudioEngineUnavailable as exc:
+            self._ptt_audio_failed = True
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    str(exc),
+                ),
+            )
+            return None
+        # The attachment controls are created before the audio engine is lazily
+        # initialized, so refresh them once the backend becomes available.
+        if hasattr(self, "stop_attachment_audio_button"):
+            self._update_attachment_controls()
+        return self._ptt_audio
+
+    def _push_to_talk_reset_ui(self) -> None:
+        self.ui.ptt_hold_space_label.setText("Hold space bar to record audio.")
+
+    def _show_status_message(
+        self,
+        title: str,
+        message: str,
+        *,
+        timeout_ms: int = 5000,
+    ) -> None:
+        status_text = f"{title}: {message}" if title else message
+        self.statusBar().showMessage(status_text, timeout_ms)
+
+    def _start_playback_monitor(self, failure_message: str) -> None:
+        self._playback_failure_message = failure_message
+        self._playback_error_timer.start()
+
+    def _stop_playback_monitor(self) -> None:
+        self._playback_failure_message = None
+        self._playback_error_timer.stop()
+        self._set_playing_message_id("")
+
+    def _poll_playback_error(self) -> None:
+        audio = getattr(self, "_ptt_audio", None)
+        if audio is None:
+            self._stop_playback_monitor()
+            return
+
+        try:
+            if error := audio.take_playback_error():
+                failure_message = self._playback_failure_message or "Audio playback failed."
+                self._stop_playback_monitor()
+                QMessageBox.critical(
+                    self,
+                    f"ERROR: {APP_NAME}",
+                    f"{failure_message}\n\n{error}",
+                )
+                return
+            if not audio.is_playing:
+                # Playback may finish just before the Rust thread stores an error.
+                if error := audio.take_playback_error():
+                    failure_message = self._playback_failure_message or "Audio playback failed."
+                    self._stop_playback_monitor()
+                    QMessageBox.critical(
+                        self,
+                        f"ERROR: {APP_NAME}",
+                        f"{failure_message}\n\n{error}",
+                    )
+                    return
+                self._stop_playback_monitor()
+        except AudioEngineError as exc:
+            self._stop_playback_monitor()
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to monitor audio playback.\n\n{exc}",
+            )
+
+    def _selected_attachment_item(self) -> QListWidgetItem | None:
+        return self.ui.attached_files_QListWidget.currentItem()
+
+    def _selected_attachment_path(self) -> Path | None:
+        item = self._selected_attachment_item()
+        if item is None:
+            return None
+        path = item.data(0x100)
+        if not path:
+            return None
+        return Path(path)
+
+    def _is_previewable_attachment(self, path: Path | None) -> bool:
+        return path is not None and path.is_file() and path.suffix.lower() == ".opus"
+
+    def _update_attachment_controls(self) -> None:
+        selected_path = self._selected_attachment_path()
+        audio = getattr(self, "_ptt_audio", None)
+        is_draft = bool(audio and selected_path and audio.is_draft_path(selected_path))
+
+        self.preview_attachment_button.setEnabled(self._is_previewable_attachment(selected_path))
+        self.stop_attachment_audio_button.setEnabled(audio is not None)
+        self.discard_attachment_button.setEnabled(selected_path is not None)
+        self.discard_attachment_button.setText(
+            "Discard voice note" if is_draft else "Remove attachment"
+        )
+
+    def _play_attachment_preview(self) -> None:
+        audio = self._push_to_talk_audio()
+        selected_path = self._selected_attachment_path()
+        if not audio or not self._is_previewable_attachment(selected_path):
+            return
+        try:
+            audio.play_preview(selected_path)
+            self._start_playback_monitor("Failed to preview the selected audio clip.")
+        except AudioEngineError as exc:
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to preview the selected audio clip.\n\n{exc}",
+            )
+
+    def _discard_selected_attachment(self) -> None:
+        item = self._selected_attachment_item()
+        if item is None:
+            return
+        convo = self.convo_state()
+        path = Path(item.data(0x100))
+        audio = getattr(self, "_ptt_audio", None)
+        if audio is not None:
+            try:
+                audio.stop_playback()
+            except AudioEngineError:
+                pass
+            self._stop_playback_monitor()
+            if audio.is_draft_path(path):
+                audio.discard_draft(path)
+        convo.attached_files.discard(str(path))
+        self.refresh_attached_files_for_conversation(convo)
+
+    def _warn_attachment(self, text: str) -> None:
+        """Show an attachment warning with the message rendered as plain text.
+
+        The text embeds a peer-chosen basename; QMessageBox defaults to
+        Qt::AutoText, which would render HTML in that basename, so pin the
+        format to plain text to keep a hostile name from spoofing the dialog.
+        """
+        box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.exec()
+
+    def _info_plain(self, title: str, text: str) -> None:
+        """Show an informational dialog with the message rendered as plain
+        text, for the same reason _warn_attachment is: the text can embed a
+        peer-chosen display name, which must not be interpreted as HTML.
+        """
+        box = QMessageBox(QMessageBox.Icon.Information, title, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.exec()
+
+    def _resolve_attachment(self, message_id: str) -> "_ResolvedAttachment | None":
+        """Rehydrate an attachment to a concrete on-disk path.
+
+        QML only carries lightweight model roles, so the payload is decoded
+        here on demand. Handles the three persisted shapes:
+
+        * ``file_marker`` (received): the bytes are already spilled to disk by
+          :func:`network._spill_attachment`; verify the SHA-256 and return it.
+        * ``file_outgoing`` (sent): read from the original ``src_path`` if it
+          is still on disk; an empty ``src_path`` (voice-note draft) yields
+          ``None``.
+        * inline ``GroupChatMessage.file_upload`` (legacy): spill the inline
+          bytes into a per-message cache file.
+
+        Raises :class:`_AttachmentError` for oversized markers, missing
+        spilled files, and checksum mismatches. ``self`` is intentionally
+        unused so the helper can be exercised in isolation.
+        """
+        try:
+            message_uuid = uuid.UUID(message_id)
+        except ValueError:
+            return None
+
+        with persistent.Session(persistent._engine_sync) as sess:
+            conversation_log = sess.get(persistent.ConversationLog, message_uuid)
+            if conversation_log is None or conversation_log.payload[:1] != b"F":
+                return None
+            body = conversation_log.payload[1:]  # strip framing byte shared with wire format
+            authored = conversation_log.network_status != 0
+
+        state_root = persistent.state_file.parent
+
+        # Attachment markers are CBOR dicts carrying a "kind" key.
+        try:
+            decoded = cbor2.loads(body)
+        except Exception:
+            decoded = None
+
+        if isinstance(decoded, dict) and "kind" in decoded:
+            kind = decoded.get("kind")
+            basename = decoded.get("basename") or "unnamed"
+            filetype = decoded.get("filetype")
+
+            if kind == "file_oversized":
+                raise _AttachmentError(
+                    f"{basename} was too large to receive and its contents "
+                    "were dropped."
+                )
+
+            if kind == "file_marker":
+                # Bytes live under state_dir/attachments/; marker holds rel_path + sha256.
+                rel_path = decoded.get("rel_path")
+                if not rel_path:
+                    raise _AttachmentError(f"{basename} has no stored location.")
+                abs_path = state_root / rel_path
+                try:
+                    abs_path.resolve().relative_to(state_root.resolve())
+                except ValueError:
+                    raise _AttachmentError(
+                        f"{basename} has an invalid stored location."
+                    ) from None
+                if not abs_path.is_file():
+                    raise _AttachmentError(
+                        f"The received file for {basename} is missing on disk."
+                    )
+                marker_sha = decoded.get("sha256")
+                if not isinstance(marker_sha, bytes):
+                    raise _AttachmentError(
+                        f"{basename} has no checksum and cannot be verified."
+                    )
+                actual_sha = hashlib.sha256(abs_path.read_bytes()).digest()
+                if actual_sha != marker_sha:
+                    raise _AttachmentError(
+                        f"Checksum mismatch for {basename}; the file may be "
+                        "corrupt."
+                    )
+                return _ResolvedAttachment(basename, filetype, abs_path)
+
+            if kind == "file_outgoing":
+                if not authored:
+                    raise _AttachmentError(
+                        f"{basename} refers to a local file but was received "
+                        "from a peer; refusing to open it."
+                    )
+                src_path = decoded.get("src_path") or ""
+                if not src_path:
+                    # Voice-note draft was discarded after sending; nothing to
+                    # play back until the peer echoes it.
+                    return None
+                abs_path = Path(src_path)
+                if not abs_path.is_file():
+                    raise _AttachmentError(
+                        f"The original file for {basename} is no longer "
+                        f"available at {src_path}."
+                    )
+                return _ResolvedAttachment(basename, filetype, abs_path, received=False)
+
+            return None
+
+        # Legacy inline file upload: spill the bytes to a cache file.
+        try:
+            group_message = GroupChatMessage.from_cbor(body)
+        except Exception:
+            return None
+        if group_message.file_upload is None:
+            return None
+        upload = group_message.file_upload
+        cache_dir = state_root / "attachments" / "_inline_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        safe = network._safe_basename(upload.basename)
+        cache_path = cache_dir / f"{message_id}-{safe}"
+        if not cache_path.exists() or cache_path.read_bytes() != upload.payload:
+            cache_path.write_bytes(upload.payload)
+        return _ResolvedAttachment(upload.basename, upload.filetype, cache_path)
+
+    # Emitted whenever the currently-playing voice note changes so QML can
+    # flip a row's Play/Stop button without polling.
+    playingMessageIdChanged = Signal()
+
+    def _set_playing_message_id(self, message_id: str) -> None:
+        if getattr(self, "_playing_message_id", "") != message_id:
+            self._playing_message_id = message_id
+            self.playingMessageIdChanged.emit()
+
+    @Property(str, notify=playingMessageIdChanged)
+    def playingMessageId(self) -> str:
+        """The message id of the voice note currently playing, or "" if none.
+        QML binds against this to show Stop on the active row and Play on the
+        rest."""
+        return getattr(self, "_playing_message_id", "")
+
+    @Slot(str)
+    def playReceivedMessage(self, message_id: str) -> None:
+        """QML slot: play a received or sent voice note."""
+        audio = self._push_to_talk_audio()
+        if not audio:
+            return
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            self._warn_attachment(str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This voice note is not available locally yet.",
+            )
+            return
+        # Stop any clip already playing so a second Play does not overlap.
+        self.stopAudioPlayback()
+        try:
+            # Rust playback wants a stable file path; cache from resolved bytes.
+            cached_path = audio.cache_received_clip(
+                message_id,
+                resolved.basename,
+                resolved.path.read_bytes(),
+            )
+            audio.play_received(cached_path)
+            self._set_playing_message_id(message_id)
+            self._start_playback_monitor("Failed to play the received voice note.")
+        except AudioEngineError as exc:
+            self._set_playing_message_id("")
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to play the received voice note.\n\n{exc}",
+            )
+
+    @Slot(str)
+    def openAttachment(self, message_id: str) -> None:
+        """QML slot: open a non-audio attachment with the desktop handler."""
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            self._warn_attachment(str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This attachment is not available locally yet.",
+            )
+            return
+        if resolved.received and not self._confirm_open_attachment(resolved):
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.path)))
+
+    def _confirm_open_attachment(self, resolved: "_ResolvedAttachment") -> bool:
+        """Ask the user before opening a peer-supplied file with the desktop
+        handler. Returns True only on an explicit Yes."""
+        filetype = resolved.filetype or "unknown type"
+        lines = [
+            "Open this attachment received from a peer with your desktop "
+            "application?",
+            "",
+            f"Name: {resolved.basename}",
+            f"Type: {filetype}",
+        ]
+        if is_risky_attachment_extension(resolved.basename):
+            lines += [
+                "",
+                "Warning: files of this kind can open in a browser, document "
+                "viewer, or other program that may run content the sender "
+                "controls. Only open it if you trust the sender.",
+            ]
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, APP_NAME, "\n".join(lines), parent=self,
+        )
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    @Slot(str)
+    def saveAttachment(self, message_id: str) -> None:
+        """QML slot: copy attachment bytes to a user-chosen path."""
+        try:
+            resolved = self._resolve_attachment(message_id)
+        except _AttachmentError as exc:
+            self._warn_attachment(str(exc))
+            return
+        if resolved is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "This attachment is not available locally yet.",
+            )
+            return
+        name_filter = (
+            "Opus audio (*.opus)" if resolved.filetype == "audio/opus" else ""
+        )
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save attachment", resolved.basename, name_filter,
+        )
+        if not dest:
+            return
+        try:
+            shutil.copyfile(resolved.path, dest)
+        except OSError as exc:
+            QMessageBox.critical(
+                self, f"ERROR: {APP_NAME}",
+                f"Could not save the attachment.\n\n{exc}",
+            )
+
+    @Slot()
+    def stopAudioPlayback(self) -> None:
+        audio = getattr(self, "_ptt_audio", None)
+        if audio is None:
+            return
+        try:
+            audio.stop_playback()
+            self._stop_playback_monitor()
+        except AudioEngineError as exc:
+            self._stop_playback_monitor()
+            QMessageBox.critical(
+                self,
+                f"ERROR: {APP_NAME}",
+                f"Failed to stop audio playback.\n\n{exc}",
+            )
+
     def push_to_talk_start(self):
-        # TODO Instead of trying to use the QMediaCapture, maybe we'd rather want to just grab stuff
-        # from an input device, encode in a separate thread, and then send that as a file.
-        # The Qt APIs seemed nice, but unfortunately QMediaRecorder can only write to files, not memory, and it likely can't encode to any of the codecs we want.
+        audio = self._push_to_talk_audio()
+        if not audio:
+            return
+        convo = self.convo_state()
+        self._stop_playback_monitor()
+        try:
+            audio.start_capture(convo.conversation_id)
+        except AudioEngineError as exc:
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.critical(
+                    self,
+                    f"ERROR: {APP_NAME}",
+                    f"Failed to start push-to-talk capture.\n\n{exc}",
+                ),
+            )
+            return
 
-        # https://doc.qt.io/qtforpython-6/examples/example_charts_audio.html#example-charts-audio
-        # This example shows more or less how to do that
+        self.push_to_talk_started = True
+        self.push_to_talk_recording_conversation_id = convo.conversation_id
+        self.ui.ptt_hold_space_label.setText(
+            "Recording audio... release Space to attach the voice note."
+        )
+        if not self.push_to_talk_watchdog.isActive():
+            self.push_to_talk_watchdog.start()
 
-        # https://doc.qt.io/qtforpython-6/examples/example_multimedia_audiosource.html#example-multimedia-audiosource
-        # This example shows how to select microphone and ask for permission on MacOS/Android
+    def push_to_talk_finish(self, *, cancel: bool) -> None:
+        if not getattr(self, "push_to_talk_started", False):
+            return
 
-        # https://doc.qt.io/qtforpython-6/examples/example_multimedia_audiooutput.html#example-multimedia-audiooutput
-        # This example shows how to do audio playback using raw samples.
+        audio = getattr(self, "_ptt_audio", None)
+        self.push_to_talk_started = False
+        self.push_to_talk_recording_conversation_id = None
+        self.push_to_talk_watchdog.stop()
+        self._push_to_talk_reset_ui()
 
-        # Then what we need is the external encoder/decoder receiving/producing PCM samples,
-        # and to hook it all up. We probably want these things running in a separate thread so as not to
-        # tie up the main event loop, and to avoid stuttering if something else ties it up.
+        if not audio:
+            return
 
-        # https://pastebin.com/n7e9KREA
-        self.push_to_talk_started = True  # TODO should use the qt state stuff for this I guess
+        if cancel:
+            try:
+                audio.cancel_capture()
+            except AudioEngineError as exc:
+                QTimer.singleShot(
+                    0,
+                    lambda: QMessageBox.critical(
+                        self,
+                        f"ERROR: {APP_NAME}",
+                        f"Failed to cancel push-to-talk capture.\n\n{exc}",
+                    ),
+                )
+            return
 
-        self.mSession = QMediaCaptureSession()
-        mSession=self.mSession
-        self.aInput=QAudioInput()  # whatever default input dev, probably want to make this configurable.
-        mSession.setAudioInput(self.aInput)
-        self.recorder = QMediaRecorder()
-        if not self.recorder.isAvailable():
-            print("MediaRecorder does not seem available")
-        self.recorder.setAutoStop(True)  # This property controls whether the media recorder stops automatically when all media inputs have reported the end of the stream or have been deactivated.
+        try:
+            draft = audio.stop_capture()
+        except AudioEngineError as exc:
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.critical(
+                    self,
+                    f"ERROR: {APP_NAME}",
+                    f"Failed to finalize push-to-talk capture.\n\n{exc}",
+                ),
+            )
+            return
 
-        aformat = QAudioFormat()
-        aformat.setSampleFormat(QAudioFormat.Float)
-        aformat.setSampleRate(44100)
-        aformat.setChannelConfig(QAudioFormat.ChannelConfigMono)
-        self.audio_buffer = QAudioBufferOutput(aformat)
+        convo = self.convo_state()
+        convo.attached_files.add(str(draft.path))
+        self.refresh_attached_files_for_conversation(convo)
+        self.ui.singlemultitab.setCurrentWidget(self.ui.attach_file_tab)
+        self._show_status_message(
+            "Voice note attached",
+            f"{draft.path.name} ({draft.duration_seconds:.1f}s)",
+        )
 
-        mSession.setRecorder(self.recorder)
-        # TODO: instead of setOutputLocation we should mock a https://doc.qt.io/qt-6/qiodevice.html
-        # TODO: in order to capture the data so we can give it to our custom encoder,
-        # TODO: and also so we can avoid writing to disk.
-        #self.recorder.setOutputLocation(QUrl("out.opus"))
+    def push_to_talk_watchdog_tick(self) -> None:
+        if not getattr(self, "push_to_talk_started", False):
+            self.push_to_talk_watchdog.stop()
+            return
+        try:
+            convo = self.convo_state()
+        except Exception:
+            self.push_to_talk_finish(cancel=True)
+            return
 
-        #recorder.readyToSendAudioBuffer.connect(push_to_talk_buffer)
-        if self.recorder.audioChannelCount() != 1:
-            self.recorder.setAudioChannelCount(1)
-        self.recorder.record()
-        # duration() is in ms
-        # what is recorder.autoStop ?
-        # encodingMode averagebitrate, constantbitrate, constantquality, twopassencoding
-        # isAvailable
-        # metadata()
+        if convo.conversation_id != self.push_to_talk_recording_conversation_id:
+            self.push_to_talk_finish(cancel=True)
+            return
 
-        # recorderStateChanged
-        #>>> self.recorder.recorderState()
-        #<RecorderState.RecordingState: 1>
-        # PausedState == 2, StoppedState
+        if self.ui.ptt_tab.parent().currentWidget() != self.ui.ptt_tab:
+            self.push_to_talk_finish(cancel=True)
+            return
 
-        # TODO that happens -a lot-:
-        #self.recorder.durationChanged.connect(lambda: print("recorder.durationChanged"))
-
-        # recorder.errorChanged.connect
-        # recorder.errorOccured.connect
-        def push_to_talk_buffer():
-            print("buff")
-            mAudioInputBuffer.sendAudioBuffer()
-
-        # TODO: we need a listener for when self.push_to_talk_started becomes false
-        # TODO: that should call recorder.stop()
-        # TODO: and then we should figure out -why- it was stopped: cancelled or because
-        # TODO: user cancelled or switched away from the push-to-talk tab
-
-        import pdb;pdb.set_trace()
-        pass
+        if duration_time_ns() - convo.last_push_to_talk_ns > 100_000_000:
+            self.push_to_talk_finish(cancel=False)
 
     def font_settings_dialog(self):
         def font_example(qtoolbtn):
@@ -308,14 +889,19 @@ class MainWindow(QMainWindow):
               f"{option}.font.pointSize": font.pointSize(),
             }
             self.settings = {**self.settings, **new}
-            with persistent.Session(persistent._engine_sync) as sess:
-                for n,v in new.items():
-                  if not (ex := sess.get(persistent.AppSetting, n)):
-                      ex = persistent.AppSetting(id=n)
-                  ex.type = 'int' if isinstance(v,int) else 'str'
-                  ex.value = v
-                  sess.add(ex)
-                sess.commit()
+            try:
+                with persistent.Session(persistent._engine_sync) as sess:
+                    for n,v in new.items():
+                      if not (ex := sess.get(persistent.AppSetting, n)):
+                          ex = persistent.AppSetting(id=n)
+                      ex.type = 'int' if isinstance(v,int) else 'str'
+                      ex.value = v
+                      sess.add(ex)
+                    sess.commit()
+            except Exception as e:
+                # self.settings already reflects the new font in memory; a
+                # failure here only means it won't survive a restart.
+                logger.warning("could not persist font setting: %s", e)
             # In theory we could now redraw the conversation QML, but we don't have
             # a way to trigger a full redraw. We should have something similar to
             # "on another conversation selected", but which we could force-redraw with.
@@ -380,6 +966,8 @@ class MainWindow(QMainWindow):
             # Probably cancel sending it too.
             # TODO actually this could just be a listener on singlemultitab
             # then we can also make the space shortcut conditional there.
+            if getattr(self, "push_to_talk_started", False):
+                self.push_to_talk_finish(cancel=True)
             return True
         #== "ptt_tab"
         # - conversation not changed
@@ -403,6 +991,69 @@ class MainWindow(QMainWindow):
         self.app = app
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        # Expose a tiny playback surface to QML instead of routing the whole
+        # window object through custom model roles.
+        self.ui.qml_ChatLines.rootContext().setContextProperty("chatController", self)
+        self._ptt_audio: PttAudioBridge | None = None
+        self._ptt_audio_failed = False
+        self._playing_message_id: str = ""
+        self._playback_failure_message: str | None = None
+        self._playback_error_timer = QTimer(self)
+        self._playback_error_timer.setInterval(100)
+        self._playback_error_timer.timeout.connect(self._poll_playback_error)
+        self.push_to_talk_started = False
+        self.push_to_talk_recording_conversation_id: int | None = None
+        self.push_to_talk_watchdog = QTimer(self)
+        self.push_to_talk_watchdog.setInterval(50)
+        self.push_to_talk_watchdog.timeout.connect(self.push_to_talk_watchdog_tick)
+        # Override the generated UI defaults: enable the list, allow single
+        # selection, and use ListMode so items scroll vertically rather than
+        # wrapping as icons.
+        self.ui.attached_files_QListWidget.setEnabled(True)
+        self.ui.attached_files_QListWidget.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.ui.attached_files_QListWidget.setViewMode(
+            QListView.ViewMode.ListMode
+        )
+        # Draft review happens in the existing attachment tab so the send path can
+        # stay unchanged once the voice note is finalized.
+        self.preview_attachment_button = QToolButton(self.ui.attach_file_tab)
+        self.preview_attachment_button.setText("Preview clip")
+        self.preview_attachment_button.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.preview_attachment_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+        )
+        self.preview_attachment_button.setEnabled(False)
+        self.ui.formLayout_2.setWidget(
+            2,
+            QFormLayout.ItemRole.FieldRole,
+            self.preview_attachment_button,
+        )
+        self.stop_attachment_audio_button = QToolButton(self.ui.attach_file_tab)
+        self.stop_attachment_audio_button.setText("Stop audio")
+        self.stop_attachment_audio_button.setIcon(QIcon.fromTheme("media-playback-stop"))
+        self.stop_attachment_audio_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+        )
+        self.stop_attachment_audio_button.setEnabled(False)
+        self.ui.formLayout_2.setWidget(
+            3,
+            QFormLayout.ItemRole.FieldRole,
+            self.stop_attachment_audio_button,
+        )
+        self.discard_attachment_button = QToolButton(self.ui.attach_file_tab)
+        self.discard_attachment_button.setText("Remove attachment")
+        self.discard_attachment_button.setIcon(QIcon.fromTheme("edit-delete"))
+        self.discard_attachment_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+        )
+        self.discard_attachment_button.setEnabled(False)
+        self.ui.formLayout_2.setWidget(
+            4,
+            QFormLayout.ItemRole.FieldRole,
+            self.discard_attachment_button,
+        )
 
         # failed attempt to firewall external resource access:
         eng = self.ui.qml_ChatLines.engine()
@@ -447,8 +1098,12 @@ class MainWindow(QMainWindow):
         # Sending files to a conversation: File attachment/sending callbacks
         self.ui.attach_file_button.clicked.connect(self.attach_file)
         self.ui.send_file_button.clicked.connect(self.send_file)
-        self.ui.attached_files_QListWidget.itemClicked.connect(self.attach_file_remove)
-        self.ui.attached_files_QListWidget.itemDoubleClicked.connect(self.attach_file_remove)
+        self.ui.attached_files_QListWidget.itemSelectionChanged.connect(
+            self._update_attachment_controls
+        )
+        self.preview_attachment_button.clicked.connect(self._play_attachment_preview)
+        self.stop_attachment_audio_button.clicked.connect(self.stopAudioPlayback)
+        self.discard_attachment_button.clicked.connect(self._discard_selected_attachment)
 
         self.all_contacts = QStandardItemModel()
         #self.ui.contacts_treeWidget.setModel(self.all_contacts)
@@ -462,7 +1117,241 @@ class MainWindow(QMainWindow):
         # inputMethodEvent
         #self.ui.contacts_treeWidget.keyboardSearch.connect(lambda: print("KB search")) # TODO not a signal, but when user starts typing here we want to set the focus to contactFilterLineEdit instead
         self.ui.contacts_treeWidget.selectionModel().currentChanged.connect(self.conversation_selected)
+        # Per-peer pause/resume: right-click a peer row under
+        # a conversation to stop/resume reading that one stream. The
+        # Transfers panel and this menu give the user a handle on streams
+        # that the contacts tree does not render.
+        self.ui.contacts_treeWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.ui.contacts_treeWidget.customContextMenuRequested.connect(
+            self.peer_context_menu
+        )
         self.ui.chat_lineEdit.returnPressed.connect(self.chat_msg_single_line)
+
+        # Transfers panel. Substream file downloads are not shown in the
+        # contacts tree (synthetic :substream: peers are filtered by
+        # _peer_is_displayable); this dedicated table carries the in-progress /
+        # resumable downloads instead. Added programmatically under the
+        # contacts tree (gridLayout_2 row 2) to avoid regenerating the .ui.
+        self.transfers_model = DownloadsModel()  # noqa: F405
+        self.transfers_view = QTableView(self.ui.groupBox)
+        self.transfers_view.setModel(self.transfers_model)
+        self.transfers_view.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.transfers_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.transfers_view.customContextMenuRequested.connect(
+            self.transfers_context_menu
+        )
+        self.transfers_view.setMinimumHeight(80)
+        self.ui.gridLayout_2.addWidget(self.transfers_view, 2, 0, 1, 1)
+
+        # Polls panel: a sibling tab in the chat tab bar. It lists the
+        # currently selected conversation's surveys and hosts the
+        # create/vote/close flows; clicking an in-chat placeholder raises it.
+        self.tally_panel = TallyPanel()
+        self.polls_model = PollsTabModel()
+        self.tally_panel.voteSubmitted.connect(self.tally_vote)
+        self.tally_panel.closeRequested.connect(self.tally_close)
+        self.tally_panel.newPollRequested.connect(self.new_poll)
+        self.ui.chatTabs.addTab(self.tally_panel, polls_tab_label(0))
+
+    # -- tally / polls -------------------------------------------------------
+
+    def _refresh_tally_views(self, conversation_id: int) -> None:
+        """Refresh the polls tab/badge and the open survey after a tally
+        notification. The chat rows themselves are refreshed by
+        ``receive_msg_listener`` (tally messages are ordinary log rows)."""
+        key = self.tally_panel.current_survey()
+        if key is not None and key[0] == conversation_id:
+            # A received vote/close may have changed the panel's survey.
+            self.tally_panel.show_survey(*key)
+        if self._selected_conversation_id() == conversation_id:
+            self._update_polls_tab()
+
+    def _selected_conversation_id(self) -> "int | None":
+        convo_state = self.convo_state_or_none()
+        return convo_state.conversation_id if convo_state is not None else None
+
+    def _update_polls_tab(self) -> None:
+        """Re-list the selected conversation's surveys and refresh the badge."""
+        if not hasattr(self, "polls_model"):
+            return
+        self.polls_model.set_conversation_filter(self._selected_conversation_id())
+        index = self.ui.chatTabs.indexOf(self.tally_panel)
+        if index >= 0:
+            self.ui.chatTabs.setTabText(
+                index, polls_tab_label(self.polls_model.badge_count())
+            )
+
+    @Slot(str)
+    def openPoll(self, survey_id_hex: str) -> None:
+        """Open a survey in the panel (QML placeholder click)."""
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        try:
+            survey_id = bytes.fromhex(survey_id_hex)
+        except ValueError:
+            return
+        if self.tally_panel.show_survey(convo_state.conversation_id, survey_id):
+            self.ui.chatTabs.setCurrentWidget(self.tally_panel)
+
+    @async_cb
+    async def tally_vote(self, choice) -> None:
+        """Persist the panel's edited selection and broadcast it."""
+        convo_state = self.convo_state_or_none()
+        key = self.tally_panel.current_survey()
+        if convo_state is None or key is None:
+            return
+        conversation_id, survey_id = key
+        if conversation_id != convo_state.conversation_id:
+            return
+        # The vote is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
+        await self.iothread.run_in_io(
+            _io_tally_vote(conversation_id, survey_id, dict(choice))
+        )
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def tally_close(self) -> None:
+        """Close the open survey (only the creator may) and broadcast it."""
+        convo_state = self.convo_state_or_none()
+        key = self.tally_panel.current_survey()
+        if convo_state is None or key is None:
+            return
+        conversation_id, survey_id = key
+        if conversation_id != convo_state.conversation_id:
+            return
+        # The close is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
+        await self.iothread.run_in_io(
+            _io_tally_close(conversation_id, survey_id)
+        )
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def new_poll(self) -> None:
+        """Open the create dialog and, on accept, create + broadcast a survey."""
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        # Creating a poll publishes it on the same stream as chat; refuse
+        # before opening the dialog so no work is discarded.
+        if await self._refuse_unless_joined(convo_state.conversation_id):
+            return
+        dialog = TallyCreateDialog(self)
+        await _dialog_finished(dialog)
+        if dialog.result() != QDialog.DialogCode.Accepted:
+            return
+        topic, mode, slots = dialog.topic(), dialog.mode(), dialog.slots()
+        if not topic or not slots:
+            return
+        survey_id = await self.iothread.run_in_io(
+            _io_tally_create(convo_state.conversation_id, topic, mode, slots)
+        )
+        self._refresh_tally_views(convo_state.conversation_id)
+        if survey_id is not None:
+            self.openPoll(survey_id.hex())
+
+    async def tally_listener(self) -> None:
+        """Refresh the poll views when the receive path consumed a tally event
+        (mirrors receive_msg_listener for the chat log)."""
+        while True:
+            try:
+                conversation_id = await self.iothread.run_in_io(
+                    network.tally_update_queue.get()
+                )
+                self._refresh_tally_views(conversation_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "tally_listener: dropping an item after %s", e, exc_info=e,
+                )
+
+    async def _enqueue_outgoing_gcm(
+        self,
+        convo_state: "ConversationUIState",
+        gcm: GroupChatMessage,
+        *,
+        local_payload: bytes,
+        log_id: uuid.UUID | None = None,
+    ) -> None:
+        """Shared WAL-commit path for both text and file sends.
+
+        Serialises ``gcm`` into the conversation's own write-cap BACAP stream,
+        records the WriteCapWAL/PlaintextWAL rows the network writer consumes,
+        appends an optimistic ConversationLog row (so the message shows up
+        immediately as "pending"), then nudges both the UI refresh queue and
+        the network thread.
+
+        ``local_payload`` is what gets stored in ConversationLog.payload for
+        local display; the network wire format comes from ``gcm`` itself.
+
+        ``log_id`` lets the caller pre-assign the ConversationLog primary key
+        so it can key cached side-data (e.g. a sent voice note's playback clip)
+        to the same id the renderer resolves against.
+        """
+        send_op = SendOperation(
+            # Must match convo.write_cap so find_resendable picks up our PWAL rows.
+            bacap_stream=convo_state.own_peer_bacap_uuid,
+            messages=[gcm],
+        )
+        print("serializing SendOperation for outgoing message", send_op)
+        new_write_caps, db_entries = send_op.serialize(
+            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            conversation_id=convo_state.conversation_id,
+        )
+
+        # The DB write runs on the io loop, not the Qt loop: the async engine
+        # must not be shared across the two (see persistent.warm_async_engine
+        # and append_outbound_chat). notify_outbound_chat_sent also wakes the
+        # chat view and pokes the send loop, so those are no longer separate
+        # run_in_io round trips.
+        await self.iothread.run_in_io(
+            network.notify_outbound_chat_sent(
+                conversation_id=convo_state.conversation_id,
+                conversation_peer_id=convo_state.own_peer_id,
+                new_write_caps=new_write_caps,
+                db_entries=db_entries,
+                payload=local_payload,
+                # TODO massive hack here because we don't reassemble sendops yet
+                final_pwal_id=db_entries[-1].id,
+                log_id=log_id,
+            )
+        )
+
+    async def _refuse_unless_joined(self, conversation_id: int) -> bool:
+        """True if an outbound send must be refused because this client is not
+        yet a member of the conversation.
+
+        A conversation before membership has only our own (inactive) peer.
+        Sending then is unsafe for a joiner: ``voucher.await_and_open``
+        salt-mutates our write stream at induction, so anything committed on
+        the pre-mutation stream is never read by the group. An owner who has
+        not yet inducted anyone also has no audience. Both are exactly
+        ``not conversation_is_joined``. Returns True (and warns) when the send
+        should be abandoned; the caller keeps the user's input for a later try.
+        """
+        if await self.iothread.run_in_io(
+            conversation_is_joined(conversation_id)
+        ):
+            return False
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, APP_NAME,
+            "You have not joined this conversation yet. Wait until you are "
+            "inducted (or induct someone) before sending messages.",
+        ))
+        return True
+
+    def _restore_unsent_text(self, convo_state, msg: str) -> None:
+        if self.convo_state_or_none() is not convo_state:
+            convo_state.chat_lineEdit_buffer = msg
+        elif not self.ui.chat_lineEdit.text():
+            self.ui.chat_lineEdit.setText(msg)
 
     @async_cb
     async def chat_msg_single_line(self):
@@ -475,8 +1364,22 @@ class MainWindow(QMainWindow):
         convo_state.chat_lineEdit_buffer = ''
         if not msg.strip():
             return
+        # Cleared above, before any await, so a second Enter cannot resend the
+        # text; a refusal gives it back.
+        if await self._refuse_unless_joined(convo_state.conversation_id):
+            self._restore_unsent_text(convo_state, msg)
+            return
 
-        group_chat_message = GroupChatMessage(version=0,membership_hash=b"TODO"*(32//4),text=msg)
+        # Stamp the real membership hash before serialize.
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(
+                convo_state.conversation_id
+            )
+        )
+        group_chat_message = GroupChatMessage(
+            version=0, membership_hash=membership_hash, text=msg
+        )
 
         # TODO: this is general code that should live in a shared place:
         send_op = SendOperation(
@@ -493,8 +1396,12 @@ class MainWindow(QMainWindow):
         # its append through the same single writer loop (via run_in_io) under
         # the per-conversation lock, so two transactions can never stamp the
         # same order and trip the unique constraint.
+        #
+        # One run_in_io hop, not three: append, the queue-put that wakes
+        # receive_msg_listener, and check_for_new all happen inside the same
+        # io-loop coroutine instead of three separate cross-thread round trips.
         await self.iothread.run_in_io(
-            persistent.append_outbound_chat(
+            network.notify_outbound_chat_sent(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
                 new_write_caps=new_write_caps,
@@ -505,58 +1412,124 @@ class MainWindow(QMainWindow):
             )
         )
 
-        # signal self.receive_msg_listener() that we have news for it:
-        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id,False)))
+    async def _wait_for_conversation_state(self, conversation_id, *, what: str) -> bool:
+        """Wait for conversation_id to appear in conversation_state_by_id.
 
-        # Signal the network module that we have a new outgoing message:
-        await self.iothread.run_in_io(
-            network.check_for_new()
-        )
+        Bounded: the UI can briefly lag the io thread at startup, but a
+        conversation_id that never appears (stale or deleted) must not
+        starve every later queue item forever. Returns False (log and skip)
+        if it never shows up within the timeout."""
+        waited = 0
+        while conversation_id not in self.conversation_state_by_id:
+            if waited >= _CONVERSATION_STATE_WAIT_TIMEOUT_S:
+                logger.error(
+                    "%s: conversation_id %s never appeared in "
+                    "conversation_state_by_id after %ds; dropping",
+                    what, conversation_id, waited,
+                )
+                return False
+            logger.debug(f"{what}: conversation_id {conversation_id} not in conversation_state_by_id yet")
+            await asyncio.sleep(1)
+            waited += 1
+        return True
+
+    def _supervised_listener(
+        self,
+        name: str,
+        coro_factory,
+        *,
+        restart_on_finish: bool = False,
+        backoff_s: float = 2.0,
+    ) -> None:
+        """Run ``coro_factory()`` as a supervised task on the QtAsyncio loop.
+
+        Listener coroutines are long-lived loops; cancellation (shutdown) is
+        the only intended end. Any other end — an exception, or a clean return
+        when ``restart_on_finish`` is set — is treated as a loss: log it and
+        reschedule a fresh run after ``backoff_s`` so the live UI refresh can
+        never silently die for the rest of the session.
+        """
+        def _on_done(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is None and not restart_on_finish:
+                return
+            logger.error(
+                "%s: %s; restarting in %.1fs",
+                name,
+                "finished without error" if exc is None else f"died with {exc}",
+                backoff_s,
+                exc_info=exc,
+            )
+            loop.call_later(
+                backoff_s,
+                lambda: self._supervised_listener(
+                    name, coro_factory,
+                    restart_on_finish=restart_on_finish, backoff_s=backoff_s,
+                ),
+            )
+        loop = asyncio.get_event_loop()
+        task = create_task(coro_factory())
+        task.add_done_callback(_on_done)
 
     async def receive_msg_listener(self):
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
         while True:
-            (conversation_id, redraw_only) = await self.iothread.run_in_io(network.conversation_update_queue.get())
-            while conversation_id not in self.conversation_state_by_id:
-                logger.debug(f"conversation_id {conversation_id} not in conversation_state_by_id yet")
-                await asyncio.sleep(1)  # encountered a race here once, where the UI hadn't loaded. not sure if still there.
-            convo_state = self.conversation_state_by_id[conversation_id]
-            if redraw_only:
-                convo_state.conversation_log_model.redraw_network_status()
-                continue
-            convo_state.conversation_log_model.increment_row_count()
-            # And then we can increment the row count to let the UI register it:
+            try:
+                (conversation_id, redraw_only) = await self.iothread.run_in_io(
+                    network.conversation_update_queue.get()
+                )
+                await self._process_conversation_update(conversation_id, redraw_only)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: one bad item must not
+                # take the whole refresh loop down (the known root causes were
+                # fixed separately; this is a safety net for a future unknown
+                # bug).
+                logger.error(
+                    "receive_msg_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
 
-            # x) Scrolling - two cases:
-            if convo_state is self.convo_state_or_none():
-                #   x.1) Scrolling: Conversation is in focus:
-                # TODO make which of these to do configurable:
-                convo_state.chat_lines_scroll_idx = 1.0
-                root = self.ui.qml_ChatLines.rootObject()
-                await convo_state.update_first_unread(root.property("ctx").value("first_unread"))
-                root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
-                #xx = self.ui.qml_ChatLines.rootObject().property("ctx")
-                #print(xx)
-                #import pdb;pdb.set_trace()
-                #print("current", self.ui.ChatLines.verticalScrollBar().value())
-                #print("next", min(
-                #    1 + self.ui.ChatLines.verticalScrollBar().value(),
-                #    conversation_order-3))
-                #self.ui.ChatLines.scrollToBottom()
-            else:
-                #   x.2) Scrolling: Conversation is NOT in focus:
-                print("NOT IN FOCUS")
-                convo_state.chat_lines_scroll_idx += 1.0
-                # convo_state.chat_lines_scroll_idx = conversation_order
-                # TODO we should flash the contact entry somehow
-                # TODO we should bump "unread message" counter
+    async def _process_conversation_update(self, conversation_id, redraw_only) -> None:
+        if not await self._wait_for_conversation_state(conversation_id, what="receive_msg_listener"):
+            return
+        convo_state = self.conversation_state_by_id[conversation_id]
+        if redraw_only:
+            convo_state.conversation_log_model.redraw_network_status()
+            return
+        convo_state.conversation_log_model.refresh_row_count()
+        # And then we can increment the row count to let the UI register it:
 
-            # if the main window is not in focus, we should issue a notification:
-            if not self.app.focusWidget():
-                self.app.alert(self)
-                # self.app.beep()
-            self.systray.has_new_messages() # TODO move this into block above
+        # x) Scrolling - two cases:
+        if convo_state is self.convo_state_or_none():
+            #   x.1) Scrolling: Conversation is in focus:
+            # TODO make which of these to do configurable:
+            convo_state.chat_lines_scroll_idx = 1.0
+            root = self.ui.qml_ChatLines.rootObject()
+            new_first_unread = root.property("ctx").value("first_unread")
+            if convo_state.mark_first_unread(new_first_unread):
+                await self.iothread.run_in_io(
+                    network.persist_first_unread(
+                        convo_state.conversation_id, new_first_unread,
+                    ),
+                )
+            root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
+        else:
+            #   x.2) Scrolling: Conversation is NOT in focus:
+            print("NOT IN FOCUS")
+            convo_state.chat_lines_scroll_idx += 1.0
+            # TODO we should flash the contact entry somehow
+            # TODO we should bump "unread message" counter
+
+        # if the main window is not in focus, we should issue a notification:
+        if not self.app.focusWidget():
+            self.app.alert(self)
+            # self.app.beep()
+        self.systray.has_new_messages() # TODO move this into block above
 
     async def peer_added_listener(self):
         """Append members announced via INTRODUCTION to the contacts tree in
@@ -565,20 +1538,198 @@ class MainWindow(QMainWindow):
         joining member shows up on every live client's contact list without a
         restart."""
         while True:
-            (conversation_id, name) = await self.iothread.run_in_io(network.peer_added_queue.get())
-            while conversation_id not in self.conversation_state_by_id:
-                logger.debug(f"peer_added for conversation {conversation_id} before UI loaded; waiting")
-                await asyncio.sleep(1)
-            convo_state = self.conversation_state_by_id[conversation_id]
-            item = convo_state.contacts_standard_item
-            already = any(
-                row is not None and row.text() == name
-                for row in (item.child(r) for r in range(item.rowCount()))
+            try:
+                (conversation_id, name) = await self.iothread.run_in_io(
+                    network.peer_added_queue.get()
+                )
+                await self._process_peer_added(conversation_id, name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: a single malformed
+                # announcement must not kill the whole contact-tree listener.
+                logger.error(
+                    "peer_added_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
+
+    async def _process_peer_added(self, conversation_id, name) -> None:
+        # A dynamically-announced peer could be a synthetic substream; never
+        # render those into the contacts tree.
+        if name.startswith(network._SUBSTREAM_NAME_PREFIX):
+            return
+        if not await self._wait_for_conversation_state(conversation_id, what="peer_added_listener"):
+            return
+        convo_state = self.conversation_state_by_id[conversation_id]
+        item = convo_state.contacts_standard_item
+        already = any(
+            row is not None and row.text() == name
+            for row in (item.child(r) for r in range(item.rowCount()))
+        )
+        if already:
+            return
+        new_item = QStandardItem(name)
+        # Tag like add_conversation's peers so the per-peer pause/resume
+        # context menu works on dynamically-announced members
+        # too. The queue only carries (conversation_id, name); resolve the
+        # read cap/own-ness from the DB. Sync engine: the Qt loop must not
+        # open the async engine (see persistent.warm_async_engine).
+        with persistent.Session(persistent._engine_sync) as _sess:
+            peer_row = _sess.exec(
+                select(persistent.ConversationPeer)
+                .where(persistent.ConversationPeer.name == name)
+            ).first()
+        if peer_row is not None:
+            new_item.peer_read_cap_id = peer_row.read_cap_id
+            new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
+        item.appendRow(new_item)
+        logger.debug("added announced contact %r to conversation %d", name, conversation_id)
+
+    @async_cb
+    async def peer_context_menu(self, pos) -> None:
+        """Per-peer pause/resume: right-clicking a peer row
+        under a conversation offers Pause/Resume for exactly that peer's
+        read stream. Pausing stops the re-reads (and cancels any in-flight
+        ARQ) without touching the rest of the conversation; our own row (we
+        never read from ourselves, active=False) and the conversation rows
+        get no menu."""
+        tree = self.ui.contacts_treeWidget
+        idx = tree.indexAt(pos)
+        if not idx.isValid():
+            return
+        # The contacts tree shows a FilterProxyModel over all_contacts: map
+        # the click back to the source row and require a peer (child) row.
+        src_idx = tree.model().mapToSource(idx)
+        if not src_idx.isValid() or not src_idx.parent().isValid():
+            return
+        item = self.all_contacts.itemFromIndex(src_idx)
+        if item is None or item.parent() is None:
+            return
+        # Skip rows tagged as our own (or untagged, e.g. an own row).
+        if getattr(item, "peer_is_own", True):
+            return
+        read_cap_id = getattr(item, "peer_read_cap_id", None)
+        if read_cap_id is None:
+            return
+        # Read the peer's current active state from the DB: pause(n) means
+        # "stop reading", resume(n) means "start again from next_index".
+        with persistent.Session(persistent._engine_sync) as sess:
+            solo = (sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == read_cap_id,
+                )
+            )).first()
+        active = bool(solo.active) if solo is not None else True
+        # A throwaway menu so we never clobber the tray's contextMenu().
+        api = QMenu(tree)
+        pgm = api.addAction(f"Do not read from {item.text()} any more")
+        rgm = api.addAction(f"Resume reading from {item.text()}")
+        pgm.setEnabled(active)
+        rgm.setEnabled(not active)
+        chosen = await _menu_chosen(api, tree.viewport().mapToGlobal(pos))
+        if chosen is pgm and active:
+            await self.iothread.run_in_io(
+                network.pause_peer_reads(bacap_stream=read_cap_id),
             )
-            if already:
-                continue
-            item.appendRow(QStandardItem(name))
-            logger.debug("added announced contact %r to conversation %d", name, conversation_id)
+        elif chosen is rgm and not active:
+            await self.iothread.run_in_io(
+                network.resume_peer_reads(bacap_stream=read_cap_id),
+            )
+
+    @async_cb
+    async def transfers_context_menu(self, pos) -> None:
+        """Right-click a Transfers row: Pause / Resume that substream
+        download, or Remove a failed one. Reuses the item-5 per-stream
+        primitive (pause freezes the BACAP cursor + cancels the in-flight
+        ARQ; resume re-arms from the saved next_index), so the main
+        conversation keeps flowing either way."""
+        view = self.transfers_view
+        idx = view.indexAt(pos)
+        if not idx.isValid():
+            return
+        rcw_id = view.model().data(
+            view.model().index(idx.row(), 0), ROLE_TRANSFER_RCW_ID,  # noqa: F405
+        )
+        if not rcw_id:
+            return
+        rcw_id = uuid.UUID(rcw_id)
+        with persistent.Session(persistent._engine_sync) as sess:
+            solo = (sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == rcw_id,
+                )
+            )).first()
+        # Check if this transfer is marked as failed in the UI model
+        transfers_model = view.model()
+        row = None
+        for i, rid in enumerate(transfers_model._order):
+            if rid == str(rcw_id):
+                row = i
+                break
+        is_failed = (
+            row is not None and
+            transfers_model._rows.get(rcw_id, {}).get("failed", False)
+        )
+        api = QMenu(view)
+        if is_failed:
+            rm = api.addAction("Remove")
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is rm:
+                transfers_model.remove_transfer(rcw_id)
+        else:
+            active = bool(solo.active) if solo is not None else True
+            pgm = api.addAction("Pause download")
+            rgm = api.addAction("Resume download")
+            pgm.setEnabled(active)
+            rgm.setEnabled(not active)
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is pgm and active:
+                await self.iothread.run_in_io(
+                    network.pause_peer_reads(bacap_stream=rcw_id),
+                )
+            elif chosen is rgm and not active:
+                await self.iothread.run_in_io(
+                    network.resume_peer_reads(bacap_stream=rcw_id),
+                )
+
+    async def transfers_listener(self) -> None:
+        """Drain network.substream_progress_queue into the Transfers model.
+
+        Mirrors receive_msg_listener: this coroutine runs on the asyncio
+        loop, so queue.get() is the only network-level await; model mutation
+        happens directly (we are already on the Qt main thread).
+        """
+        while True:
+            try:
+                event = await self.iothread.run_in_io(
+                    network.substream_progress_queue.get(),
+                )
+                kind = event[0]
+                rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]
+                if kind == "started":
+                    _, _, conv_id, total, parent_name = event
+                    self.transfers_model.start_transfer(
+                        rcw_id, conv_id, parent_name, total,
+                    )
+                elif kind == "piece":
+                    self.transfers_model.notify_piece(rcw_id, event[2])
+                elif kind == "completed":
+                    self.transfers_model.complete_transfer(rcw_id)
+                elif kind == "paused":
+                    self.transfers_model.set_paused(rcw_id, paused=True)
+                elif kind == "resumed":
+                    self.transfers_model.set_paused(rcw_id, paused=False)
+                elif kind == "failed":
+                    self.transfers_model.fail_transfer(rcw_id, event[2])
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # log-and-continue, defense in depth: a malformed event must
+                # not kill the whole Transfers listener.
+                logger.error(
+                    "transfers_listener: dropping an item after %s",
+                    e, exc_info=e,
+                )
 
     def convo_state(self) -> ConversationUIState:
         convo = self.convo_state_or_none()
@@ -604,75 +1755,124 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def send_file(self):
-        """Send attached files.
-
-        This is more or less like self.chat_msg_single_line(),
-        except of course we're sending some potentially big files.
-        If we don't think the files will change, we can stream them to the temp stream.
-        But the safest would be to load the whole thing into the WAL, that way user can delete
-        or modify their file. In the future that should probably be a setting.
-        For now let's just do the simple thing:
-        - Each file is one big message
-        - We send them back to back and end up with a huge ephemeral BACAP stream
-        - When done uploading, we put a reference to the big stream into the chat.
-        - We can choose whether we want to block the user's chat stream or not (if we don't,
-          they can keep chatting but their attached files may look out of order).
-          This might be a good reason to allow sending a message along with the files.
+        """Send each queued attachment as its own SendOperation.
+        
+        Wire format is a full GroupChatMessage (bytes in PWAL); the local
+        ConversationLog row gets a lightweight ``file_outgoing`` marker so
+        the chat view does not store megabytes inline.
         """
         convo = self.convo_state()
+        # Refuse (and keep the queued attachments) until we are a member;
+        # see _refuse_unless_joined.
+        if await self._refuse_unless_joined(convo.conversation_id):
+            return
         print("should send files", convo.attached_files)
 
-        # TODO actually send them
-        fmsgs = []
-        for fn in convo.attached_files:
+        voice_note_drafts = []
+        audio = getattr(self, "_ptt_audio", None)
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(convo.conversation_id)
+        )
+        # One SendOperation per file; unserialize() only decodes one GCM.
+        for fn in sorted(convo.attached_files):
             f_path = Path(fn)
-            fmsgs.append(
-                GroupChatMessage(
-                version=0,
-                membership_hash=b"t"*32, # TODO: mocked for now; convo_state.group_chat_state.membership_hash
-                    file_upload=GroupChatFileUpload(
-                        basename=f_path.name,
-                        filetype="arbitrary",
-                        payload=f_path.read_bytes(), # TODO we'll obviously need a better strategy for big files
-                    )
+            is_draft = bool(audio and audio.is_draft_path(f_path))
+
+            if not f_path.is_file():
+                QTimer.singleShot(
+                    0,
+                    lambda p=f_path: QMessageBox.warning(
+                        self,
+                        APP_NAME,
+                        f"Attachment no longer exists and was skipped:\n{p}",
+                    ),
                 )
+                continue
+
+            size = f_path.stat().st_size
+            # Same cap network._spill_attachment uses on receive.
+            if size > network._ATTACHMENT_HARD_CAP:
+                cap_mib = network._ATTACHMENT_HARD_CAP / (1024 * 1024)
+                QTimer.singleShot(
+                    0,
+                    lambda n=f_path.name,
+                    s=size: QMessageBox.warning(
+                        self,
+                        APP_NAME,
+                        f"{n} is {s / (1024 * 1024):.1f} MiB, which "
+                        f"exceeds the {cap_mib:.0f} MiB attachment limit. "
+                        "It was not sent.",
+                    ),
+                )
+                continue
+
+            upload = GroupChatFileUpload.from_path(f_path)
+            gcm = GroupChatMessage(
+                version=0,
+                membership_hash=membership_hash,
+                file_upload=upload,
             )
 
-        send_op = SendOperation(
-            messages=fmsgs,
-            bacap_stream=uuid.uuid4() # TODO look up the right uuid in convo_state.group_chat_state.bacap_uuid
-        )
+            # Pre-assign the ConversationLog id so a voice-note draft (which is
+            # discarded right after sending) can be cached for playback under
+            # the same id the renderer later resolves against.
+            log_id = uuid.uuid4()
 
-        new_write_caps, db_entries = send_op.serialize(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
-            conversation_id=convo.conversation_id)
+            # Voice-note drafts are deleted after send, so persist a stable
+            # playback copy keyed to the log id and point src_path at it. Other
+            # attachments stay on disk at their original src_path.
+            if is_draft and audio:
+                src_path = str(
+                    audio.cache_received_clip(
+                        str(log_id), upload.basename, f_path.read_bytes(),
+                    )
+                )
+            else:
+                src_path = str(f_path)
 
-        # open a new transaction: TODO: need to only READ COMMITTED, we do not want dirty reads here
-        async with persistent.asession() as sess:
-            for cap_uuid in new_write_caps:
-                sess.add(persistent.WriteCapWAL(id=cap_uuid))  # the network writer needs to create these before it can process plaintextwals
-            for db_obj in db_entries:
-                sess.add(db_obj)  # These are PlaintextWAL and ReadCapWal entries
-            await sess.commit()
+# Store a lightweight local marker rather than the file bytes: the
+            # renderer only needs the basename/filetype, and the bytes are
+            # already on disk at src_path.
+            marker_fields = {
+                "v": 0,
+                "kind": "file_outgoing",
+                "basename": upload.basename,
+                "filetype": upload.filetype,
+                "size": size,
+                "src_path": src_path,
+            }
+            safe_basename = network._safe_basename(upload.basename)
+            is_image = attachment_images.is_image_attachment(
+                upload.filetype, safe_basename,
+            )
+            if is_image:
+                thumb_rel_path = attachment_images.spill_image_thumbnail(
+                    conversation_id=convo.conversation_id,
+                    file_uuid=log_id,
+                    safe_basename=safe_basename,
+                    source=f_path,
+                )
+                if thumb_rel_path is not None:
+                    marker_fields["thumb_rel_path"] = thumb_rel_path
+            local_payload = b"F" + cbor2.dumps(marker_fields)
 
-        # Signal network.py that we have written a new SendOperation to PlaintextWAL
-        await self.iothread.run_in_io(
-            network.check_for_new()
-        )
+            await self._enqueue_outgoing_gcm(
+                convo, gcm, local_payload=local_payload, log_id=log_id,
+            )
+
+            if is_draft:
+                voice_note_drafts.append(f_path)
 
         # Remove sent files from model and view:
         convo.attached_files.clear()
         self.ui.attached_files_QListWidget.clear()
+        self._update_attachment_controls()
+        if audio:
+            for draft_path in voice_note_drafts:
+                audio.discard_draft(draft_path)
 
-    def attach_file_remove(self, item: QListWidgetItem) -> None:
-        """Clicking on a file path in the QListWidgetItem path removes it"""
-        convo = self.convo_state()
-        convo.attached_files.remove(item.data(0x100))
-        # Redraw:
-        self.refresh_attached_files_for_conversation(convo)
-
-    @async_cb
-    async def attach_file(self):
+    def attach_file(self, _checked: bool = False):
         dialog = QFileDialog()
         dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)  # allow more than one file
         dialog.setAcceptMode(QFileDialog.AcceptOpen)  # files should exist already
@@ -693,7 +1893,10 @@ class MainWindow(QMainWindow):
         self.refresh_attached_files_for_conversation(convo)
 
     def refresh_attached_files_for_conversation(self, convo: ConversationUIState):
+        selected_path = self._selected_attachment_path()
         self.ui.attached_files_QListWidget.clear()
+        audio = getattr(self, "_ptt_audio", None)
+        selected_item = None
         for fname in convo.attached_files:
             itm = QListWidgetItem()
             itm.setData(0x100, fname)  # full path stored in Qt.UserRole
@@ -707,8 +1910,27 @@ class MainWindow(QMainWindow):
             except (FileNotFoundError, PermissionError):
                 # TODO should report this error
                 continue
+            # Surface voice-note state directly in the attachment list so drafts
+            # can be reviewed without adding another model or tab.
+            if audio and audio.is_draft_path(p):
+                abbrev = f"voice note draft\r\n{abbrev}"
+            elif p.suffix.lower() == ".opus":
+                abbrev = f"audio clip\r\n{abbrev}"
             itm.setText(abbrev)  # abbreviated path with first parent + size stored in "display"
+            itm.setToolTip(str(p))
             self.ui.attached_files_QListWidget.addItem(itm)
+            if selected_path == p:
+                selected_item = itm
+
+        has_files = self.ui.attached_files_QListWidget.count() > 0
+        # Send is only meaningful when at least one file is queued.
+        self.ui.send_file_button.setEnabled(has_files)
+
+        if selected_item is not None:
+            self.ui.attached_files_QListWidget.setCurrentItem(selected_item)
+        elif has_files:
+            self.ui.attached_files_QListWidget.setCurrentRow(0)
+        self._update_attachment_controls()
 
     @async_cb
     async def conversation_selected(self, selected:QTreeWidgetItem, old:QTreeWidgetItem|None):
@@ -742,7 +1964,13 @@ class MainWindow(QMainWindow):
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
             if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
                 print("old first_unread is", old_ctx.value("first_unread"))
-                await old_convo.update_first_unread(old_ctx.value("first_unread"))
+                old_first_unread = old_ctx.value("first_unread")
+                if old_convo.mark_first_unread(old_first_unread):
+                    await self.iothread.run_in_io(
+                        network.persist_first_unread(
+                            old_convo.conversation_id, old_first_unread,
+                        ),
+                    )
             root = self.ui.qml_ChatLines.rootObject()
             if root and (vscrollbar := root.findChild(object, "vscrollbar")):
                 #vrect = vscrollbar.findChild(object, "vscrollbar_rect")
@@ -813,8 +2041,22 @@ class MainWindow(QMainWindow):
         self.ui.chat_lineEdit.setText(convo_state.chat_lineEdit_buffer)
         # Update the label we display at the top left corner of the chat view:
         self.ui.ContactName.setText(f"{selected} (your name: {convo_state.own_peer_name})")
+
+        # The whole attach-file tab and its key children start disabled in the
+        # generated UI; enable them once a real conversation is in scope.
+        self.ui.attach_file_tab.setEnabled(True)
+        self.ui.attach_file_button.setEnabled(True)
+        self.ui.attached_files_QListWidget.setEnabled(True)
+
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
+
+        # Scope the Polls tab to the newly selected conversation and drop a
+        # panel survey that belonged to the previous one.
+        key = self.tally_panel.current_survey()
+        if key is not None and key[0] != convo_state.conversation_id:
+            self.tally_panel.clear()
+        self._update_polls_tab()
 
         self.systray.has_read_messages()
 
@@ -831,19 +2073,25 @@ class MainWindow(QMainWindow):
 
     @async_cb
     async def new_conversation(self):
-        conversation_name , ok = QInputDialog.getText(
-            self,
-            "New conversation",
-            "Choose conversation title:",
-        )
-        if not ok: return
+        title_dialog = QInputDialog(self)
+        title_dialog.setWindowTitle("New conversation")
+        title_dialog.setLabelText("Choose conversation title:")
+        if not await _dialog_finished(title_dialog):
+            return
+        conversation_name = title_dialog.textValue().strip()
+        if not conversation_name:
+            return
         # TODO this crap out while something is awaiting the write_channel:
-        display_name , ok = QInputDialog.getText(
-            self,
-            "New conversation",
+        display_dialog = QInputDialog(self)
+        display_dialog.setWindowTitle("New conversation")
+        display_dialog.setLabelText(
             "Choose (your) name displayed to the other user(s):",
         )
-        if not ok: return
+        if not await _dialog_finished(display_dialog):
+            return
+        display_name = display_dialog.textValue().strip()
+        if not display_name:
+            return
 
         wcapwal = persistent.WriteCapWAL(id=uuid.uuid4()) # actual CAP will be provisioned later
         rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
@@ -862,18 +2110,16 @@ class MainWindow(QMainWindow):
             conversation_order=0,
             payload=b"Your name in this conversation is " + own_peer.name.encode(),
         )
-        async with persistent.asession() as sess:
-            sess.add(wcapwal)
-            sess.add(rcapwal)
-            sess.add(convo)
-            sess.add(own_peer)
-            sess.add(first_post)
-            await sess.commit()
-            await sess.refresh(first_post)
-            await sess.refresh(own_peer)
-            await sess.refresh(convo)
-            await sess.refresh(rcapwal)
-            await sess.refresh(wcapwal)
+        # The objects must be written on the io loop, not the Qt thread, and via
+        # the same single-writer path every other ConversationLog append uses
+        # (mirror of network.notify_outbound_chat_sent): the aiosqlite session
+        # of the async engine is not safe to touch from any loop other than the
+        # one that created it, and a second writer on the Qt thread (_engine_sync)
+        # would race it. The helper refreshes the objects in place, so `convo`
+        # carries the generated ids back to add_conversation on the Qt thread.
+        await self.iothread.run_in_io(
+            _commit_new_conversation(wcapwal, rcapwal, convo, own_peer, first_post)
+        )
         await add_conversation(self, convo)
 
     @async_cb
@@ -885,10 +2131,10 @@ class MainWindow(QMainWindow):
         try:
             convo = self.convo_state()
         except Exception:
-            QMessageBox.critical(
+            QTimer.singleShot(0, lambda: QMessageBox.critical(
                 self, f"ERROR: {APP_NAME}",
                 "Select a conversation first (or create one) before generating a voucher.",
-            )
+            ))
             return
 
         conv_id = convo.conversation_id
@@ -896,32 +2142,42 @@ class MainWindow(QMainWindow):
         # member, a second voucher would re-run the join and duplicate every
         # member and message, so refuse outright.
         if await self.iothread.run_in_io(conversation_is_joined(conv_id)):
-            QMessageBox.information(
+            QTimer.singleShot(0, lambda: QMessageBox.information(
                 self, APP_NAME,
                 "You are already a member of this conversation, so a voucher is "
                 "not needed. Vouchers are only for joining a conversation you are "
                 "not yet part of.",
-            )
+            ))
             return
         # At most one voucher in flight per conversation. If one is pending,
         # offer to abandon it and mint a fresh one (e.g. the code was lost).
         pending_id = await self.iothread.run_in_io(pending_voucher_for(conv_id))
         if pending_id is not None:
-            if QMessageBox.question(
-                self, APP_NAME,
+            replace_box = QMessageBox(
+                QMessageBox.Icon.Question, APP_NAME,
                 "A voucher for this conversation is already pending. Cancel it "
                 "and generate a new one?",
+                parent=self,
+            )
+            replace_box.setStandardButtons(
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                defaultButton=QMessageBox.StandardButton.No,
-            ) != QMessageBox.StandardButton.Yes:
+            )
+            replace_box.setDefaultButton(QMessageBox.StandardButton.No)
+            result = await _dialog_finished(replace_box)
+            # finished() returns the clicked StandardButton, not a widget.
+            if result != QMessageBox.StandardButton.Yes:
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
-        display_name, ok = QInputDialog.getText(
-            self, "Generate voucher",
+        display_dialog = QInputDialog(self)
+        display_dialog.setWindowTitle("Generate voucher")
+        display_dialog.setLabelText(
             "Choose (your) name shown to the contact who inducts you:",
         )
-        if not ok or not display_name:
+        if not await _dialog_finished(display_dialog):
+            return
+        display_name = display_dialog.textValue().strip()
+        if not display_name:
             return
 
         try:
@@ -929,11 +2185,11 @@ class MainWindow(QMainWindow):
                 mint_and_publish(self.iothread.kp_client, conv_id, display_name)
             )
         except Exception as e:
-            QMessageBox.critical(
+            QTimer.singleShot(0, lambda err=e: QMessageBox.critical(
                 self, f"ERROR: {APP_NAME}",
                 "Could not mint the voucher. Is the conversation finished setting "
-                f"up and the client connected?\n\n{e}",
-            )
+                f"up and the client connected?\n\n{err}",
+            ))
             return
 
         code = b64encode(voucher).decode()
@@ -945,7 +2201,10 @@ class MainWindow(QMainWindow):
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
-        ensure_future(self._await_voucher_join(convo))
+        self._supervised_listener(
+            "_await_voucher_join",
+            lambda: self._await_voucher_join(convo),
+        )
 
     async def _await_voucher_join(self, convo):
         # A fresh GUI start may still be dialling the daemon on the io thread
@@ -963,18 +2222,39 @@ class MainWindow(QMainWindow):
             ))
             return
         for name in added:
-            convo.contacts_standard_item.appendRow(QStandardItem(name))
+            # Synthetic substream peers are never rendered.
+            if name.startswith(network._SUBSTREAM_NAME_PREFIX):
+                continue
+            new_item = QStandardItem(name)
+            # Tag like add_conversation's peers so the per-peer pause/resume
+            # context menu works on dynamically-announced members too.
+            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            with persistent.Session(persistent._engine_sync) as _sess:
+                peer_row = _sess.exec(
+                    select(persistent.ConversationPeer)
+                    .where(persistent.ConversationPeer.name == name)
+                ).first()
+            if peer_row is not None:
+                new_item.peer_read_cap_id = peer_row.read_cap_id
+                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+            convo.contacts_standard_item.appendRow(new_item)
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
-        joined = ", ".join(added) or "(none)"
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
+        joined = ", ".join(
+            n for n in added if not n.startswith(network._SUBSTREAM_NAME_PREFIX)
+        ) or "(none)"
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
 
     async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
         for attempt in range(5):
-            while self.iothread.kp_client is None:
-                await asyncio.sleep(1)
             try:
+                # getattr, not a direct attribute access: AsyncioThread sets
+                # kp_client as the first line of async_main(), so a call
+                # made before that thread has even started running would
+                # otherwise raise AttributeError here instead of waiting.
+                while getattr(self.iothread, "kp_client", None) is None:
+                    await asyncio.sleep(1)
                 return await self.iothread.run_in_io(
                     await_and_open(self.iothread.kp_client, conversation_id)
                 )
@@ -998,11 +2278,15 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        voucher_str, ok = QInputDialog.getText(
-            self, "Induct via voucher",
+        voucher_dialog = QInputDialog(self)
+        voucher_dialog.setWindowTitle("Induct via voucher")
+        voucher_dialog.setLabelText(
             "Enter the voucher your new contact handed you:",
         )
-        if not ok or not voucher_str:
+        if not await _dialog_finished(voucher_dialog):
+            return
+        voucher_str = voucher_dialog.textValue()
+        if not voucher_str:
             return
         try:
             voucher = b64decode(voucher_str.strip().encode())
@@ -1024,12 +2308,34 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        name = joiner_name or "contact"
-        convo.contacts_standard_item.appendRow(QStandardItem(name))
+        if joiner_name is None:
+            # Already inducted by an earlier run of this same handshake;
+            # voucher.py has already logged and skipped the duplicate add,
+            # so there is no new contact to reflect here.
+            QTimer.singleShot(0, lambda: QMessageBox.information(
+                self, f"Inducted: {APP_NAME}", "This contact was already inducted.",
+            ))
+            return
+
+        # Synthetic substream peers are never rendered.
+        if not joiner_name.startswith(network._SUBSTREAM_NAME_PREFIX):
+            new_item = QStandardItem(joiner_name)
+            # Tag like add_conversation's peers so the per-peer pause/resume
+            # context menu works on inducted members too.
+            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            with persistent.Session(persistent._engine_sync) as _sess:
+                peer_row = _sess.exec(
+                    select(persistent.ConversationPeer)
+                    .where(persistent.ConversationPeer.name == joiner_name)
+                ).first()
+            if peer_row is not None:
+                new_item.peer_read_cap_id = peer_row.read_cap_id
+                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+            convo.contacts_standard_item.appendRow(new_item)
         logging.warning("Peer inducted. Signaling readables_to_mixwal")
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Inducted: {APP_NAME}", f"Inducted {name} into this conversation.",
+        QTimer.singleShot(0, lambda: self._info_plain(
+            f"Inducted: {APP_NAME}", f"Inducted {joiner_name} into this conversation.",
         ))
 
     @async_cb
@@ -1037,10 +2343,12 @@ class MainWindow(QMainWindow):
         """Open the pending-voucher view so the user can abandon stale ones."""
         rows = await self.iothread.run_in_io(list_pending_vouchers())
         if not rows:
-            QMessageBox.information(self, APP_NAME, "There are no pending vouchers.")
+            QTimer.singleShot(0, lambda: QMessageBox.information(
+                self, APP_NAME, "There are no pending vouchers.",
+            ))
             return
         dialog = PendingVouchersDialog(self, rows)
-        dialog.exec()
+        await _dialog_finished(dialog)
         for pv_id in dialog.cancelled:
             await self.iothread.run_in_io(cancel_pending_voucher(pv_id))
 
@@ -1133,6 +2441,88 @@ class MixSystrayIcon(QSystemTrayIcon):
         print("Someone clicked message", args, kwargs)
 
     
+async def _stage_local_tally(sess, convo, gcm) -> None:
+    """Stage an outbound tally message and append its optimistic chat row.
+
+    Runs inside the caller's ``conversation_log_order_lock``: the row's order is
+    a COUNT subquery evaluated at commit, so it must not race a concurrent
+    append. ``network_status=1`` marks the row pending until the send clears.
+    """
+    final_pwal_id = await tally_send.stage_outbound(sess, convo, gcm)
+    sess.add(persistent.ConversationLog(
+        conversation_id=convo.id,
+        conversation_peer_id=convo.own_peer_id,
+        conversation_order=persistent.next_conversation_order(convo.id),
+        payload=b"F" + gcm.to_cbor(),
+        network_status=1,
+        outgoing_pwal=final_pwal_id,
+    ))
+
+
+async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes | None":
+    """Create a survey, persist it and stage its broadcast, on the io loop.
+
+    Returns the survey id (None on failure).
+    """
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            logger.error("tally create: conversation %d not found", conversation_id)
+            return None
+        async with persistent.conversation_log_order_lock(conversation_id):
+            doc = await tally_controller.INSTANCE.create_local(
+                sess, convo, survey_id, topic, mode, slots,
+            )
+            blob = tally_sync.full_state(doc)
+            await _stage_local_tally(
+                sess, convo, tally_events.build_create(survey_id, blob),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return survey_id
+
+
+async def _io_tally_vote(conversation_id: int, survey_id: bytes, choice) -> bool:
+    """Record our vote locally and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        async with persistent.conversation_log_order_lock(conversation_id):
+            version = await tally_controller.INSTANCE.cast_local_vote(
+                sess, convo, survey_id, choice,
+            )
+            if version is None:
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_vote(survey_id, choice, version),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return True
+
+
+async def _io_tally_close(conversation_id: int, survey_id: bytes) -> bool:
+    """Close a survey we created and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        async with persistent.conversation_log_order_lock(conversation_id):
+            if not await tally_controller.INSTANCE.close_local(sess, convo, survey_id):
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_close(survey_id),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return True
+
+
 async def add_conversation(window, convo: persistent.Conversation) -> None:
     window.conversation_log_models = getattr(window, "conversation_log_models", dict())
 
@@ -1156,16 +2546,26 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
 
     for peer in convo.peers:
         #ptwi = QTreeWidgetItem([peer.name])
+        if not _peer_is_displayable(peer):
+            continue
         ptwi = QStandardItem(peer.name)
+        # The peer row is the per-peer pause/resume target:
+        # tag it with its read cap (the bacap_stream the drain reads on) so
+        # the contacts-tree context menu can resolve the right stream, and
+        # mark our own row so the menu can refuse to "pause" ourselves.
+        ptwi.peer_read_cap_id = peer.read_cap_id
+        ptwi.peer_is_own = (peer.id == convo.own_peer_id)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
-    async with persistent.asession() as sess:
-        msg_count = (await sess.exec(
+    # Sync engine: add_conversation runs on the Qt loop, which must not open
+    # the async engine (see persistent.warm_async_engine).
+    with persistent.Session(persistent._engine_sync) as sess:
+        msg_count = sess.exec(
             select(func.count())
             .select_from(persistent.ConversationLog)
             .where(persistent.ConversationLog.conversation_id == convo.id)
-        )).first()
-        convo_state.conversation_log_model.row_count = msg_count
+        ).first()
+    convo_state.conversation_log_model.set_row_count(msg_count)
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
     # Append the new conversation to the "real" model window.all_contacts,
@@ -1191,12 +2591,26 @@ def rebuild_pydantic_models():
     #ConversationUIState.model_rebuild()
     pass
 
+async def _wait_for_engine_warmed(iothread: AsyncioThread) -> None:
+    """Hold off the Qt loop's first use of the async engine until the io thread
+    has warmed it. Gives up if the thread died before it could: the window
+    should still appear, as it does when the thread dies later."""
+    while not iothread.engine_warmed.is_set():
+        # re-checked: it may have been set and the thread exited since the test above
+        if not iothread.is_alive() and not iothread.engine_warmed.is_set():
+            logger.error("io thread exited before it warmed the async engine")
+            return
+        await asyncio.sleep(0.01)
+
+
 async def main(window: MainWindow):
     def report_exception2(*args):
         for m in args:
             print("report_exception2", m)
             QTimer.singleShot(0, lambda: QMessageBox.critical(window, f"Exception", f"{m}"))
     asyncio.get_running_loop().set_exception_handler(report_exception2)
+
+    await _wait_for_engine_warmed(window.iothread)
 
     rebuild_pydantic_models()
     echomix_icon = QIcon()
@@ -1238,18 +2652,35 @@ async def main(window: MainWindow):
         for convo in a:
             await add_conversation(window, convo)
 
+    # Seed the Polls tab from whatever the selection (or lack of one) is now.
+    window._update_polls_tab()
+
     window.show()
-    create_task(window.receive_msg_listener())
-    create_task(window.peer_added_listener())
+    window._supervised_listener(
+        "receive_msg_listener", window.receive_msg_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
+        "peer_added_listener", window.peer_added_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
+        "tally_listener", window.tally_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
+        "transfers_listener", window.transfers_listener, restart_on_finish=True,
+    )
+    window.transfers_model.seed_from_db()
 
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
-    for conv_id in await pending_joiner_join_conversation_ids():
+    for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)
-            create_task(window._await_voucher_join(convo_state))
+            window._supervised_listener(
+                f"_await_voucher_join:{conv_id}",
+                lambda: window._await_voucher_join(convo_state),
+            )
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html
@@ -1321,7 +2752,17 @@ def cli():
     # reliably everywhere; set QT_QUICK_BACKEND yourself to override. Must be
     # set before the QApplication is constructed.
     os.environ.setdefault("QT_QUICK_BACKEND", "software")
+    # QML and icons are referenced by repo-root-relative paths
+    # ("resources/..."), so the app only worked when launched from the repo
+    # root. Anchor the cwd to the resources root so it works from any launch
+    # directory (a NoneType rootObject() -> setProperty crash otherwise, and
+    # the window icon silently fails to load).
+    _res_root = Path(__file__).resolve().parent.parent.parent
+    if (_res_root / "resources").is_dir():
+        os.chdir(_res_root)
     app = QApplication(sys.argv)
+    if (_res_root / "resources" / "echomix_256.png").is_file():
+        app.setWindowIcon(QIcon("resources/echomix_256.png"))
     parser = argparse.ArgumentParser()
     add_log_args(parser)
     args = parser.parse_args()

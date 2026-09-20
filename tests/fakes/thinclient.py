@@ -98,6 +98,12 @@ class FakeThinClient:
         self.next_errors: Dict[str, List[Exception]] = {}
         # envelope_hashes whose start_resending hangs forever
         self.pending_acks: set[bytes] = set()
+        # (box_id, message_box_index) pairs whose start_resending hangs
+        # forever, regardless of which envelope_hash a fresh encrypt_read/
+        # encrypt_write mints for that box position (drain_mixwal_read_single
+        # re-encrypts on every call, so the envelope_hash is not stable
+        # across retries the way the box position is).
+        self.pending_ack_boxes: "set[tuple[bytes, bytes]]" = set()
         # advertised couriers; tests may add/remove mid-flight
         self.couriers: List[Tuple[bytes, bytes]] = [
             (secrets.token_bytes(32), b"+courier"),
@@ -128,6 +134,15 @@ class FakeThinClient:
 
     def release_ack(self, envelope_hash: bytes) -> None:
         self.pending_acks.discard(envelope_hash)
+
+    def hold_ack_for_box(self, box_id: bytes, message_box_index: bytes) -> None:
+        """Like :meth:`hold_ack`, but keyed on the box position rather than
+        one envelope_hash: use this for a read a caller may re-encrypt
+        (fresh envelope, same box) across retries."""
+        self.pending_ack_boxes.add((box_id, message_box_index))
+
+    def release_ack_for_box(self, box_id: bytes, message_box_index: bytes) -> None:
+        self.pending_ack_boxes.discard((box_id, message_box_index))
 
     def add_courier(
         self, identity_hash: Optional[bytes] = None, queue_id: bytes = b"+courier",
@@ -296,12 +311,12 @@ class FakeThinClient:
             message_ciphertext=message_ciphertext,
         )
         self._maybe_raise("start_resending_encrypted_message")
-        if envelope_hash in self.pending_acks:
-            await asyncio.Event().wait()  # never set; models stuck ACK
         env = self.envelopes.get(envelope_hash)
-        courier = self.couriers[0] if self.couriers else (None, None)
         if env is None:
             raise BoxIDNotFoundError()
+        if envelope_hash in self.pending_acks or (env.box_id, env.message_box_index) in self.pending_ack_boxes:
+            await asyncio.Event().wait()  # never set; models stuck ACK
+        courier = self.couriers[0] if self.couriers else (None, None)
         if env.is_write:
             self.box_store[(env.box_id, env.message_box_index)] = env.plaintext
             return StartResendingResult(
