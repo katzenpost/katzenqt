@@ -22,9 +22,8 @@ import asyncio
 import traceback
 import time
 import uuid
-from asyncio import ensure_future
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Hashable
+from collections.abc import Awaitable, Callable, Hashable, Iterable
 from typing import Protocol, TypedDict, TypeVar, Unpack, Literal
 
 import cbor2
@@ -161,42 +160,49 @@ __should_quit = asyncio.Event()
 def shutdown():
     __should_quit.set()
 
-async def start_background_threads(connection: ThinClient):
-    """This should be called on startup, after establishing a connection to the mixnet.
-    It runs forever.
-    """
-    # Loop over our write caps and retrive read caps for them:
-    f1 = ensure_future(asyncio.gather(provision_read_caps(connection)))
+async def _cancel_and_join(
+    tasks: Iterable[asyncio.Task[object]],
+) -> None:
+    owned = tuple(tasks)
+    for task in owned:
+        if not task.done() and not task.cancelling():
+            task.cancel()
+    joined = asyncio.gather(*owned, return_exceptions=True)
+    cancelled = False
+    while not joined.done():
+        try:
+            await asyncio.shield(joined)
+        except asyncio.CancelledError:
+            cancelled = True
+    joined.result()
+    for task in owned:
+        if not task.cancelled():
+            task.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
-    await __mixnet_connected.wait()
 
-    # Loop over outgoing queue and start transmitting them to the network. Runs forever.
-    f3 = ensure_future(asyncio.gather(drain_mixwal(connection)))
-
-    # Loop over PlaintextWAL messages, encrypt them, and put them in MixWAL. Runs forever.
-    f4 = ensure_future(asyncio.gather(send_resendable_plaintexts(connection)))
-
-    # Loop over things we can read and start reading them:
-    f5 = asyncio.gather(create_task(readables_to_mixwal(connection)))
-    async def do_shutdown():
-        """TODO this needs some work"""
-        await __should_quit.wait()
-        logger.info("shutting down")
-        f1.cancel()
-        f3.cancel()
-        f4.cancel()
-        f5.cancel()
-    shutdown_task = create_task(do_shutdown())
+async def start_background_threads(connection: ThinClient) -> None:
+    """Run the network workers and join their requests before returning."""
+    workers: list[asyncio.Task[None]] = [
+        create_task(provision_read_caps(connection)),
+    ]
+    stopping = asyncio.create_task(__should_quit.wait())
     try:
-        for task in asyncio.as_completed([f1, f3, f4, f5, shutdown_task]):
-            try:
-              await asyncio.gather(task)
-            except asyncio.exceptions.CancelledError:
-              logger.info(f"cancelled: {task}")
-            logger.debug("start_background_threads completed: %s", task)
-    except Exception as xx:  # pragma: no cover - defensive: gathered tasks catch their own
-        logger.critical("f1-f4-f5 exception: %s", xx, exc_info=True)
-        raise
+        if not await _wait_for_connection_or_shutdown():
+            return
+        workers.extend((
+            create_task(drain_mixwal(connection)),
+            create_task(send_resendable_plaintexts(connection)),
+            create_task(readables_to_mixwal(connection)),
+        ))
+        done, _ = await asyncio.wait(
+            [*workers, stopping], return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            task.result()
+    finally:
+        await _cancel_and_join((*workers, stopping))
 
 async def drain_mixwal(connection: ThinClient):
     try:
@@ -1611,7 +1617,7 @@ def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
     )
 
 
-async def drain_mixwal2(connection: ThinClient):
+async def drain_mixwal2(connection: ThinClient) -> None:
     """Read from MixWAL and put the messages on the network."""
     """"Send messages to mixnet from MixWAL.
 
@@ -1629,106 +1635,119 @@ async def drain_mixwal2(connection: ThinClient):
     draining_right_now : "Set[uuid.UUID]" = set()
     await __resend_queue_populated.wait()
     shutdown = create_task(__should_quit.wait())
-    while not __should_quit.is_set():
-        # asyncio.wait defaults to ALL_COMPLETED, which would force this
-        # loop to wait the full timeout (or for shutdown) regardless of
-        # __mixwal_updated being set, effectively turning it into a
-        # 15-second poller. FIRST_COMPLETED restores the event-driven
-        # behaviour the caller of __mixwal_updated.set() expects.
-        _, _ = await asyncio.wait((
-                 create_task(__mixwal_updated.wait()),
-                 shutdown,
-        ), timeout=15, return_when=asyncio.FIRST_COMPLETED)
-        if __should_quit.is_set():
-          continue
-        __mixwal_updated.clear()
-        # Read fresh, after the wait: a reconnect that happens *during* the
-        # wait (on_connection_status also pokes __mixwal_updated on one, so
-        # this pass runs promptly) must not be judged by a connectedness
-        # snapshot taken up to 15s earlier, or a pending write sits deferred
-        # for a further sweep instead of going out immediately.
-        connected = __mixnet_connected.is_set()
-        logger.debug("DRAIN_MIXWAL draining_right_now:%s __resend_queue:%s", draining_right_now, __resend_queue)
-        # TODO drain new from mixwal, this should NOT be a long-running session like it currently is
-        new_write_mws = []
-        async with persistent.asession() as sess:
-            new_mixwals = (await sess.exec(persistent.MixWAL.get_new(draining_right_now))).all()
-            for mw in new_mixwals:
-                if mw.is_read:
-                    # Reads are cast even while on_connection_status reports
-                    # the daemon offline: kpclientd's own ARQ holds the
-                    # request and rides out gateway-link flaps, delivering
-                    # when the link recovers. Gating reads on
-                    # __mixnet_connected strands them forever if the
-                    # re-enabled status notification is ever lost.
-                    draining_right_now.add(mw.bacap_stream)
-                    __resend_queue.add(mw.bacap_stream)
-                    rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-                    if rcw is not None and rcw.read_paused:
-                        draining_right_now.discard(mw.bacap_stream)
-                        __resend_queue.discard(mw.bacap_stream)
-                        continue
-                    if len(rcw.read_cap) != 136:
-                        # A malformed row must not take down the whole drain
-                        # loop (see drain_mixwal's wrapper, which catches an
-                        # escaped exception here but then simply returns,
-                        # permanently ending every read AND write drain for
-                        # the rest of the process). Skip only this stream,
-                        # the same log-and-continue contract every other
-                        # per-item failure path in this loop already gets.
-                        logger.error(
-                            "drain_mixwal: ReadCapWAL.read_cap for "
-                            "bacap_stream=%s has incorrect length %d "
-                            "(expected 136); skipping this stream: %r",
-                            mw.bacap_stream, len(rcw.read_cap), rcw,
-                        )
-                        draining_right_now.discard(mw.bacap_stream)
-                        __resend_queue.discard(mw.bacap_stream)
-                        continue
-                    read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
-                    _inflight_reads[mw.bacap_stream] = read_task
+    requests: set[asyncio.Task[None]] = set()
+    try:
+        while not __should_quit.is_set():
+            # asyncio.wait defaults to ALL_COMPLETED, which would force this
+            # loop to wait the full timeout (or for shutdown) regardless of
+            # __mixwal_updated being set, effectively turning it into a
+            # 15-second poller. FIRST_COMPLETED restores the event-driven
+            # behaviour the caller of __mixwal_updated.set() expects.
+            updated = asyncio.create_task(__mixwal_updated.wait())
+            try:
+                await asyncio.wait(
+                    (updated, shutdown), timeout=15,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                await _cancel_and_join((updated,))
+            if __should_quit.is_set():
+              continue
+            __mixwal_updated.clear()
+            # Read fresh, after the wait: a reconnect that happens *during* the
+            # wait (on_connection_status also pokes __mixwal_updated on one, so
+            # this pass runs promptly) must not be judged by a connectedness
+            # snapshot taken up to 15s earlier, or a pending write sits deferred
+            # for a further sweep instead of going out immediately.
+            connected = __mixnet_connected.is_set()
+            logger.debug("DRAIN_MIXWAL draining_right_now:%s __resend_queue:%s", draining_right_now, __resend_queue)
+            # TODO drain new from mixwal, this should NOT be a long-running session like it currently is
+            new_write_mws = []
+            async with persistent.asession() as sess:
+                new_mixwals = (await sess.exec(persistent.MixWAL.get_new(draining_right_now))).all()
+                for mw in new_mixwals:
+                    if mw.is_read:
+                        # Reads are cast even while on_connection_status reports
+                        # the daemon offline: kpclientd's own ARQ holds the
+                        # request and rides out gateway-link flaps, delivering
+                        # when the link recovers. Gating reads on
+                        # __mixnet_connected strands them forever if the
+                        # re-enabled status notification is ever lost.
+                        draining_right_now.add(mw.bacap_stream)
+                        __resend_queue.add(mw.bacap_stream)
+                        rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+                        if rcw is not None and rcw.read_paused:
+                            draining_right_now.discard(mw.bacap_stream)
+                            __resend_queue.discard(mw.bacap_stream)
+                            continue
+                        if len(rcw.read_cap) != 136:
+                            # A malformed row must not take down the whole drain
+                            # loop (see drain_mixwal's wrapper, which catches an
+                            # escaped exception here but then simply returns,
+                            # permanently ending every read AND write drain for
+                            # the rest of the process). Skip only this stream,
+                            # the same log-and-continue contract every other
+                            # per-item failure path in this loop already gets.
+                            logger.error(
+                                "drain_mixwal: ReadCapWAL.read_cap for "
+                                "bacap_stream=%s has incorrect length %d "
+                                "(expected 136); skipping this stream: %r",
+                                mw.bacap_stream, len(rcw.read_cap), rcw,
+                            )
+                            draining_right_now.discard(mw.bacap_stream)
+                            __resend_queue.discard(mw.bacap_stream)
+                            continue
+                        read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
+                        requests.add(read_task)
+                        read_task.add_done_callback(requests.discard)
+                        _inflight_reads[mw.bacap_stream] = read_task
 
-                    def _on_read_done(task, stream=mw.bacap_stream) -> None:
-                        _inflight_reads.pop(stream, None)
-                        # The drain loop never awaits read_task, so without
-                        # this an unhandled exception (e.g. an OS-level send
-                        # failure mid-bounce) would strand the stream in
-                        # draining_right_now forever, silently starving
-                        # every later box on it. give_up() already discards
-                        # on the handled paths; discard is idempotent.
-                        _done_callback(
-                            task,
-                            desc=(
-                                f"drain_mixwal_read_single crashed for "
-                                f"bacap_stream={stream}; releasing stream "
-                                "for another drain pass"
-                            ),
-                            on_cancel=(
-                                lambda: (draining_right_now.discard(stream), None)
-                            ),
-                            on_error=lambda _exc: (
-                                draining_right_now.discard(stream), None
-                            ),
-                        )
-                        readables_to_mixwal_event.set()
+                        def _on_read_done(task, stream=mw.bacap_stream) -> None:
+                            _inflight_reads.pop(stream, None)
+                            # The drain loop never awaits read_task, so without
+                            # this an unhandled exception (e.g. an OS-level send
+                            # failure mid-bounce) would strand the stream in
+                            # draining_right_now forever, silently starving
+                            # every later box on it. give_up() already discards
+                            # on the handled paths; discard is idempotent.
+                            _done_callback(
+                                task,
+                                desc=(
+                                    f"drain_mixwal_read_single crashed for "
+                                    f"bacap_stream={stream}; releasing stream "
+                                    "for another drain pass"
+                                ),
+                                on_cancel=(
+                                    lambda: (draining_right_now.discard(stream), None)
+                                ),
+                                on_error=lambda _exc: (
+                                    draining_right_now.discard(stream), None
+                                ),
+                            )
+                            readables_to_mixwal_event.set()
 
-                    read_task.add_done_callback(_on_read_done)
-                elif connected:
-                    new_write_mws.append(mw)
-                else:
-                    # Defer the write dispatch until the daemon reports
-                    # connected again; the daemon-side ARQ ride-out for
-                    # writes depends on the gate (see test_client_reconnect).
-                    logger.debug("drain_mixwal: deferring (write) MIXWAL is_read=%s bacap_stream=%s until connected", mw.is_read, mw.bacap_stream)
-        for mw in new_write_mws:
-            logger.debug("drain_mixwal: NEW (write) MIXWAL is_read=%s bacap_stream=%s",
-                         mw.is_read, mw.bacap_stream)
-            draining_right_now.add(mw.bacap_stream) # this is the uuid PK
-            __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
+                        read_task.add_done_callback(_on_read_done)
+                    elif connected:
+                        new_write_mws.append(mw)
+                    else:
+                        # Defer the write dispatch until the daemon reports
+                        # connected again; the daemon-side ARQ ride-out for
+                        # writes depends on the gate (see test_client_reconnect).
+                        logger.debug("drain_mixwal: deferring (write) MIXWAL is_read=%s bacap_stream=%s until connected", mw.is_read, mw.bacap_stream)
+            for mw in new_write_mws:
+                logger.debug("drain_mixwal: NEW (write) MIXWAL is_read=%s bacap_stream=%s",
+                             mw.is_read, mw.bacap_stream)
+                draining_right_now.add(mw.bacap_stream) # this is the uuid PK
+                __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
 
-            write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
-            write_task.add_done_callback(
-                lambda task, b=mw.bacap_stream: _on_write_done(task, b, draining_right_now))
+                write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
+                requests.add(write_task)
+                write_task.add_done_callback(requests.discard)
+                write_task.add_done_callback(
+                    lambda task, b=mw.bacap_stream: _on_write_done(task, b, draining_right_now))
+
+    finally:
+        await _cancel_and_join((*requests, shutdown))
 
 
 async def provision_read_caps(connection: ThinClient):
@@ -1911,84 +1930,91 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     global __resend_queue
     __resend_queue |= await persistent.MixWAL.resend_queue_from_disk()
     __resend_queue_populated.set()
-    while not __should_quit.is_set():
-        # Pause while the mixnet is unreachable; encrypt_write/
-        # start_resending need a live route through kpclientd. Bounded by
-        # _CONNECTION_IDLE_RETRY_S the same way as readables_to_mixwal's
-        # gate.
-        if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
-            continue
-        try:
-            await asyncio.wait_for(resendable_event.wait(), timeout=_ARMING_SWEEP_S)
-        except TimeoutError:
-            pass
-        if __should_quit.is_set():
-            continue
-        resendable_event.clear()
-        logger.debug("send_resendable_plaintexts: running")
-        pwals_to_send = set()
-        async with persistent.asession() as sess:
-            query = persistent.PlaintextWAL.find_resendable(__resend_queue)
-            sendable_rows = (await sess.exec(query)).all()
-            # find_resendable wraps PlaintextWAL inside a row_number()
-            # subquery and returns plain Row tuples that are not
-            # ORM-tracked. For an indirection PWAL we re-fetch the
-            # tracked instance to fill in its bacap_payload, then
-            # snapshot the (id, bacap_stream, payload) we need for
-            # dispatch into a detachable container so start_resending
-            # never touches a session-bound attribute.
-            dispatch: "list[types.SimpleNamespace]" = []
-            for row in sendable_rows:
-                payload = row.bacap_payload
-                if row.indirection is not None and not payload:
-                    # find_resendable only surfaces indirection PWALs
-                    # whose target ReadCapWAL has been provisioned
-                    # (read_cap IS NOT NULL), so the get is guaranteed
-                    # to find a populated read_cap here.
-                    logger.debug(
-                        "filling indirection PWAL %s from rcw %s",
-                        row.id, row.indirection,
-                    )
-                    rcw = await sess.get(persistent.ReadCapWAL, row.indirection)
-                    # Extended I-chunk carries the total plaintext
-                    # chunk count (C-chunks + final F) as a 4-byte big-endian
-                    # prefix, so the reader can render progress n/total. rcw is
-                    # the sender's indirection ReadCapWAL created in
-                    # models.serialize(); when it predates the column this
-                    # falls back to a legacy 136-byte I-chunk.
-                    total = rcw.substream_total_chunks if rcw is not None else None
-                    if total is None:
-                        payload = b'I' + rcw.read_cap
-                    else:
-                        payload = b'I' + struct.pack(">I", total) + rcw.read_cap
-                    pwal_orm = await sess.get(persistent.PlaintextWAL, row.id)
-                    if pwal_orm is not None:
-                        pwal_orm.bacap_payload = payload
-                        sess.add(pwal_orm)
-                dispatch.append(types.SimpleNamespace(
-                    id=row.id,
-                    bacap_stream=row.bacap_stream,
-                    bacap_payload=payload,
-                ))
-            try:
-                await sess.commit()
-            except OperationalError as e:
-                if not _is_transient_sqlite_busy(e):
-                    raise
-                logger.warning(
-                    "send_resendable_plaintexts: sqlite busy; retrying on the next sweep: %s", e,
-                )
+    requests: set[asyncio.Task[None]] = set()
+    try:
+        while not __should_quit.is_set():
+            # Pause while the mixnet is unreachable; encrypt_write/
+            # start_resending need a live route through kpclientd. Bounded by
+            # _CONNECTION_IDLE_RETRY_S the same way as readables_to_mixwal's
+            # gate.
+            if not await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
                 continue
-        for pwal in dispatch:
-            if pwal.bacap_stream not in __resend_queue:
-                __resend_queue.add(pwal.bacap_stream)
-                t = create_task(start_resending(connection, pwal))
-                # Default-arg capture pins pwal.bacap_stream at lambda
-                # creation time. The prior `lambda: ... pwal.bacap_stream`
-                # closed over the loop variable and, on an inner iteration's
-                # failure, discarded the LAST iteration's bacap_stream,
-                # stranding the actual failer in __resend_queue forever.
-                on_error(t, lambda s=pwal.bacap_stream: __resend_queue.discard(s))  # when cancelled/exception
+            try:
+                await asyncio.wait_for(resendable_event.wait(), timeout=_ARMING_SWEEP_S)
+            except TimeoutError:
+                pass
+            if __should_quit.is_set():
+                continue
+            resendable_event.clear()
+            logger.debug("send_resendable_plaintexts: running")
+            pwals_to_send = set()
+            async with persistent.asession() as sess:
+                query = persistent.PlaintextWAL.find_resendable(__resend_queue)
+                sendable_rows = (await sess.exec(query)).all()
+                # find_resendable wraps PlaintextWAL inside a row_number()
+                # subquery and returns plain Row tuples that are not
+                # ORM-tracked. For an indirection PWAL we re-fetch the
+                # tracked instance to fill in its bacap_payload, then
+                # snapshot the (id, bacap_stream, payload) we need for
+                # dispatch into a detachable container so start_resending
+                # never touches a session-bound attribute.
+                dispatch: "list[types.SimpleNamespace]" = []
+                for row in sendable_rows:
+                    payload = row.bacap_payload
+                    if row.indirection is not None and not payload:
+                        # find_resendable only surfaces indirection PWALs
+                        # whose target ReadCapWAL has been provisioned
+                        # (read_cap IS NOT NULL), so the get is guaranteed
+                        # to find a populated read_cap here.
+                        logger.debug(
+                            "filling indirection PWAL %s from rcw %s",
+                            row.id, row.indirection,
+                        )
+                        rcw = await sess.get(persistent.ReadCapWAL, row.indirection)
+                        # Extended I-chunk carries the total plaintext
+                        # chunk count (C-chunks + final F) as a 4-byte big-endian
+                        # prefix, so the reader can render progress n/total. rcw is
+                        # the sender's indirection ReadCapWAL created in
+                        # models.serialize(); when it predates the column this
+                        # falls back to a legacy 136-byte I-chunk.
+                        total = rcw.substream_total_chunks if rcw is not None else None
+                        if total is None:
+                            payload = b'I' + rcw.read_cap
+                        else:
+                            payload = b'I' + struct.pack(">I", total) + rcw.read_cap
+                        pwal_orm = await sess.get(persistent.PlaintextWAL, row.id)
+                        if pwal_orm is not None:
+                            pwal_orm.bacap_payload = payload
+                            sess.add(pwal_orm)
+                    dispatch.append(types.SimpleNamespace(
+                        id=row.id,
+                        bacap_stream=row.bacap_stream,
+                        bacap_payload=payload,
+                    ))
+                try:
+                    await sess.commit()
+                except OperationalError as e:
+                    if not _is_transient_sqlite_busy(e):
+                        raise
+                    logger.warning(
+                        "send_resendable_plaintexts: sqlite busy; retrying on the next sweep: %s", e,
+                    )
+                    continue
+            for pwal in dispatch:
+                if pwal.bacap_stream not in __resend_queue:
+                    __resend_queue.add(pwal.bacap_stream)
+                    t = create_task(start_resending(connection, pwal))
+                    requests.add(t)
+                    t.add_done_callback(requests.discard)
+                    # Default-arg capture pins pwal.bacap_stream at lambda
+                    # creation time. The prior `lambda: ... pwal.bacap_stream`
+                    # closed over the loop variable and, on an inner iteration's
+                    # failure, discarded the LAST iteration's bacap_stream,
+                    # stranding the actual failer in __resend_queue forever.
+                    on_error(t, lambda s=pwal.bacap_stream: __resend_queue.discard(s))  # when cancelled/exception
+
+    finally:
+        await _cancel_and_join(requests)
 
 async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     """
