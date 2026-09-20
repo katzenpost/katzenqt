@@ -607,14 +607,17 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
-        # The row count is cached and re-read from the database by
-        # refresh_row_count() (called on a conversation-update notification).
-        # Deriving it from the log, rather than incrementing a counter at each
-        # writer, means a writer that forgets to notify cannot desync the view
-        # permanently: the next notification re-reads the truth. ``_row_count``
-        # is the DB truth (what rowCount() returns); ``_view_count`` is how many
-        # rows Qt has actually been told about, which drives insert/reset
-        # transitions.
+        # The ordered list of conversation_order values is cached and re-read
+        # from the database by refresh_row_count() (called on a
+        # conversation-update notification). Deriving it from the log, rather
+        # than incrementing a counter at each writer, means a writer that
+        # forgets to notify cannot desync the view permanently: the next
+        # notification re-reads the truth. Row ``r`` renders the log row with
+        # ``conversation_order == _orders[r]``, which tolerates gaps left by a
+        # deleted (cancelled) message; ``_row_count`` is the DB truth (what
+        # rowCount() returns); ``_view_count`` is how many rows Qt has actually
+        # been told about, which drives insert/reset transitions.
+        self._orders: list[int] = []
         self._row_count = 0
         self._view_count = 0
 
@@ -668,57 +671,73 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             return self._row_count
         return 0
 
-    def _query_row_count(self) -> int:
+    def _query_orders(self) -> list[int]:
+        """The conversation's conversation_order values, ascending.
+
+        Enumerating the actual orders (rather than assuming
+        ``index_row == conversation_order``) keeps rows addressable after a
+        deletion leaves a gap."""
         with persistent.Session(persistent._engine_sync) as sess:
-            return int(sess.exec(
-                select(persistent.sa.func.count())
-                .select_from(persistent.ConversationLog)
+            return list(sess.exec(
+                select(persistent.ConversationLog.conversation_order)
                 .where(
                     persistent.ConversationLog.conversation_id == self.convo_id
                 )
-            ).one())
+                .order_by(persistent.ConversationLog.conversation_order)
+            ))
 
     def set_row_count(self, count: int) -> None:
         """Seed the cached count without emitting signals (startup, when the
         view has no rows yet). Both the DB-truth count and the count Qt has
         been told about start equal, so the first later insert uses a range the
         view can accept."""
+        self._orders = self._query_orders()
         self._row_count = int(count)
         self._view_count = int(count)
         self._clear_data_caches()
 
     def refresh_row_count(self) -> None:
-        """Re-read the log's row count and reconcile the view.
+        """Re-read the log's orders and reconcile the view.
 
         Transitions are driven by ``_view_count`` (rows Qt has actually been
         told about), never by the raw DB count: seeding the count at startup
         without an insert means the view's bookkeeping can lag the model's, and
         emitting a range computed from the DB count then crashes the view.
-        Growth inserts the missing tail, a shrink resets the model, and no
-        change repaints in place. Because the count comes from the log, a
-        writer that appends a row without notifying this model self-heals on
-        the next notification instead of desyncing the view permanently.
+        Growth whose existing prefix is unchanged inserts the missing tail; any
+        other change (a deletion left a gap, or a reorder) resets the model,
+        because a shifted index invalidates cached cells. Because the orders
+        come from the log, a writer that appends a row without notifying this
+        model self-heals on the next notification instead of desyncing the view
+        permanently.
         """
-        new_count = self._query_row_count()
-        if new_count > self._view_count:
+        new_orders = self._query_orders()
+        if new_orders == self._orders:
+            # No change: repaint in place (no transition).
+            self.redraw_network_status()
+            return
+        new_count = len(new_orders)
+        prefix_unchanged = (
+            new_count > self._view_count
+            and new_orders[:self._view_count] == self._orders[:self._view_count]
+        )
+        if prefix_unchanged:
+            first = self._view_count
             qmi = QModelIndex()
-            self.beginInsertRows(qmi, self._view_count, new_count - 1)
+            self.beginInsertRows(qmi, first, new_count - 1)
+            self._orders = new_orders
             self._row_count = new_count
             self._view_count = new_count
             self.endInsertRows()
             return
-        if new_count < self._view_count:
-            # Shrink: rows were removed. Reset rather than compute a delta, so
-            # any shifted indices and stale cached cells are dropped wholesale.
-            # Clear the caches before the transition, not between begin/end.
-            self._clear_data_caches()
-            self.beginResetModel()
-            self._row_count = new_count
-            self._view_count = new_count
-            self.endResetModel()
-            return
-        # Count unchanged: repaint in place (no transition).
-        self.redraw_network_status()
+        # Shrink, gap, or reorder: reset rather than compute a delta, so any
+        # shifted indices and stale cached cells are dropped wholesale. Clear
+        # the caches before the transition, not between begin/end.
+        self._clear_data_caches()
+        self.beginResetModel()
+        self._orders = new_orders
+        self._row_count = new_count
+        self._view_count = new_count
+        self.endResetModel()
 
     def redraw_network_status(self):
         """Repaint the network-status column without changing the row set."""
@@ -767,6 +786,13 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         ):
             return None
         index_row : int = index.row()
+        # Render the log row whose conversation_order is at this position. The
+        # cached order list is authoritative after a refresh; before the first
+        # refresh (a bare createIndex in tests) fall back to identity.
+        order = (
+            self._orders[index_row]
+            if index_row < len(self._orders) else index_row
+        )
         #print("DATA: INDEX ROW IS", index_row, repr(index))
         # TODO we definitely want to paginate this stuff for performance reasons,
         # and when we do we want order by:
@@ -782,14 +808,16 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         #     every conversation notification, making the view re-ask roles for
         #     every row. Narrow it to the row whose status actually changed (the
         #     ACK path) instead.
-        #   - refresh_row_count() runs one COUNT(*) per conversation event (not
-        #     per scroll/mouse); that cadence is fine, keep it tied to events.
+        #   - refresh_row_count() reads the conversation's full order list per
+        #     conversation event (not per scroll/mouse); that cadence is fine,
+        #     keep it tied to events. A tail-only query would be cheaper on the
+        #     common append path but cannot detect a middle deletion.
 
         with persistent.Session(persistent._engine_sync) as sess:
                 cl = sess.exec(
                     select(persistent.ConversationLog).where(
                         persistent.ConversationLog.conversation_id == self.convo_id,
-                        persistent.ConversationLog.conversation_order == index_row,
+                        persistent.ConversationLog.conversation_order == order,
                     )
                 ).first()
                 if cl is None:

@@ -36,9 +36,9 @@ logger = logging.getLogger("katzen.persistent")
 # run on the io loop — so the aiosqlite session is never shared across two
 # loops. (The GUI-thread _engine_sync circuit is gone: _commit_new_conversation
 # replaced the one Qt-thread commit site that previously carved itself out
-# here.) The appends still serialise their "count, insert, commit" critical
+# here.) The appends still serialise their "read max, insert, commit" critical
 # section with the per-conversation async poll lock below: two in-flight
-# appends to the same conversation cannot read the same count and trip
+# appends to the same conversation cannot read the same max and trip
 # UniqueConstraint(conversation_id, conversation_order), silently dropping a
 # message (or failing an induction that already succeeded on the wire). The
 # lock is a non-blocking acquire-and-poll so a same-conversation waiter on the
@@ -92,13 +92,17 @@ async def conversation_log_order_lock(conversation_id: int) -> AsyncIterator[Non
 
 
 def next_conversation_order(conversation_id: int):
-    """Scalar subquery for the next ``conversation_order`` value: a live
-    COUNT evaluated at INSERT/COMMIT time. Shared by every ConversationLog
-    append site so a future change to how the order is derived only needs
-    to be made once."""
+    """Scalar subquery for the next ``conversation_order`` value:
+    ``MAX(order) + 1`` (or 0 for an empty log) evaluated at INSERT/COMMIT
+    time. Shared by every ConversationLog append site so a future change to
+    how the order is derived only needs to be made once.
+
+    MAX+1 rather than COUNT(*): once a row can be deleted (a cancelled upload)
+    COUNT under-counts and the next append would reuse a surviving order and
+    trip the unique constraint. It is behaviour-identical while nothing is
+    deleted."""
     return (
-        select(count())
-        .select_from(ConversationLog)
+        select(sa.func.coalesce(sa.func.max(ConversationLog.conversation_order), -1) + 1)
         .where(ConversationLog.conversation_id == conversation_id)
         .scalar_subquery()
     )
