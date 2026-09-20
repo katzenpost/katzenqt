@@ -145,6 +145,25 @@ def epoch_duration_s() -> float:
     return _parse_go_duration(match.group(1))
 
 
+def budget_for(epoch_s: float, headroom_s: float) -> float:
+    """A wait that rides out one epoch plus ``headroom_s`` of slack.
+
+    >>> budget_for(120.0, 630.0)
+    750.0
+    >>> budget_for(1200.0, 630.0)
+    1830.0
+    """
+    return epoch_s + headroom_s
+
+
+def budget_s(headroom_s: float) -> float:
+    return budget_for(epoch_duration_s(), headroom_s)
+
+
+def deadline_arg(headroom_s: float) -> str:
+    return str(int(budget_s(headroom_s)))
+
+
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
 # / KATZENQT_KPCLIENTD_PORT, matching conftest).
@@ -156,8 +175,10 @@ CONN_ARGS = ("--address", KP_ADDR, "--network", "tcp")
 
 
 def run_role(
-    role_state: Path, *cli_args: str, timeout: float = 300.0,
+    role_state: Path, *cli_args: str, timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if timeout is None:
+        timeout = budget_s(180.0)
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     env["PYTHONUNBUFFERED"] = "1"

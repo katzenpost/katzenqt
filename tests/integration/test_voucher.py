@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tests.integration._bounce_helpers import epoch_duration_s
+from tests.integration._bounce_helpers import budget_s
 from tests.integration._process import run_logged, spawn_logged
 from tests.integration._outcomes import check_roles
 
@@ -55,7 +56,10 @@ def _timed_run(what: str, role_state: Path, *cli_args: str, timeout: float = 180
     t0 = time.perf_counter()
     proc = _run_role(role_state, *cli_args, timeout=timeout)
     if _TIMING:
-        print(f"[KQT-TIMING] {what}: {time.perf_counter() - t0:.2f}s", flush=True)
+        print(
+            f"[KQT-TIMING] {what}: {time.perf_counter() - t0:.2f}s",
+            flush=True,
+        )
         for line in _output(proc).splitlines():
             if any(m in line for m in _VOUCHER_MARKERS):
                 print(f"[KQT-VOUCHER] {line.strip()}", flush=True)
@@ -97,8 +101,10 @@ def _role_env(role_state: Path) -> dict[str, str]:
 
 
 def _run_role(
-    role_state: Path, *cli_args: str, timeout: float = 180.0,
+    role_state: Path, *cli_args: str, timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if timeout is None:
+        timeout = budget_s(60.0)
     return run_logged(
         role_state, _role_command(role_state, *cli_args), env=_role_env(role_state),
         cwd=str(_REPO_ROOT), timeout=timeout,
@@ -166,31 +172,46 @@ def test_voucher_handshake_then_bidirectional(kpclientd_endpoint, tmp_path_facto
     _assert_ok(_timed_run("bob create-conv", bob_state, "create-conv", "demo", "bob"), "bob create-conv")
 
     # Bob mints a Voucher and publishes his payload to box 0.
-    mint = _timed_run("bob voucher-mint", bob_state, "voucher-mint", "demo", "bob", timeout=300.0)
+    mint = _timed_run(
+        "bob voucher-mint", bob_state, "voucher-mint", "demo", "bob",
+        timeout=budget_s(180.0),
+    )
     _assert_ok(mint, "bob voucher-mint")
     voucher = _expect_token(mint, "VOUCHER=")
     assert voucher, "empty voucher"
 
     # Alice inducts Bob with the out-of-band voucher.
-    induct = _timed_run("alice voucher-induct", alice_state, "voucher-induct", "demo", "bob", voucher, timeout=300.0)
+    induct = _timed_run(
+        "alice voucher-induct", alice_state, "voucher-induct", "demo", "bob",
+        voucher, timeout=budget_s(180.0),
+    )
     _assert_ok(induct, "alice voucher-induct")
     assert "INDUCTED=" in _output(induct)
 
     # Bob polls box 1, opens the reply, and joins.
-    joined = _timed_run("bob voucher-await", bob_state, "voucher-await", "demo", timeout=300.0)
+    joined = _timed_run(
+        "bob voucher-await", bob_state, "voucher-await", "demo",
+        timeout=budget_s(180.0),
+    )
     _assert_ok(joined, "bob voucher-await")
     assert "JOINED" in _output(joined)
 
     # Alice -> Bob: Bob holds Alice's read cap from the WhoReply.
     _assert_ok(_timed_run("alice send", alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
-    read_bob = _timed_run("bob read", bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
+    read_bob = _timed_run(
+        "bob read", bob_state, "read", "demo", _read_deadline_s(),
+        "hello from alice", timeout=_read_timeout_s(),
+    )
     _assert_ok(read_bob, "bob read")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
     # Bob -> Alice on the salt-mutated stream: Alice holds Bob's mutated
     # read cap from induction. This is the cross-mutation crux.
     _assert_ok(_timed_run("bob send", bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
-    read_alice = _timed_run("alice read", alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
+    read_alice = _timed_run(
+        "alice read", alice_state, "read", "demo", _read_deadline_s(),
+        "hello from bob", timeout=_read_timeout_s(),
+    )
     _assert_ok(read_alice, "alice read")
     assert _expect_token(read_alice, "RECV=") == "hello from bob"
 
@@ -203,10 +224,17 @@ def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory)
     alice_state = tmp_path_factory.mktemp("alice2") / "state"
     bob_state = tmp_path_factory.mktemp("bob2") / "state"
 
-    _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
-    _assert_ok(_run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv")
+    _assert_ok(
+        _run_role(alice_state, "create-conv", "demo", "alice"),
+        "alice create-conv",
+    )
+    _assert_ok(
+        _run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv",
+    )
 
-    mint = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
+    mint = _run_role(
+        bob_state, "voucher-mint", "demo", "bob", timeout=budget_s(630.0),
+    )
     _assert_ok(mint, "bob voucher-mint")
     voucher = _expect_token(mint, "VOUCHER=")
 
@@ -216,11 +244,16 @@ def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory)
         _run_role(bob_state, "voucher-await", "demo", timeout=25.0)
 
     # Now Alice replies.
-    induct = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
+    induct = _run_role(
+        alice_state, "voucher-induct", "demo", "bob", voucher,
+        timeout=budget_s(630.0),
+    )
     _assert_ok(induct, "alice voucher-induct")
 
     # A fresh await must resume from the persisted PendingVoucher and join.
-    joined = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
+    joined = _run_role(
+        bob_state, "voucher-await", "demo", timeout=budget_s(630.0),
+    )
     _assert_ok(joined, "bob voucher-await (resumed)")
     assert "JOINED" in _output(joined)
 
@@ -243,10 +276,18 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
     await_out = log_dir / "await.out"
     await_err = log_dir / "await.err"
 
-    _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
-    _assert_ok(_run_role(carol_state, "create-conv", "demo", "carol"), "carol create-conv")
+    _assert_ok(
+        _run_role(alice_state, "create-conv", "demo", "alice"),
+        "alice create-conv",
+    )
+    _assert_ok(
+        _run_role(carol_state, "create-conv", "demo", "carol"),
+        "carol create-conv",
+    )
 
-    mint = _run_role(carol_state, "voucher-mint", "demo", "carol", timeout=750.0)
+    mint = _run_role(
+        carol_state, "voucher-mint", "demo", "carol", timeout=budget_s(630.0),
+    )
     _assert_ok(mint, "carol voucher-mint")
     voucher = _expect_token(mint, "VOUCHER=")
     assert voucher, "empty voucher"
@@ -272,14 +313,17 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
                 flush=True,
             )
         t_induct = time.perf_counter()
-        induct = _run_role(alice_state, "voucher-induct", "demo", "carol", voucher, timeout=900.0)
+        induct = _run_role(
+            alice_state, "voucher-induct", "demo", "carol", voucher,
+            timeout=budget_s(780.0),
+        )
         _assert_ok(induct, "alice voucher-induct carol")
         if _TIMING:
             print(
                 f"[KQT-TIMING] overlap induct: {time.perf_counter() - t_induct:.2f}s",
                 flush=True,
             )
-        await_proc.wait(timeout=900.0)
+        await_proc.wait(timeout=budget_s(780.0))
     finally:
         if await_proc.poll() is None:
             await_proc.kill()
@@ -310,72 +354,112 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
 
     # Phase 0: the plain two-party handshake (mirrors
     # test_voucher_handshake_then_bidirectional).
-    _assert_ok(_run_role(alice_state, "create-conv", "demo", "alice"), "alice create-conv")
-    _assert_ok(_run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv")
+    _assert_ok(
+        _run_role(alice_state, "create-conv", "demo", "alice"),
+        "alice create-conv",
+    )
+    _assert_ok(
+        _run_role(bob_state, "create-conv", "demo", "bob"), "bob create-conv",
+    )
 
-    mint_ab = _run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
+    mint_ab = _run_role(
+        bob_state, "voucher-mint", "demo", "bob", timeout=budget_s(630.0),
+    )
     _assert_ok(mint_ab, "bob voucher-mint")
     voucher_ab = _expect_token(mint_ab, "VOUCHER=")
     assert voucher_ab, "empty voucher"
 
-    induct_ab = _run_role(alice_state, "voucher-induct", "demo", "bob", voucher_ab, timeout=750.0)
+    induct_ab = _run_role(
+        alice_state, "voucher-induct", "demo", "bob", voucher_ab,
+        timeout=budget_s(630.0),
+    )
     _assert_ok(induct_ab, "alice voucher-induct bob")
     assert "INDUCTED=" in _output(induct_ab)
 
-    joined_bob = _run_role(bob_state, "voucher-await", "demo", timeout=750.0)
+    joined_bob = _run_role(
+        bob_state, "voucher-await", "demo", timeout=budget_s(630.0),
+    )
     _assert_ok(joined_bob, "bob voucher-await")
     assert "JOINED" in _output(joined_bob)
 
     _assert_ok(_run_role(alice_state, "send", "demo", "hello from alice", timeout=_SEND_TIMEOUT_S), "alice send")
-    read_bob = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
+    read_bob = _run_role(
+        bob_state, "read", "demo", _read_deadline_s(), "hello from alice",
+        timeout=_read_timeout_s(),
+    )
     _assert_ok(read_bob, "bob read alice")
     assert _expect_token(read_bob, "RECV=") == "hello from alice"
 
     _assert_ok(_run_role(bob_state, "send", "demo", "hello from bob", timeout=_SEND_TIMEOUT_S), "bob send")
-    read_alice_bob = _run_role(alice_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
+    read_alice_bob = _run_role(
+        alice_state, "read", "demo", _read_deadline_s(), "hello from bob",
+        timeout=_read_timeout_s(),
+    )
     _assert_ok(read_alice_bob, "alice read bob")
     assert _expect_token(read_alice_bob, "RECV=") == "hello from bob"
 
     # Phase 1: Carol joins via Bob, the group's third member.
-    _assert_ok(_run_role(carol_state, "create-conv", "demo", "carol"), "carol create-conv")
-    mint_bc = _run_role(carol_state, "voucher-mint", "demo", "carol", timeout=750.0)
+    _assert_ok(
+        _run_role(carol_state, "create-conv", "demo", "carol"),
+        "carol create-conv",
+    )
+    mint_bc = _run_role(
+        carol_state, "voucher-mint", "demo", "carol", timeout=budget_s(630.0),
+    )
     _assert_ok(mint_bc, "carol voucher-mint")
     voucher_bc = _expect_token(mint_bc, "VOUCHER=")
     assert voucher_bc, "empty voucher"
 
-    induct_bc = _run_role(bob_state, "voucher-induct", "demo", "carol", voucher_bc, timeout=750.0)
+    induct_bc = _run_role(
+        bob_state, "voucher-induct", "demo", "carol", voucher_bc,
+        timeout=budget_s(630.0),
+    )
     _assert_ok(induct_bc, "bob voucher-induct carol")
     assert "INDUCTED=" in _output(induct_bc)
 
-    joined_carol = _run_role(carol_state, "voucher-await", "demo", timeout=750.0)
+    joined_carol = _run_role(
+        carol_state, "voucher-await", "demo", timeout=budget_s(630.0),
+    )
     _assert_ok(joined_carol, "carol voucher-await")
     assert "JOINED" in _output(joined_carol)
 
     _assert_ok(_run_role(carol_state, "send", "demo", "hello from carol", timeout=_SEND_TIMEOUT_S), "carol send")
-    read_bob_carol = _run_role(bob_state, "read", "demo", _read_deadline_s(), "hello from carol", timeout=_read_timeout_s())
+    read_bob_carol = _run_role(
+        bob_state, "read", "demo", _read_deadline_s(), "hello from carol",
+        timeout=_read_timeout_s(),
+    )
     _assert_ok(read_bob_carol, "bob read carol")
     assert _expect_token(read_bob_carol, "RECV=") == "hello from carol"
 
     # Alice must learn about Carol from the INTRODUCTION Bob wrote to his own
     # stream, then read Carol's message without any further coordination.
-    read_alice_carol = _run_role(alice_state, "read", "demo", _read_deadline_s(), "hello from carol", timeout=_read_timeout_s())
+    read_alice_carol = _run_role(
+        alice_state, "read", "demo", _read_deadline_s(), "hello from carol",
+        timeout=_read_timeout_s(),
+    )
     _assert_ok(read_alice_carol, "alice read carol")
     alice_out = _output(read_alice_carol)
     assert "RECV_ADD=bob added carol" in alice_out, alice_out
     assert _expect_token(read_alice_carol, "RECV=") == "hello from carol"
 
     # Carol sees the group's pre-join history.
-    read_carol_alice = _run_role(carol_state, "read", "demo", _read_deadline_s(), "hello from alice", timeout=_read_timeout_s())
+    read_carol_alice = _run_role(
+        carol_state, "read", "demo", _read_deadline_s(), "hello from alice",
+        timeout=_read_timeout_s(),
+    )
     _assert_ok(read_carol_alice, "carol read alice")
     assert _expect_token(read_carol_alice, "RECV=") == "hello from alice"
 
-    read_carol_bob = _run_role(carol_state, "read", "demo", _read_deadline_s(), "hello from bob", timeout=_read_timeout_s())
+    read_carol_bob = _run_role(
+        carol_state, "read", "demo", _read_deadline_s(), "hello from bob",
+        timeout=_read_timeout_s(),
+    )
     _assert_ok(read_carol_bob, "carol read bob")
     assert _expect_token(read_carol_bob, "RECV=") == "hello from bob"
 
     # Carol receives Bob's announcement about herself but must not subscribe to
     # her own stream: exactly own + alice + bob.
-    info_carol = _run_role(carol_state, "info", timeout=150.0)
+    info_carol = _run_role(carol_state, "info", timeout=budget_s(30.0))
     _assert_ok(info_carol, "carol info")
     info = _expect_info(info_carol)
     demo = next(
