@@ -15,6 +15,27 @@ chat. Python package is `src/katzenqt/`. The QML chat view is
 (`katzenqt-headless`, `src/katzenqt/headless/_actions.py`) used by integration
 tests.
 
+## Key modules
+
+- `src/katzenqt/network.py` — read/write drain loops, `_try_assemble`,
+  `drain_mixwal_read_single`, `drain_mixwal_write_single`, substream handling,
+  the `pause_peer_reads` / `resume_peer_reads` primitives, and
+  `substream_progress_queue`.
+- `src/katzenqt/persistent.py` — MixWAL / PlaintextWAL / ReadCapWAL /
+  WriteCapWAL / ConversationPeer / ReceivedPiece models, and
+  `PlaintextWAL.find_resendable()` (the `after_id` / `after_stream` gates).
+- `src/katzenqt/models.py` — `SendOperation.serialize()`: chunk splitting,
+  substream (`agg_bacap_stream`) creation, the indirection ReadCapWAL and the
+  I-chunk PlaintextWAL.
+- `src/katzenqt/katzen.py` — GUI backend: `MainWindow`, the `@async_cb`
+  actions, the supervised listeners, `add_conversation()`.
+- `src/katzenqt/qt_models.py` — `ConversationUIState`, `DownloadsModel`, and the
+  chat/transfer model roles.
+- `src/katzenqt/voucher.py` — the contact-voucher handshake
+  (`conversation_is_joined()`, `mint_and_publish`, `derive_read_and_induct`).
+- `src/katzenqt/conversation_handlers.py` — inbound message routing.
+- `src/katzenqt/tally/` — the tally engine, sync, and controller.
+
 ## The two-event-loop, two-engine architecture (most important)
 
 This is the single biggest source of subtle bugs. Get it right.
@@ -47,6 +68,22 @@ This is the single biggest source of subtle bugs. Get it right.
   the io loop (queues in `network.py`). The GUI's `receive_msg_listener` etc.
   drain those and update models. Do not mutate Qt models from the io loop.
 
+## QtAsyncio tasks, dialogs, and re-entrancy
+
+Blocking modals (`dialog.exec()`, `QInputDialog.getText`, `QMessageBox.*`,
+`QMenu.exec`) must never run inside an `@async_cb` task: they spin a nested Qt
+event loop that re-enters another task's `QtAsyncio` `_step`, corrupts the task
+bookkeeping, freezes the supervised listeners, and can silently swallow work
+being done by the interrupted task.
+
+- Never spin a nested Qt event loop inside a QtAsyncio task.
+- Blocking dialogs and menus are safe only from plain sync slots (top-level
+  event dispatch, no task mid-step) or via `QTimer.singleShot`.
+- Inside a task, go through the non-blocking helpers `_dialog_finished(dialog)`
+  / `_menu_chosen(menu, global_pos)` (`katzen.py`).
+- Long-lived listeners are supervised and restarted; `async_cb` logs failures
+  rather than letting them vanish.
+
 ## Conversation log, ordering, and the message types
 
 - **`ConversationLog`** (`persistent.py`) is the per-conversation message log.
@@ -70,6 +107,26 @@ This is the single biggest source of subtle bugs. Get it right.
   suffix varies per copy (pre-mutation vs. salt-mutated vs. future-only caps) —
   see "capability" below. Membership hashing (`models.canonical_membership_hash`)
   likewise keys on `cap[:32]`.
+
+## BACAP / MixWAL / substream facts
+
+Re-derivable from `persistent.py`, but easy to get wrong:
+
+- `mixwal.bacap_stream` (and the other `bacap_stream` UUID columns) is stored by
+  SQLite as 32 hex chars, no dashes.
+- `current_message_index` / `next_index` are 104-byte blobs whose first 8 bytes
+  are the little-endian uint64 Pigeonhole box index (BACAP counters).
+- A substream is its own BACAP stream: its write/read caps start at their own
+  index 0, independently of the parent stream. An oversized send becomes
+  C-chunks plus a final F-chunk on a fresh `agg_bacap_stream`; the main-stream
+  I-chunk announces it and carries the chunk count in its extended 140-byte
+  form, persisted as `ReadCapWAL.substream_total_chunks`.
+- A retired substream peer (`active=0`, ReceivedPiece rows pruned, no MixWAL
+  row) is the **normal terminal state** after F-assembly, not a stall. The
+  dead-substream fail-fast (first `BoxIDNotFound`/`Tombstone`) looks similar
+  but WARNING-logs and keeps the pieces.
+- `pause_peer_reads` / `resume_peer_reads` freeze and re-arm a single BACAP
+  read stream from its saved `next_index`.
 
 ## Notifications from the io loop to the GUI
 
@@ -127,21 +184,29 @@ and replies with read caps. Key facts that have caused bugs:
 
 ## Working conventions in this repo
 
-- **Tests**: `uv run pytest` (not `make test-uv`). The root `conftest.py` points
+- **Tests**: `uv run pytest` (not `make test-uv`); `uv run pytest --no-cov`
+  skips coverage for a quicker unit suite. The root `conftest.py` points
   `KQT_STATE` at a temp DB before `persistent` is imported; `tests/conftest.py`
   wipes tables and resets `network` module state per test (autouse). Docker
-  integration tests are gated by `KATZENQT_DOCKER_INTEGRATION=1`. Qt tests are
+  integration tests live under `tests/integration`, are gated by
+  `KATZENQT_DOCKER_INTEGRATION=1`, and need the docker mixnet up. Qt tests are
   offscreen. `make test` / `make test-uv` exist but `uv run pytest` is the
-  documented shortcut.
-- **Comments** describe current behavior only. Historical narrative (what a bug
-  used to be) belongs in commit messages, not code comments or docstrings.
+  documented shortcut. Host tests use the repo-local `.venv` (uv, CPython 3.13,
+  editable katzenqt + `~/thin_client`).
+- **Comments and docstrings** describe current behavior only. Root-cause
+  narratives, "used to ..." notes, and tuning/justification history belong in
+  **commit messages**, not in the code. Never reference `TODO item N` (or the
+  plan's item numbers) in code, docstrings, tests, or migration headers — the
+  numbers are bookkeeping that goes stale. Write for a reader who sees only the
+  current code: current behavior, current invariants, current recovery
+  contracts. In tests, the docstring states the behavior under test; where
+  several tests share a caveat, state it once concisely rather than
+  cross-referencing another test. Loose `TODO:` comments with no plan number are
+  fine where they mark a genuine open question, but keep them specific and
+  current.
 - **Generated files**: `src/katzenqt/ui_mixchat.py` is generated by
   `pyside6-uic` from `ui/mixchat.ui` (`make code-generator`). Never hand-edit the
   generated Python; edit the `.ui` and regenerate. Same for
   `resources_rc.py` from the `.qrc`.
 - **TODO.md** (when present) is a living plan committed to git; keep it updated
   with separate `update TODO.md: ...` commits, not mixed into code commits.
-- **Manual testing** is done in the containerized webtop environment; see
-  `webtop/AGENTS.md` for launching clients, logs, and read-only state
-  inspection. Bugs found there are often diagnosable from the logs plus a
-  read-only `sqlite3` query against the live state file.

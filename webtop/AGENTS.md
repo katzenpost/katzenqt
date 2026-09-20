@@ -175,3 +175,25 @@ the app import path never touches the live state file.)
   there.
 - SQLite runs in WAL mode with a 250 ms `busy_timeout`; readers do not block
   writers. `-wal`/`-shm` files are normal and expected.
+
+## Host repos and the mixnet testnet
+
+The client talks to a mixnet that lives in a sibling Go repo and its own
+containers; server-side bugs (replica, courier, PKI) are diagnosed there.
+
+- Sibling Go repo: `~/katzenpost` (mixnet / replicas / courier). Code
+  of interest when a client symptom has a server side:
+  `~/katzenpost/replica/handlers.go`,
+  `~/katzenpost/replica/proxy_request_manager.go`,
+  `~/katzenpost/replica/connector.go`.
+- Dockerized testnet: `~/katzenpost/docker/mixnet-alpine/`. It runs
+  under **rootless podman + podman-compose, not Docker**: `podman ps`,
+  `podman stats`, and `podman top <ctr>` all work from the host without sudo.
+  Makefile: `~/katzenpost/docker/Makefile`; if a full
+  containerized-mixnet restart is needed, pass `base_port=62331` so kpclientd
+  lands on `127.0.0.1:64331`.
+- kpclientd container `mixnet-alpine_da39a-kpclientd-1` runs
+  `/mixnet-alpine/kpclientd.alpine -c /mixnet-alpine/client/client.toml`,
+  epoch 2m.
+- Client logs are in the client's local time (UTC+2); host and replica logs are
+  UTC, so cross-referencing timestamps needs the offset.
