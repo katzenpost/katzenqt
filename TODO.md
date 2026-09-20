@@ -1,3 +1,75 @@
+# Active backlog
+
+## `conversation_order` / message deletion
+
+- [ ] **ConversationLog: assign `conversation_order` from `MAX(order)+1` instead of
+      `COUNT(*)`, so message deletion doesn't corrupt ordering.**
+      `persistent.next_conversation_order()` (`persistent.py:94`) returns a live
+      `select(count())` scalar subquery; every production append site uses it under the
+      per-conversation `conversation_log_order_lock`: `append_outbound_chat`
+      (`persistent.py:139`), `ConversationLog.append_from` (`persistent.py:954`), the
+      voucher induction (`voucher.py:589`), and local tally rows
+      (`_stage_local_tally`, `katzen.py:2455`). The create-conversation row seeds
+      order 0 directly (`katzen.py:2110`, `headless/_actions.py:162`).
+      COUNT under-counts as soon as any log row is deleted: the next append reuses the
+      highest surviving order and trips `UniqueConstraint('conversation_id',
+      'conversation_order')` (`persistent.py:907`), dropping the message. Replace the
+      helper's body with `coalesce(func.max(ConversationLog.conversation_order), -1) + 1`.
+      It is behavior-identical while nothing is deleted (after the order-0 create row,
+      `COUNT == MAX+1`). Keep the lock: MAX+1 removes the delete-vs-append hazard, not
+      append-vs-append.
+      The model renders rows by index: `data()` resolves a row via
+      `conversation_order == index_row` (`qt_models.py:741`) and `index()` bounds by
+      `_row_count` (`qt_models.py:604`), and `refresh_row_count()`'s shrink→reset path
+      assumes a contiguous `0..count-1` (`qt_models.py:639`). Once deletion leaves gaps,
+      row indices no longer match orders and rows past a gap become unreachable/None;
+      deletion and rendering must enumerate by actual `conversation_order`, not row
+      index. Unread space is `>=`-compared (`first_unread`, `new_poll_count`,
+      `tally/presenter.py:338,367`), so gaps are tolerable there.
+      Tests: `test_voucher_guard.py:211` (`_append_log_row_async`) hand-rolls the COUNT
+      subquery — route it through the helper; add a delete-a-middle-row then append case
+      asserting the new order is the old MAX+1 with no unique violation;
+      `test_concurrent_write_orders.py:90` (`orders == range(n)`) must still pass.
+
+- [ ] **(Deferred; needs migration) Make `conversation_order` assignment atomic and
+      app-lock-free via a per-conversation counter table.**
+      Order assignment relies on every append site funnelling through the single io-loop
+      writer and the intra-process `conversation_log_order_lock` (`persistent.py:31-47`,
+      `katzen.py:1394`). That is correct in one process but does nothing if a second
+      process appends the same conversation (a future GUI + headless worker on one state
+      file). The clean design is one counter row per conversation and, inside the append
+      transaction, `UPDATE counter SET next = next + 1 WHERE conversation_id = ?
+      RETURNING next`, then INSERT ConversationLog with that literal value. SQLite
+      serializes the UPDATE, so it is correct in-process and cross-process with no app
+      lock and no funnel dependency, and it composes with the MAX+1 item above. Cost: a
+      new table = a migration, deliberately avoided (an upgrade with a migration can't be
+      rolled back by users). Do only if the single-process assumption breaks or a
+      forgotten-lock bug bites.
+
+- [ ] **Delete a single chat message from the right-click context menu.**
+      Add a context menu on a chat row in `resources/chatview.qml` (mirror the
+      context-menu pattern used for the transfers/contacts trees) that calls a
+      `MainWindow` handler with the row's `message_id` role (`ROLE_CHAT_MESSAGE_ID`,
+      `qt_models.py:755`), and delete the matching `ConversationLog` row.
+      Depends on the ordering work above: deletion leaves a gap, so without MAX+1 the
+      next append collides and without order-based rendering the view mis-maps rows. The
+      shrink→reset path (`qt_models.py:659`) already reconciles the count and clears the
+      per-index caches, so the handler must commit and then wake
+      `conversation_update_queue`.
+      Implementation notes:
+        - Delete on the io loop (async engine, `iothread.run_in_io`) inside
+          `conversation_log_order_lock(conversation_id)`; never on the Qt thread / sync
+          engine mid-append.
+        - Scope is local-only removal by default; there is no delete protocol on the
+          mixnet, so a tombstone or peer propagation would need one.
+        - Tally events are ordinary ConversationLog rows, so deleting one does not
+          retract the survey from `TallyState` or from peers; decide whether to allow
+          deleting any row or restrict to normal chat/file rows.
+        - Reconcile related state: `outgoing_pwal`/PlaintextWAL, SentLog, attachments,
+          and `Conversation.first_unread` when the deleted row is the unread pointer.
+        - Decide confirmation/undo. A local delete survives a later daemon replay: rows
+          are consumed by read-cap index, so a re-fetch does not recreate an old row.
+
 # Old TODO backlog
 
 What follows is mostly out of date but still being retained for now pending
@@ -14,52 +86,6 @@ furher review.
       `.github/workflows/test-integration-docker.yml` pins katzenpost
       `d5a6349a` ("lockstep with thin_client 0.0.23 CI") and katzenpost
       docker Makefile `thin_client_ref?=`.
-
-## old `conversation_order` TODO items
-
-These are obsolete but preserved here for now for review.
-
-- [ ] **ConversationLog: assign `conversation_order` from `MAX(order)+1` instead of
-      `COUNT(*)`, so pruning/deleting messages won't corrupt the ordering.**
-      Motivation: we plan to implement message deletion soon, and we avoid migrations.
-      Today `conversation_order` is stamped with a `select(count())` scalar subquery
-      evaluated in the INSERT at commit, race-free only because all appends serialize
-      under the per-conversation lock (`conversation_log_order_lock`). If any
-      `ConversationLog` row is ever deleted, COUNT under-counts and the next append
-      collides with the highest surviving order -> UniqueConstraint(conversation_id,
-      conversation_order) trips -> a silently dropped message. This is a query-only,
-      no-migration change (behavior-identical to COUNT while nothing is deleted:
-      after the create-conv order=0 row, COUNT == MAX+1 == next index).
-      Change all three sites from `count()` to `coalesce(func.max(order), -1) + 1`:
-        - `ConversationLog.append_from`      src/katzenqt/persistent.py (~713)
-        - `persistent.append_outbound_chat`  src/katzenqt/persistent.py (~112)
-        - induction append                   src/katzenqt/voucher.py (~381)
-      Imports: persistent.py currently selects `count()`; add `sqlalchemy.func` /
-      `coalesce`; voucher.py uses `select(persistent.count())`, switch to `func.max`.
-      The per-conversation lock STAYS (MAX+1 removes the delete-vs-append hazard, not
-      the append-vs-append race). Tests: add a unit case that deletes a middle row
-      then appends and asserts new order == old MAX+1 with no unique violation; the
-      existing same-loop contention regression in test_voucher_guard.py must still
-      pass. NOTE for the deletion feature itself: deleting rows creates gaps and the
-      UI's `conversation_order == index_row` lookup (qt_models.py:150) assumes a
-      gapless 0-based index — the deletion feature must enumerate by order query, not
-      index into it.
-
-- [ ] **(Deferred; needs migration) Make `conversation_order` assignment atomic and
-      app-lock-free via a per-conversation counter table.**
-      The MAX+1/lock design above is correct in one process but fragile by
-      convention: every append site must remember the funnel + per-conversation lock,
-      and the lock does nothing if a second process ever appends the same
-      conversation (a future GUI + headless worker on one state file). If we ever
-      need that, the clean design is: one row per conversation in a counter table,
-      and inside the append transaction do
-      `UPDATE counter SET next = next + 1 WHERE conversation_id = ? RETURNING next`,
-      then INSERT ConversationLog with that literal value. SQLite serializes the
-      UPDATE, so it is correct in-process and cross-process with no app lock and no
-      funnel dependency, and it composes with the MAX+1 deletion-safety above.
-      Cost: a new table = a migration, which we deliberately avoid (an upgrade with a
-      migration can't be rolled back by users). Do this only if/when the
-      single-process assumption breaks or a forgotten-lock bug bites again.
 
 ## Future work (carried over from prior fix branches)
 
