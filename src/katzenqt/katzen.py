@@ -1587,20 +1587,17 @@ class MainWindow(QMainWindow):
             active = bool(solo and solo.active and rcw and not rcw.read_paused)
         # Check if this transfer is marked as failed in the UI model
         transfers_model = view.model()
-        row = None
-        for i, rid in enumerate(transfers_model._order):
-            if rid == str(rcw_id):
-                row = i
-                break
-        is_failed = (
-            row is not None and
-            transfers_model._rows.get(rcw_id, {}).get("failed", False)
-        )
+        is_failed = bool(transfers_model.data(
+            transfers_model.index(idx.row(), 0), ROLE_TRANSFER_FAILED,
+        ))
         api = QMenu(view)
         if is_failed:
             rm = api.addAction("Remove")
             chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
             if chosen is rm:
+                await self.iothread.run_in_io(
+                    network.dismiss_failed_transfer(bacap_stream=rcw_id),
+                )
                 transfers_model.remove_transfer(rcw_id)
         else:
             pgm = api.addAction("Pause download")
