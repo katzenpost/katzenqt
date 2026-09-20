@@ -278,19 +278,19 @@ TreeView {
             Button {
               text: "Play"
               // voice notes only, and only when this row is not already playing
-              visible: model.is_audio_message
+              visible: model.is_audio_message === true
                     && chatController.playingMessageId !== model.message_id
               onClicked: chatController.playReceivedMessage(model.message_id)
             }
             Button {
               text: "Stop"
-              visible: model.is_audio_message
+              visible: model.is_audio_message === true
                     && chatController.playingMessageId === model.message_id
               onClicked: chatController.stopAudioPlayback()
             }
             Button {
               text: "Open"
-              visible: !model.is_audio_message  // let the OS pick a handler
+              visible: model.is_audio_message !== true  // let the OS pick a handler
               onClicked: chatController.openAttachment(model.message_id)
             }
             Button {
