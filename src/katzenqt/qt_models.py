@@ -720,6 +720,19 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         # TODO we definitely want to paginate this stuff for performance reasons,
         # and when we do we want order by:
         # sa_relationship_kwargs={"order_by": "conversation_order", "lazy": "dynamic"},
+        #
+        # TODO (2026-09-20) DB-chatter reductions, not urgent:
+        #   - data() opens a Session and runs one indexed SELECT per uncached
+        #     (index, role); a fast scroll over unseen rows can burst many
+        #     one-query sessions. A per-conversation in-model row cache keyed
+        #     by conversation_order (invalidated on insert/reset) would remove
+        #     the per-paint queries.
+        #   - redraw_network_status() emits dataChanged over the whole range on
+        #     every conversation notification, making the view re-ask roles for
+        #     every row. Narrow it to the row whose status actually changed (the
+        #     ACK path) instead.
+        #   - refresh_row_count() runs one COUNT(*) per conversation event (not
+        #     per scroll/mouse); that cadence is fine, keep it tied to events.
 
         with persistent.Session(persistent._engine_sync) as sess:
                 cl = sess.exec(
