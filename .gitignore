@@ -20,3 +20,4 @@ katzenpost/
 .ci-local/
 .go-cache/
 dist/
+.kpclientd-build-revision

@@ -85,3 +85,9 @@ def test_generated_configs_live_in_runtime_dir(launcher, tmp_path):
     thin = launcher.thin("/run/test.sock")
     assert launcher.ROOT in thin.parents
     assert str(tmp_path / "config") not in str(thin)
+
+
+def test_endpoint_reaches_default_abstract_socket(launcher, monkeypatch):
+    monkeypatch.setattr(Path, "exists", lambda _: False)
+    monkeypatch.setattr(launcher, "alive", lambda address: address == "@katzenpost")
+    assert launcher.endpoint() == "@katzenpost"

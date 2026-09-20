@@ -80,3 +80,20 @@ def test_render_wires_the_mixnet_status_menu():
     MainWindow.render_mixnet_status(win, False)
     assert len(menu.actions) == 1
     assert "offline" in menu.actions[0].text.lower()
+
+
+def test_failing_listener_does_not_block_delivery(caplog):
+    seen = []
+
+    def broken(connected: bool) -> None:
+        raise RuntimeError("observer failed")
+
+    network.add_status_listener(broken)
+    network.add_status_listener(seen.append)
+    try:
+        network._notify_status(True)
+        assert seen == [True]
+        assert "connection status listener failed" in caplog.text
+    finally:
+        network.remove_status_listener(broken)
+        network.remove_status_listener(seen.append)
