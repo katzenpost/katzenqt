@@ -298,7 +298,7 @@ jobs:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
-          bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -m serial_docker \
+          bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -n 0 -m serial_docker \
             --basetemp=integration-results/serial \
             --junitxml=integration-results/serial.xml
 
@@ -446,7 +446,7 @@ jobs:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
-          bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -m epoch_driven \
+          bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -n 0 -m epoch_driven \
             --basetemp=integration-results/epoch \
             --junitxml=integration-results/epoch.xml
 

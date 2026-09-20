@@ -93,7 +93,7 @@ module = "katzenqt._thinclient"
 disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
-addopts = "--cov=katzenqt --cov-report=term-missing --doctest-modules -vv"
+addopts = "--cov=katzenqt --cov-report=term-missing --doctest-modules -n auto --dist loadscope -vv"
 testpaths = [
     "src",
     "tests",
@@ -108,6 +108,16 @@ markers = [
 # because setting norecursedirs at all replaces the built-in list
 # wholesale rather than extending it.
 norecursedirs = ["src/katzenqt/migrations", ".hypothesis"]
+
+[tool.coverage.run]
+source = ["katzenqt"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]
 
 [tool.ruff]
 line-length = 78
