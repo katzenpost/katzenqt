@@ -60,7 +60,14 @@ class Observation:
         code = deadline_code(record)
         if code is not None:
             self.deadline = code
-        elif record.levelno >= logging.ERROR:
+        elif (
+            record.levelno >= logging.ERROR
+            and record.name == "katzen.headless"
+        ):
+            # Only the action under test owns this logger. A library's
+            # logger.error for a recovered condition (a dropped peer message,
+            # a retried write) must not fail the role: a real failure still
+            # surfaces as an uncaught exception or a non-deadline exit code.
             self.failed = True
 
 

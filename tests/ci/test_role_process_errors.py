@@ -66,3 +66,33 @@ def test_parent_process_timeout_remains_a_process_error(
             [sys.executable, "-m", "katzenqt.integration_runner", "read"],
             env=env, cwd=str(tmp_path), timeout=0.2,
         )
+
+
+def test_recovered_library_error_log_does_not_fail_a_role(
+    tmp_path: Path,
+) -> None:
+    env = _fake_cli(tmp_path,
+        "    logging.getLogger('katzen.network').error("
+        "'dropped a peer message; continuing')\n"
+        "    return 0"
+    )
+    result = run_logged(
+        tmp_path / "state",
+        [sys.executable, "-m", "katzenqt.integration_runner", "read"],
+        env=env, cwd=str(tmp_path), timeout=10,
+    )
+    assert result.returncode == 0
+
+
+def test_action_error_log_still_fails_a_role(tmp_path: Path) -> None:
+    env = _fake_cli(tmp_path,
+        "    logging.getLogger('katzen.headless').error("
+        "'the action could not do its job')\n"
+        "    return 0"
+    )
+    with pytest.raises(AssertionError):
+        run_logged(
+            tmp_path / "state",
+            [sys.executable, "-m", "katzenqt.integration_runner", "read"],
+            env=env, cwd=str(tmp_path), timeout=10,
+        )
