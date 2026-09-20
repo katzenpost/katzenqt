@@ -8,6 +8,7 @@ CourierError, CourierInvalidEpochError, ReplicaError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import hashlib
+import errno
 import importlib.resources
 import os
 import struct
@@ -757,14 +758,14 @@ async def start_background_threads(connection: ThinClient):
               logger.info(f"cancelled: {task}")
             logger.debug("start_background_threads completed: %s", task)
     except Exception as xx:  # pragma: no cover - defensive: gathered tasks catch their own
-        logger.critical("f1-f4-f5 exception: %s", xx)
+        logger.critical("f1-f4-f5 exception: %s", xx, exc_info=True)
         raise
 
 async def drain_mixwal(connection: ThinClient):
     try:
         await drain_mixwal2(connection) # todo why the fuck does this not catch ?
     except Exception as e:  # pragma: no cover - defensive: drain_mixwal2 handles its own errors
-        logger.critical("drain_mixwal: exception: %s", e)
+        logger.critical("drain_mixwal: exception: %s", e, exc_info=True)
         import traceback
         traceback.print_exc()
 
@@ -1077,6 +1078,18 @@ _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
     ThinClientOfflineError, BrokenPipeError, CourierError, ReplicaError,
     StartResendingCancelledError, ConnectionLifeInterruptedError,
 )
+
+
+def _retryable_rpc_error(exc: BaseException) -> bool:
+    if isinstance(exc, _REMINT_TRANSIENT_ERRORS):
+        return True
+    if isinstance(exc, TimeoutError):
+        return isinstance(exc.__cause__, ConnectionLifeInterruptedError)
+    return isinstance(exc, OSError) and exc.errno in {
+        errno.EAGAIN, errno.ECONNABORTED, errno.ECONNREFUSED,
+        errno.ECONNRESET, errno.EHOSTUNREACH, errno.ENETDOWN,
+        errno.ENETUNREACH, errno.EPIPE, errno.ETIMEDOUT,
+    }
 
 
 async def _rpc_racing_connection_life(
@@ -1434,7 +1447,7 @@ async def _try_assemble(sess, rcw_id: "uuid.UUID", terminal_idx_8b: bytes):
     except Exception as exc:  # malformed CBOR or framing: leave RPs for retry
         logger.warning(
             "could not assemble chain at rcw=%s terminal=%s: %s",
-            rcw_id, terminal_idx_8b.hex(), exc,
+            rcw_id, terminal_idx_8b.hex(), exc, exc_info=True,
         )
         return None
     if gcm is None:
@@ -1578,7 +1591,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         epoch_marker=epoch_marker,
     )
   except (ConnectionLifeInterruptedError, TimeoutError, ThinClientOfflineError, OSError) as exc:
-    logger.warning("Read setup failed for %s; retrying: %s", bacap_uuid, exc)
+    logger.warning(
+        "Read setup failed for %s; retrying: %s", bacap_uuid, exc,
+        exc_info=not _retryable_rpc_error(exc),
+    )
     await asyncio.sleep(5)
     give_up()
     return
@@ -1631,7 +1647,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     )
     give_up()
     return
-  except asyncio.TimeoutError:
+  except asyncio.TimeoutError as exc:
     # No reply within the watchdog: the courier keeps the box and re-serves
     # it, so abort the in-flight ARQ at the daemon and let the drain loop
     # re-cast the same box with a fresh query id.
@@ -1639,7 +1655,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         "drain_mixwal_read_single: read for bacap_stream=%s gave up after"
         " %.1f s (watchdog %s s); cancelling the in-flight ARQ and re-scheduling",
         bacap_uuid, asyncio.get_running_loop().time() - read_started,
-        read_watchdog_s,
+        read_watchdog_s, exc_info=not _retryable_rpc_error(exc),
     )
     try:
         await asyncio.wait_for(
@@ -1679,7 +1695,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   except (katzenpost_thinclient.core.MKEMDecryptionFailedError,
           BACAPDecryptionFailedError, StartResendingCancelledError,
           ThinClientOfflineError, BrokenPipeError, OSError) as e:
-    logger.warning("drain_mixwal_read_single giving up: %s", e)
+    logger.warning(
+        "drain_mixwal_read_single giving up: %s", e,
+        exc_info=not _retryable_rpc_error(e),
+    )
     await asyncio.sleep(5)
     give_up()
     return
@@ -1746,7 +1765,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         await sess.delete(mw)
         await sess.commit()
       except Exception as e:  # pragma: no cover - defensive: commit-of-delete should never fail
-        logger.critical("error committing deletion of stray MW: %s", e)
+        logger.critical(
+            "error committing deletion of stray MW: %s", e, exc_info=True,
+        )
       draining_right_now.discard(bacap_uuid)  # otherwise this stream is wedged forever with no exception needed
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
@@ -1969,6 +1990,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       give_up()
       return
     except Exception as e:
+      logger.error("Received-message handler failed: %s", e, exc_info=True)
       # Check if this is a substream peer (look up the peer by bacap_stream)
       async with persistent.asession() as _cp_sess:
           _cp = (await _cp_sess.exec(select(persistent.ConversationPeer).where(
@@ -2560,7 +2582,10 @@ async def provision_read_caps(connection: ThinClient):
                             backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
                         )
                     except Exception as e:
-                        logger.warning("new_keypair did not work: %s", e)
+                        logger.warning(
+                            "new_keypair did not work: %s", e,
+                            exc_info=not _retryable_rpc_error(e),
+                        )
                         continue
                     wcw.write_cap = keypair_res.write_cap
                     wcw.next_index = keypair_res.first_message_index
@@ -2657,7 +2682,10 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
                     try:
                       mw = await process_box(cpeer, rcw)
                     except Exception as e:
-                      logger.warning("Read setup failed; retrying: %s", e)
+                      logger.warning(
+                          "Read setup failed; retrying: %s", e,
+                          exc_info=not _retryable_rpc_error(e),
+                      )
                       retry_needed = True
                       continue
                     sess.add(mw)

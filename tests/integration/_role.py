@@ -54,11 +54,14 @@ class Observation:
 
     def observe(self, record: logging.LogRecord) -> None:
         if record.exc_info and record.exc_info[1] is not None:
-            if not isinstance(record.exc_info[1], asyncio.CancelledError):
-                self.failed = True
+            if isinstance(record.exc_info[1], asyncio.CancelledError):
+                return
+            self.failed = True
         code = deadline_code(record)
         if code is not None:
             self.deadline = code
+        elif record.levelno >= logging.ERROR:
+            self.failed = True
 
 
 def run_observed(
