@@ -301,7 +301,7 @@ class Ui_MainWindow(object):
         self.chatTabs.setTabPosition(QTabWidget.TabPosition.South)
         self.chatTabs.setTabShape(QTabWidget.TabShape.Triangular)
         self.chatTabs.setDocumentMode(True)
-        self.chatTabs.setTabsClosable(True)
+        self.chatTabs.setTabsClosable(False)
         self.chatTabs.setTabBarAutoHide(True)
         self.defaultcontext = QWidget()
         self.defaultcontext.setObjectName(u"defaultcontext")

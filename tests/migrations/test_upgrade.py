@@ -42,6 +42,7 @@ _HELPER = Path(__file__).with_name("_helper.py")
     "524576e2f8a5",  # network_status tracking
     "a430f7202849",  # ReceivedPiece introduced
     "93eef61c3c54",  # 64-bit-integer remediation; one before AppSetting
+    "35cec50b9604",  # conversation_voucher_used_flag
 ])
 def test_upgrade_from_revision_reaches_head(revision, tmp_path):
     """Each historical revision must upgrade to head and leave every
@@ -51,6 +52,30 @@ def test_upgrade_from_revision_reaches_head(revision, tmp_path):
     own ``KQT_STATE``; the parent process has its own already bound
     from the repo conftest and we must not stomp on it.
     """
+    payload = _run_helper(revision, tmp_path)
+
+    # Head must be non-empty and the same for every parametrised
+    # case (alembic's notion of "the head of the chain" is single).
+    assert payload["head"]
+    actual = set(payload["tables"])
+    expected = set(SQLModel.metadata.tables.keys())
+    missing = expected - actual
+    assert not missing, (
+        f"after upgrading from {revision!r} to head, the following "
+        f"SQLModel tables are missing on disk: {sorted(missing)}"
+    )
+
+
+def test_upgrade_from_pre_tally_revision_reaches_head(tmp_path):
+    """A state file parked at 35cec50b9604 (the parent of the since-removed
+    tally migration) must still reach head; the tally state table has only its
+    core columns because conversation_order was dropped from the model."""
+    payload = _run_helper("35cec50b9604", tmp_path)
+    assert "doc_state" in payload["columns"]["tallystate"]
+    assert "conversation_order" not in payload["columns"]["tallystate"]
+
+
+def _run_helper(revision: str, tmp_path) -> dict:
     state_file = tmp_path / f"state-{revision}.sqlite3"
     env = {
         # Reproduce the parent process's PATH and HOME so the venv
@@ -79,17 +104,7 @@ def test_upgrade_from_revision_reaches_head(revision, tmp_path):
     assert payload is not None, (
         f"no JSON result line found in helper output:\n{res.stdout}"
     )
-
-    # Head must be non-empty and the same for every parametrised
-    # case (alembic's notion of "the head of the chain" is single).
-    assert payload["head"]
-    actual = set(payload["tables"])
-    expected = set(SQLModel.metadata.tables.keys())
-    missing = expected - actual
-    assert not missing, (
-        f"after upgrading from {revision!r} to head, the following "
-        f"SQLModel tables are missing on disk: {sorted(missing)}"
-    )
+    return payload
 
 
 def test_helper_module_exists():

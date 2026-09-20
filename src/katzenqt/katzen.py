@@ -57,6 +57,13 @@ from .models import (GroupChatFileUpload,
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
+from .qt_tally import (PollsTabModel, TallyCreateDialog, TallyPanel,
+                       polls_tab_label)
+from .tally import controller as tally_controller
+from .tally import events as tally_events
+from .tally import schema as tally_schema
+from .tally import send as tally_send
+from .tally import sync as tally_sync
 from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
 from .ui_mixchat import Ui_MainWindow  # ui_mixchat.py
 
@@ -97,6 +104,10 @@ class _ResolvedAttachment(NamedTuple):
 _CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
 
 class AsyncioThread(threading.Thread):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.engine_warmed = threading.Event()
+
     def run(self):
         self.loop = asyncio.new_event_loop()
         def report_exception3(loop, exception):
@@ -105,6 +116,7 @@ class AsyncioThread(threading.Thread):
                     return
             print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
+        self.loop.run_until_complete(self.warm_engine())
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
 
@@ -119,6 +131,17 @@ class AsyncioThread(threading.Thread):
         assert ffff.exception() is None
         assert ffff.result() == res
         return res
+
+    async def warm_engine(self):
+        """Establish the async engine's first DB connection on this loop,
+        before anything else here or on the Qt loop uses the engine. The pool's
+        run-once connect guard is an asyncio.Lock bound to the loop that first
+        acquires it, and the two loops used to race for it at startup, so the
+        loser raised "Lock is bound to a different event loop"."""
+        try:
+            await persistent.warm_async_engine()
+        finally:
+            self.engine_warmed.set()
 
     async def async_main(self):
         self.kp_client = None
@@ -1122,6 +1145,133 @@ class MainWindow(QMainWindow):
         self.transfers_view.setMinimumHeight(80)
         self.ui.gridLayout_2.addWidget(self.transfers_view, 2, 0, 1, 1)
 
+        # Polls panel: a sibling tab in the chat tab bar. It lists the
+        # currently selected conversation's surveys and hosts the
+        # create/vote/close flows; clicking an in-chat placeholder raises it.
+        self.tally_panel = TallyPanel()
+        self.polls_model = PollsTabModel()
+        self.tally_panel.voteSubmitted.connect(self.tally_vote)
+        self.tally_panel.closeRequested.connect(self.tally_close)
+        self.tally_panel.newPollRequested.connect(self.new_poll)
+        self.ui.chatTabs.addTab(self.tally_panel, polls_tab_label(0))
+
+    # -- tally / polls -------------------------------------------------------
+
+    def _refresh_tally_views(self, conversation_id: int) -> None:
+        """Refresh the polls tab/badge and the open survey after a tally
+        notification. The chat rows themselves are refreshed by
+        ``receive_msg_listener`` (tally messages are ordinary log rows)."""
+        key = self.tally_panel.current_survey()
+        if key is not None and key[0] == conversation_id:
+            # A received vote/close may have changed the panel's survey.
+            self.tally_panel.show_survey(*key)
+        if self._selected_conversation_id() == conversation_id:
+            self._update_polls_tab()
+
+    def _selected_conversation_id(self) -> "int | None":
+        convo_state = self.convo_state_or_none()
+        return convo_state.conversation_id if convo_state is not None else None
+
+    def _update_polls_tab(self) -> None:
+        """Re-list the selected conversation's surveys and refresh the badge."""
+        if not hasattr(self, "polls_model"):
+            return
+        self.polls_model.set_conversation_filter(self._selected_conversation_id())
+        index = self.ui.chatTabs.indexOf(self.tally_panel)
+        if index >= 0:
+            self.ui.chatTabs.setTabText(
+                index, polls_tab_label(self.polls_model.badge_count())
+            )
+
+    @Slot(str)
+    def openPoll(self, survey_id_hex: str) -> None:
+        """Open a survey in the panel (QML placeholder click)."""
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        try:
+            survey_id = bytes.fromhex(survey_id_hex)
+        except ValueError:
+            return
+        if self.tally_panel.show_survey(convo_state.conversation_id, survey_id):
+            self.ui.chatTabs.setCurrentWidget(self.tally_panel)
+
+    @async_cb
+    async def tally_vote(self, choice) -> None:
+        """Persist the panel's edited selection and broadcast it."""
+        convo_state = self.convo_state_or_none()
+        key = self.tally_panel.current_survey()
+        if convo_state is None or key is None:
+            return
+        conversation_id, survey_id = key
+        if conversation_id != convo_state.conversation_id:
+            return
+        # The vote is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
+        await self.iothread.run_in_io(
+            _io_tally_vote(conversation_id, survey_id, dict(choice))
+        )
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def tally_close(self) -> None:
+        """Close the open survey (only the creator may) and broadcast it."""
+        convo_state = self.convo_state_or_none()
+        key = self.tally_panel.current_survey()
+        if convo_state is None or key is None:
+            return
+        conversation_id, survey_id = key
+        if conversation_id != convo_state.conversation_id:
+            return
+        # The close is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
+        await self.iothread.run_in_io(
+            _io_tally_close(conversation_id, survey_id)
+        )
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def new_poll(self) -> None:
+        """Open the create dialog and, on accept, create + broadcast a survey."""
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        # Creating a poll publishes it on the same stream as chat; refuse
+        # before opening the dialog so no work is discarded.
+        if await self._refuse_unless_joined(convo_state.conversation_id):
+            return
+        dialog = TallyCreateDialog(self)
+        await _dialog_finished(dialog)
+        if dialog.result() != QDialog.DialogCode.Accepted:
+            return
+        topic, mode, slots = dialog.topic(), dialog.mode(), dialog.slots()
+        if not topic or not slots:
+            return
+        survey_id = await self.iothread.run_in_io(
+            _io_tally_create(convo_state.conversation_id, topic, mode, slots)
+        )
+        self._refresh_tally_views(convo_state.conversation_id)
+        if survey_id is not None:
+            self.openPoll(survey_id.hex())
+
+    async def tally_listener(self) -> None:
+        """Refresh the poll views when the receive path consumed a tally event
+        (mirrors receive_msg_listener for the chat log)."""
+        while True:
+            try:
+                conversation_id = await self.iothread.run_in_io(
+                    network.tally_update_queue.get()
+                )
+                self._refresh_tally_views(conversation_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "tally_listener: dropping an item after %s", e, exc_info=e,
+                )
+
     async def _enqueue_outgoing_gcm(
         self,
         convo_state: "ConversationUIState",
@@ -1156,35 +1306,52 @@ class MainWindow(QMainWindow):
             conversation_id=convo_state.conversation_id,
         )
 
-        async with persistent.asession() as sess:
-            for cap_uuid in new_write_caps:
-                sess.add(persistent.WriteCapWAL(id=cap_uuid))
-            for obj in db_entries:
-                sess.add(obj)
-            final_pwal_id = db_entries[-1].id  # relying on this being a plaintextwal is a little bit of an assumption about the internal of .serialize() ....
-
-            # Then we pretend that we have received it:
-            sess.add(persistent.ConversationLog(
-                id=log_id or uuid.uuid4(),
+        # The DB write runs on the io loop, not the Qt loop: the async engine
+        # must not be shared across the two (see persistent.warm_async_engine
+        # and append_outbound_chat). notify_outbound_chat_sent also wakes the
+        # chat view and pokes the send loop, so those are no longer separate
+        # run_in_io round trips.
+        await self.iothread.run_in_io(
+            network.notify_outbound_chat_sent(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
-                conversation_order=select(func.count())
-                .select_from(persistent.ConversationLog)
-                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
-                .scalar_subquery(),
+                new_write_caps=new_write_caps,
+                db_entries=db_entries,
                 payload=local_payload,
-                network_status=1,
-                outgoing_pwal=final_pwal_id,
-            ))
-            await sess.commit()
-
-        # Wake the chat view (was missing from the old send_file path).
-        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id, False)))
-
-        # Signal the network module that we have a new outgoing message:
-        await self.iothread.run_in_io(
-            network.check_for_new()
+                # TODO massive hack here because we don't reassemble sendops yet
+                final_pwal_id=db_entries[-1].id,
+                log_id=log_id,
+            )
         )
+
+    async def _refuse_unless_joined(self, conversation_id: int) -> bool:
+        """True if an outbound send must be refused because this client is not
+        yet a member of the conversation.
+
+        A conversation before membership has only our own (inactive) peer.
+        Sending then is unsafe for a joiner: ``voucher.await_and_open``
+        salt-mutates our write stream at induction, so anything committed on
+        the pre-mutation stream is never read by the group. An owner who has
+        not yet inducted anyone also has no audience. Both are exactly
+        ``not conversation_is_joined``. Returns True (and warns) when the send
+        should be abandoned; the caller keeps the user's input for a later try.
+        """
+        if await self.iothread.run_in_io(
+            conversation_is_joined(conversation_id)
+        ):
+            return False
+        QTimer.singleShot(0, lambda: QMessageBox.information(
+            self, APP_NAME,
+            "You have not joined this conversation yet. Wait until you are "
+            "inducted (or induct someone) before sending messages.",
+        ))
+        return True
+
+    def _restore_unsent_text(self, convo_state, msg: str) -> None:
+        if self.convo_state_or_none() is not convo_state:
+            convo_state.chat_lineEdit_buffer = msg
+        elif not self.ui.chat_lineEdit.text():
+            self.ui.chat_lineEdit.setText(msg)
 
     @async_cb
     async def chat_msg_single_line(self):
@@ -1196,6 +1363,11 @@ class MainWindow(QMainWindow):
             return
         convo_state.chat_lineEdit_buffer = ''
         if not msg.strip():
+            return
+        # Cleared above, before any await, so a second Enter cannot resend the
+        # text; a refusal gives it back.
+        if await self._refuse_unless_joined(convo_state.conversation_id):
+            self._restore_unsent_text(convo_state, msg)
             return
 
         # Stamp the real membership hash before serialize.
@@ -1329,7 +1501,7 @@ class MainWindow(QMainWindow):
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
             return
-        convo_state.conversation_log_model.increment_row_count()
+        convo_state.conversation_log_model.refresh_row_count()
         # And then we can increment the row count to let the UI register it:
 
         # x) Scrolling - two cases:
@@ -1400,12 +1572,13 @@ class MainWindow(QMainWindow):
         # Tag like add_conversation's peers so the per-peer pause/resume
         # context menu works on dynamically-announced members
         # too. The queue only carries (conversation_id, name); resolve the
-        # read cap/own-ness from the DB.
-        async with persistent.asession() as _sess:
-            peer_row = (await _sess.exec(
+        # read cap/own-ness from the DB. Sync engine: the Qt loop must not
+        # open the async engine (see persistent.warm_async_engine).
+        with persistent.Session(persistent._engine_sync) as _sess:
+            peer_row = _sess.exec(
                 select(persistent.ConversationPeer)
                 .where(persistent.ConversationPeer.name == name)
-            )).first()
+            ).first()
         if peer_row is not None:
             new_item.peer_read_cap_id = peer_row.read_cap_id
             new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
@@ -1589,6 +1762,10 @@ class MainWindow(QMainWindow):
         the chat view does not store megabytes inline.
         """
         convo = self.convo_state()
+        # Refuse (and keep the queued attachments) until we are a member;
+        # see _refuse_unless_joined.
+        if await self._refuse_unless_joined(convo.conversation_id):
+            return
         print("should send files", convo.attached_files)
 
         voice_note_drafts = []
@@ -1874,6 +2051,13 @@ class MainWindow(QMainWindow):
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
 
+        # Scope the Polls tab to the newly selected conversation and drop a
+        # panel survey that belonged to the previous one.
+        key = self.tally_panel.current_survey()
+        if key is not None and key[0] != convo_state.conversation_id:
+            self.tally_panel.clear()
+        self._update_polls_tab()
+
         self.systray.has_read_messages()
 
     def do_we_even_have_unread_messages(self) -> bool:
@@ -1980,7 +2164,8 @@ class MainWindow(QMainWindow):
             )
             replace_box.setDefaultButton(QMessageBox.StandardButton.No)
             result = await _dialog_finished(replace_box)
-            if replace_box.standardButton(result) != QMessageBox.StandardButton.Yes:
+            # finished() returns the clicked StandardButton, not a widget.
+            if result != QMessageBox.StandardButton.Yes:
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
@@ -2043,11 +2228,12 @@ class MainWindow(QMainWindow):
             new_item = QStandardItem(name)
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on dynamically-announced members too.
-            async with persistent.asession() as _sess:
-                peer_row = (await _sess.exec(
+            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            with persistent.Session(persistent._engine_sync) as _sess:
+                peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
                     .where(persistent.ConversationPeer.name == name)
-                )).first()
+                ).first()
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -2136,11 +2322,12 @@ class MainWindow(QMainWindow):
             new_item = QStandardItem(joiner_name)
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on inducted members too.
-            async with persistent.asession() as _sess:
-                peer_row = (await _sess.exec(
+            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            with persistent.Session(persistent._engine_sync) as _sess:
+                peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
                     .where(persistent.ConversationPeer.name == joiner_name)
-                )).first()
+                ).first()
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -2254,6 +2441,88 @@ class MixSystrayIcon(QSystemTrayIcon):
         print("Someone clicked message", args, kwargs)
 
     
+async def _stage_local_tally(sess, convo, gcm) -> None:
+    """Stage an outbound tally message and append its optimistic chat row.
+
+    Runs inside the caller's ``conversation_log_order_lock``: the row's order is
+    a COUNT subquery evaluated at commit, so it must not race a concurrent
+    append. ``network_status=1`` marks the row pending until the send clears.
+    """
+    final_pwal_id = await tally_send.stage_outbound(sess, convo, gcm)
+    sess.add(persistent.ConversationLog(
+        conversation_id=convo.id,
+        conversation_peer_id=convo.own_peer_id,
+        conversation_order=persistent.next_conversation_order(convo.id),
+        payload=b"F" + gcm.to_cbor(),
+        network_status=1,
+        outgoing_pwal=final_pwal_id,
+    ))
+
+
+async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes | None":
+    """Create a survey, persist it and stage its broadcast, on the io loop.
+
+    Returns the survey id (None on failure).
+    """
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            logger.error("tally create: conversation %d not found", conversation_id)
+            return None
+        async with persistent.conversation_log_order_lock(conversation_id):
+            doc = await tally_controller.INSTANCE.create_local(
+                sess, convo, survey_id, topic, mode, slots,
+            )
+            blob = tally_sync.full_state(doc)
+            await _stage_local_tally(
+                sess, convo, tally_events.build_create(survey_id, blob),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return survey_id
+
+
+async def _io_tally_vote(conversation_id: int, survey_id: bytes, choice) -> bool:
+    """Record our vote locally and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        async with persistent.conversation_log_order_lock(conversation_id):
+            version = await tally_controller.INSTANCE.cast_local_vote(
+                sess, convo, survey_id, choice,
+            )
+            if version is None:
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_vote(survey_id, choice, version),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return True
+
+
+async def _io_tally_close(conversation_id: int, survey_id: bytes) -> bool:
+    """Close a survey we created and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        async with persistent.conversation_log_order_lock(conversation_id):
+            if not await tally_controller.INSTANCE.close_local(sess, convo, survey_id):
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_close(survey_id),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return True
+
+
 async def add_conversation(window, convo: persistent.Conversation) -> None:
     window.conversation_log_models = getattr(window, "conversation_log_models", dict())
 
@@ -2288,13 +2557,15 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         ptwi.peer_is_own = (peer.id == convo.own_peer_id)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
-    async with persistent.asession() as sess:
-        msg_count = (await sess.exec(
+    # Sync engine: add_conversation runs on the Qt loop, which must not open
+    # the async engine (see persistent.warm_async_engine).
+    with persistent.Session(persistent._engine_sync) as sess:
+        msg_count = sess.exec(
             select(func.count())
             .select_from(persistent.ConversationLog)
             .where(persistent.ConversationLog.conversation_id == convo.id)
-        )).first()
-        convo_state.conversation_log_model.row_count = msg_count
+        ).first()
+    convo_state.conversation_log_model.set_row_count(msg_count)
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
     # Append the new conversation to the "real" model window.all_contacts,
@@ -2320,12 +2591,26 @@ def rebuild_pydantic_models():
     #ConversationUIState.model_rebuild()
     pass
 
+async def _wait_for_engine_warmed(iothread: AsyncioThread) -> None:
+    """Hold off the Qt loop's first use of the async engine until the io thread
+    has warmed it. Gives up if the thread died before it could: the window
+    should still appear, as it does when the thread dies later."""
+    while not iothread.engine_warmed.is_set():
+        # re-checked: it may have been set and the thread exited since the test above
+        if not iothread.is_alive() and not iothread.engine_warmed.is_set():
+            logger.error("io thread exited before it warmed the async engine")
+            return
+        await asyncio.sleep(0.01)
+
+
 async def main(window: MainWindow):
     def report_exception2(*args):
         for m in args:
             print("report_exception2", m)
             QTimer.singleShot(0, lambda: QMessageBox.critical(window, f"Exception", f"{m}"))
     asyncio.get_running_loop().set_exception_handler(report_exception2)
+
+    await _wait_for_engine_warmed(window.iothread)
 
     rebuild_pydantic_models()
     echomix_icon = QIcon()
@@ -2367,6 +2652,9 @@ async def main(window: MainWindow):
         for convo in a:
             await add_conversation(window, convo)
 
+    # Seed the Polls tab from whatever the selection (or lack of one) is now.
+    window._update_polls_tab()
+
     window.show()
     window._supervised_listener(
         "receive_msg_listener", window.receive_msg_listener, restart_on_finish=True,
@@ -2375,14 +2663,17 @@ async def main(window: MainWindow):
         "peer_added_listener", window.peer_added_listener, restart_on_finish=True,
     )
     window._supervised_listener(
+        "tally_listener", window.tally_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
         "transfers_listener", window.transfers_listener, restart_on_finish=True,
     )
-    await window.transfers_model.seed_from_db()
+    window.transfers_model.seed_from_db()
 
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
-    for conv_id in await pending_joiner_join_conversation_ids():
+    for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)

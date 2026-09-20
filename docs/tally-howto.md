@@ -47,13 +47,19 @@ this: they touch only the local database.
 Headless callers have one event loop and can run all four steps on it.
 
 The GUI runs two: Qt's loop for the widgets, and `AsyncioThread`'s loop
-(`katzen.py:65`), which owns the thin-client connection. There, follow what
-`MainWindow.chat_msg_single_line` (`katzen.py:467`) does — database work
-directly on the Qt loop, network calls handed to the other loop:
+(`katzen.py`), which owns the thin-client connection. Anything that opens an
+async DB session or touches the network must run on the io loop, handed over
+with `MainWindow.iothread.run_in_io`:
 
 ```python
 await self.iothread.run_in_io(network.check_for_new())
 ```
+
+The GUI's tally bridge follows this exactly: `_io_tally_create`,
+`_io_tally_vote` and `_io_tally_close` (`katzen.py`) each perform the whole
+four-step task in a single `run_in_io` hop, so the Qt thread never opens an
+`asession`. `MainWindow.chat_msg_single_line` does the same for an ordinary
+chat message through `network.notify_outbound_chat_sent`.
 
 ### Getting the conversation
 
@@ -198,8 +204,9 @@ document (next task).
 
 `engine.tally` aggregates and will not tell you who voted for what. For that,
 read the votes map directly and map voter ids back to peers. A voter id is
-`blake2b` of that member's BACAP read capability, so every member derives the
-same id for the same member:
+`blake2b` of that member's BACAP read capability's 32-byte public-key prefix,
+so every member derives the same id for the same member even though the
+trailing index suffix varies between copies:
 
 ```python
 async def voter_names(sess, conversation) -> dict[str, str]:
@@ -280,11 +287,26 @@ after a close is still counted. Do not present it as a locked ballot box.
 ## Notice that a survey changed
 
 Inbound tally messages are applied to the document and written to `TallyState`
-by the receive path, which signals nothing: tally messages deliberately never
-become `ConversationLog` rows, and `network.conversation_update_queue` is only
-poked for those. There is no tally notification channel today.
+by the receive path. Each also becomes a `ConversationLog` row (so the timeline
+shows it) and so wakes `network.conversation_update_queue`; in addition, after
+the transaction commits, the receive path pushes the affected `conversation_id`
+onto **`network.tally_update_queue`** so poll-specific views can refresh:
 
-So to follow a survey, re-derive it on a timer and compare:
+```python
+async def tally_listener(on_change):
+    while True:
+        conversation_id = await network.tally_update_queue.get()
+        await on_change(conversation_id)
+```
+
+The queue carries only the conversation id on purpose: the consumer re-derives
+the surveys it cares about from committed `TallyState`, so there is no payload
+that can get out of step with the database and no risk of reading uncommitted
+rows. The GUI's `tally_listener` drains exactly this queue to refresh its Polls
+tab and any open survey panel.
+
+If you would rather poll — for instance a script that is not running the
+network receive path — re-derive on a timer and compare:
 
 ```python
 async def watch(conversation_id: int, survey_id: bytes, on_change, interval=1.0):
@@ -353,8 +375,10 @@ Call `handle_event` yourself only if you are driving the protocol outside the
 normal receive path, e.g. in a test:
 
 ```python
-signal_send = await tally.handle_event(sess, peer, gcm)
-if signal_send:                 # it staged a sync response
+result = await tally.handle_event(sess, peer, gcm)
+# result.status is "applied" | "duplicate" | "rejected"; result.signal_send
+# is True when outbound work was staged and the send loop must be poked.
+if result.signal_send:          # it staged a sync response
     await sess.commit()
     await network.check_for_new()
 ```
@@ -411,8 +435,9 @@ transport at all.
 
 ## Pitfalls
 
-- **Wait for the read capability.** A voter's identity is the hash of their
-  provisioned BACAP read cap. Before it exists the controller logs a warning
+- **Wait for the read capability.** A voter's identity is the hash of the
+  32-byte public-key prefix of their provisioned BACAP read cap. Before it
+  exists the controller logs a warning
   and falls back to a *local-only* id no peer will derive, so such a ballot
   never merges with that voter's others. Do not vote on a conversation that is
   not fully joined.

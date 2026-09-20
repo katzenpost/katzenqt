@@ -12,13 +12,19 @@ vote, read the result, catch up after missing messages — see
 
 ## Status
 
-The protocol core, the persistence, the receive-side routing and the headless
-CLI verbs exist and are covered by unit, property and docker-integration tests.
-There is **no GUI yet**, and two pieces of the design are deliberately still
-open; both are called out under [What is not enforced](#what-is-not-enforced)
-and [Known gaps](#known-gaps). Nothing in the API below is frozen, but all of
-it is in use by the CLI and the integration tests, so changes should be made
-deliberately rather than by accident.
+The protocol core, the persistence, the receive-side routing, the headless
+CLI verbs and the Qt GUI all exist and are covered by unit, property and
+docker-integration tests. Every tally wire message is an ordinary
+`ConversationLog` row, so the chat timeline shows poll creates, votes,
+recasts, closes and syncs inline; the GUI (`katzenqt.qt_tally` plus the
+wiring in `katzenqt.katzen`) also hosts a Polls panel/tab. It reads state
+through `katzenqt.tally.presenter` and performs every write on the io loop
+under the same controller calls the CLI uses. Two pieces of the protocol
+design are deliberately still open; both are called out under [What is not
+enforced](#what-is-not-enforced) and [Known gaps](#known-gaps). Nothing in the
+API below is frozen, but all of it is in use by the CLI, the GUI and the
+integration tests, so changes should be made deliberately rather than by
+accident.
 
 ## Concepts
 
@@ -29,7 +35,7 @@ deliberately rather than by accident.
 | **mode** | `approval` (availability domain `yes`/`no`) or `availability` (`yes`/`maybe`/`no`, Doodle-style). Fixed at creation. |
 | **availability** | One voter's answer *for one slot*: a string from the mode's domain. |
 | **choice** | One voter's whole ballot: a `dict[slot_id, availability]`. Omitted slots count as `no`. |
-| **voter id** | 16 bytes, `blake2b(peer's BACAP read capability, digest_size=16)`. Peer-independent: every member derives the same id for the same member, because they all hold the same read cap for them. |
+| **voter id** | 16 bytes, `blake2b(peer's BACAP read capability's 32-byte public-key prefix, digest_size=16)`. Peer-independent: every member holds the same public key for a given member, so they derive the same id. Only the 32-byte prefix is hashed because the trailing 104-byte index suffix varies per copy (a joiner's pre-mutation cap vs. the salt-mutated cap the group holds, and future-only caps that start at a later index). |
 | **version** | A per-voter monotonic counter carrying intent order, so a recast supersedes an earlier ballot whatever the arrival order. |
 | **status** | `open` or `closed`. Closing is advisory (see below). |
 | **outcome** | The declared result: `winner`, `tie`, or `no_winner`, derived purely from yes counts. |
@@ -46,6 +52,8 @@ The core is Qt-free and network-free, and must stay so.
 | `katzenqt.tally.events` | `katzenqt.models` | Builders for the five wire messages. Pure. |
 | `katzenqt.tally.controller` | persistent, models, all of the above | Owns one in-memory `Doc` per survey, reconciles it with the database, applies inbound events, mutates for local actions. |
 | `katzenqt.tally.send` | persistent, models | Stages an outbound tally message onto the conversation's BACAP write stream. |
+| `katzenqt.tally.presenter` | persistent, engine, schema | Projects a `Doc` plus persisted identity into plain GUI-ready data (summaries, per-voter rows, tally-row text, unread-poll counts). Qt-free. |
+| `katzenqt.qt_tally` | PySide6, presenter | Qt-only models/widgets: the Polls-tab `PollsTabModel`, the vote panel and the create dialog. |
 
 `katzenqt.tally`'s package namespace re-exports the protocol core only:
 `Mode`, `Outcome`, `SlotTally`, `TallyResult`, `apply_vote`, `close_survey`,
@@ -249,8 +257,12 @@ the sync path has prior state to diff against. The migration is
 ## `katzenqt.tally.controller`
 
 ```python
-def voter_id_from_read_cap(read_cap: bytes) -> bytes   # blake2b, 16 bytes
+def voter_id_from_read_cap(read_cap: bytes) -> bytes   # blake2b(read_cap[:32]), 16 bytes
 ```
+
+The id is a hash of the read capability's 32-byte public-key prefix only, so
+that every copy of a member's capability (pre-mutation, salt-mutated, or a
+future-only cap starting at a later index) maps to the same voter id.
 
 ```python
 class TallyController:
@@ -261,10 +273,10 @@ class TallyController:
     async def cast_local_vote(self, sess, conversation, survey_id, choice) -> int | None
     async def close_local(self, sess, conversation, survey_id) -> bool
     async def list_for_conversation(self, sess, conversation_id) -> list[Doc]
-    async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> bool
+    async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> ApplyResult
 
 INSTANCE = TallyController()
-async def handle_event(sess, peer, gcm) -> bool     # module-level, delegates to INSTANCE
+async def handle_event(sess, peer, gcm) -> ApplyResult   # module-level, delegates to INSTANCE
 ```
 
 The controller has two faces. **Receive**: `handle_event` applies an inbound
@@ -287,7 +299,10 @@ Notes that matter:
   propagates `ValueError` from `apply_vote` for an invalid ballot.
 - `close_local` returns `False` if the survey is unknown or the local user is
   not its creator, and logs why.
-- `handle_event` returns `True` only when it staged outbound work in the
+- `handle_event` returns an `ApplyResult(status, detail, signal_send)`. `status`
+  is `"applied"`, `"duplicate"` (well-formed but no effect), or `"rejected"`
+  (malformed or not accepted); `detail` is a short phrase for a rejected
+  message; `signal_send` is True only when it staged outbound work in the
   session — which today means it answered a `TALLY_SYNC_REQ` — and the caller
   must then poke the send loop.
 
@@ -296,9 +311,9 @@ Receive-side behaviour per kind:
 | Kind | Effect |
 |---|---|
 | `TALLY_CREATE` | Load the `Doc` from the blob, or merge into an existing one. Persist. |
-| `TALLY_VOTE` | Record the choice under the authenticated sender's voter id, at the payload's version. An invalid ballot is logged and dropped. A vote for an unknown survey is dropped. |
-| `TALLY_CLOSE` | Set status to `closed`, but only if the sender is the recorded creator (or the survey predates the `creator` field). |
-| `TALLY_SYNC_REQ` | Stage a `TALLY_SYNC_RESP` carrying the diff since the requester's state vector; returns `True`. |
+| `TALLY_VOTE` | Record the choice under the authenticated sender's voter id, at the payload's version. An invalid ballot is rejected. A vote for an unknown survey is a no-op (`duplicate`). |
+| `TALLY_CLOSE` | Set status to `closed`, but only if the sender is the recorded creator (or the survey predates the `creator` field); a non-creator's close is rejected. |
+| `TALLY_SYNC_REQ` | Stage a `TALLY_SYNC_RESP` carrying the diff since the requester's state vector; sets `signal_send`. |
 | `TALLY_SYNC_RESP` | Merge the diff (or load the `Doc` if we had none). Persist. |
 
 ## `katzenqt.tally.send`
@@ -322,16 +337,30 @@ The caller commits, then calls `network.check_for_new()`.
 
 `katzenqt.conversation_handlers.dispatch` routes an assembled
 `GroupChatMessage` by `msg_type`. The five tally kinds go to the controller and
-**never touch `ConversationLog`**, so they do not surface as empty chat lines:
+also append the message to `ConversationLog` as an ordinary chat row, so the
+timeline shows poll creates, votes, recasts, closes and syncs inline:
 
 ```python
-async def dispatch(sess, peer, gcm, full_payload) -> tuple[bool, bool]
-    # -> (convlog_added, signal_send)
+async def dispatch(sess, peer, gcm, full_payload) -> tuple[bool, bool, tuple[int, str] | None, bool]
+    # -> (convlog_added, signal_send, peer_added, tally_added)
 ```
 
-Because `convlog_added` is `False` for tally messages, the network layer does
-**not** push onto `network.conversation_update_queue` — see
-[Known gaps](#known-gaps).
+`convlog_added` is `True` for tally messages: the row's `conversation_order`
+places it in the timeline and the chat-log refresh queue
+(`network.conversation_update_queue`) wakes the view. `tally_added` is also
+`True`; after its transaction commits the network receive path pushes the
+`conversation_id` onto **`network.tally_update_queue`**, which the GUI drains
+(via its `tally_listener`) to re-render the Polls tab/badge and any open survey
+panel. That queue carries only the conversation id, so the GUI re-derives
+everything from committed state and the notification stays race-free with
+send-side commits.
+
+The row's payload is the raw `GroupChatMessage` CBOR, so the renderer decodes
+each row and formats it (see `presenter.tally_row_text`): a create as
+`[Poll] <topic>`, a vote as `<author> voted on "[Poll] <topic>": …`, a recast as
+`changed vote`, and so on. A row that could not be applied (unknown survey,
+invalid ballot, non-creator close, oversized id) renders as an `invalid` row
+naming the reason.
 
 ## Security properties
 
@@ -416,22 +445,28 @@ Exit codes:
 Each of these has a workaround, where one exists, in
 [tally-howto.md](tally-howto.md).
 
-1. **No change notification.** Applying an inbound tally event updates
-   `TallyState` and the in-memory `Doc` but signals nothing — the chat's
-   `network.conversation_update_queue` is only poked for `ConversationLog`
-   rows. A view must poll, or the receive path must gain a queue of its own.
+1. ~~**No change notification.**~~ **Resolved.** After a tally transaction
+   commits, the receive path pushes the conversation id onto
+   `network.tally_update_queue`; the GUI's `tally_listener` drains it and
+   re-reads committed state. (The queue carries only the conversation id on
+   purpose: the views derive everything from `TallyState`, so there is no
+   payload to get out of step with the database.)
 2. **The catch-up request is never sent.** `events.build_sync_request` exists
    and the receive side answers `TALLY_SYNC_REQ` correctly, but nothing calls
    the builder, so a peer that joins after a survey was created only learns
    about it if someone re-broadcasts. Wiring the request is a GUI-visible
-   feature ("refresh this survey").
+   feature ("refresh this survey"); it is deliberately deferred — a true late
+   joiner already reads every member stream from box 0, so a sync request only
+   repairs offline windows / pruned boxes / dropped messages.
 3. **Closing does not stop voting** (see above).
 4. **No per-voter view in the derived result.** `TallyResult` aggregates;
-   showing "who voted for what" means reading `schema.votes_map` directly.
-5. **A malformed sync request raises out of the receive path.**
-   `handle_event` passes `tally.crdt or b""` straight to `diff_since`, which
-   rejects an empty vector with `ValueError` rather than treating it as "send
-   me everything".
+   `engine.per_voter(doc)` now exposes per-voter ballots, which the GUI's poll
+   panel renders ("show who voted"), but the CLI's `tally-result` still emits
+   the aggregate only.
+5. ~~**A malformed sync request raises out of the receive path.**~~
+   **Resolved.** `handle_event` now wraps `diff_since` in `try/except
+   ValueError`, logs and drops the request (returning `False`) so a garbage
+   state vector cannot wedge the receive loop.
 
 ## Tests as documentation
 
@@ -441,5 +476,7 @@ Each of these has a workaround, where one exists, in
 | `tests/test_tally_sync.py` | Late-joiner catch-up, symmetric merge of concurrent votes. |
 | `tests/test_tally_convergence.py` | Property test: event order never changes the tally. |
 | `tests/test_tally_controller.py` | Votes keyed to the authenticated sender, persistence round-trip, creator-only close, dispatch routing. |
+| `tests/test_tally_presenter.py` | The Qt-free projection: `summarize`, `panel_rows`, `tally_row_text`, `new_poll_count`. |
+| `tests/test_qt_tally.py` | Offscreen Qt: tally rows in `ConversationLogModel`, panel vote cycle + close, create dialog, Polls tab list/badge. |
 | `tests/test_models_tally.py` | CBOR round-trip of every kind, integer `msg_type` on the wire, large CRDT blobs through `SendOperation`. |
 | `tests/integration/test_tally.py` | The whole path over a docker mixnet, two peers, convergent counts. |
