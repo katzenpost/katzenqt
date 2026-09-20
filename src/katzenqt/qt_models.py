@@ -238,30 +238,34 @@ class DownloadsModel(QtCore.QAbstractTableModel):
 
     # -- startup seeding ----------------------------------------------------
 
-    async def seed_from_db(self) -> None:
+    def seed_from_db(self) -> None:
         """Populate rows for resumable substream transfers already on disk.
 
         Include paused transfers before their first piece and persisted
         failures. Completed or dismissed transfers have no active peer,
         pause flag, failure, or remaining pieces.
+
+        Sync engine: this runs on the Qt loop and builds Qt model rows, so it
+        neither opens the async engine (see persistent.warm_async_engine) nor
+        hands the model to the io loop.
         """
-        async with persistent.asession() as sess:
+        with persistent.Session(persistent._engine_sync) as sess:
             from . import network
             prefix = network._SUBSTREAM_NAME_PREFIX
-            streams = (await sess.exec(
+            streams = sess.exec(
                 select(persistent.ConversationPeer).where(
                     persistent.ConversationPeer.name.like(f"{prefix}%"),
                 )
-            )).all()
+            ).all()
             for cp in streams:
-                rcw = await sess.get(persistent.ReadCapWAL, cp.read_cap_id)
+                rcw = sess.get(persistent.ReadCapWAL, cp.read_cap_id)
                 if rcw is None:
                     continue
-                recv_count = (await sess.exec(
+                recv_count = sess.exec(
                     select(persistent.sa.func.count()).select_from(persistent.ReceivedPiece)
                     .where(persistent.ReceivedPiece.read_cap == rcw.id)
-                )).one()
-                parent = await _substream_parent_name(sess, cp)
+                ).one()
+                parent = _substream_parent_name(sess, cp)
                 # Keep paused and failed transfers visible across restart.
                 if (cp.active or rcw.read_paused or rcw.substream_failure
                         or int(recv_count)):
@@ -277,15 +281,20 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                         self.fail_transfer(rcw.id, rcw.substream_failure)
 
 
-async def _substream_parent_name(sess, cp) -> str:
-    """Best-effort display name of a substream peer's parent, for the panel."""
-    from .network import _substream_parent
-    parent = await _substream_parent(sess, cp.name)
+def _substream_parent_name(sess, cp) -> str:
+    """Best-effort display name of a substream peer's parent, for the panel.
+    ``sess`` is a sync ``persistent.Session`` (the Qt-loop read path)."""
+    from .network import _substream_parent_id
+    parent_id = _substream_parent_id(cp.name)
+    parent = (
+        sess.get(persistent.ConversationPeer, parent_id)
+        if parent_id is not None else None
+    )
     if parent is not None:
         return parent.name
     # Fall back to the conversation name; the substream peer itself is
     # synthetic and must never surface.
-    conv = await sess.get(persistent.Conversation, cp.conversation.id)
+    conv = sess.get(persistent.Conversation, cp.conversation.id)
     return conv.name if conv is not None else cp.name
 
 

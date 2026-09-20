@@ -36,7 +36,7 @@ async def test_restart_keeps_zero_piece_pauses_and_failures() -> None:
             ))
         await sess.commit()
     model = qt_models.DownloadsModel()
-    await model.seed_from_db()
+    model.seed_from_db()
     assert model.rowCount() == 2
     states = {
         model.data(model.index(i, 0), qt_models.ROLE_TRANSFER_RCW_ID): (
@@ -53,6 +53,6 @@ async def test_restart_keeps_zero_piece_pauses_and_failures() -> None:
         assert rcw.next_index == b"i" * 104
     await network.dismiss_failed_transfer(bacap_stream=failed)
     model = qt_models.DownloadsModel()
-    await model.seed_from_db()
+    model.seed_from_db()
     assert model.rowCount() == 1
     assert model.data(model.index(0, 0), qt_models.ROLE_TRANSFER_RCW_ID) == str(paused)

@@ -1,7 +1,7 @@
 from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -31,7 +31,7 @@ async def test_restarted_voucher_join_keeps_its_conversation(
     )
     monkeypatch.setattr(
         katzen, "pending_joiner_join_conversation_ids",
-        AsyncMock(return_value=[11, 22]),
+        MagicMock(return_value=[11, 22]),
     )
     await katzen._resume_pending_joins(cast(katzen.MainWindow, window))
     await factories["_await_voucher_join:11"]()

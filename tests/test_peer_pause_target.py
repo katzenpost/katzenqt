@@ -23,7 +23,8 @@ async def test_peer_pause_target_is_scoped_and_unambiguous() -> None:
             await sess.commit()
             await sess.refresh(conv)
             ids.append(conv.id)
-        peer = await persistent.peer_named_in_conversation(sess, ids[1], "bob")
+    with persistent.Session(persistent._engine_sync) as sess:
+        peer = persistent.peer_named_in_conversation(sess, ids[1], "bob")
         assert peer is not None and peer.read_cap_id == caps[1]
     item = QStandardItem("room-1")
     window = SimpleNamespace(
@@ -42,6 +43,7 @@ async def test_peer_pause_target_is_scoped_and_unambiguous() -> None:
             name="bob", read_cap_id=extra_cap, conversation=conv,
         ))
         await sess.commit()
-        assert await persistent.peer_named_in_conversation(sess, ids[1], "bob") is None
-        first = await persistent.peer_named_in_conversation(sess, ids[0], "bob")
+    with persistent.Session(persistent._engine_sync) as sess:
+        assert persistent.peer_named_in_conversation(sess, ids[1], "bob") is None
+        first = persistent.peer_named_in_conversation(sess, ids[0], "bob")
         assert first is not None and first.read_cap_id == caps[0]
