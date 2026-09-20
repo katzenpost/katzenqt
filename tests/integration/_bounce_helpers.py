@@ -21,6 +21,7 @@ instead of assuming the docker mixnet's 2m default.
 from __future__ import annotations
 
 import functools
+from collections.abc import Sequence
 import math
 import os
 import re
@@ -230,6 +231,13 @@ def kpclientd_reachable(timeout: float = 1.0) -> bool:
         return False
 
 
+def _engine_command(args: Sequence[str]) -> list[str]:
+    engine = os.environ.get("KATZENQT_CONTAINER_ENGINE", "podman")
+    if engine not in ("podman", "docker"):
+        raise ValueError("KATZENQT_CONTAINER_ENGINE must be podman or docker")
+    return [engine, *args]
+
+
 def find_kpclientd_container() -> str:
     """The kpclientd container actually publishing KATZENQT_KPCLIENTD_PORT.
 
@@ -244,8 +252,8 @@ def find_kpclientd_container() -> str:
         return override
     port = os.environ.get("KATZENQT_KPCLIENTD_PORT", "64331")
     proc = subprocess.run(
-        ["podman", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
-        capture_output=True, text=True, check=False,
+        _engine_command(["ps", "--format", "{{.Names}}\t{{.Ports}}"]),
+        capture_output=True, text=True, check=False, timeout=10.0,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"podman ps failed: {proc.stderr}")
@@ -280,8 +288,8 @@ def find_same_network_container(kpclientd_container: str, role: str) -> str:
     prefix = kpclientd_container[: -len("-kpclientd-1")]
     name = f"{prefix}-{role}-1"
     proc = subprocess.run(
-        ["podman", "ps", "--format", "{{.Names}}"],
-        capture_output=True, text=True, check=False,
+        _engine_command(["ps", "--format", "{{.Names}}"]),
+        capture_output=True, text=True, check=False, timeout=10.0,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"podman ps failed: {proc.stderr}")
@@ -290,9 +298,9 @@ def find_same_network_container(kpclientd_container: str, role: str) -> str:
     return name
 
 
-def podman(args) -> None:
+def podman(args: Sequence[str]) -> None:
     proc = subprocess.run(
-        ["podman", *args], capture_output=True, text=True, check=False,
+        _engine_command(args), capture_output=True, text=True, check=False,
         timeout=300.0,
     )
     if proc.returncode != 0:

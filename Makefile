@@ -339,3 +339,72 @@ clean:
 	@rm -r $(VENV)
 	@rm $(SYSTEM_STAMP)
 
+
+ACT_ARGS ?=
+ACT_RUNNER_IMAGE ?= ghcr.io/catthehacker/ubuntu:rust-24.04
+
+.PHONY: ci-local
+ci-local:
+	@command -v act >/dev/null || { printf '%s\n' 'act is required' >&2; exit 1; }
+	command -v curl >/dev/null || { printf '%s\n' 'curl is required' >&2; exit 1; }
+	command -v podman >/dev/null || { printf '%s\n' 'podman is required' >&2; exit 1; }
+	endpoint="$${DOCKER_HOST:-unix://$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}/podman/podman.sock}"
+	case "$$endpoint" in
+		unix:///*) socket="$${endpoint#unix://}" ;;
+		*) printf '%s\n' 'ci-local requires a local Unix socket' >&2; exit 1 ;;
+	esac
+	if [[ ! -S "$$socket" ]]; then
+		printf 'Podman socket is unavailable: %s\n' "$$socket" >&2
+		printf '%s\n' 'Start it with: systemctl --user start podman.socket' >&2
+		exit 1
+	fi
+	if ! reply=$$(curl --disable --fail --silent --show-error --max-time 5 \
+		--noproxy '*' --unix-socket "$$socket" http://localhost/_ping); then
+		printf 'Podman API is not responding on %s\n' "$$socket" >&2
+		exit 1
+	fi
+	if [[ "$$reply" != OK ]]; then
+		printf 'Unexpected Podman API response on %s\n' "$$socket" >&2
+		exit 1
+	fi
+	export DOCKER_HOST="$$endpoint"
+	mkdir -p "$(CURDIR)/.ci-local/uv-cache" \
+		"$(CURDIR)/.ci-local/go-mod" "$(CURDIR)/.ci-local/go-build" \
+		"$(CURDIR)/.ci-local/cargo-home"
+	if ! podman image exists "$(ACT_RUNNER_IMAGE)"; then
+		podman pull "$(ACT_RUNNER_IMAGE)"
+	fi
+	state=$$(mktemp -d)
+	podman ps -a --format '{{.ID}}' > "$$state/containers.before"
+	podman volume ls --format '{{.Name}}' > "$$state/volumes.before"
+	podman images --filter dangling=true --format '{{.ID}}' > "$$state/images.before"
+	cleanup() {
+		set +e
+		podman ps -a --format '{{.ID}}' > "$$state/containers.after"
+		awk 'FILENAME == ARGV[1] { seen[$$0] = 1; next } !($$0 in seen)' \
+			"$$state/containers.before" "$$state/containers.after" \
+			| xargs -r podman rm -f -v
+		podman volume ls --format '{{.Name}}' > "$$state/volumes.after"
+		awk 'FILENAME == ARGV[1] { seen[$$0] = 1; next } !($$0 in seen)' \
+			"$$state/volumes.before" "$$state/volumes.after" \
+			| xargs -r podman volume rm -f
+		podman images --filter dangling=true --format '{{.ID}}' > "$$state/images.after"
+		awk 'FILENAME == ARGV[1] { seen[$$0] = 1; next } !($$0 in seen)' \
+			"$$state/images.before" "$$state/images.after" \
+			| xargs -r podman image rm -f
+		rm -rf "$$state"
+	}
+	trap 'status=$$?; trap - EXIT INT TERM; cleanup; exit $$status' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	act --rm --pull=false --concurrent-jobs 1 --network host \
+		-P ubuntu-latest=$(ACT_RUNNER_IMAGE) \
+		--container-daemon-socket "$$endpoint" \
+		--container-options '--volume "$(CURDIR)/.ci-local:$(CURDIR)/.ci-local"' \
+		--env "UV_CACHE_DIR=$(CURDIR)/.ci-local/uv-cache" \
+		--env UV_LINK_MODE=copy \
+		--env "GOMODCACHE=$(CURDIR)/.ci-local/go-mod" \
+		--env "GOCACHE=$(CURDIR)/.ci-local/go-build" \
+		--env "CARGO_HOME=$(CURDIR)/.ci-local/cargo-home" \
+		--artifact-server-path "$(CURDIR)/.ci-local/artifacts" \
+		--artifact-server-addr 127.0.0.1 $(ACT_ARGS)
