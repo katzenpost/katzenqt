@@ -1659,7 +1659,7 @@ async def provision_read_caps(connection: ThinClient):
                     continue
             await sess.commit()
 
-async def readables_to_mixwal(connection):
+async def readables_to_mixwal(connection: ThinClient) -> None:
     """
     Look up all of our read caps, start sending reads for all the "active" ones that we
     aren't currently trying to read.
@@ -1725,7 +1725,7 @@ async def readables_to_mixwal(connection):
                 # same stream twice raises IntegrityError on its single
                 # commit (UNIQUE constraint failed: mixwal.bacap_stream);
                 # arm each read cap at most once per pass.
-                armed = set()
+                armed: set[uuid.UUID] = set()
                 for (cpeer, rcw) in readable_peers:
                     if rcw.id in armed:
                         logger.warning(
@@ -1744,25 +1744,19 @@ async def readables_to_mixwal(connection):
                     sess.add(mw)
                     logger.debug("finished one peer: %s", cpeer.name)
                 logger.debug("readables_to_mixwal: committing")
-                try:
-                    await sess.commit()
-                except OperationalError as e:
-                    if not _is_transient_sqlite_busy(e):
-                        raise
-                    logger.warning(
-                        "readables_to_mixwal: sqlite busy; retrying on the next sweep: %s", e,
-                    )
-                    continue
-        except Exception as e:
-            # readables_to_mixwal is the session's only read-arming task, so
-            # a failed pass must NEVER kill the loop: every read would wedge
-            # for the rest of the session. The uncommitted pass is rolled back
-            # by the session; the same streams are re-selected and armed on the
-            # next sweep.
+                await sess.commit()
+        except OperationalError as e:
+            # Retry SQLite lock contention without publishing a failed pass.
+            # Other database errors must retain their traceback.
+            if not _is_transient_sqlite_busy(e):
+                raise
             logger.warning(
-                "readables_to_mixwal: pass failed; re-arming next sweep: %s", e,
+                "readables_to_mixwal: sqlite busy; retrying next sweep: %s",
+                e,
             )
-            retry_needed = True
+            await asyncio.sleep(5)
+            readables_to_mixwal_event.set()
+            continue
         logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))
         if len(readable_peers):
             __mixwal_updated.set()
