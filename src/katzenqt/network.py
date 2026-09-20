@@ -75,13 +75,14 @@ async def check_for_new():
 
 async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
                                      new_write_caps, db_entries, payload,
-                                     final_pwal_id=None):
+                                     final_pwal_id=None, log_id=None):
     """Append an outbound chat message's WAL rows/log entry and wake the
     receive-side listeners, all in one io-loop hop.
 
     Combines what would otherwise be three separate run_in_io round trips
     from the GUI thread (append, queue-put, check_for_new) into one; each
-    hop is a real cross-thread future wait.
+    hop is a real cross-thread future wait. ``log_id`` optionally pre-assigns
+    the ConversationLog primary key (see ``persistent.append_outbound_chat``).
     """
     await persistent.append_outbound_chat(
         conversation_id=conversation_id,
@@ -90,6 +91,7 @@ async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
         db_entries=db_entries,
         payload=payload,
         final_pwal_id=final_pwal_id,
+        log_id=log_id,
     )
     await conversation_update_queue.put((conversation_id, False))
     await check_for_new()
@@ -575,6 +577,19 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
     except ConnectionLifeInterruptedError as exc:
         raise asyncio.TimeoutError() from exc
 
+def _substream_parent_id(name: str) -> "int | None":
+    """Parse the parent peer id out of a ``:substream:<parent_id>:<nonce>``
+    name, or None when the name is malformed. Pure, so the sync-seeded
+    Transfers panel can resolve a parent without the async engine."""
+    parts = name.split(":")
+    if len(parts) < 4:
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
+
+
 async def _substream_parent(
     sess: persistent.AsyncSession, name: str,
 ) -> persistent.ConversationPeer | None:
@@ -585,12 +600,8 @@ async def _substream_parent(
     no longer exists, so the caller retires the peer instead of raising
     inside the read loop.
     """
-    parts = name.split(":")
-    if len(parts) < 4:
-        return None
-    try:
-        parent_id = int(parts[2])
-    except ValueError:
+    parent_id = _substream_parent_id(name)
+    if parent_id is None:
         return None
     return await sess.get(persistent.ConversationPeer, parent_id)
 

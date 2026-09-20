@@ -97,6 +97,10 @@ class _ResolvedAttachment(NamedTuple):
 _CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
 
 class AsyncioThread(threading.Thread):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.engine_warmed = threading.Event()
+
     def run(self):
         self.loop = asyncio.new_event_loop()
         def report_exception3(loop, exception):
@@ -105,6 +109,7 @@ class AsyncioThread(threading.Thread):
                     return
             print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
+        self.loop.run_until_complete(self.warm_engine())
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
 
@@ -119,6 +124,17 @@ class AsyncioThread(threading.Thread):
         assert ffff.exception() is None
         assert ffff.result() == res
         return res
+
+    async def warm_engine(self):
+        """Establish the async engine's first DB connection on this loop,
+        before anything else here or on the Qt loop uses the engine. The pool's
+        run-once connect guard is an asyncio.Lock bound to the loop that first
+        acquires it, and the two loops used to race for it at startup, so the
+        loser raised "Lock is bound to a different event loop"."""
+        try:
+            await persistent.warm_async_engine()
+        finally:
+            self.engine_warmed.set()
 
     async def async_main(self):
         self.kp_client = None
@@ -1156,34 +1172,22 @@ class MainWindow(QMainWindow):
             conversation_id=convo_state.conversation_id,
         )
 
-        async with persistent.asession() as sess:
-            for cap_uuid in new_write_caps:
-                sess.add(persistent.WriteCapWAL(id=cap_uuid))
-            for obj in db_entries:
-                sess.add(obj)
-            final_pwal_id = db_entries[-1].id  # relying on this being a plaintextwal is a little bit of an assumption about the internal of .serialize() ....
-
-            # Then we pretend that we have received it:
-            sess.add(persistent.ConversationLog(
-                id=log_id or uuid.uuid4(),
+        # The DB write runs on the io loop, not the Qt loop: the async engine
+        # must not be shared across the two (see persistent.warm_async_engine
+        # and append_outbound_chat). notify_outbound_chat_sent also wakes the
+        # chat view and pokes the send loop, so those are no longer separate
+        # run_in_io round trips.
+        await self.iothread.run_in_io(
+            network.notify_outbound_chat_sent(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
-                conversation_order=select(func.count())
-                .select_from(persistent.ConversationLog)
-                .where(persistent.ConversationLog.conversation_id == convo_state.conversation_id)
-                .scalar_subquery(),
+                new_write_caps=new_write_caps,
+                db_entries=db_entries,
                 payload=local_payload,
-                network_status=1,
-                outgoing_pwal=final_pwal_id,
-            ))
-            await sess.commit()
-
-        # Wake the chat view (was missing from the old send_file path).
-        await self.iothread.run_in_io(network.conversation_update_queue.put((convo_state.conversation_id, False)))
-
-        # Signal the network module that we have a new outgoing message:
-        await self.iothread.run_in_io(
-            network.check_for_new()
+                # TODO massive hack here because we don't reassemble sendops yet
+                final_pwal_id=db_entries[-1].id,
+                log_id=log_id,
+            )
         )
 
     @async_cb
@@ -1400,12 +1404,13 @@ class MainWindow(QMainWindow):
         # Tag like add_conversation's peers so the per-peer pause/resume
         # context menu works on dynamically-announced members
         # too. The queue only carries (conversation_id, name); resolve the
-        # read cap/own-ness from the DB.
-        async with persistent.asession() as _sess:
-            peer_row = (await _sess.exec(
+        # read cap/own-ness from the DB. Sync engine: the Qt loop must not
+        # open the async engine (see persistent.warm_async_engine).
+        with persistent.Session(persistent._engine_sync) as _sess:
+            peer_row = _sess.exec(
                 select(persistent.ConversationPeer)
                 .where(persistent.ConversationPeer.name == name)
-            )).first()
+            ).first()
         if peer_row is not None:
             new_item.peer_read_cap_id = peer_row.read_cap_id
             new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
@@ -2043,11 +2048,12 @@ class MainWindow(QMainWindow):
             new_item = QStandardItem(name)
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on dynamically-announced members too.
-            async with persistent.asession() as _sess:
-                peer_row = (await _sess.exec(
+            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            with persistent.Session(persistent._engine_sync) as _sess:
+                peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
                     .where(persistent.ConversationPeer.name == name)
-                )).first()
+                ).first()
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -2136,11 +2142,12 @@ class MainWindow(QMainWindow):
             new_item = QStandardItem(joiner_name)
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on inducted members too.
-            async with persistent.asession() as _sess:
-                peer_row = (await _sess.exec(
+            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            with persistent.Session(persistent._engine_sync) as _sess:
+                peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
                     .where(persistent.ConversationPeer.name == joiner_name)
-                )).first()
+                ).first()
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -2288,12 +2295,14 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         ptwi.peer_is_own = (peer.id == convo.own_peer_id)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
-    async with persistent.asession() as sess:
-        msg_count = (await sess.exec(
+    # Sync engine: add_conversation runs on the Qt loop, which must not open
+    # the async engine (see persistent.warm_async_engine).
+    with persistent.Session(persistent._engine_sync) as sess:
+        msg_count = sess.exec(
             select(func.count())
             .select_from(persistent.ConversationLog)
             .where(persistent.ConversationLog.conversation_id == convo.id)
-        )).first()
+        ).first()
         convo_state.conversation_log_model.row_count = msg_count
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
@@ -2320,12 +2329,26 @@ def rebuild_pydantic_models():
     #ConversationUIState.model_rebuild()
     pass
 
+async def _wait_for_engine_warmed(iothread: AsyncioThread) -> None:
+    """Hold off the Qt loop's first use of the async engine until the io thread
+    has warmed it. Gives up if the thread died before it could: the window
+    should still appear, as it does when the thread dies later."""
+    while not iothread.engine_warmed.is_set():
+        # re-checked: it may have been set and the thread exited since the test above
+        if not iothread.is_alive() and not iothread.engine_warmed.is_set():
+            logger.error("io thread exited before it warmed the async engine")
+            return
+        await asyncio.sleep(0.01)
+
+
 async def main(window: MainWindow):
     def report_exception2(*args):
         for m in args:
             print("report_exception2", m)
             QTimer.singleShot(0, lambda: QMessageBox.critical(window, f"Exception", f"{m}"))
     asyncio.get_running_loop().set_exception_handler(report_exception2)
+
+    await _wait_for_engine_warmed(window.iothread)
 
     rebuild_pydantic_models()
     echomix_icon = QIcon()
@@ -2377,12 +2400,12 @@ async def main(window: MainWindow):
     window._supervised_listener(
         "transfers_listener", window.transfers_listener, restart_on_finish=True,
     )
-    await window.transfers_model.seed_from_db()
+    window.transfers_model.seed_from_db()
 
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
-    for conv_id in await pending_joiner_join_conversation_ids():
+    for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)

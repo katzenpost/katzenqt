@@ -250,7 +250,7 @@ async def test_seed_from_db_lists_active_and_partial_transfers():
     assert parent_id is not None
 
     model = DownloadsModel()
-    await model.seed_from_db()
+    model.seed_from_db()
     assert model.rowCount() == 2
     rcw_ids = {
         str(model.data(model.index(r, 0), ROLE_TRANSFER_RCW_ID))
@@ -270,3 +270,17 @@ async def test_seed_from_db_lists_active_and_partial_transfers():
         else:
             assert model.data(model.index(r, 0), ROLE_TRANSFER_ACTIVE) is False
             assert model.data(model.index(r, 1), ROLE_TRANSFER_PIECES) == 1
+
+
+def test_seed_from_db_uses_only_the_sync_engine(monkeypatch):
+    """seed_from_db runs on the Qt loop and must never open the async engine:
+    the two loops sharing it is what produced the "Lock is bound to a
+    different event loop" startup crash. Fail loudly if asession is touched."""
+    async def _boom():
+        raise AssertionError("seed_from_db opened the async engine")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(persistent, "asession", _boom)
+    model = DownloadsModel()
+    model.seed_from_db()  # must complete on the sync engine alone
+    assert model.rowCount() == 0
