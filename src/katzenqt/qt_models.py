@@ -241,10 +241,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
     def seed_from_db(self) -> None:
         """Populate rows for resumable substream transfers already on disk.
 
-        A substream is resumable when its peer is still active (currently
-        reading) *or* it has ReceivedPiece rows (paused mid-transfer). The
-        Transfers panel is where substream transfers are paused/resumed, so
-        this seeding keeps the panel populated across a GUI restart.
+        A substream is resumable when its peer is active, paused, failed, or
+        has ReceivedPiece rows. The Transfers panel keeps those transfers
+        visible across a GUI restart.
 
         Sync engine: this runs on the Qt loop and builds Qt model rows, so it
         neither opens the async engine (see persistent.warm_async_engine) nor
@@ -267,17 +266,18 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                     .where(persistent.ReceivedPiece.read_cap == rcw.id)
                 ).one()
                 parent = _substream_parent_name(sess, cp)
-                # Resumable = active, or received something but not yet
-                # assembled to the terminal F (still has pieces outstanding).
-                if cp.active or int(recv_count):
+                if (cp.active or rcw.read_paused or rcw.substream_failure
+                        or int(recv_count)):
                     self.start_transfer(
                         rcw.id, cp.conversation.id, parent,
                         rcw.substream_total_chunks,
                     )
                     if int(recv_count):
                         self.notify_piece(rcw.id, int(recv_count))
-                    if not cp.active:
+                    if rcw.read_paused or not cp.active:
                         self.set_paused(rcw.id, paused=True)
+                    if rcw.substream_failure is not None:
+                        self.fail_transfer(rcw.id, rcw.substream_failure)
 
 
 def _substream_parent_name(sess, cp) -> str:
