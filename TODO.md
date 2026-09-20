@@ -59,93 +59,120 @@ Low priority; re-evaluate when we do the next dependency refresh.
 - [ ] Give uploads their own Transfers-panel rows, pausable and cancelable.
 
 The Transfers panel is receive-only today (`DownloadsModel` seeds from
-substream `ConversationPeer` rows). A large outgoing file is invisible until
-its chat bubble flips to sent, and it can be neither paused nor cancelled.
-Uploads should get their own rows, pausable and cancelable.
+substream `ConversationPeer` rows). An in-progress upload has no row of its
+own; the chat bubble is already visible (pending) but the only way to stop an
+upload is to wait it out.
 
-### How an upload is wired today
+### How an upload is wired (corrected)
 
-- `SendOperation.serialize()` (`models.py:129-187`) splits an oversized message
-  into C-chunks plus a final F-chunk on a fresh `agg_bacap_stream`, creates the
-  indirection `ReadCapWAL(active=False, substream_total_chunks=C+1)`, and
-  appends the I-chunk PlaintextWAL on the **main** conversation stream with
-  `after_stream=agg_bacap_stream` and `indirection=rcw.id`.
-- `_enqueue_outgoing_gcm` (`katzen.py:1147-1178`) persists those rows plus the
-  optimistic `conversationlog` bubble with `network_status=1` and
-  `outgoing_pwal=<I-chunk PWAL id>`.
-- The writer sweep `send_resumable_plaintexts` (`network.py:1660-1732`) asks
-  `PlaintextWAL.find_resendable()` (`persistent.py:730-790`) for dispatchable
-  rows and starts one `start_resending` task per stream, guarded by
-  `__resend_queue` and by "one msg per BACAP stream at a time".
+- `SendOperation.serialize()` (`models.py:131-221`) splits an oversized message
+  into C-chunks plus a final F-chunk on a fresh `agg_bacap_stream`. The main
+  stream gets a **gated I-chunk**
+  `PlaintextWAL(after_stream=agg_bacap_stream, indirection=rcw.id)` and an
+  indirection `ReadCapWAL(substream_total_chunks=C+1,
+  write_cap_id=agg_bacap_stream)`. **All of these rows are committed at send
+  time**, together with the optimistic `ConversationLog` bubble
+  (`network_status=1`, `outgoing_pwal=<I-chunk id>`) by
+  `persistent.append_outbound_chat` (`persistent.py:107-144`).
+- The I-chunk is **not deferred-inserted**; it is *dispatched* only after the
+  substream drains. `PlaintextWAL.find_resendable` (`persistent.py:754-829`)
+  keeps the `after_stream` gate shut while any `PlaintextWAL` remains on
+  `agg_bacap_stream` (`persistent.py:802-808`), and the I-chunk's main-stream
+  BACAP box index is assigned at dispatch in `start_resending` ->
+  `encrypt_write` (`network.py:1876-1895`).
+- Ordering consequence (upload-general, not pause-specific): texts sent during
+  an upload land on the main stream before the I-chunk (the main stream is
+  otherwise idle and the gated I-chunk is excluded from the `row_number()`
+  window), so **recipients render the image after those texts**, while the
+  sender's optimistic row keeps its send-time `conversation_order` and never
+  moves.
+- Completion: the Transfers row disappears when the substream upload finishes,
+  i.e. when the last C/F chunk is ACK'd (`remaining agg PlaintextWAL == 0`).
+  The chat bubble stays pending until the I-chunk is *separately* ACK'd
+  (`SentLog._ensure_sent_log_and_flip_status`, `persistent.py:639-660`). There
+  is therefore no cancel-after-I-chunk case: once the I-chunk can dispatch the
+  upload is already complete.
 
-### Pausing must not block the conversation
+### Phase 1 — display in-progress uploads
 
-Requirement: while an upload is paused the user can keep sending chat
-messages, which means the I-chunk that announces the substream lands at a
-*later* main-stream box index than it would have.
+- Row key: the indirection `ReadCapWAL.id`, known at send time.
+- Numerator: `substream_total_chunks - COUNT(PlaintextWAL WHERE bacap_stream =
+  agg_bacap_stream)` (PWAL rows are deleted per ACK). Denominator:
+  `ReadCapWAL.substream_total_chunks`.
+- New `substream_progress_queue` kinds, kept distinct from the download kinds
+  so existing events/tests are untouched: `upload_started` (rcw_id, conv_id,
+  total, conversation name), `upload_piece` (rcw_id, sent), `upload_completed`
+  (rcw_id), `upload_paused`, `upload_resumed`, `upload_cancelled`.
+- `upload_started`: `persistent.append_outbound_chat` detects the I-chunk in
+  `db_entries` and returns an upload descriptor (conversation name as parent);
+  `network.notify_outbound_chat_sent` (`network.py:83-104`) pushes it
+  post-commit.
+- `upload_piece` / `upload_completed`: `SentLog.mark_sent` resolves `ReadCapWAL`
+  by `write_cap_id == mw.bacap_stream` (non-null total) and counts remaining agg
+  PWALs after the deleting transaction; `drain_mixwal_write_single`
+  (`network.py:377-411`) pushes the event.
+- `DownloadsModel` (`qt_models.py:85+`) becomes direction-aware: a `direction`
+  field plus `ROLE_TRANSFER_DIRECTION`, State text `"Uploading"` /
+  `"Downloading"`; `start_transfer(..., direction="download")` default keeps
+  existing tests green.
+- `transfers_listener` (`katzen.py:1695-1732`) routes the new kinds.
+- `seed_from_db` (`qt_models.py:236-275`) additionally seeds `PlaintextWAL` rows
+  with `indirection IS NOT NULL` where remaining agg PWALs > 0 (remaining==0
+  means the substream already finished, so no row), direction upload, parent
+  name = conversation name; paused state from the Phase-2 marker.
+- Fix the latent `_order` bug at `katzen.py:1664-1672` (`_order` holds
+  `uuid.UUID` but is compared to `str(rcw_id)`, so failed rows can never be
+  dismissed).
 
-This already works with the current gate semantics: `find_resendable` applies
-the `after_id` / `after_stream` conditions **inside** the
-`row_number() OVER (PARTITION BY bacap_stream)` window, so a gated-shut
-I-chunk is excluded from the window entirely and a later eligible row on the
-same stream gets `rownum=1` and dispatches. Worth verifying while implementing:
-that `row_number()` has **no `ORDER BY`**, so per-stream pick order currently
-relies on scan order.
+### Phase 2 — pause
 
-Consequence to decide: local vs wire render order. The outgoing bubble's
-`conversation_order` is fixed at send time, so the sender sees the image
-*before* messages sent during the pause, while recipients render it in
-arrival order, i.e. after. Either re-order the local row on resume or accept
-the divergence deliberately.
+- Persist a per-stream marker: `WriteCapWAL.paused: bool` (one row per stream,
+  mirrors receive-side `ConversationPeer.active`). New Alembic migration with
+  `down_revision='c4f1a8b2e9d7'` (the current chain head,
+  `add_substream_total_chunks_to_readcapwal`).
+- `find_resendable` also excludes streams whose `WriteCapWAL.paused` is True.
+- Add `_inflight_writes: dict[uuid.UUID, asyncio.Task]` (the missing write-side
+  analogue of `_inflight_reads`, `network.py:69`); register where `write_task`
+  is created (`network.py:1582`), pop in `_on_write_done`.
+- `pause_upload(agg_bacap_stream)`: set the marker; cancel the in-flight write
+  task; delete pending `is_read=False` MixWAL rows for the stream; discard
+  `__resend_queue` (`draining_right_now` is cleared by the done-callback); poke
+  `resendable_event` / `__mixwal_updated`; fire `upload_paused`.
+- `resume_upload`: clear the marker, poke, fire `upload_resumed`.
+- `transfers_context_menu` (`katzen.py:1639-1693`) branches on direction;
+  Pause/Resume enabled per that row's own direction and state (mirror
+  `pause_peer_reads` / `resume_peer_reads`, `network.py:1309-1376`).
 
-### Pause mechanics (mirror `pause_peer_reads`, `network.py:1210-1254`)
+### Phase 3 — cancel (requires order-based rendering first)
 
-- Stop the sweep from re-picking the substream's C/F rows: a persisted pause
-  marker (nullable column on PlaintextWAL, needing an Alembic migration —
-  precedent `c4f1a8b2e9d7`) or a persisted paused-stream set.
-- Cancel the in-flight write task and its ARQ, delete pending `is_read=0`
-  MixWAL rows for `agg_bacap_stream` so the drain sweep cannot re-cast them,
-  and discard the stream from `__resend_queue`.
-- **Blocker:** there is no write-side analogue of the `_inflight_reads`
-  registry (`network.py:61`). Write tasks are tracked only loosely via
-  `on_error(t, ...)` (`network.py:1732`) and the `draining_right_now` set, so
-  a per-stream write-task registry is needed before a pause can cancel
-  reliably.
-- Resume: clear the marker and poke `resendable_event` / `__mixwal_updated`.
+Cancel exists only while the upload is live (remaining agg PWAL > 0 and the
+I-chunk `PlaintextWAL.indirection == rcw_id` still present); if the substream
+has completed, refuse. **Prerequisite:** deleting a middle `ConversationLog`
+row exposes the COUNT-based ordering hazard, so land the backlog ordering fix
+first:
 
-### Cancel mechanics
+- `persistent.next_conversation_order` -> `coalesce(func.max(conversation_order),
+  -1) + 1` (keep the per-conversation lock).
+- Make `ConversationLogModel` gap-tolerant: cache the ordered
+  `conversation_order` values and map `index.row()` -> actual order in
+  `data()` / `index()`; fetch new orders on growth, reset on shrink. Drop the
+  `index_row == conversation_order` assumption (`qt_models.py:741`).
 
-- Cancel is clean only while the I-chunk PlaintextWAL still exists (i.e. has
-  not reached SentLog). Then delete: the substream C/F PlaintextWAL rows, the
-  I-chunk PlaintextWAL, the indirection ReadCapWAL, the `agg_bacap_stream`
-  WriteCapWAL, that stream's MixWAL rows, **and** the optimistic
-  `conversationlog` row — the last is mandatory because its `outgoing_pwal`
-  foreign key points at the I-chunk (`katzen.py:1176`).
-- Boxes already ACK'd at couriers/replicas are orphaned but harmless: without
-  the I-chunk nobody ever learns the substream read cap, so they are
-  unreachable and expire.
-- Once the I-chunk *has* been sent, recipients may already be downloading, so
-  cancel must either be refused or degrade to "remove the local copy only".
-  Decide which.
+Then `cancel_upload(rcw_id)`: cancel the in-flight write; in one transaction
+delete the agg C/F `PlaintextWAL` rows, the I-chunk `PlaintextWAL`, the
+indirection `ReadCapWAL`, the `agg_bacap_stream` `WriteCapWAL`, that stream's
+MixWAL rows, and the optimistic `ConversationLog` row (its `outgoing_pwal` FK
+forces this); discard `__resend_queue`; fire `upload_cancelled` and wake
+`conversation_update_queue`.
 
-### GUI surface
+### Tests
 
-- `DownloadsModel` (`qt_models.py:78+`) becomes direction-aware: a direction
-  role/column distinguishing upload from download rows, and Pause/Resume/Cancel
-  menu entries that apply per direction (each entry's enablement must follow
-  its own direction and state).
-- `substream_progress_queue` (`network.py:92`) gains write-side events
-  (upload started / chunk-acked / completed / paused / resumed / cancelled);
-  today all its push sites are receive-side.
-- Upload progress numerator: `substream_total_chunks - COUNT(PlaintextWAL
-  WHERE bacap_stream = agg_bacap_stream)`, since PlaintextWAL rows are deleted
-  as each chunk is ACK'd. The denominator is already persisted on the sender's
-  indirection ReadCapWAL.
-- Row key: the indirection `ReadCapWAL.id`, which mirrors the download side
-  and is known before dispatch.
-- Startup seeding: uploads have no `ConversationPeer` row, so seed from
-  PlaintextWAL rows with `indirection IS NOT NULL` (an in-flight upload's
-  I-chunk).
+- `tests/test_downloads_model.py`: direction role, `"Uploading"` state, upload
+  seeding (completed uploads skipped).
+- `tests/test_network_fake.py`: `upload_started` / `upload_piece` /
+  `upload_completed` events; pause/resume/cancel.
+- Ordering: delete-middle-row then append uses old MAX+1 with no unique
+  violation; `test_concurrent_write_orders.py:90` still passes.
 
 ---
 
