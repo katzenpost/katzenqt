@@ -22,7 +22,6 @@ import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
 import asyncio
 import traceback
-import time
 import uuid
 from pathlib import Path
 from collections.abc import Awaitable, Callable, Hashable, Iterable
@@ -754,32 +753,47 @@ async def start_background_threads(connection: ThinClient) -> None:
     """Run the network workers and join their requests before returning."""
     install_stats_counters(connection)
     workers: list[asyncio.Task[None]] = [
-        create_task(provision_read_caps(connection)),
+        create_task(_supervised(provision_read_caps, connection)),
     ]
     stopping = asyncio.create_task(__should_quit.wait())
     try:
         if not await _wait_for_connection_or_shutdown():
             return
         workers.extend((
-            create_task(drain_mixwal(connection)),
-            create_task(send_resendable_plaintexts(connection)),
-            create_task(readables_to_mixwal(connection)),
+            create_task(_supervised(drain_mixwal, connection)),
+            create_task(_supervised(send_resendable_plaintexts, connection)),
+            create_task(readables_to_mixwal_supervised(connection)),
         ))
         done, _ = await asyncio.wait(
             [*workers, stopping], return_when=asyncio.FIRST_COMPLETED,
         )
         for task in done:
             task.result()
+        if stopping not in done:
+            # A worker returning while we are not shutting down is a bug, not
+            # a shutdown. Surfacing it here beats tearing the stack down
+            # silently: the caller owns the io loop, and in the GUI that loop
+            # stopping wedges every later run_in_io forever.
+            logger.critical(
+                "network worker returned without a shutdown request; "
+                "stopping the stack",
+            )
     finally:
         await _cancel_and_join((*workers, stopping))
 
+def _failure_reason(exc: BaseException) -> str:
+    """A bounded, printable reason for a failed received transfer.
+
+    The exception is raised while parsing second-party content, so its text
+    can embed peer-chosen bytes of any length. The reason is persisted and
+    rendered in the transfers panel, so keep only the exception type. The
+    full exception is already logged with a traceback.
+    """
+    return f"{type(exc).__name__}: {exc}"
+
+
 async def drain_mixwal(connection: ThinClient):
-    try:
-        await drain_mixwal2(connection) # todo why the fuck does this not catch ?
-    except Exception as e:  # pragma: no cover - defensive: drain_mixwal2 handles its own errors
-        logger.critical("drain_mixwal: exception: %s", e, exc_info=True)
-        import traceback
-        traceback.print_exc()
+    await drain_mixwal2(connection)
 
 
 async def _remint_mixwal(mw: persistent.MixWAL, fresh) -> bool:
@@ -2023,13 +2037,14 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
               rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
               if rcw_row is not None:
                   rcw_row.next_index = rcr.next_message_box_index
-                  rcw_row.substream_failure = f"{type(e).__name__}: {e}"
+                  rcw_row.substream_failure = _failure_reason(e)
                   drop_sess.add(rcw_row)
               mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
               if mw_row is not None:
                   await drop_sess.delete(mw_row)
               await drop_sess.commit()
-          substream_progress_queue.put_nowait(("failed", str(mw.bacap_stream), f"{type(e).__name__}: {e}"))
+          substream_progress_queue.put_nowait(
+              ("failed", str(mw.bacap_stream), _failure_reason(e)))
           give_up()
           return
       else:
@@ -2739,6 +2754,61 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
         if retry_needed:
             await asyncio.sleep(5)
             readables_to_mixwal_event.set()
+
+
+async def readables_to_mixwal_supervised(connection: ThinClient) -> None:
+    """Keep the read-arming loop alive across an unexpected pass failure.
+
+    ``readables_to_mixwal`` is the session's only source of is_read MixWAL
+    rows, and it deliberately re-raises invariant errors (a transient sqlite
+    lock is handled inside it) rather than swallow them. Without this wrapper
+    a single unexpected error would end the task and wedge every read for the
+    rest of the session, so log the traceback loudly and restart the loop.
+    The bounded wait keeps a persistently failing pass from spinning.
+    """
+    await _supervised(
+        readables_to_mixwal, connection, on_restart=readables_to_mixwal_event.set,
+    )
+
+
+_SUPERVISOR_RETRY_S = 5.0
+_SUPERVISOR_RETRY_MAX_S = 60.0
+
+
+async def _supervised(worker, connection: ThinClient, *, on_restart=None) -> None:
+    """Run ``worker`` forever, restarting it after a failure or an early
+    return, paced so a deterministic failure cannot spin.
+
+    The pause is unconditional. _wait_for_connection_or_shutdown returns at
+    once while the daemon is connected, so it paces nothing on its own: a
+    non-transient error (a malformed database, a full disk) would otherwise
+    restart at the speed the error returns, logging a traceback each time.
+    """
+    delay = _SUPERVISOR_RETRY_S
+    while not __should_quit.is_set():
+        try:
+            await worker(connection)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.critical(
+                "%s died; restarting it", getattr(worker, "__name__", worker),
+                exc_info=True,
+            )
+        else:
+            if __should_quit.is_set():
+                return
+            logger.critical(
+                "%s returned early; restarting it",
+                getattr(worker, "__name__", worker),
+            )
+        await asyncio.sleep(delay)
+        delay = min(_SUPERVISOR_RETRY_MAX_S, delay * 2.0)
+        if await _wait_for_connection_or_shutdown(
+            idle_retry_s=_CONNECTION_IDLE_RETRY_S,
+        ) and on_restart is not None:
+            on_restart()
+
 
 def on_error(task, func, *args, **kwargs):
     """Attach ``func(*args, **kwargs)`` to ``task``'s completion, firing only
