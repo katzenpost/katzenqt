@@ -7,7 +7,7 @@ if ! command -v rustup >/dev/null 2>&1; then
     sudo apt-get update
     sudo apt-get install -y --no-install-recommends rustup
 fi
-rustup toolchain install "$toolchain" --profile minimal
+rustup toolchain install "$toolchain" --profile minimal --no-self-update
 rustup run "$toolchain" rustc --version
 rustup run "$toolchain" cargo --version
 cargo=$(rustup which --toolchain "$toolchain" cargo)
