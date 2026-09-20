@@ -4,6 +4,7 @@ APP_NAME = "KatzenQt"
 import argparse
 import asyncio
 import fcntl
+from functools import partial
 import hashlib
 import logging
 import math
@@ -3128,14 +3129,19 @@ async def main(window: MainWindow):
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
+    await _resume_pending_joins(window)
+
+
+async def _resume_pending_joins(window: MainWindow) -> None:
     for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)
             window._supervised_listener(
                 f"_await_voucher_join:{conv_id}",
-                lambda: window._await_voucher_join(convo_state),
+                partial(window._await_voucher_join, convo_state),
             )
+
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html
