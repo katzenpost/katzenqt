@@ -339,7 +339,6 @@ async def _send_one_gcm(
     budget_floor_s = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0"))
     budget_s = max(budget_floor_s, num_pwals * 60.0) if timeout is None else timeout
     connection, bg = await _connect_and_start()
-    connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
         deadline = asyncio.get_event_loop().time() + budget_s
