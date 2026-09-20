@@ -593,14 +593,18 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_IS_TALLY: QByteArray(b'is_tally'),
         }
 
-    @lru_cache(maxsize=10000)
     def index(self, row:int, column:int, parent:QModelIndex | None) -> QModelIndex:
+        """A standard flat-list index: no custom internal id, and out-of-range
+        rows are invalid. QML's TreeView adapts this model through
+        QQmlTreeModelToTableModel, which stores QPersistentModelIndexes; an
+        index identity derived from the row (and cached) desyncs that adapter
+        across inserts and crashes it."""
         if parent and parent.isValid():
             return QModelIndex()
-        qmi = self.createIndex(row,column, id=row*(column+1))
-        return qmi
+        if row < 0 or row >= self._row_count or column < 0:
+            return QModelIndex()
+        return self.createIndex(row, column)
 
-    @lru_cache(maxsize=10000)
     def parent(self, child:QModelIndex|QPersistentModelIndex) -> QModelIndex:
         """Since we don't have any trees here, nochild indices have parents"""
         return QModelIndex()
@@ -674,17 +678,15 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self.dataChanged.emit(top, bottom, [ROLE_CHAT_NETWORK_STATUS])
 
     def _clear_data_caches(self) -> None:
-        """Drop cached model lookups after the row count changed.
+        """Drop cached data()/tally-row cells after the row count changed.
 
         ``data()`` is lru-cached per (model, index, role) and tally rows are
         cached per row id; a reset (deletion) can shift rows and invalidate
-        both, so any count change clears them. The ``index``/``parent`` lru
-        caches are keyed by row too, so they are cleared as well.
+        both, so any count change clears them.
         """
-        for fn in (self.data, self.index, self.parent):
-            clear = getattr(fn, "cache_clear", None)
-            if clear is not None:
-                clear()
+        clear = getattr(self.data, "cache_clear", None)
+        if clear is not None:
+            clear()
         _TALLY_ROW_CACHE.clear()
 
     def columnCount(self, parent:QModelIndex|QPersistentModelIndex|None) -> int:

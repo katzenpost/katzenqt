@@ -145,7 +145,7 @@ def test_create_row_renders_as_a_poll_line():
     _seed_tally_row(convo_id, peer_id, events.build_create(survey_id, sync.full_state(doc)))
 
     m = ConversationLogModel(convo_id)
-    m.row_count = 1
+    m.set_row_count(1)
     idx = m.index(0, 0, QModelIndex())
     assert m.data(idx, ROLE_CHAT_IS_TALLY) is True
     assert m.data(idx, ROLE_CHAT_TALLY_KIND) == "create"
@@ -162,7 +162,7 @@ def test_vote_row_names_the_sender_and_lists_selections():
     )
 
     m = ConversationLogModel(convo_id)
-    m.row_count = 1
+    m.set_row_count(1)
     assert m.data(m.index(0, 0, QModelIndex()), 0) == (
         'me voted on "[Poll] lunch?": chicken: yes, pasta: no'
     )
@@ -178,7 +178,7 @@ def test_recast_row_says_changed_vote():
         events.build_vote(survey_id, {"s0": "maybe"}, version=1),
     )
     m = ConversationLogModel(convo_id)
-    m.row_count = 1
+    m.set_row_count(1)
     assert "changed vote in" in m.data(m.index(0, 0, QModelIndex()), 0)
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "recast"
 
@@ -189,7 +189,7 @@ def test_vote_for_an_unknown_survey_renders_invalid():
     _seed_tally_row(convo_id, peer_id, events.build_vote(survey_id, {"s0": "yes"}))
 
     m = ConversationLogModel(convo_id)
-    m.row_count = 1
+    m.set_row_count(1)
     assert m.data(m.index(0, 0, QModelIndex()), 0) == f"me: vote for unknown poll {survey_id.hex()}"
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "invalid"
 
