@@ -61,3 +61,76 @@ def test_data_exposes_attachment_roles_from_a_persisted_row() -> None:
     assert model.data(index, ROLE_CHAT_MESSAGE_ID) == str(mid)
     # A role outside the exposed set short-circuits to None.
     assert model.data(index, 0xDEAD) is None
+
+
+def _append_row(convo_id: int, order: int, peer_id: int = 1) -> None:
+    with persistent.Session(persistent._engine_sync) as sess:
+        sess.add(persistent.ConversationLog(
+            conversation_id=convo_id, conversation_peer_id=peer_id,
+            conversation_order=order, payload=b"F" + cbor2.dumps({"v": 0, "text": "x"}),
+        ))
+        sess.commit()
+
+
+def test_row_count_is_read_from_the_log_on_refresh() -> None:
+    """rowCount reflects the DB, not a hand-maintained counter."""
+    convo_id = 1234
+    for order in range(3):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+
+    assert model.rowCount(None) == 0  # cache starts empty
+    model.refresh_row_count()
+    assert model.rowCount(None) == 3
+
+
+def test_a_writer_that_forgets_to_notify_still_shows_its_row() -> None:
+    """Regression for the tally/local-send bug: a caller that appends a log
+    row without any notification must not desync the view permanently. The
+    next refresh re-reads the truth from the log."""
+    convo_id = 1235
+    _append_row(convo_id, 0)
+    model = ConversationLogModel(convo_id=convo_id)
+    model.refresh_row_count()
+    assert model.rowCount(None) == 1
+
+    # A writer appends a row but does NOT notify the model.
+    _append_row(convo_id, 1)
+    assert model.rowCount(None) == 1  # cache unchanged, as expected
+
+    # The next notification (any conversation update) self-heals.
+    grown: "list[tuple[int, int]]" = []
+    model.rowsInserted.connect(
+        lambda _p, first, last: grown.append((first, last))
+    )
+    model.refresh_row_count()
+    assert model.rowCount(None) == 2
+    assert grown == [(1, 1)]
+
+
+def test_row_count_shrink_resets_and_clears_caches() -> None:
+    """A future deletion shrinks the count; the model resets."""
+    convo_id = 1236
+    for order in range(3):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+    model.refresh_row_count()
+    assert model.rowCount(None) == 3
+    index = model.index(0, 0, None)
+    assert model.data(index, ROLE_CHAT_MESSAGE_ID) is not None  # warm the cache
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.exec(
+            persistent.select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == convo_id,
+                persistent.ConversationLog.conversation_order == 2,
+            )
+        ).one()
+        sess.delete(row)
+        sess.commit()
+
+    resets: "list[bool]" = []
+    model.modelReset.connect(lambda: resets.append(True))
+    model.refresh_row_count()
+    assert model.rowCount(None) == 2
+    assert resets == [True]

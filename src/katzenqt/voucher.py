@@ -616,12 +616,8 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
         )
         return
 
-    # The UI's ConversationLogModel maps index_row 1:1 to conversation_order
-    # and grows row_count by one per `False` event. Every other path that
-    # appends a ConversationLog row emits this; if the sender's own
-    # announcement doesn't, the view silently falls behind by one row per
-    # announcement (the newest messages stay invisible until another message
-    # nudges the window).
+    # Nudge the local view so the sender's own announcement row shows up
+    # promptly; the model re-reads its row count from the log on this trigger.
     await conversation_update_queue.put((conversation_id, False))
 
     await check_for_new()

@@ -1478,7 +1478,7 @@ class MainWindow(QMainWindow):
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
             return
-        convo_state.conversation_log_model.increment_row_count()
+        convo_state.conversation_log_model.refresh_row_count()
         # And then we can increment the row count to let the UI register it:
 
         # x) Scrolling - two cases:
@@ -2456,6 +2456,7 @@ async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes |
                 sess, convo, tally_events.build_create(survey_id, blob),
             )
             await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
     await network.check_for_new()
     return survey_id
 
@@ -2476,6 +2477,7 @@ async def _io_tally_vote(conversation_id: int, survey_id: bytes, choice) -> bool
                 sess, convo, tally_events.build_vote(survey_id, choice, version),
             )
             await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
     await network.check_for_new()
     return True
 
@@ -2493,6 +2495,7 @@ async def _io_tally_close(conversation_id: int, survey_id: bytes) -> bool:
                 sess, convo, tally_events.build_close(survey_id),
             )
             await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
     await network.check_for_new()
     return True
 
@@ -2539,7 +2542,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
             .select_from(persistent.ConversationLog)
             .where(persistent.ConversationLog.conversation_id == convo.id)
         ).first()
-        convo_state.conversation_log_model.row_count = msg_count
+    convo_state.conversation_log_model.set_row_count(msg_count)
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
     # Append the new conversation to the "real" model window.all_contacts,

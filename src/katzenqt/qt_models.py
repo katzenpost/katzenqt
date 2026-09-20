@@ -533,6 +533,13 @@ def lru_cache_for_data_roles(maxsize=10000):
                 if ret != 1:  # received or sent, but not "pending"
                     indices_with_stable_network_status[index] = ret
                 return ret
+        # Expose a cache_clear so a model reset (row removal) can drop stale
+        # cells: the value cache indexes by QModelIndex, and the stable-status
+        # map keys by index too.
+        def cache_clear() -> None:
+            cached_func.cache_clear()
+            indices_with_stable_network_status.clear()
+        wrapper.cache_clear = cache_clear
         return wrapper
     return decorator
 
@@ -549,6 +556,12 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
+        # The row count is cached and re-read from the database by
+        # refresh_row_count() (called on a conversation-update notification).
+        # Deriving it from the log, rather than incrementing a counter at each
+        # writer, means a writer that forgets to notify cannot desync the view
+        # permanently: the next notification re-reads the truth.
+        self._row_count = 0
 
     def roleNames(self):
         """These map names used in QML to ints used in QAbstractItemModel
@@ -588,26 +601,78 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         """Since we don't have any trees here, nochild indices have parents"""
         return QModelIndex()
     def rowCount(self, parent:QModelIndex|None) -> int:
-        """number of chat messages.
-        we set this initially when loading in add_conversation(),
-        and then each time we receive a message
-        or write a message ourselves.
+        """number of chat messages, from the cached DB count (see
+        refresh_row_count). Qt calls this during layout/paint, so it must not
+        query; the cache is refreshed on each conversation-update notification.
         """
         if not parent or parent.row() == -1:
-            return self.row_count
+            return self._row_count
         return 0
 
-    def increment_row_count(self):
-        qmi = QModelIndex()
-        self.beginInsertRows(qmi, self.row_count-1, self.row_count-1)
-        self.row_count += 1
-        self.endInsertRows()
+    def _query_row_count(self) -> int:
+        with persistent.Session(persistent._engine_sync) as sess:
+            return int(sess.exec(
+                select(persistent.sa.func.count())
+                .select_from(persistent.ConversationLog)
+                .where(
+                    persistent.ConversationLog.conversation_id == self.convo_id
+                )
+            ).one())
+
+    def set_row_count(self, count: int) -> None:
+        """Seed the cached count without emitting signals (startup, when the
+        view has no rows yet)."""
+        self._row_count = int(count)
+        self._clear_data_caches()
+
+    def refresh_row_count(self) -> None:
+        """Re-read the log's row count and reconcile the view.
+
+        Emits a row insertion for growth, resets the model for a shrink
+        (a future message-deletion path), and repaints on no change. Because
+        the count comes from the log, a writer that appends a row without
+        notifying this model self-heals on the next notification instead of
+        desyncing the view permanently.
+        """
+        new_count = self._query_row_count()
+        old_count = self._row_count
+        if new_count == old_count:
+            self.redraw_network_status()
+            return
+        if new_count > old_count:
+            # Growth appends at the end: existing indices keep their meaning,
+            # so the per-index data() cache stays valid and is left alone.
+            qmi = QModelIndex()
+            self.beginInsertRows(qmi, old_count, new_count - 1)
+            self._row_count = new_count
+            self.endInsertRows()
+            return
+        # Shrink: rows were removed. Reset rather than compute a delta, so any
+        # shifted indices and stale cached cells are dropped wholesale.
+        self.beginResetModel()
+        self._row_count = new_count
+        self._clear_data_caches()
+        self.endResetModel()
 
     def redraw_network_status(self):
         """Force the view to refresh without actually changing anything."""
         qmi = QModelIndex()
         self.beginInsertRows(qmi, 1,0)
         self.endInsertRows()
+
+    def _clear_data_caches(self) -> None:
+        """Drop cached model lookups after the row count changed.
+
+        ``data()`` is lru-cached per (model, index, role) and tally rows are
+        cached per row id; a reset (deletion) can shift rows and invalidate
+        both, so any count change clears them. The ``index``/``parent`` lru
+        caches are keyed by row too, so they are cleared as well.
+        """
+        for fn in (self.data, self.index, self.parent):
+            clear = getattr(fn, "cache_clear", None)
+            if clear is not None:
+                clear()
+        _TALLY_ROW_CACHE.clear()
 
     def columnCount(self, parent:QModelIndex|QPersistentModelIndex|None) -> int:
         if parent.isValid():
