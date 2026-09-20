@@ -59,8 +59,9 @@ Low priority; re-evaluate when we do the next dependency refresh.
 - [ ] Give uploads their own Transfers-panel rows, pausable and cancelable.
 
 Progress: Phase 1 (display) landed in `f901bf8` ("transfers: show in-progress
-uploads in the Transfers panel"). Phases 2 (pause) and 3 (cancel + ordering)
-remain; see the per-phase headings below for the exact steps.
+uploads in the Transfers panel"); Phase 2 (pause/resume) landed in `42c0125`
+("transfers: pause and resume in-progress uploads"). Phase 3 (cancel +
+ordering) remains; see the per-phase headings below for the exact steps.
 
 The Transfers panel is receive-only today (`DownloadsModel` seeds from
 substream `ConversationPeer` rows). An in-progress upload has no row of its
@@ -128,11 +129,11 @@ upload is to wait it out.
   `uuid.UUID` but is compared to `str(rcw_id)`, so failed rows can never be
   dismissed).
 
-### Phase 2 — pause
+### Phase 2 — pause (done, `42c0125`)
 
 - Persist a per-stream marker: `WriteCapWAL.paused: bool` (one row per stream,
-  mirrors receive-side `ConversationPeer.active`). New Alembic migration with
-  `down_revision='c4f1a8b2e9d7'` (the current chain head,
+  mirrors receive-side `ConversationPeer.active`). New Alembic migration
+  `b7d2e4f19a3c` with `down_revision='c4f1a8b2e9d7'` (the chain head,
   `add_substream_total_chunks_to_readcapwal`).
 - `find_resendable` also excludes streams whose `WriteCapWAL.paused` is True.
 - Add `_inflight_writes: dict[uuid.UUID, asyncio.Task]` (the missing write-side
