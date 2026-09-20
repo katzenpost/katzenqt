@@ -16,7 +16,7 @@ def is_risky_attachment_extension(basename: str) -> bool:
     """True if ``basename``'s extension names a format whose desktop handler is
     a rich parser/renderer that peer-chosen content could exploit. Pure and
     Qt-free so it can be unit-tested in isolation."""
-    if not basename or "." not in basename:
+    if not isinstance(basename, str) or not basename or "." not in basename:
         return False
     ext = basename.rsplit(".", 1)[-1].strip().lower()
     return ext in _RISKY_ATTACHMENT_EXTENSIONS
