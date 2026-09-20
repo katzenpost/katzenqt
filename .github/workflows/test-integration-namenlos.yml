@@ -12,19 +12,28 @@ jobs:
     timeout-minutes: 60
     outputs:
       tests: ${{ steps.tests.outcome }}
+      verdict: ${{ steps.result.outputs.verdict }}
 
     steps:
+      - name: Set the job deadline
+        run: echo "KQT_CI_DEADLINE=$(($(date +%s) + 3600))" >> "$GITHUB_ENV"
+
       - name: Checkout katzenqt
         uses: actions/checkout@v7
         with:
           path: katzenqt
 
+      - name: Set mixnet paths
+        working-directory: katzenqt
+        run: bash tools/ci-paths.sh
+
       - name: Checkout katzenpost
         uses: actions/checkout@v7
         with:
+          clean: ${{ env.KATZENQT_CHECKOUT_CLEAN }}
           repository: katzenpost/katzenpost
           ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
-          path: katzenqt/katzenpost
+          path: ${{ env.KATZENPOST_CI_PATH }}
 
       - name: Set up Go (for kpclientd build)
         uses: actions/setup-go@v7
@@ -40,20 +49,22 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Select the Rust toolchain
+        working-directory: katzenqt
+        run: bash tools/ci-timeout.sh timeout --kill-after=10s 300s bash tools/ci-rust.sh
+
       - name: Build kpclientd and install deps in parallel
         working-directory: katzenqt
         run: |
           set -euo pipefail
-          ( cd katzenpost/cmd/kpclientd && go build -o "$GITHUB_WORKSPACE/kpclientd" ) &
+          ( cd "$KATZENPOST_DIR/cmd/kpclientd" && exec bash "$GITHUB_WORKSPACE/katzenqt/tools/ci-timeout.sh" go build -o "$GITHUB_WORKSPACE/kpclientd" ) &
           build=$!
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-          uv sync --all-extras --dev --locked
+          trap 'kill "$build" 2>/dev/null || true; wait "$build" 2>/dev/null || true' EXIT
+          bash tools/ci-timeout.sh bash tools/ci-deps.sh
           wait "$build"
+          trap - EXIT
 
-      - name: Start kpclientd against namenlos
-        id: connect
-        continue-on-error: true
+      - name: Configure the namenlos listener
         working-directory: katzenqt
         run: |
           set -euo pipefail
@@ -66,13 +77,29 @@ jobs:
           assert t.count(old) == 1, "client.toml Listen block moved"
           p.write_text(t.replace(old, new, 1))
           PY
+
+      - name: Start kpclientd against namenlos
+        id: connect
+        continue-on-error: true
+        working-directory: katzenqt
+        run: |
+          set -euo pipefail
           "$GITHUB_WORKSPACE/kpclientd" --config config/client.toml > "$GITHUB_WORKSPACE/kpclientd.log" 2>&1 &
+          daemon=$!
+          printf '%s\n' "$daemon" > "$RUNNER_TEMP/katzenqt-kpclientd.pid"
           for _ in $(seq 60); do
+            if ! kill -0 "$daemon" 2>/dev/null; then
+              echo "verdict=failed" >> "$GITHUB_OUTPUT"
+              cat "$GITHUB_WORKSPACE/kpclientd.log"
+              exit 1
+            fi
             if grep -q 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; then
+              echo "verdict=passed" >> "$GITHUB_OUTPUT"
               echo "kpclientd is on the mixnet:"; grep -m1 'Connected to gateway' "$GITHUB_WORKSPACE/kpclientd.log"; exit 0
             fi
             sleep 2
           done
+          echo "verdict=deadline" >> "$GITHUB_OUTPUT"
           echo "kpclientd never reached a namenlos gateway"; cat "$GITHUB_WORKSPACE/kpclientd.log"; exit 1
 
       - name: Run integration tests
@@ -81,22 +108,52 @@ jobs:
         continue-on-error: true
         working-directory: katzenqt
         env:
+          KQT_INTEGRATION_TARGET: "namenlos"
+          KQT_EPOCH_DURATION_S: "1200"
           KATZENQT_DOCKER_INTEGRATION: "1"
           KQT_INTEGRATION_PARALLEL: "4"
         run: |
           mkdir -p integration-results
-          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+          rm -f integration-results/namenlos.json
+          status=0
+          bash tools/ci-timeout.sh .venv/bin/python -m pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
             --dist loadscope -m "not serial_docker and not epoch_driven" \
             --basetemp=integration-results/namenlos \
-            --junitxml=integration-results/namenlos.xml
+            --junitxml=integration-results/namenlos.xml \
+            -p tests.integration._report \
+            --integration-report=integration-results/namenlos.json || status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Check the namenlos result
+        id: result
+        if: ${{ !cancelled() }}
+        working-directory: katzenqt
+        env:
+          CONNECT: ${{ steps.connect.outcome }}
+          PROBE: ${{ steps.connect.outputs.verdict }}
+          TESTS: ${{ steps.tests.outcome }}
+          TEST_EXIT: ${{ steps.tests.outputs.exit_code }}
+        run: |
+          python3 -m tools.integration_result live \
+            --connect="$CONNECT" --probe="$PROBE" --tests="$TESTS" \
+            --exit-code="$TEST_EXIT" --report=integration-results/namenlos.json
+
+      - name: Stop the namenlos client
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/katzenqt-kpclientd.pid"; then
+            kill "$(cat "$RUNNER_TEMP/katzenqt-kpclientd.pid")" 2>/dev/null || true
+          fi
 
       - name: Upload logs
         uses: actions/upload-artifact@v7
-        if: always()
+        if: ${{ always() && env.ACT != 'true' }}
         with:
           name: namenlos-${{ github.run_id }}-${{ github.job }}
           path: |
             katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.json
             katzenqt/integration-results/**/*.out
             katzenqt/integration-results/**/*.err
             kpclientd.log
@@ -104,7 +161,7 @@ jobs:
 
   docker-integration:
     needs: [namenlos-integration]
-    if: always() && needs.namenlos-integration.outputs.tests != 'success'
+    if: ${{ !cancelled() && (needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
     permissions:
       contents: read
       packages: write
@@ -112,18 +169,25 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      - name: Set the job deadline
+        run: echo "KQT_CI_DEADLINE=$(($(date +%s) + 5400))" >> "$GITHUB_ENV"
+
       - name: Checkout katzenqt
         uses: actions/checkout@v7
         with:
           path: katzenqt
 
-      # Checked out under katzenqt/ so katzenqt's Makefile default
-      # KATZENPOST_DIR (="katzenpost", relative to the Makefile) resolves
-      # without modification. Pin to a sha that has every daemon API the
-      # integration test exercises.
+      # Resolve the dependency path before checkout so the runner and
+      # container engine share the generated mixnet files. Pin to a sha
+      # that has every daemon API the integration test exercises.
+      - name: Set mixnet paths
+        working-directory: katzenqt
+        run: bash tools/ci-paths.sh
+
       - name: Checkout katzenpost
         uses: actions/checkout@v7
         with:
+          clean: ${{ env.KATZENQT_CHECKOUT_CLEAN }}
           repository: katzenpost/katzenpost
           # Keep in lockstep with
           # thin_client/.github/workflows/test-integration-docker.yml;
@@ -131,15 +195,37 @@ jobs:
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
           ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
-          path: katzenqt/katzenpost
+          path: ${{ env.KATZENPOST_CI_PATH }}
+
+      - name: Use the local mixnet cache
+        if: ${{ env.ACT == 'true' }}
+        run: |
+          set -euo pipefail
+          cache="$GITHUB_WORKSPACE/.ci-local/mixnet-cache"
+          mkdir -p "$cache"
+          rm -rf "$KATZENPOST_DIR/docker/cache"
+          ln -s "$cache" "$KATZENPOST_DIR/docker/cache"
+
+      - name: Configure the local buildx builder
+        if: ${{ env.ACT == 'true' }}
+        run: |
+          set -euo pipefail
+          builder="katzenqt-${GITHUB_JOB}"
+          docker buildx rm "$builder" >/dev/null 2>&1 || true
+          docker buildx create --name "$builder" --driver docker-container --driver-opt default-load=true >/dev/null
+          echo "BUILDX_BUILDER=$builder" >> "$GITHUB_ENV"
 
       - name: Cache the mixnet build
+        if: ${{ env.ACT != 'true' }}
         uses: actions/cache@v6
         with:
-          path: katzenqt/katzenpost/docker/cache
-          key: ${{ runner.os }}-mixnet-${{ hashFiles('katzenqt/katzenpost/go.sum') }}
+          path: ${{ env.KATZENPOST_CI_PATH }}/docker/cache
+          key: ${{ runner.os }}-mixnet-${{ hashFiles(format('{0}/go.sum', env.KATZENPOST_CI_PATH)) }}
           restore-keys: |
             ${{ runner.os }}-mixnet-
+
+      - name: Set the mixnet base port seed
+        run: printf '%s\n' 62331 > "$KATZENPOST_DIR/docker/.base_port_seed"
 
       - name: Configure podman socket
         run: systemctl --user start podman.socket || true
@@ -158,7 +244,12 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Select the Rust toolchain
+        working-directory: katzenqt
+        run: bash tools/ci-timeout.sh timeout --kill-after=10s 300s bash tools/ci-rust.sh
+
       - name: Log in to GitHub Container Registry
+        if: ${{ env.ACT != 'true' }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin || true
@@ -167,12 +258,12 @@ jobs:
         id: start_mixnet
         run: |
           set -euo pipefail
-          ( cd katzenqt/katzenpost/docker && make base_port=62331 start wait ) &
+          ( cd "$KATZENPOST_DIR/docker" && exec bash "$GITHUB_WORKSPACE/katzenqt/tools/ci-timeout.sh" make base_port=62331 start wait ) &
           mixnet=$!
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-          ( cd katzenqt && uv sync --all-extras --dev --locked )
+          trap 'kill "$mixnet" 2>/dev/null || true; wait "$mixnet" 2>/dev/null || true' EXIT
+          ( cd katzenqt && bash tools/ci-timeout.sh bash tools/ci-deps.sh )
           wait "$mixnet"
+          trap - EXIT
 
       - name: Brief pause so the mixnet is fully ready
         run: sleep 30
@@ -185,39 +276,47 @@ jobs:
           KQT_INTEGRATION_PARALLEL: "4"
         run: |
           mkdir -p integration-results
-          .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
+          bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
             --dist loadscope -m "not serial_docker" \
             --basetemp=integration-results/parallel \
             --junitxml=integration-results/parallel.xml
 
       - name: Run serial watchdog integration tests
         working-directory: katzenqt
-        if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' && steps.install_deps.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' }}
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
-          .venv/bin/pytest tests/integration --no-cov -vv -m serial_docker \
+          bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -m serial_docker \
             --basetemp=integration-results/serial \
             --junitxml=integration-results/serial.xml
 
       - name: Stop the mixnet
         if: always()
-        working-directory: katzenqt/katzenpost/docker
-        run: make stop
+        working-directory: ${{ env.KATZENPOST_DIR }}/docker
+        run: timeout --kill-after=10s 60 make stop
+
+      - name: Remove the local buildx builder
+        if: ${{ always() && env.ACT == 'true' }}
+        run: |
+          if [[ -n "${BUILDX_BUILDER:-}" ]]; then
+            docker buildx rm "$BUILDX_BUILDER" || true
+          fi
 
       - name: Upload integration and mixnet logs
         uses: actions/upload-artifact@v7
-        if: always()
+        if: ${{ always() && env.ACT != 'true' }}
         with:
           name: mixnet-${{ github.run_id }}-${{ github.job }}
           path: |
             katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.json
             katzenqt/integration-results/**/*.out
             katzenqt/integration-results/**/*.err
-            katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
-            katzenqt/katzenpost/docker/mixnet-alpine/*/*/*.log
+            ${{ env.KATZENPOST_DIR }}/docker/mixnet-alpine/*/*.log
+            ${{ env.KATZENPOST_DIR }}/docker/mixnet-alpine/*/*/*.log
 
   epoch-integration:
     runs-on: ubuntu-latest
@@ -227,25 +326,55 @@ jobs:
       packages: write
 
     steps:
+      - name: Set the job deadline
+        run: echo "KQT_CI_DEADLINE=$(($(date +%s) + 2700))" >> "$GITHUB_ENV"
+
       - name: Checkout katzenqt
         uses: actions/checkout@v7
         with:
           path: katzenqt
 
+      - name: Set mixnet paths
+        working-directory: katzenqt
+        run: bash tools/ci-paths.sh
+
       - name: Checkout katzenpost
         uses: actions/checkout@v7
         with:
+          clean: ${{ env.KATZENQT_CHECKOUT_CLEAN }}
           repository: katzenpost/katzenpost
           ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
-          path: katzenqt/katzenpost
+          path: ${{ env.KATZENPOST_CI_PATH }}
+
+      - name: Use the local mixnet cache
+        if: ${{ env.ACT == 'true' }}
+        run: |
+          set -euo pipefail
+          cache="$GITHUB_WORKSPACE/.ci-local/mixnet-cache"
+          mkdir -p "$cache"
+          rm -rf "$KATZENPOST_DIR/docker/cache"
+          ln -s "$cache" "$KATZENPOST_DIR/docker/cache"
+
+      - name: Configure the local buildx builder
+        if: ${{ env.ACT == 'true' }}
+        run: |
+          set -euo pipefail
+          builder="katzenqt-${GITHUB_JOB}"
+          docker buildx rm "$builder" >/dev/null 2>&1 || true
+          docker buildx create --name "$builder" --driver docker-container --driver-opt default-load=true >/dev/null
+          echo "BUILDX_BUILDER=$builder" >> "$GITHUB_ENV"
 
       - name: Cache the mixnet build
+        if: ${{ env.ACT != 'true' }}
         uses: actions/cache@v6
         with:
-          path: katzenqt/katzenpost/docker/cache
-          key: ${{ runner.os }}-mixnet-${{ hashFiles('katzenqt/katzenpost/go.sum') }}
+          path: ${{ env.KATZENPOST_CI_PATH }}/docker/cache
+          key: ${{ runner.os }}-mixnet-${{ hashFiles(format('{0}/go.sum', env.KATZENPOST_CI_PATH)) }}
           restore-keys: |
             ${{ runner.os }}-mixnet-
+
+      - name: Set the mixnet base port seed
+        run: printf '%s\n' 62331 > "$KATZENPOST_DIR/docker/.base_port_seed"
 
       - name: Configure podman socket
         run: systemctl --user start podman.socket || true
@@ -258,7 +387,12 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Select the Rust toolchain
+        working-directory: katzenqt
+        run: bash tools/ci-timeout.sh timeout --kill-after=10s 300s bash tools/ci-rust.sh
+
       - name: Log in to GitHub Container Registry
+        if: ${{ env.ACT != 'true' }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin || true
@@ -266,12 +400,12 @@ jobs:
       - name: Build a short-epoch mixnet and install deps in parallel
         run: |
           set -euo pipefail
-          ( cd katzenqt/katzenpost/docker && make base_port=62331 epoch_duration=30s start ) &
+          ( cd "$KATZENPOST_DIR/docker" && exec bash "$GITHUB_WORKSPACE/katzenqt/tools/ci-timeout.sh" make base_port=62331 epoch_duration=30s start ) &
           mixnet=$!
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev cargo
-          ( cd katzenqt && uv sync --all-extras --dev --locked )
+          trap 'kill "$mixnet" 2>/dev/null || true; wait "$mixnet" 2>/dev/null || true' EXIT
+          ( cd katzenqt && bash tools/ci-timeout.sh bash tools/ci-deps.sh )
           wait "$mixnet"
+          trap - EXIT
 
       # Not `make wait`: that runs fetch --require-ready, which compares each
       # node's epoch against epochtime.Now(). The binaries are built with the
@@ -282,14 +416,14 @@ jobs:
       # command from the Makefile rather than rewriting it here, so the
       # engine, network name, mounts and image stay whatever it decides.
       - name: Wait for the mixnet to publish a usable consensus
-        working-directory: katzenqt/katzenpost/docker
+        working-directory: ${{ env.KATZENPOST_DIR }}/docker
         run: |
           set -euo pipefail
           test -f mixnet-alpine/running.stamp
           make base_port=62331 mixnet-alpine/client/thinclient-bridge.toml
           cmd=$(make base_port=62331 -n wait | sed 's/\\$//' | tr '\n' ' ')
           test "$(grep -c -o -- '--require-ready' <<<"$cmd")" = 1
-          timeout 600 bash -c "${cmd/ --require-ready/}"
+          bash "$GITHUB_WORKSPACE/katzenqt/tools/ci-timeout.sh" timeout 600 bash -c "${cmd/ --require-ready/}"
 
       - name: Brief pause so the mixnet settles
         run: sleep 30
@@ -300,22 +434,54 @@ jobs:
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
-          .venv/bin/pytest tests/integration --no-cov -vv -m epoch_driven \
+          bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -m epoch_driven \
             --basetemp=integration-results/epoch \
             --junitxml=integration-results/epoch.xml
 
       - name: Stop the mixnet
         if: always()
-        working-directory: katzenqt/katzenpost/docker
-        run: make stop
+        working-directory: ${{ env.KATZENPOST_DIR }}/docker
+        run: timeout --kill-after=10s 60 make stop
+
+      - name: Remove the local buildx builder
+        if: ${{ always() && env.ACT == 'true' }}
+        run: |
+          if [[ -n "${BUILDX_BUILDER:-}" ]]; then
+            docker buildx rm "$BUILDX_BUILDER" || true
+          fi
 
       - name: Upload integration and mixnet logs
         uses: actions/upload-artifact@v7
-        if: always()
+        if: ${{ always() && env.ACT != 'true' }}
         with:
           name: epoch-${{ github.run_id }}-${{ github.job }}
           path: |
             katzenqt/integration-results/*.xml
+            katzenqt/integration-results/**/*.json
             katzenqt/integration-results/**/*.out
             katzenqt/integration-results/**/*.err
-            katzenqt/katzenpost/docker/mixnet-alpine/*/*.log
+            ${{ env.KATZENPOST_DIR }}/docker/mixnet-alpine/*/*.log
+
+  integration-result:
+    needs: [namenlos-integration, docker-integration, epoch-integration]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Set the job deadline
+        run: echo "KQT_CI_DEADLINE=$(($(date +%s) + 300))" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check integration results
+        env:
+          LIVE_JOB: ${{ needs.namenlos-integration.result }}
+          LIVE: ${{ needs.namenlos-integration.outputs.verdict }}
+          DOCKER: ${{ needs.docker-integration.result }}
+          EPOCH: ${{ needs.epoch-integration.result }}
+        run: |
+          python3 -m tools.integration_result final \
+            --live-job="$LIVE_JOB" --live="$LIVE" \
+            --docker="$DOCKER" --epoch="$EPOCH"
