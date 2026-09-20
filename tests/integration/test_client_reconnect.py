@@ -60,6 +60,7 @@ from tests.integration._bounce_helpers import (
     epoch_duration_s,
     PhaseStopwatch,
 )
+from tests.integration._bounce_helpers import budget_for
 
 
 
@@ -75,13 +76,13 @@ class _ReconnectBudgets:
 def _reconnect_budgets(epoch_s: float) -> _ReconnectBudgets:
     if not math.isfinite(epoch_s) or epoch_s <= 0:
         raise ValueError("epoch must be positive finite seconds")
-    commit_s = 300.0
+    commit_s = budget_for(epoch_s, 180.0)
     terminate_s = 15.0 + 5.0
     process_margin_s = 120.0
     writer_sleep_s = math.ceil(epoch_s + 100.0)
     writer_process_s = writer_sleep_s + process_margin_s
     reader_s = max(
-        1500.0,
+        budget_for(epoch_s, 1380.0),
         commit_s + terminate_s + writer_process_s + process_margin_s,
     )
     if reader_s > 7200:
@@ -134,14 +135,18 @@ def test_write_survives_client_reconnect(
     kpclientd_endpoint: tuple[str, int],
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    budgets = _reconnect_budgets(epoch_duration_s())
+    epoch = epoch_duration_s()
+    budgets = _reconnect_budgets(epoch)
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
     log_dir = tmp_path_factory.mktemp("reconnect_logs")
     _bootstrap_voucher(alice_state, bob_state)
 
     # 1. Baseline: Bob's send is ACKed -> the pair is connected and working.
-    baseline = _run_role(bob_state, "chat-session", "demo", "SEND:m0", timeout=750.0)
+    baseline = _run_role(
+        bob_state, "chat-session", "demo", "SEND:m0",
+        timeout=budget_for(epoch, 630.0),
+    )
     assert "STEP_OK:0:SEND:m0" in baseline.stdout + baseline.stderr, (
         f"baseline SEND:m0 did not complete\n"
         f"stdout:\n{baseline.stdout}\nstderr:\n{baseline.stderr}"

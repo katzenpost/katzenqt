@@ -29,6 +29,7 @@ from tests.integration._bounce_helpers import (
     expect_token as _expect_token,
     bootstrap_voucher as _bootstrap_voucher,
 )
+from tests.integration._bounce_helpers import budget_s, deadline_arg
 
 
 def _snapshot_role_state(state: Path, label: str) -> None:
@@ -259,13 +260,16 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     send = _run_role(
-        alice_state, "multi-send", "demo", "m1|m2", timeout=900.0,
+        alice_state, "multi-send", "demo", "m1|m2", timeout=budget_s(780.0),
     )
     assert send.returncode == 0 and "SENT" in _combined(send), send.stdout + send.stderr
 
     # Bob restarts fresh and must receive both in order.
     for expected in ("m1", "m2"):
-        r = _run_role(bob_state, "read", "demo", "900", expected, timeout=1000.0)
+        r = _run_role(
+            bob_state, "read", "demo", deadline_arg(780.0), expected,
+            timeout=budget_s(880.0),
+        )
         assert r.returncode == 0, (
             f"bob failed to read {expected!r}:\n"
             f"stdout tail:\n{r.stdout[-3000:]}\nstderr tail:\n{r.stderr[-3000:]}"
@@ -310,8 +314,8 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
         stdout_path=log_dir / "alice.out", stderr_path=log_dir / "alice.err",
     )
     try:
-        bob_proc.wait(timeout=1200.0)
-        alice_proc.wait(timeout=1200.0)
+        bob_proc.wait(timeout=budget_s(1080.0))
+        alice_proc.wait(timeout=budget_s(1080.0))
     except subprocess.TimeoutExpired:
         bob_proc.kill()
         alice_proc.kill()
@@ -396,30 +400,54 @@ def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
     _bootstrap_voucher(alice_state, bob_state)
 
     # Round 1: each sends one message, the other reads.
-    s1a = _run_role(alice_state, "send", "demo", "hello-from-alice", "--timeout", "450", timeout=750.0)
+    s1a = _run_role(
+        alice_state, "send", "demo", "hello-from-alice", "--timeout",
+        deadline_arg(330.0), timeout=budget_s(630.0),
+    )
     assert s1a.returncode == 0 and "SENT" in _combined(s1a), s1a.stdout + s1a.stderr
 
-    s1b = _run_role(bob_state, "send", "demo", "hello-from-bob", "--timeout", "450", timeout=750.0)
+    s1b = _run_role(
+        bob_state, "send", "demo", "hello-from-bob", "--timeout",
+        deadline_arg(330.0), timeout=budget_s(630.0),
+    )
     assert s1b.returncode == 0 and "SENT" in _combined(s1b), s1b.stdout + s1b.stderr
 
-    r1b = _run_role(bob_state, "read", "demo", "900", "hello-from-alice", timeout=1000.0)
+    r1b = _run_role(
+        bob_state, "read", "demo", deadline_arg(780.0), "hello-from-alice",
+        timeout=budget_s(880.0),
+    )
     assert r1b.returncode == 0, f"bob read1 failed:\n{r1b.stdout}\n{r1b.stderr}"
 
-    r1a = _run_role(alice_state, "read", "demo", "900", "hello-from-bob", timeout=1000.0)
+    r1a = _run_role(
+        alice_state, "read", "demo", deadline_arg(780.0), "hello-from-bob",
+        timeout=budget_s(880.0),
+    )
     assert r1a.returncode == 0, f"alice read1 failed:\n{r1a.stdout}\n{r1a.stderr}"
     print("[r1] bidirectional exchange complete")
 
     # Round 2 — restart scenario. Fresh subprocesses, state loaded from disk.
-    s2a = _run_role(alice_state, "send", "demo", "round2-from-alice", "--timeout", "450", timeout=750.0)
+    s2a = _run_role(
+        alice_state, "send", "demo", "round2-from-alice", "--timeout",
+        deadline_arg(330.0), timeout=budget_s(630.0),
+    )
     assert s2a.returncode == 0 and "SENT" in _combined(s2a), s2a.stdout + s2a.stderr
 
-    s2b = _run_role(bob_state, "send", "demo", "round2-from-bob", "--timeout", "450", timeout=750.0)
+    s2b = _run_role(
+        bob_state, "send", "demo", "round2-from-bob", "--timeout",
+        deadline_arg(330.0), timeout=budget_s(630.0),
+    )
     assert s2b.returncode == 0 and "SENT" in _combined(s2b), s2b.stdout + s2b.stderr
 
-    r2b = _run_role(bob_state, "read", "demo", "900", "round2-from-alice", timeout=1000.0)
+    r2b = _run_role(
+        bob_state, "read", "demo", deadline_arg(780.0), "round2-from-alice",
+        timeout=budget_s(880.0),
+    )
     print(f"[r2] bob read2 stdout tail:\n{r2b.stdout[-2000:]}\nstderr tail:\n{r2b.stderr[-3000:]}")
     assert r2b.returncode == 0, "bob read2 did not find round2-from-alice"
 
-    r2a = _run_role(alice_state, "read", "demo", "900", "round2-from-bob", timeout=1000.0)
+    r2a = _run_role(
+        alice_state, "read", "demo", deadline_arg(780.0), "round2-from-bob",
+        timeout=budget_s(880.0),
+    )
     print(f"[r2] alice read2 stdout tail:\n{r2a.stdout[-2000:]}\nstderr tail:\n{r2a.stderr[-3000:]}")
     assert r2a.returncode == 0, "alice read2 did not find round2-from-bob"
