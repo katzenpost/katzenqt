@@ -461,10 +461,18 @@ class TestAlreadyInductedGuard:
                     persistent.ConversationPeer.name.in_(["alice", "bob"]),
                 )
             )).all()
+            # The own peer's read cap must be the salt-mutated one (the write
+            # cap's 32-byte-key + index), not the un-mutated cap provisioned
+            # before the handshake. Own voter identity and membership hash
+            # both depend on it.
+            conv = await sess.get(persistent.Conversation, conversation_id)
+            own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
+            own_rcw = await sess.get(persistent.ReadCapWAL, own_peer.read_cap_id)
         assert sorted(caps) == sorted([
             b"\x05" * 136, b"\x06" * 136,
         ])
         assert sorted(peer.name for peer in peers) == ["alice", "bob"]
+        assert own_rcw.read_cap == b"\x07" * 136
 
 
 async def _finish(conversation_id: int, pv_id: uuid.UUID) -> None:

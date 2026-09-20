@@ -508,6 +508,21 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         wcw.write_cap = opened.mutated_message_write_cap
         wcw.next_index = opened.mutated_message_write_cap[-_INDEX_LEN:]
         sess.add(wcw)
+        # The handshake mutates the message stream onto the salted sequence.
+        # The own peer's read cap was provisioned from the *un-mutated*
+        # keypair (provision_read_caps); replace it with the salt-mutated read
+        # cap, which is the 32-byte key plus the 104-byte index -- exactly the
+        # cap the inductor recorded for us and the rest of the group holds.
+        # Leaving the un-mutated cap here made our own voter identity (and
+        # membership hash, which self-represents via write_cap[32:]) disagree
+        # with everyone else's view of us.
+        own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
+        if own_peer is not None:
+            own_rcw = await sess.get(persistent.ReadCapWAL, own_peer.read_cap_id)
+            if own_rcw is not None:
+                own_rcw.read_cap = opened.mutated_message_write_cap[32:]
+                own_rcw.next_index = own_rcw.read_cap[-_INDEX_LEN:]
+                sess.add(own_rcw)
         added = []
         remaining = max(0, MAX_GROUP_MEMBERS - await _active_member_count(
             sess, conversation_id,
