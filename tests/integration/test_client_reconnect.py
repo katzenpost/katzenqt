@@ -49,6 +49,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration._outcomes import check_roles
+
 from tests.integration._bounce_helpers import (
     run_role as _run_role,
     spawn_role as _spawn_role,
@@ -191,6 +193,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         if any(t in line for t in ("STEP_OK", "STEP_FAIL", "STEP_POLL", "SESSION_DONE")):
             print(f"[reconnect][alice] {line}")
 
+    check_roles([(alice_proc.returncode, alice_err)])
     assert alice_proc.returncode == 0, (
         f"alice chat-session failed rc={alice_proc.returncode}\n"
         f"stderr:\n{alice_err.read_text()[-3000:]}"
