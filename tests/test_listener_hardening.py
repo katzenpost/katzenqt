@@ -1,8 +1,7 @@
-"""The two UI listeners must survive a per-item error (log-and-continue).
+"""The UI listeners must survive a per-item error (log-and-continue).
 
-``receive_msg_listener`` and ``peer_added_listener`` are bare ``while True:``
-loops; any unexpected exception used to kill them until a full restart,
-silently freezing UI refresh. They now wrap the whole per-item unit
+``receive_msg_listener``, ``peer_added_listener``, and ``transfers_listener``
+are bare ``while True:`` loops; each wraps the whole per-item unit
 (queue-get through UI refresh) in try/except, re-raising only
 ``CancelledError``. Stub-based tests pin that a bad item is logged and the
 loop keeps serving the next one.
@@ -23,12 +22,12 @@ class _BlockedLoop:
     this loop, as ``MainWindow.run_in_io`` does over the thread hop."""
 
     async def run_in_io(self, fn):
-        if asyncio.iscoroutine(fn):
-            # the real caller passes network...queue.get(), a coroutine,
-            # straight to run_coroutine_threadsafe; the get() body only
-            # runs on await.
-            return await fn
-        return await fn()
+        if not asyncio.iscoroutine(fn):
+            # mirror asyncio.run_coroutine_threadsafe's contract: callers
+            # pass a started coroutine (network...queue.get(), not .get),
+            # and a bare callable must fail loudly rather than be tolerated.
+            raise TypeError("A coroutine object is required")
+        return await fn
 
 
 class _FakeQueue:
@@ -205,3 +204,87 @@ class TestPeerAddedDedups:
         await process(conversation_id, "bob")
         # appended once then deduplicated by name
         assert len(_State.contacts_standard_item.rows) == 1
+
+
+class TestTransfersListenerDrainsEvents:
+    """The Transfers listener turns each substream_progress_queue
+    event into a DownloadsModel call, and survives a per-item error via
+    log-and-continue like the other UI listeners."""
+
+    def _fake_transfers_model(self, boom_on="started"):
+        class _Model:
+            def __init__(self):
+                self.calls = []
+
+            def start_transfer(self, rcw_id, conv_id, parent_name, total):
+                self.calls.append(("start", rcw_id, conv_id, parent_name, total))
+                if boom_on == "started":
+                    raise RuntimeError("boom")
+
+            def notify_piece(self, rcw_id, pieces):
+                self.calls.append(("piece", rcw_id, pieces))
+                if boom_on == "piece":
+                    raise RuntimeError("boom")
+
+            def complete_transfer(self, rcw_id):
+                self.calls.append(("complete", rcw_id))
+
+            def set_paused(self, rcw_id, paused):
+                self.calls.append(("paused", rcw_id, paused))
+
+        return _Model()
+
+    @pytest.mark.asyncio
+    async def test_events_are_dispatched_to_the_model(self, monkeypatch):
+        rcw = __import__("uuid").uuid4()
+        queue = _FakeQueue([
+            ("started", rcw, 7, 3, "alice"),
+            ("piece", rcw, 1),
+            ("piece", rcw, 2),
+            ("paused", rcw),
+            ("resumed", rcw),
+            ("completed", rcw),
+        ])
+        monkeypatch.setattr(network, "substream_progress_queue", queue)
+        model = self._fake_transfers_model(boom_on=None)
+        window = _fake_window(transfers_model=model)
+
+        await _run_until_cancelled(
+            katzen.MainWindow.transfers_listener.__get__(window)()
+        )
+
+        assert model.calls == [
+            ("start", rcw, 7, "alice", 3),
+            ("piece", rcw, 1),
+            ("piece", rcw, 2),
+            ("paused", rcw, True),
+            ("paused", rcw, False),  # resumed event -> set_paused(paused=False)
+            ("complete", rcw),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_bad_item_is_logged_and_next_item_still_served(
+        self, monkeypatch, caplog,
+    ):
+        rcw = __import__("uuid").uuid4()
+        queue = _FakeQueue([
+            ("started", rcw, 7, 3, "alice"),  # boom
+            ("piece", rcw, 1),                # must still get through
+        ])
+        monkeypatch.setattr(network, "substream_progress_queue", queue)
+        window = _fake_window(
+            transfers_model=self._fake_transfers_model(boom_on="started"),
+        )
+        with caplog.at_level(logging.ERROR, logger="katzen"):
+            await _run_until_cancelled(
+                katzen.MainWindow.transfers_listener.__get__(window)()
+            )
+
+        assert window.transfers_model.calls == [
+            ("start", rcw, 7, "alice", 3),
+            ("piece", rcw, 1),
+        ]
+        assert any(
+            "transfers_listener: dropping an item after boom" in r.message
+            for r in caplog.records
+        )

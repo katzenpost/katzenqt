@@ -10,10 +10,10 @@ longer reliable here; test_network_fake.py covers that path.
 
 Needs a mixnet whose epoch_duration is short enough to observe a real
 rollover within a reasonable test time, so it is marked epoch_driven and
-run only against one started with a short epoch. Touches no
-containers at all -- purely a timing scenario -- so it's safe to run
-alongside the other integration files, though it's still slow enough
-(one full epoch's wait) to run on its own.
+run only against one started with a short epoch. Touches no containers at
+all -- purely a timing scenario -- so it's safe to run alongside the other
+integration files, though it's still slow enough (one full epoch's wait) to
+run on its own.
 
 Skipped unless KATZENQT_DOCKER_INTEGRATION=1 (see conftest.py).
 """
@@ -26,7 +26,7 @@ import time
 import pytest
 
 from tests.integration._bounce_helpers import (
-    bootstrap_voucher, epoch_duration_s, run_role, spawn_role,
+    bootstrap_voucher, spawn_role, run_role, epoch_duration_s,
 )
 
 # Emitted by network.on_new_pki_document on every epoch advance, whatever
@@ -49,10 +49,16 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
     alice_out = log_dir / "alice.out"
     alice_err = log_dir / "alice.err"
 
+    # Alice's own READ deadline must comfortably outlast the rollover poll
+    # below plus the post-send read wait, or her chat-session would give up
+    # before either has a chance to happen.
+    read_deadline_s = epoch_duration_s() + 480.0
+    rollover_poll_deadline_s = epoch_duration_s() + 100.0
+
     # Alice waits for a message Bob hasn't sent yet: a genuine in-flight
     # read whose envelope will still be sitting there when the epoch rolls.
     alice_proc = spawn_role(
-        alice_state, "chat-session", "demo", "READ:m1:600",
+        alice_state, "chat-session", "demo", f"READ:m1:{read_deadline_s:.0f}",
         stdout_path=alice_out, stderr_path=alice_err,
     )
 
@@ -69,8 +75,9 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
             time.sleep(1.0)
         else:
             raise AssertionError(
-                "no PKI epoch advance observed while alice's read was "
-                f"outstanding\n{alice_err.read_text()[-4000:]}"
+                f"PKI epoch did not advance mid-wait within "
+                f"{3 * epoch_duration_s() + 30.0:.0f}s\n"
+                f"{alice_err.read_text()[-4000:]}"
             )
 
         send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=750.0)
@@ -79,7 +86,7 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
         # If the fix regressed, this hangs on the stale envelope up to the
         # 1200s backstop; bound the wait well under that so a regression
         # fails the test instead of stalling the suite for 20 minutes.
-        alice_proc.wait(timeout=450.0)
+        alice_proc.wait(timeout=180.0)
     except Exception:
         alice_proc.kill()
         raise
@@ -99,6 +106,6 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
     )
     # Assert a rollover really happened rather than trusting the wait above.
     assert _EPOCH_ADVANCE_RE.search(alice_all), (
-        "no epoch advance during alice's read, so no rollover was exercised\n"
+        "no PKI epoch advance during alice's read, so no rollover was exercised\n"
         f"{alice_err.read_text()[-6000:]}"
     )

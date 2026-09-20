@@ -32,13 +32,18 @@ def is_membership_sentinel(digest: bytes) -> bool:
 
 def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
     """Order-independent membership hash of a set of member read caps:
-    dedupe, sort byte-wise, concatenate, SHA-256 under
-    :data:`MEMBERSHIP_DOMAIN`. The caller represents itself as
-    ``write_cap[32:]``."""
+    take each cap's 32-byte public-key prefix, dedupe and sort those
+    byte-wise, concatenate, and SHA-256 under :data:`MEMBERSHIP_DOMAIN`.
+
+    Hashing the prefix (not the whole cap) keeps the digest stable across
+    the index/mutation suffix variants of the same member's read cap — a
+    joiner's pre-mutation cap, the salt-mutated cap the group holds, and
+    future-only read caps starting at a later index all collapse to one
+    member. The caller represents itself as ``write_cap[32:]``."""
     digest = hashlib.sha256()
     digest.update(MEMBERSHIP_DOMAIN)
-    for cap in sorted(set(read_caps)):
-        digest.update(cap)
+    for key in sorted({cap[:32] for cap in read_caps}):
+        digest.update(key)
     return digest.digest()
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
@@ -184,7 +189,17 @@ class SendOperation(BaseModel):
 
         # Put the release in the original bacap stream:
         # 1. We need a ReadCapWal that points to the `agg_bacap_stream`:
-        rcw = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=agg_bacap_stream, active=False)
+        #    substream_total_chunks counts the C-chunks plus the
+        #    final F chunk, so the reader/GUI can render download progress as
+        #    n/total over this substream's ReceivedPiece rows. None means a
+        #    legacy (136-byte) I-chunk where the total is unknowable.
+        total_c_chunks = len([
+            pc for pc in agg if pc.bacap_payload[:1] == b'C'
+        ])
+        rcw = persistent.ReadCapWAL(
+            id=uuid.uuid4(), write_cap_id=agg_bacap_stream,
+            active=False, substream_total_chunks=total_c_chunks + 1,
+        )
         agg.append(rcw)
         # 2. the b'I'ndirection entry needs to point to rcw.id, so the read
         #    cap can be filled once we have received it from clientd, and

@@ -90,6 +90,28 @@ async def test_concurrent_appends_same_conversation_do_not_deadlock():
     assert await _orders(conversation_id) == list(range(n))
 
 
+@pytest.mark.asyncio
+async def test_append_outbound_chat_honours_a_preassigned_log_id():
+    """The file/voice send path pre-assigns ConversationLog.id so cached
+    side-data keys to the rendered row; append_outbound_chat (the io-loop
+    writer the Qt send path now routes through) must carry it through."""
+    conversation_id, peer_id = await _make_conversation()
+    log_id = uuid.uuid4()
+    await persistent.append_outbound_chat(
+        conversation_id=conversation_id,
+        conversation_peer_id=peer_id,
+        new_write_caps=[],
+        db_entries=[],
+        payload=b"voice-note",
+        log_id=log_id,
+    )
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.ConversationLog, log_id)
+    assert row is not None
+    assert row.conversation_id == conversation_id
+    assert row.payload == b"voice-note"
+
+
 def test_lock_blocks_a_genuinely_different_thread():
     # The single-loop test above only exercises the same-thread deadlock
     # this lock was fixed to avoid; it says nothing about the cross-thread

@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: katzenpost/katzenpost
-          ref: 730d6cf458216cc1378fbafcf0e9f28c99ec83d5
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
           path: katzenqt/katzenpost
 
       - name: Set up Go (for kpclientd build)
@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p integration-results
           .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
-            --dist load -m "not serial_docker and not epoch_driven" \
+            --dist loadscope -m "not serial_docker and not epoch_driven" \
             --basetemp=integration-results/namenlos \
             --junitxml=integration-results/namenlos.xml
 
@@ -130,7 +130,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: 730d6cf458216cc1378fbafcf0e9f28c99ec83d5
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
           path: katzenqt/katzenpost
 
       - name: Cache the mixnet build
@@ -186,7 +186,7 @@ jobs:
         run: |
           mkdir -p integration-results
           .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
-            --dist load -m "not serial_docker" \
+            --dist loadscope -m "not serial_docker" \
             --basetemp=integration-results/parallel \
             --junitxml=integration-results/parallel.xml
 
@@ -236,7 +236,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: katzenpost/katzenpost
-          ref: 730d6cf458216cc1378fbafcf0e9f28c99ec83d5
+          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
           path: katzenqt/katzenpost
 
       - name: Cache the mixnet build

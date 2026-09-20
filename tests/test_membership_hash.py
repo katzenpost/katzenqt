@@ -19,10 +19,31 @@ def test_canonical_hash_is_deduped_sorted_and_domained():
     a = b"a" * 136
     b = b"b" * 136
     got = models.canonical_membership_hash([b, a, a])
-    want = hashlib.sha256(models.MEMBERSHIP_DOMAIN + a + b).digest()
+    want = hashlib.sha256(models.MEMBERSHIP_DOMAIN + a[:32] + b[:32]).digest()
     assert got == want
     assert models.canonical_membership_hash([a, b]) == got
     assert not models.is_membership_sentinel(got)
+
+
+def test_canonical_hash_ignores_the_read_cap_index_suffix():
+    """Two caps for the same member (same 32-byte key, different 104-byte
+    index suffix) must collapse to one member, so membership agrees across a
+    joiner's pre-mutation cap, the salt-mutated cap the group holds, and a
+    future-only cap starting at a later index."""
+    key = b"k" * 32
+    own_copy = key + b"\x01" * 104
+    shared_copy = key + b"\x02" * 104
+    other = b"z" * 32 + b"\x03" * 104
+
+    assert (
+        models.canonical_membership_hash([own_copy, other])
+        == models.canonical_membership_hash([shared_copy, other])
+    )
+    # Both copies of one member count once, not twice.
+    assert (
+        models.canonical_membership_hash([own_copy, shared_copy])
+        == models.canonical_membership_hash([own_copy])
+    )
 
 
 def test_sentinels():
