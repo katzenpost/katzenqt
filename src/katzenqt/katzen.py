@@ -1653,44 +1653,39 @@ class MainWindow(QMainWindow):
         if not rcw_id:
             return
         rcw_id = uuid.UUID(rcw_id)
+        transfers_model = view.model()
+        row_data = transfers_model._rows.get(rcw_id, {})
+        api = QMenu(view)
+        if row_data.get("failed", False):
+            rm = api.addAction("Remove")
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is rm:
+                transfers_model.remove_transfer(rcw_id)
+            return
+        if row_data.get("direction", "download") != "download":
+            # Only downloads have a pause/resume primitive
+            # (network.pause_peer_reads); an upload's is the write-side one.
+            return
         with persistent.Session(persistent._engine_sync) as sess:
             solo = (sess.exec(
                 select(persistent.ConversationPeer).where(
                     persistent.ConversationPeer.read_cap_id == rcw_id,
                 )
             )).first()
-        # Check if this transfer is marked as failed in the UI model
-        transfers_model = view.model()
-        row = None
-        for i, rid in enumerate(transfers_model._order):
-            if rid == str(rcw_id):
-                row = i
-                break
-        is_failed = (
-            row is not None and
-            transfers_model._rows.get(rcw_id, {}).get("failed", False)
-        )
-        api = QMenu(view)
-        if is_failed:
-            rm = api.addAction("Remove")
-            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-            if chosen is rm:
-                transfers_model.remove_transfer(rcw_id)
-        else:
-            active = bool(solo.active) if solo is not None else True
-            pgm = api.addAction("Pause download")
-            rgm = api.addAction("Resume download")
-            pgm.setEnabled(active)
-            rgm.setEnabled(not active)
-            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-            if chosen is pgm and active:
-                await self.iothread.run_in_io(
-                    network.pause_peer_reads(bacap_stream=rcw_id),
-                )
-            elif chosen is rgm and not active:
-                await self.iothread.run_in_io(
-                    network.resume_peer_reads(bacap_stream=rcw_id),
-                )
+        active = bool(solo.active) if solo is not None else True
+        pgm = api.addAction("Pause download")
+        rgm = api.addAction("Resume download")
+        pgm.setEnabled(active)
+        rgm.setEnabled(not active)
+        chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+        if chosen is pgm and active:
+            await self.iothread.run_in_io(
+                network.pause_peer_reads(bacap_stream=rcw_id),
+            )
+        elif chosen is rgm and not active:
+            await self.iothread.run_in_io(
+                network.resume_peer_reads(bacap_stream=rcw_id),
+            )
 
     async def transfers_listener(self) -> None:
         """Drain network.substream_progress_queue into the Transfers model.
@@ -1711,9 +1706,18 @@ class MainWindow(QMainWindow):
                     self.transfers_model.start_transfer(
                         rcw_id, conv_id, parent_name, total,
                     )
+                elif kind == "upload_started":
+                    _, _, conv_id, total, parent_name = event
+                    self.transfers_model.start_transfer(
+                        rcw_id, conv_id, parent_name, total, direction="upload",
+                    )
                 elif kind == "piece":
                     self.transfers_model.notify_piece(rcw_id, event[2])
+                elif kind == "upload_piece":
+                    self.transfers_model.notify_piece(rcw_id, event[2])
                 elif kind == "completed":
+                    self.transfers_model.complete_transfer(rcw_id)
+                elif kind == "upload_completed":
                     self.transfers_model.complete_transfer(rcw_id)
                 elif kind == "paused":
                     self.transfers_model.set_paused(rcw_id, paused=True)

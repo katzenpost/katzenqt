@@ -69,6 +69,7 @@ ROLE_TRANSFER_TOTAL = 0x204
 ROLE_TRANSFER_ACTIVE = 0x205  # True = downloading, False = paused
 ROLE_TRANSFER_FAILED = 0x206  # True = failed, False/missing = active or paused
 ROLE_TRANSFER_FAILURE_REASON = 0x207  # reason string for failed transfers
+ROLE_TRANSFER_DIRECTION = 0x208  # "upload" or "download"
 
 _TRANSFER_ROLES = {
     ROLE_TRANSFER_RCW_ID: QByteArray(b"transfer_rcw_id"),
@@ -79,6 +80,7 @@ _TRANSFER_ROLES = {
     ROLE_TRANSFER_ACTIVE: QByteArray(b"transfer_active"),
     ROLE_TRANSFER_FAILED: QByteArray(b"transfer_failed"),
     ROLE_TRANSFER_FAILURE_REASON: QByteArray(b"transfer_failure_reason"),
+    ROLE_TRANSFER_DIRECTION: QByteArray(b"transfer_direction"),
 }
 
 
@@ -87,10 +89,12 @@ class DownloadsModel(QtCore.QAbstractTableModel):
 
     Backs the Transfers QTableView. Columns: Contact, Progress, State, with
     the substream's ReadCapWAL id carried as ROLE_TRANSFER_RCW_ID for the
-    Pause/Resume/Remove actions. Rows are added/updated by MainWindow's
-    transfers_listener (network.substream_progress_queue) and seeded from
-    the database at startup by seed_from_db(). Failed transfers stay visible
-    until dismissed by the user.
+    Pause/Resume/Cancel actions, and ROLE_TRANSFER_DIRECTION distinguishing an
+    upload ("upload", keyed by the indirection ReadCapWAL) from a download
+    ("download", keyed by the substream ReadCapWAL). Rows are added/updated by
+    MainWindow's transfers_listener (network.substream_progress_queue) and
+    seeded from the database at startup by seed_from_db(). Failed transfers
+    stay visible until dismissed by the user.
     """
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -133,7 +137,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             if index.column() == 2:
                 if row.get("failed", False):
                     return f"Failed: {row.get('failure_reason', 'unknown')}"
-                return "Paused" if not row.get("active", True) else "Downloading"
+                if not row.get("active", True):
+                    return "Paused"
+                return "Uploading" if row.get("direction") == "upload" else "Downloading"
             return None
         if role == ROLE_TRANSFER_RCW_ID:
             return str(rcw_id)
@@ -151,11 +157,14 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             return row.get("failed", False)
         if role == ROLE_TRANSFER_FAILURE_REASON:
             return row.get("failure_reason")
+        if role == ROLE_TRANSFER_DIRECTION:
+            return row.get("direction", "download")
         return None
 
     # -- mutations (Qt-listener thread) ------------------------------------
 
-    def start_transfer(self, rcw_id: uuid.UUID, conversation_id, parent_name, total) -> None:
+    def start_transfer(self, rcw_id: uuid.UUID, conversation_id, parent_name, total,
+                       direction: str = "download") -> None:
         if rcw_id in self._rows:
             # Already tracked; refresh the denominator if it became known.
             if total is not None:
@@ -171,6 +180,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             "pieces": 0,
             "total": total,
             "active": True,
+            "direction": direction,
         }
         self._order.append(rcw_id)
         self.endInsertRows()
@@ -273,6 +283,44 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                         self.notify_piece(rcw.id, int(recv_count))
                     if not cp.active:
                         self.set_paused(rcw.id, paused=True)
+
+            self._seed_uploads(sess)
+
+    def _seed_uploads(self, sess) -> None:
+        """Seed Transfers rows for outbound substreams still in flight.
+
+        An in-flight upload is a gated I-chunk: a PlaintextWAL with a non-null
+        ``indirection`` whose target ReadCapWAL carries the chunk total. It has
+        no ConversationPeer row, so it is seeded separately. A substream with
+        no remaining C/F PWALs has already finished (the I-chunk is now
+        dispatchable), so it gets no row; the chat bubble covers the wait for
+        the I-chunk's own ACK.
+        """
+        i_chunks = sess.exec(
+            select(persistent.PlaintextWAL).where(
+                persistent.PlaintextWAL.indirection != None,  # noqa: E711
+            )
+        ).all()
+        for i_chunk in i_chunks:
+            rcw = sess.get(persistent.ReadCapWAL, i_chunk.indirection)
+            if rcw is None or rcw.write_cap_id is None:
+                continue
+            remaining = int(sess.exec(
+                select(persistent.sa.func.count())
+                .select_from(persistent.PlaintextWAL)
+                .where(persistent.PlaintextWAL.bacap_stream == rcw.write_cap_id)
+            ).one())
+            if remaining <= 0:
+                continue
+            conv = sess.get(persistent.Conversation, i_chunk.conversation_id)
+            total = rcw.substream_total_chunks
+            self.start_transfer(
+                rcw.id, i_chunk.conversation_id,
+                conv.name if conv is not None else "",
+                total, direction="upload",
+            )
+            if total is not None:
+                self.notify_piece(rcw.id, total - remaining)
 
 
 def _substream_parent_name(sess, cp) -> str:

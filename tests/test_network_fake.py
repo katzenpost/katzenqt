@@ -3659,3 +3659,144 @@ class TestUnprocessableContentDoesNotWedgeTheStream:
                 persistent.ReadCapWAL, setup["bacap_stream"])).next_index
             assert after != before, "index did not advance past the poisoned box"
         assert setup["bacap_stream"] not in draining
+
+
+# ---------------------------------------------------------------------------
+# Outbound substream (upload) transfer events
+# ---------------------------------------------------------------------------
+
+
+async def _set_up_upload_flow(
+    fake, *, total_chunks: int = 3, chunks_present: int = 2,
+):
+    """Build an outbound substream: an agg WriteCapWAL, its indirection
+    ReadCapWAL (carrying ``substream_total_chunks``), the gated I-chunk on the
+    main stream, ``chunks_present`` agg C/F PWALs, and a write-MixWAL for the
+    first chunk so drain_mixwal_write_single can be driven."""
+    setup = await _insert_write_setup(fake, active=False)
+    agg_kp = await fake.new_keypair(b"\x77" * 32)
+    agg = uuid.uuid4()
+    rcw_id = uuid.uuid4()
+    first_chunk_id = uuid.uuid4()
+    async with persistent.asession() as sess:
+        sess.add(persistent.WriteCapWAL(
+            id=agg, write_cap=agg_kp.write_cap,
+            next_index=agg_kp.first_message_index,
+        ))
+        sess.add(persistent.ReadCapWAL(
+            id=rcw_id, write_cap_id=agg,
+            read_cap=agg_kp.read_cap, next_index=agg_kp.first_message_index,
+            substream_total_chunks=total_chunks,
+        ))
+        sess.add(persistent.PlaintextWAL(
+            id=uuid.uuid4(), bacap_stream=setup["bacap_stream"],
+            conversation_id=setup["conversation_id"], bacap_payload=b"",
+            indirection=rcw_id,
+        ))
+        for i in range(chunks_present):
+            sess.add(persistent.PlaintextWAL(
+                id=first_chunk_id if i == 0 else uuid.uuid4(),
+                bacap_stream=agg,
+                conversation_id=setup["conversation_id"],
+                bacap_payload=b"Cchunk",
+            ))
+        await sess.commit()
+    wcr = await fake.encrypt_write(
+        plaintext=b"Cchunk", write_cap=agg_kp.write_cap,
+        message_box_index=agg_kp.first_message_index,
+    )
+    mw_id = uuid.uuid4()
+    async with persistent.asession() as sess:
+        sess.add(persistent.MixWAL(
+            id=mw_id, plaintextwal=first_chunk_id, bacap_stream=agg,
+            envelope_hash=wcr.envelope_hash,
+            encrypted_payload=wcr.message_ciphertext,
+            envelope_descriptor=wcr.envelope_descriptor,
+            current_message_index=agg_kp.first_message_index,
+            next_message_index=wcr.next_message_box_index,
+            is_read=False,
+        ))
+        await sess.commit()
+    setup.update({"agg": agg, "rcw_id": rcw_id, "mw_id": mw_id})
+    return setup
+
+
+def _drain_progress_queue() -> None:
+    while not network.substream_progress_queue.empty():
+        network.substream_progress_queue.get_nowait()
+
+
+class TestUploadTransferEvents:
+    @pytest.mark.asyncio
+    async def test_notify_outbound_chat_sent_announces_upload(
+        self, fake_thinclient,
+    ):
+        _drain_progress_queue()
+        setup = await _insert_write_setup(fake_thinclient, conv_name="carol-conv")
+        agg = uuid.uuid4()
+        rcw_id = uuid.uuid4()
+        rcw = persistent.ReadCapWAL(
+            id=rcw_id, write_cap_id=agg, substream_total_chunks=3,
+        )
+        i_chunk = persistent.PlaintextWAL(
+            id=uuid.uuid4(), bacap_stream=setup["bacap_stream"],
+            conversation_id=setup["conversation_id"], bacap_payload=b"",
+            indirection=rcw_id,
+        )
+        chunk = persistent.PlaintextWAL(
+            id=uuid.uuid4(), bacap_stream=agg,
+            conversation_id=setup["conversation_id"], bacap_payload=b"Cx",
+        )
+        await network.notify_outbound_chat_sent(
+            conversation_id=setup["conversation_id"],
+            conversation_peer_id=setup["peer_id"],
+            new_write_caps=[agg],
+            db_entries=[chunk, rcw, i_chunk],
+            payload=b"Flocal",
+            final_pwal_id=i_chunk.id,
+        )
+        event = network.substream_progress_queue.get_nowait()
+        assert event == (
+            "upload_started", rcw_id, setup["conversation_id"], 3, "carol-conv",
+        )
+        assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_write_ack_emits_upload_piece(self, fake_thinclient):
+        _drain_progress_queue()
+        setup = await _set_up_upload_flow(
+            fake_thinclient, total_chunks=3, chunks_present=2,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["agg"]},
+        )
+        event = network.substream_progress_queue.get_nowait()
+        assert event == ("upload_piece", setup["rcw_id"], 2)
+        assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_write_ack_completes_upload(self, fake_thinclient):
+        _drain_progress_queue()
+        setup = await _set_up_upload_flow(
+            fake_thinclient, total_chunks=1, chunks_present=1,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["agg"]},
+        )
+        event = network.substream_progress_queue.get_nowait()
+        assert event == ("upload_completed", setup["rcw_id"])
+
+    @pytest.mark.asyncio
+    async def test_main_stream_ack_emits_no_upload_event(self, fake_thinclient):
+        _drain_progress_queue()
+        setup = await _set_up_write_flow(fake_thinclient)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["bacap_stream"]},
+        )
+        assert network.substream_progress_queue.empty()

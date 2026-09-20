@@ -20,6 +20,7 @@ from katzenqt import network, persistent  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
     ROLE_TRANSFER_ACTIVE,
     ROLE_TRANSFER_CONV_ID,
+    ROLE_TRANSFER_DIRECTION,
     ROLE_TRANSFER_FAILED,
     ROLE_TRANSFER_FAILURE_REASON,
     ROLE_TRANSFER_PARENT_NAME,
@@ -283,4 +284,113 @@ def test_seed_from_db_uses_only_the_sync_engine(monkeypatch):
     monkeypatch.setattr(persistent, "asession", _boom)
     model = DownloadsModel()
     model.seed_from_db()  # must complete on the sync engine alone
+    assert model.rowCount() == 0
+
+
+def test_direction_defaults_to_download_and_drives_state_text():
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "download"
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Downloading"
+    model.set_paused(rcw_id, paused=True)
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Paused"
+
+
+def test_upload_direction_renders_uploading_state():
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(
+        rcw_id, conversation_id=7, parent_name="carol", total=4,
+        direction="upload",
+    )
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "upload"
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Uploading"
+    model.notify_piece(rcw_id, pieces=2)
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == "2/4"
+    model.set_paused(rcw_id, paused=True)
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Paused"
+
+
+async def _make_conversation_with_upload(
+    *, remaining_chunks: int, total_chunks: int = 3,
+) -> tuple[int, uuid.UUID]:
+    """Build a conversation plus an in-flight outbound substream.
+
+    Returns ``(conversation_id, indirection_rcw_id)``. The I-chunk on the main
+    stream carries ``indirection``; ``remaining_chunks`` agg-stream C/F PWAL
+    rows are still outstanding.
+    """
+    owner_wcw = persistent.WriteCapWAL(
+        id=uuid.uuid4(), write_cap=b"\x00" * 168, next_index=b"\x00" * 104,
+    )
+    owner_rcw = persistent.ReadCapWAL(
+        id=owner_wcw.id, write_cap_id=owner_wcw.id,
+        read_cap=b"\x00" * 136, next_index=b"\x00" * 104,
+    )
+    agg = uuid.uuid4()
+    indirection_rcw_id = uuid.uuid4()
+    async with persistent.asession() as sess:
+        conv = persistent.Conversation(
+            name="carol-conv", write_cap=owner_wcw.id, first_unread=0,
+        )
+        own_peer = persistent.ConversationPeer(
+            name="me", read_cap_id=owner_rcw.id, active=False,
+            conversation=conv,
+        )
+        conv.own_peer = own_peer
+        sess.add(owner_wcw)
+        sess.add(owner_rcw)
+        sess.add(conv)
+        await sess.flush()
+        conv_id = conv.id
+        sess.add_all((
+            persistent.WriteCapWAL(
+                id=agg, write_cap=b"\x01" * 168, next_index=b"\x00" * 104,
+            ),
+            persistent.ReadCapWAL(
+                id=indirection_rcw_id, write_cap_id=agg,
+                read_cap=b"\x11" * 136, next_index=b"\x22" * 104,
+                substream_total_chunks=total_chunks,
+            ),
+            persistent.PlaintextWAL(
+                id=uuid.uuid4(), bacap_stream=owner_wcw.id,
+                conversation_id=conv_id, bacap_payload=b"",
+                indirection=indirection_rcw_id,
+            ),
+        ))
+        for _ in range(remaining_chunks):
+            sess.add(persistent.PlaintextWAL(
+                id=uuid.uuid4(), bacap_stream=agg,
+                conversation_id=conv_id, bacap_payload=b"Cchunk",
+            ))
+        await sess.commit()
+    return conv_id, indirection_rcw_id
+
+
+@pytest.mark.asyncio
+async def test_seed_from_db_lists_in_flight_upload():
+    conv_id, rcw_id = await _make_conversation_with_upload(
+        remaining_chunks=1, total_chunks=3,
+    )
+    model = DownloadsModel()
+    model.seed_from_db()
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_RCW_ID) == str(rcw_id)
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "upload"
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_PARENT_NAME) == "carol-conv"
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_CONV_ID) == conv_id
+    # 3 total chunks, 1 outstanding -> 2 sent.
+    assert model.data(model.index(0, 1), ROLE_TRANSFER_PIECES) == 2
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Uploading"
+
+
+@pytest.mark.asyncio
+async def test_seed_from_db_skips_completed_upload():
+    """A substream with no remaining C/F PWALs has finished uploading (the
+    gated I-chunk is now dispatchable), so it gets no Transfers row; the chat
+    bubble still shows pending until the I-chunk is ACK'd."""
+    await _make_conversation_with_upload(remaining_chunks=0, total_chunks=3)
+    model = DownloadsModel()
+    model.seed_from_db()
     assert model.rowCount() == 0

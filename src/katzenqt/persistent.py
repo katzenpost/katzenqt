@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, TypeVar
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, NamedTuple, TypeVar
 from .katzen_util import create_task
 if TYPE_CHECKING:
     from typing import AsyncContextManager
@@ -113,7 +113,7 @@ async def append_outbound_chat(
     payload: bytes,
     final_pwal_id: uuid.UUID | None = None,
     log_id: uuid.UUID | None = None,
-) -> None:
+) -> "OutboundUpload | None":
     """Append one outbound chat message's WAL rows and its ConversationLog entry.
 
     This is the GUI send path's writer: it runs on the io loop (invoked via
@@ -125,6 +125,10 @@ async def append_outbound_chat(
     ``log_id`` lets a caller pre-assign the ConversationLog primary key so it
     can key cached side-data (e.g. a sent voice note's playback clip) to the
     id the renderer will resolve against.
+
+    Returns an :class:`OutboundUpload` when the message was an oversized send
+    that opened a substream, so the caller can announce the upload to the
+    Transfers panel; None for an ordinary single-box message.
     """
     async with conversation_log_order_lock(conversation_id):
         async with asession() as sess:
@@ -132,6 +136,9 @@ async def append_outbound_chat(
                 sess.add(WriteCapWAL(id=cap_uuid))
             for obj in db_entries:
                 sess.add(obj)
+            upload = await _outbound_upload_from_entries(
+                sess, conversation_id, db_entries,
+            )
             sess.add(ConversationLog(
                 id=log_id or uuid.uuid4(),
                 conversation_id=conversation_id,
@@ -142,6 +149,57 @@ async def append_outbound_chat(
                 outgoing_pwal=final_pwal_id,
             ))
             await sess.commit()
+            return upload
+
+
+class OutboundUpload(NamedTuple):
+    """A substream file transfer opened by an outbound commit.
+
+    ``total_chunks`` is the substream's C-chunks plus final F (the indirection
+    ``ReadCapWAL.substream_total_chunks``); ``parent_name`` is the conversation
+    name, shown as the Transfers-panel "Contact" for an upload.
+    """
+    rcw_id: uuid.UUID
+    conversation_id: int
+    total_chunks: int | None
+    parent_name: str
+
+
+class UploadAck(NamedTuple):
+    """Upload progress after one substream chunk was ACK'd.
+
+    ``sent`` is ``total - remaining PlaintextWAL rows`` on the substream; equal
+    to ``total`` when the substream has fully drained (the Transfers row is
+    then complete, even though the I-chunk has not yet been dispatched).
+    """
+    rcw_id: uuid.UUID
+    sent: int
+    total: int
+
+
+async def _outbound_upload_from_entries(
+    sess: AsyncSession, conversation_id: int, db_entries: list[SQLModel],
+) -> "OutboundUpload | None":
+    """Describe the substream announced by ``db_entries``, if any.
+
+    An oversized ``SendOperation.serialize()`` emits a gated I-chunk (a
+    PlaintextWAL with a non-null ``indirection``) plus the indirection
+    ReadCapWAL it points at. Ordinary sends have neither.
+    """
+    i_chunk = next(
+        (o for o in db_entries if getattr(o, "indirection", None) is not None),
+        None,
+    )
+    if i_chunk is None:
+        return None
+    rcw = next((o for o in db_entries if o.id == i_chunk.indirection), None)
+    conv = await sess.get(Conversation, conversation_id)
+    return OutboundUpload(
+        rcw_id=i_chunk.indirection,
+        conversation_id=conversation_id,
+        total_chunks=rcw.substream_total_chunks if rcw is not None else None,
+        parent_name=conv.name if conv is not None else "",
+    )
 
 
 def _resolve_alembic_ini() -> Path:
@@ -627,6 +685,33 @@ async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float 
             return True
         await asyncio.sleep(poll_s)
     return False
+
+
+async def upload_progress_after_ack(bacap_stream: uuid.UUID) -> "UploadAck | None":
+    """Upload progress for a just-ACK'd outbound chunk, or None.
+
+    An outbound substream is the `agg_bacap_stream`: it is the only kind of
+    stream whose indirection ``ReadCapWAL`` carries a non-null
+    ``substream_total_chunks``, so a lookup on ``write_cap_id ==
+    bacap_stream`` discriminates it from the main conversation stream (whose
+    own-peer ReadCapWAL has no total) and from inbound substreams (whose
+    ReadCapWAL has no ``write_cap_id``). PWAL rows are deleted as their ACKs
+    land, so the remaining count is the outstanding chunk count.
+    """
+    async with asession() as sess:
+        rcw = (await sess.exec(select(ReadCapWAL).where(
+            ReadCapWAL.write_cap_id == bacap_stream,
+            ReadCapWAL.substream_total_chunks != None,  # noqa: E711
+        ))).first()
+        if rcw is None:
+            return None
+        remaining = int((await sess.exec(
+            select(count()).select_from(PlaintextWAL).where(
+                PlaintextWAL.bacap_stream == bacap_stream,
+            )
+        )).one())
+        total = int(rcw.substream_total_chunks)
+        return UploadAck(rcw_id=rcw.id, sent=total - remaining, total=total)
 
 
 def _read_wcw_precheck(bacap_stream) -> "bytes | None":

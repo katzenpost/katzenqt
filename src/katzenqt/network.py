@@ -91,7 +91,7 @@ async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
     hop is a real cross-thread future wait. ``log_id`` optionally pre-assigns
     the ConversationLog primary key (see ``persistent.append_outbound_chat``).
     """
-    await persistent.append_outbound_chat(
+    upload = await persistent.append_outbound_chat(
         conversation_id=conversation_id,
         conversation_peer_id=conversation_peer_id,
         new_write_caps=new_write_caps,
@@ -101,7 +101,15 @@ async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
         log_id=log_id,
     )
     await conversation_update_queue.put((conversation_id, False))
+    if upload is not None:
+        # A substream file transfer is committed; the Transfers panel tracks
+        # it until the last C/F chunk is ACK'd (see drain_mixwal_write_single).
+        substream_progress_queue.put_nowait((
+            "upload_started", upload.rcw_id, upload.conversation_id,
+            upload.total_chunks, upload.parent_name,
+        ))
     await check_for_new()
+
 
 __mixwal_updated = asyncio.Event()
 __mixwal_updated.set()
@@ -409,6 +417,17 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     if conv_id:
         # update the UX:
         create_task(conversation_update_queue.put((conv_id, True)))
+    progress = await persistent.upload_progress_after_ack(mw.bacap_stream)
+    if progress is not None:
+        # Mirror an outbound substream's chunk progress into the Transfers
+        # panel; the row is done when the last C/F chunk is ACK'd, which is
+        # when the gated I-chunk becomes dispatchable.
+        if progress.sent >= progress.total:
+            substream_progress_queue.put_nowait(("upload_completed", progress.rcw_id))
+        else:
+            substream_progress_queue.put_nowait(
+                ("upload_piece", progress.rcw_id, progress.sent),
+            )
 
 _SUBSTREAM_NAME_PREFIX = models.SUBSTREAM_NAME_PREFIX
 
