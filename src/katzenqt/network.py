@@ -19,6 +19,7 @@ import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
 import asyncio
 import traceback
+import time
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
@@ -829,6 +830,55 @@ async def _try_assemble(sess, rcw_id: "uuid.UUID", terminal_idx_8b: bytes):
     return ("F", chunks, chain, gcm)
 
 
+def _substream_miss_state(
+    started_s: float | None, *, terminal: bool,
+    now_s: float, budget_s: float,
+) -> tuple[float, str | None]:
+    started = now_s if started_s is None else started_s
+    if terminal:
+        return started, "A required box is tombstoned"
+    if now_s - started >= budget_s:
+        return started, "A required box remained unavailable"
+    return started, None
+
+
+async def _record_substream_miss(
+    bacap_stream: uuid.UUID, *, terminal: bool,
+    now_s: float, budget_s: float,
+) -> bool:
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
+        if rcw is None:
+            return False
+        started, failure = _substream_miss_state(
+            rcw.substream_missing_since, terminal=terminal,
+            now_s=now_s, budget_s=budget_s,
+        )
+        rcw.substream_missing_since = started
+        rcw.substream_failure = failure
+        sess.add(rcw)
+        if failure is not None:
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == bacap_stream,
+                )
+            )).all()
+            for peer in peers:
+                peer.active = False
+                sess.add(peer)
+            pending = (await sess.exec(select(persistent.MixWAL).where(
+                persistent.MixWAL.bacap_stream == bacap_stream,
+                persistent.MixWAL.is_read,
+            ))).all()
+            for row in pending:
+                await sess.delete(row)
+        await sess.commit()
+    if failure is not None:
+        substream_progress_queue.put_nowait(("failed", bacap_stream, failure))
+        return True
+    return False
+
+
 async def _discard_substream_release(
     sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
     read_cap: bytes,
@@ -861,9 +911,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   assert len(rcw_read_cap) == 136
   bacap_uuid = mw.bacap_stream
 
-  # Detect substream peers for fail-fast BoxIDNotFound handling: the
-  # I-chunk is gated by after_stream, so the reader only learns of the
-  # substream after every box was written; a not-found is terminal.
+  # Substreams retry missing boxes within their read budget. A tombstone
+  # or an exhausted budget retires the transfer and reports the failure.
   async with persistent.asession() as _pre_sess:
       _cp_row = (await _pre_sess.exec(
           select(persistent.ConversationPeer).where(
@@ -1009,48 +1058,14 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
   except (BoxIDNotFoundError, TombstoneError) as e:
+    failed = False
     if is_substream:
-      # A substream box is unrecoverable: the I-chunk is gated by
-      # after_stream (models.serialize:155), so the reader only learns
-      # of the substream after every box was ACK'd at the courier; a
-      # not-found here means the courier's async replica dispatch failed
-      # and nothing will ever resurrect these boxes.  Deactivate the
-      # peer and delete the MixWAL to stop the amplification.
-      logger.warning(
-          "drain_mixwal_read_single: substream %s (bacap=%s) hit %s; "
-          "deactivating peer — box is unrecoverable",
-          _cp_row.name if _cp_row else "?",
-          bacap_uuid,
-          e,
+      failed = await _record_substream_miss(
+          bacap_uuid, terminal=isinstance(e, TombstoneError),
+          now_s=time.time(), budget_s=read_watchdog_s,
       )
-      try:
-          async with persistent.asession() as _deact_sess:
-              cp = (await _deact_sess.exec(
-                  select(persistent.ConversationPeer).where(
-                      persistent.ConversationPeer.read_cap_id == mw.bacap_stream,
-                  )
-              )).one_or_none()
-              if cp is not None:
-                  cp.active = False
-                  _deact_sess.add(cp)
-              mw_obj = await _deact_sess.get(persistent.MixWAL, mw.id)
-              if mw_obj is not None:
-                  await _deact_sess.delete(mw_obj)
-              await _deact_sess.commit()
-      except Exception:
-          logger.exception(
-              "drain_mixwal_read_single: failed to deactivate dead "
-              "substream bacap=%s", bacap_uuid,
-          )
-    else:
-      # Benign replica read outcomes, not failures (cf. the thin client's
-      # is_expected_outcome). BoxIDNotFound means the stream simply has no
-      # further data yet; the local polling delay handles the next attempt.
-      # Tombstone means the writer deleted this box. Neither warrants an
-      # error to the user: release the stream and wait for more, rather than
-      # wedging it (an uncaught one would strand the stream in
-      # draining_right_now exactly as DatabaseFailure once did).
-      logger.debug("drain_mixwal_read_single: benign replica outcome, nothing to advance: %s", e)
+    if not failed:
+      logger.debug("read box unavailable; retrying %s: %s", bacap_uuid, e)
       await asyncio.sleep(5)
     give_up()
     return
@@ -1112,6 +1127,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     logger.info(f"advancing read to idx {idx_new}")
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = rcr.next_message_box_index
+    rcw.substream_missing_since = None
     sess.add(rcw)
     chunk_type = resp.plaintext[:1]
     chunk_body = resp.plaintext[1:]
@@ -1120,8 +1136,15 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
       cp.active = False
       sess.add(cp)
+      failure = None
+      if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+          failure = "The transfer contains an invalid chunk prefix"
+          rcw.substream_failure = failure
+          sess.add(rcw)
       await sess.delete(mw)
       await sess.commit()
+      if failure is not None:
+          substream_progress_queue.put_nowait(("failed", bacap_uuid, failure))
       draining_right_now.discard(bacap_uuid)  # otherwise this stream is wedged forever with no exception needed
       __mixwal_updated.set()
       return
@@ -1176,7 +1199,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             if cp.name.startswith(_SUBSTREAM_NAME_PREFIX) and parent_peer is None:
                 logger.warning("retiring substream with no parent: %r", cp.name)
                 cp.active = False
+                rcw.substream_failure = "The transfer parent no longer exists"
                 sess.add(cp)
+                sess.add(rcw)
+                substream_progress.append((
+                    "failed", mw.bacap_stream, rcw.substream_failure,
+                ))
             else:
                 if gcm.file_upload is not None:
                     target_conv_id = (
@@ -1202,7 +1230,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                         sess, parent_peer.read_cap_id, rcw.read_cap,
                     )
                     cp.active = False
+                    rcw.substream_failure = None
+                    rcw.substream_missing_since = None
                     sess.add(cp)
+                    sess.add(rcw)
                     convlog_added = added
                     # The transfer is complete (terminal F
                     # assembled and routed). Held until commit.
@@ -1300,6 +1331,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
               rcw_row = await drop_sess.get(persistent.ReadCapWAL, mw.bacap_stream)
               if rcw_row is not None:
                   rcw_row.next_index = rcr.next_message_box_index
+                  rcw_row.substream_failure = f"{type(e).__name__}: {e}"
                   drop_sess.add(rcw_row)
               mw_row = await drop_sess.get(persistent.MixWAL, mw.id)
               if mw_row is not None:
@@ -1418,6 +1450,11 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
             is_substream = cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
         else:
             is_substream = False
+        rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
+        if rcw is not None:
+            rcw.substream_missing_since = None
+            rcw.substream_failure = None
+            sess.add(rcw)
         await sess.commit()
     readables_to_mixwal_event.set()
     if is_substream:
