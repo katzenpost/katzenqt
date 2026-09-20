@@ -8,9 +8,8 @@ from katzenpost_thinclient import ThinClient
 
 from katzenqt import network
 
-pytestmark = pytest.mark.asyncio
 
-
+@pytest.mark.asyncio
 async def test_a_failing_worker_is_paced_before_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -40,6 +39,7 @@ async def test_a_failing_worker_is_paced_before_restart(
     assert slept and slept[0] >= network._SUPERVISOR_RETRY_S
 
 
+@pytest.mark.asyncio
 async def test_an_early_clean_return_restarts_rather_than_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -66,6 +66,7 @@ async def test_an_early_clean_return_restarts_rather_than_exits(
     assert len(calls) == 3
 
 
+@pytest.mark.asyncio
 async def test_drain_mixwal_no_longer_swallows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -85,6 +86,7 @@ def test_failure_reason_drops_peer_chosen_text() -> None:
     assert reason.isprintable()
 
 
+@pytest.mark.asyncio
 async def test_dismissing_an_already_cleared_transfer_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -104,6 +106,7 @@ async def test_dismissing_an_already_cleared_transfer_is_idempotent(
     await network.dismiss_failed_transfer(bacap_stream=uuid.uuid4())
 
 
+@pytest.mark.asyncio
 async def test_a_slow_but_cancellable_join_still_closes_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -132,7 +135,7 @@ async def test_a_slow_but_cancellable_join_still_closes_the_client(
     assert stopped == [True]
 
 
-
+@pytest.mark.asyncio
 async def test_a_join_that_ignores_cancellation_still_closes_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -160,6 +163,7 @@ async def test_a_join_that_ignores_cancellation_still_closes_the_client(
     await asyncio.sleep(0)
 
 
+@pytest.mark.asyncio
 async def test_backoff_resets_after_a_healthy_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
