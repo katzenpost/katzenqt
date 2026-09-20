@@ -441,6 +441,10 @@ class WriteCapWAL(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)
     write_cap: bytes | None = Field(None, min_length=168, max_length=168)
     next_index: bytes | None = Field(None, min_length=104, max_length=104)
+    # Set on an outbound substream's WriteCapWAL to pause its chunk sweep
+    # (find_resendable skips paused streams); the main conversation stream is
+    # never paused. Persisted so a paused upload stays paused across a restart.
+    paused: bool = Field(default=False)
     @classmethod
     def get_by_bacap_uuid(cls, uuid):
         # from typing import ClassVar
@@ -853,7 +857,14 @@ class PlaintextWAL(SQLModel, table=True):
         sent_cte = sa.select(sa.select(SentLog.id).cte('sent_cte'))  # Successfully sent messages
         mixwal_bacap_cte = sa.select(sa.select(MixWAL.bacap_stream).cte('mixwal_bacap_cte'))
         populated_read_cap_cte = sa.select(sa.select(ReadCapWAL.id).where(ReadCapWAL.read_cap != None).cte("populated_read_cap_cte"))
-        populated_write_cap_cte = sa.select(sa.select(WriteCapWAL.id).where(WriteCapWAL.write_cap != None).cte("populated_write_cap_cte"))
+        # A paused stream's rows are withheld from the sweep entirely (the
+        # I-chunk on the main stream is not affected: the main WriteCapWAL is
+        # never paused, and its after_stream gate still holds it back while the
+        # paused substream's rows remain).
+        populated_write_cap_cte = sa.select(sa.select(WriteCapWAL.id).where(
+            WriteCapWAL.write_cap != None,
+            WriteCapWAL.paused == False,  # noqa: E712
+        ).cte("populated_write_cap_cte"))
         # Aliased copy of the table for the after_stream gate's correlated
         # NOT EXISTS subquery. The gate fires when the referenced
         # bacap_stream has no remaining PWALs, which (since mark_sent

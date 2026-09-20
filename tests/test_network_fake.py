@@ -3800,3 +3800,53 @@ class TestUploadTransferEvents:
             fake_thinclient, mw, {setup["bacap_stream"]},
         )
         assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_pause_upload_marks_stream_and_clears_pending_write(
+        self, fake_thinclient,
+    ):
+        _drain_progress_queue()
+        setup = await _set_up_upload_flow(
+            fake_thinclient, total_chunks=3, chunks_present=2,
+        )
+        await network.pause_upload(rcw_id=setup["rcw_id"])
+        async with persistent.asession() as sess:
+            wcw = await sess.get(persistent.WriteCapWAL, setup["agg"])
+            assert wcw.paused is True
+            # The pending write MixWAL was deleted so the sweep cannot re-cast.
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            # Chunk PlaintextWAL rows survive so resume can re-encrypt.
+            remaining = (await sess.exec(
+                select(persistent.PlaintextWAL).where(
+                    persistent.PlaintextWAL.bacap_stream == setup["agg"],
+                )
+            )).all()
+            assert len(remaining) == 2
+        assert network.substream_progress_queue.get_nowait() == (
+            "upload_paused", setup["rcw_id"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_upload_clears_marker(self, fake_thinclient):
+        _drain_progress_queue()
+        setup = await _set_up_upload_flow(
+            fake_thinclient, total_chunks=3, chunks_present=2,
+        )
+        await network.pause_upload(rcw_id=setup["rcw_id"])
+        _drain_progress_queue()
+        await network.resume_upload(rcw_id=setup["rcw_id"])
+        async with persistent.asession() as sess:
+            wcw = await sess.get(persistent.WriteCapWAL, setup["agg"])
+            assert wcw.paused is False
+        assert network.substream_progress_queue.get_nowait() == (
+            "upload_resumed", setup["rcw_id"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_pause_upload_ignores_a_non_upload_rcw(self, fake_thinclient):
+        _drain_progress_queue()
+        setup = await _set_up_write_flow(fake_thinclient)
+        # The main stream's own-peer ReadCapWAL has no write_cap_id, so it is
+        # not an upload and pause is a no-op.
+        await network.pause_upload(rcw_id=setup["bacap_stream"])
+        assert network.substream_progress_queue.empty()

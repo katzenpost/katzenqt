@@ -49,13 +49,20 @@ tally_update_queue: "Tuple[int]" = asyncio.Queue()
 peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 
 # Substream file-transfer progress for the GUI Transfers panel.
-# Events are ``(kind, rcw_id, *extra)``:
+# Download events are ``(kind, rcw_id, *extra)``:
 #   ("started", rcw_id, conversation_id, total_or_None, parent_name)
 #   ("piece",    rcw_id, count_or_None)      # count is pieces received so far
 #   ("completed", rcw_id)
 #   ("paused",   rcw_id)
 #   ("resumed",  rcw_id)
 #   ("failed",   rcw_id, reason_str)         # unprocessable chunk
+# Upload events mirror them under distinct kinds, keyed by the indirection
+# ReadCapWAL id:
+#   ("upload_started",   rcw_id, conversation_id, total_or_None, name)
+#   ("upload_piece",     rcw_id, sent_count)
+#   ("upload_completed", rcw_id)             # last C/F chunk ACK'd
+#   ("upload_paused",    rcw_id)
+#   ("upload_resumed",   rcw_id)
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
 substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
@@ -67,6 +74,11 @@ __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded fr
 # external pause/cancel can stop just one peer's reads
 # instead of quitting the whole drain loop.
 _inflight_reads: "dict[uuid.UUID, asyncio.Task]" = {}
+
+# in-flight drain_mixwal_write_single tasks keyed by bacap_stream, so an
+# upload pause can cancel the one chunk currently being cast (and its daemon
+# ARQ) without disturbing the conversation's own stream.
+_inflight_writes: "dict[uuid.UUID, asyncio.Task]" = {}
 
 #__plaintextwal_updated = asyncio.Event()
 #__plaintextwal_updated.set()
@@ -1395,6 +1407,84 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         substream_progress_queue.put_nowait(("resumed", bacap_stream))
 
 
+async def pause_upload(*, rcw_id: uuid.UUID) -> None:
+    """Pause an outbound substream: mark its WriteCapWAL paused so
+    find_resendable skips its remaining C/F chunks, cancel the in-flight write
+    drain (which also cancels its ARQ at the daemon), and delete the pending
+    write MixWAL row so the drain sweep cannot re-cast it.
+
+    The chunk PlaintextWAL rows are left in place: resume re-encrypts from the
+    stream's saved next_index, and the I-chunk's after_stream gate stays shut
+    while they remain, so the conversation's own stream is unaffected either
+    way. ``rcw_id`` is the indirection ReadCapWAL id (the Transfers row key).
+    """
+    agg = await _upload_stream_for_rcw(rcw_id)
+    if agg is None:
+        return
+    async with persistent.asession() as sess:
+        wcw = await sess.get(persistent.WriteCapWAL, agg)
+        if wcw is not None:
+            wcw.paused = True
+            sess.add(wcw)
+            await sess.commit()
+    task = _inflight_writes.get(agg)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # cancellation is the point
+            pass
+    _inflight_writes.pop(agg, None)
+    __resend_queue.discard(agg)
+    async with persistent.asession() as sess:
+        mw_rows = (await sess.exec(select(persistent.MixWAL).where(
+            persistent.MixWAL.bacap_stream == agg,
+            persistent.MixWAL.is_read == False,  # noqa: E712
+        ))).all()
+        for mw in mw_rows:
+            await sess.delete(mw)
+        await sess.commit()
+    resendable_event.set()
+    __mixwal_updated.set()
+    substream_progress_queue.put_nowait(("upload_paused", rcw_id))
+
+
+async def resume_upload(*, rcw_id: uuid.UUID) -> None:
+    """Resume a paused outbound substream: clear its WriteCapWAL pause marker
+    and poke the writer sweep to dispatch its next C/F chunk from the saved
+    next_index. ``rcw_id`` is the indirection ReadCapWAL id."""
+    agg = await _upload_stream_for_rcw(rcw_id)
+    if agg is None:
+        return
+    async with persistent.asession() as sess:
+        wcw = await sess.get(persistent.WriteCapWAL, agg)
+        if wcw is not None:
+            wcw.paused = False
+            sess.add(wcw)
+            await sess.commit()
+    resendable_event.set()
+    __mixwal_updated.set()
+    substream_progress_queue.put_nowait(("upload_resumed", rcw_id))
+
+
+async def _upload_stream_for_rcw(rcw_id: uuid.UUID) -> "uuid.UUID | None":
+    """The agg_bacap_stream of an outbound substream, from its indirection
+    ReadCapWAL id; None if the row is missing or is not an upload's.
+
+    The main stream's own-peer ReadCapWAL also has a ``write_cap_id``, so the
+    non-null ``substream_total_chunks`` (set only by
+    ``SendOperation.serialize`` for an upload's indirection) is what
+    discriminates the two.
+    """
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+        if rcw is None or rcw.write_cap_id is None:
+            return None
+        if rcw.substream_total_chunks is None:
+            return None
+        return rcw.write_cap_id
+
+
 async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool:
     """Block until either __mixnet_connected is set or __should_quit fires.
 
@@ -1474,6 +1564,7 @@ def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
     next pass), keep the failure loud in the error logs rather than dead, and
     poke __mixwal_updated so the retry is prompt.
     """
+    _inflight_writes.pop(stream, None)
     _done_callback(
         task,
         desc=(
@@ -1599,6 +1690,7 @@ async def drain_mixwal2(connection: ThinClient):
             __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
 
             write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
+            _inflight_writes[mw.bacap_stream] = write_task
             write_task.add_done_callback(
                 lambda task, b=mw.bacap_stream: _on_write_done(task, b, draining_right_now))
 

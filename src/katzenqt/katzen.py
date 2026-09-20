@@ -1663,8 +1663,20 @@ class MainWindow(QMainWindow):
                 transfers_model.remove_transfer(rcw_id)
             return
         if row_data.get("direction", "download") != "download":
-            # Only downloads have a pause/resume primitive
-            # (network.pause_peer_reads); an upload's is the write-side one.
+            active = bool(row_data.get("active", True))
+            pgm = api.addAction("Pause upload")
+            rgm = api.addAction("Resume upload")
+            pgm.setEnabled(active)
+            rgm.setEnabled(not active)
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is pgm and active:
+                await self.iothread.run_in_io(
+                    network.pause_upload(rcw_id=rcw_id),
+                )
+            elif chosen is rgm and not active:
+                await self.iothread.run_in_io(
+                    network.resume_upload(rcw_id=rcw_id),
+                )
             return
         with persistent.Session(persistent._engine_sync) as sess:
             solo = (sess.exec(

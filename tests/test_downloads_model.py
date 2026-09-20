@@ -313,7 +313,7 @@ def test_upload_direction_renders_uploading_state():
 
 
 async def _make_conversation_with_upload(
-    *, remaining_chunks: int, total_chunks: int = 3,
+    *, remaining_chunks: int, total_chunks: int = 3, paused: bool = False,
 ) -> tuple[int, uuid.UUID]:
     """Build a conversation plus an in-flight outbound substream.
 
@@ -347,6 +347,7 @@ async def _make_conversation_with_upload(
         sess.add_all((
             persistent.WriteCapWAL(
                 id=agg, write_cap=b"\x01" * 168, next_index=b"\x00" * 104,
+                paused=paused,
             ),
             persistent.ReadCapWAL(
                 id=indirection_rcw_id, write_cap_id=agg,
@@ -394,3 +395,16 @@ async def test_seed_from_db_skips_completed_upload():
     model = DownloadsModel()
     model.seed_from_db()
     assert model.rowCount() == 0
+
+
+@pytest.mark.asyncio
+async def test_seed_from_db_marks_a_paused_upload_paused():
+    await _make_conversation_with_upload(
+        remaining_chunks=2, total_chunks=3, paused=True,
+    )
+    model = DownloadsModel()
+    model.seed_from_db()
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "upload"
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_ACTIVE) is False
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Paused"

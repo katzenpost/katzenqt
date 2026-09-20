@@ -321,6 +321,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             )
             if total is not None:
                 self.notify_piece(rcw.id, total - remaining)
+            agg_wcw = sess.get(persistent.WriteCapWAL, rcw.write_cap_id)
+            if agg_wcw is not None and agg_wcw.paused:
+                self.set_paused(rcw.id, paused=True)
 
 
 def _substream_parent_name(sess, cp) -> str:
