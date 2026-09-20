@@ -2048,39 +2048,21 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == rcw_id,
                 )
             )).first()
-            rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+            rcw = sess.get(persistent.ReadCapWAL, rcw_id)
             active = bool(solo and solo.active and rcw and not rcw.read_paused)
-        # Check if this transfer is marked as failed in the UI model
-        transfers_model = view.model()
-        row = None
-        for i, rid in enumerate(transfers_model._order):
-            if rid == str(rcw_id):
-                row = i
-                break
-        is_failed = (
-            row is not None and
-            transfers_model._rows.get(rcw_id, {}).get("failed", False)
-        )
-        api = QMenu(view)
-        if is_failed:
-            rm = api.addAction("Remove")
-            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-            if chosen is rm:
-                transfers_model.remove_transfer(rcw_id)
-        else:
-            pgm = api.addAction("Pause download")
-            rgm = api.addAction("Resume download")
-            pgm.setEnabled(active)
-            rgm.setEnabled(not active)
-            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-            if chosen is pgm and active:
-                await self.iothread.run_in_io(
-                    network.pause_peer_reads(bacap_stream=rcw_id),
-                )
-            elif chosen is rgm and not active:
-                await self.iothread.run_in_io(
-                    network.resume_peer_reads(bacap_stream=rcw_id),
-                )
+        pgm = api.addAction("Pause download")
+        rgm = api.addAction("Resume download")
+        pgm.setEnabled(active)
+        rgm.setEnabled(not active)
+        chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+        if chosen is pgm and active:
+            await self.iothread.run_in_io(
+                network.pause_peer_reads(bacap_stream=rcw_id),
+            )
+        elif chosen is rgm and not active:
+            await self.iothread.run_in_io(
+                network.resume_peer_reads(bacap_stream=rcw_id),
+            )
 
     async def transfers_listener(self) -> None:
         """Drain network.substream_progress_queue into the Transfers model.

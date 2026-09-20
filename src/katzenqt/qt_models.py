@@ -266,13 +266,20 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 self._rows[rcw_id].get("raw_bytes", 0)
             )
             self._rows[rcw_id]["rate_started_at"] = time.monotonic()
+            self._rows[rcw_id]["failed"] = False
+            self._rows[rcw_id].pop("failure_reason", None)
         row = self._idx(rcw_id)
         idx0 = self.index(row, 2)
         idx1 = self.index(row, 3)
         self.dataChanged.emit(
             idx0, idx1,
-            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_ACTIVE,
-             ROLE_TRANSFER_RATE],
+            [
+                QtCore.Qt.ItemDataRole.DisplayRole,
+                ROLE_TRANSFER_ACTIVE,
+                ROLE_TRANSFER_FAILED,
+                ROLE_TRANSFER_FAILURE_REASON,
+                ROLE_TRANSFER_RATE,
+            ],
         )
 
     def fail_transfer(self, rcw_id: uuid.UUID, reason: str) -> None:
@@ -281,8 +288,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         The row stays visible in the Transfers panel so the user can see
         what failed and why. Use remove_transfer() to dismiss it.
 
-        TODO: When removing a failed transfer, also purge any partial
-        ReceivedPiece rows from the database to free disk space.
+        The caller removes persisted transfer state before dismissing it.
         """
         if rcw_id not in self._rows:
             return
@@ -294,8 +300,13 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         idx3 = self.index(row, 3)  # Rate column (forced to 0 B/s)
         self.dataChanged.emit(
             idx2, idx3,
-            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_FAILED,
-             ROLE_TRANSFER_FAILURE_REASON, ROLE_TRANSFER_RATE],
+            [
+                QtCore.Qt.ItemDataRole.DisplayRole,
+                ROLE_TRANSFER_ACTIVE,
+                ROLE_TRANSFER_FAILED,
+                ROLE_TRANSFER_FAILURE_REASON,
+                ROLE_TRANSFER_RATE,
+            ],
         )
 
     def remove_transfer(self, rcw_id: uuid.UUID) -> None:
