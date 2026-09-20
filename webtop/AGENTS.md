@@ -79,6 +79,35 @@ Tips:
 - Lines are interleaved from both event loops, so ordering is not a reliable
   causal signal on its own; use the tracebacks.
 
+## Diagnosing a native crash (SIGSEGV) or a silent exit
+
+A client that dies without a Python traceback is usually a native crash. Get the
+exit code first (`uv run katzenqt; echo "EXIT=$?"`): `139` = SIGSEGV, `0` = a
+clean return/quit, `1` = a `sys.exit`.
+
+- **Python-level frames on a native crash:** set `PYTHONFAULTHANDLER=1` in the
+  launch environment. On SIGSEGV it prints a stack for every thread; the
+  `Current thread` section names the Python line that was executing when Qt
+  faulted (this is how a `ConversationLogModel` crash was localised to
+  `endInsertRows`). The Python stack does **not** show the C++ frame that
+  actually faulted.
+- **C++ frames (the real fault site):** run under gdb inside the container.
+  Note the app's console script is `/config/.venv-katzenqt/bin/katzenqt` —
+  `python -m katzenqt` fails ("No module named katzenqt.__main__"), so target
+  the script or `python -c "from katzenqt import cli; cli()"`:
+  ```sh
+  gdb -batch -ex run -ex "thread apply all bt" \
+      --args /config/.venv-katzenqt/bin/katzenqt
+  ```
+  with `KQT_STATE`, `KATZENQT_THINCLIENT_CONFIG`, `UV_PROJECT_ENVIRONMENT` set as
+  in `launch-3`. The line right after `received signal SIGSEGV` is the faulting
+  frame; the crashing thread's `bt` (near the end of the dump) shows the C++
+  call path (e.g. `endInsertRows -> rowsInserted -> modelRowsInserted ->
+  showModelChildItems -> QPersistentModelIndex copy`, which pinned a QML
+  `TreeView`/model-transition bug). gdb's ASLR/`.dynstr` warnings are harmless.
+- Logs are appended across launches; check for several `going to init_and_migrate`
+  lines to tell runs apart before concluding a line "caused" the exit.
+
 ## Inspecting client state (read-only)
 
 Each `KQT_STATE` value selects a database file: `KQT_STATE=a` → `a.sqlite3`;
@@ -101,18 +130,19 @@ Always open with `?mode=ro` (URI) — never write to a live client's state.
 
 Useful tables: `conversation`, `conversationlog`, `conversationpeer` (+
 `conversationpeerlink` join table, there is no `conversation_id` column on the
-peer), `tallystate` (`survey_id`, `conversation_id`, `doc_state`,
-`conversation_order`), `readcapwal`, `writecapwal`, `mixwal`, `plaintextwal`,
-`sentlog`, `receivedpiece`, `pendingvoucher`, and `alembic_version`
-(`select version_num from alembic_version` = applied schema revision).
+peer), `tallystate` (`survey_id`, `conversation_id`, `doc_state`), `readcapwal`,
+`writecapwal`, `mixwal`, `plaintextwal`, `sentlog`, `receivedpiece`,
+`pendingvoucher`, and `alembic_version` (`select version_num from
+alembic_version` = applied schema revision).
 
-Example shape probes:
+To tell whether a `conversationlog` row is chat or a tally event, decode the
+payload: `payload[:1] == b"F"` then CBOR `GroupChatMessage` (its `msg_type`;
+tally kinds are `TALLY_*`). Example shape probes:
 
 ```sql
 select conversation_id, conversation_order, network_status, length(payload)
   from conversationlog order by conversation_id, conversation_order;
-select survey_id, conversation_id, conversation_order, length(doc_state)
-  from tallystate;
+select survey_id, conversation_id, length(doc_state) from tallystate;
 ```
 
 For **derived** reads (decoding a `doc_state` CRDT, running the tally engine,
