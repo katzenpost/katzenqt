@@ -50,7 +50,7 @@ jobs:
 
       - name: Select the Rust toolchain
         working-directory: katzenqt
-        run: bash tools/ci-timeout.sh bash tools/ci-rust.sh
+        run: bash tools/ci-timeout.sh timeout --kill-after=10s 300s bash tools/ci-rust.sh
 
       - name: Build kpclientd and install deps in parallel
         working-directory: katzenqt
@@ -222,7 +222,7 @@ jobs:
 
       - name: Select the Rust toolchain
         working-directory: katzenqt
-        run: bash tools/ci-timeout.sh bash tools/ci-rust.sh
+        run: bash tools/ci-timeout.sh timeout --kill-after=10s 300s bash tools/ci-rust.sh
 
       - name: Log in to GitHub Container Registry
         if: ${{ env.ACT != 'true' }}
@@ -335,7 +335,7 @@ jobs:
 
       - name: Select the Rust toolchain
         working-directory: katzenqt
-        run: bash tools/ci-timeout.sh bash tools/ci-rust.sh
+        run: bash tools/ci-timeout.sh timeout --kill-after=10s 300s bash tools/ci-rust.sh
 
       - name: Log in to GitHub Container Registry
         if: ${{ env.ACT != 'true' }}
