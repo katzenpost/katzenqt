@@ -321,7 +321,7 @@ async def _send_one_gcm(
     send_op = models.SendOperation(
         bacap_stream=own_bacap_stream, messages=[gcm],
     )
-    new_write_caps, db_entries = send_op.serialize(
+    new_write_caps, db_entries = await send_op.serialize_async(
         chunk_size=1530, conversation_id=conversation_id,
     )
     final_pwal_id = db_entries[-1].id
@@ -491,7 +491,7 @@ async def _action_multi_send(args):
         send_op = models.SendOperation(
             bacap_stream=own_bacap_stream, messages=[gcm],
         )
-        _, db_entries = send_op.serialize(
+        _, db_entries = await send_op.serialize_async(
             chunk_size=1530, conversation_id=conversation_id,
         )
         final_pwal_ids.append(db_entries[-1].id)
@@ -600,7 +600,7 @@ async def _action_chat_session(args):
                 send_op = models.SendOperation(
                     bacap_stream=own_bacap_stream, messages=[gcm],
                 )
-                _, db_entries = send_op.serialize(
+                _, db_entries = await send_op.serialize_async(
                     chunk_size=1530, conversation_id=conversation_id,
                 )
                 final_pwal_id = db_entries[-1].id

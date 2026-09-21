@@ -542,17 +542,31 @@ async def peer_has_read_cap(
     session: "AsyncSession", conversation_id: int, read_cap: bytes,
 ) -> bool:
     """True if any peer of the conversation (the owner included) already
-    holds this read cap.
+    holds this member's read cap.
 
-    Read caps are a member's unique cryptographic identity, so this is the
-    dedup key for the "already inducted" guard: a failed post-commit ack
-    makes a naive retry re-run the induction, and without a guard that
-    retry would add a second peer for the same person (the same hazard
-    ``_already_has`` closes for the announcement path). Uses an explicit
-    join query rather than relationship traversal: the receive and voucher
-    paths call this from SQLAlchemy's async session, where touching a
-    ``conv.peers`` lazy relationship raises ``MissingGreenlet``.
+    A member's read capability is ``public_key(32) || index(104)``. The same
+    member's stream can be held under caps that share the public key but
+    differ in the index suffix: a joiner's un-mutated cap, the salt-mutated
+    cap the group inducted them with, and a cap from a re-run of the handshake
+    (the daemon mints a fresh random salt on every ``voucher_induct``). The
+    index suffix is therefore not an identity, so this dedup keys on the
+    32-byte public-key prefix alone -- matching
+    ``models.canonical_membership_hash`` and
+    ``tally.controller.voter_id_from_read_cap``. Otherwise a re-induction
+    adds a second peer for the same member, whose cap addresses a
+    salt-determined box sequence nobody writes, and it polls a nonexistent
+    box forever.
+
+    This is the "already inducted" guard: a failed post-commit ack makes a
+    naive retry re-run the induction, and without this guard that retry would
+    add a second peer for the same person (the same hazard ``_already_has``
+    closes for the announcement path). Uses an explicit join query rather
+    than relationship traversal: the receive and voucher paths call this from
+    SQLAlchemy's async session, where touching a ``conv.peers`` lazy
+    relationship raises ``MissingGreenlet``.
     """
+    if not read_cap or len(read_cap) < 32:
+        return False
     rows = (
         await session.exec(
             select(ReadCapWAL.read_cap)
@@ -567,7 +581,7 @@ async def peer_has_read_cap(
             )
             .where(
                 ConversationPeerLink.conversation_id == conversation_id,
-                ReadCapWAL.read_cap == read_cap,
+                sa.func.substr(ReadCapWAL.read_cap, 1, 32) == read_cap[:32],
             )
         )
     ).all()
