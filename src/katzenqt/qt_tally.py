@@ -23,7 +23,7 @@ job, in the same `run_in_io` style the chat composer uses.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCalendarWidget,
@@ -338,14 +338,25 @@ class TallyPanel(QDialog):
             me is not None and me.has_voted and not self._editing and is_open
         )
         self._apply_size_constraints()
+        # A QGridLayout does not refresh its size hint until the pending layout
+        # request is processed, so re-fit once the event loop has run; reading
+        # the hint synchronously would use the pre-edit size and miss the
+        # growth when Edit vote swaps cells for buttons.
+        QTimer.singleShot(0, self._apply_size_constraints)
 
     def _apply_size_constraints(self) -> None:
-        """Open at the preferred size, never larger than the screen.
+        """Size the window to the grid's content, never larger than the screen.
 
-        The scroll area takes any overflow, so the rows are never squeezed to
-        fit (which clipped the first or last row)."""
+        A QScrollArea does not advertise the full size of the widget it hosts,
+        so ``self.sizeHint()`` does not grow when Edit vote swaps the read-only
+        cells for larger buttons. Build the preferred size from the grid host's
+        own hint plus the surrounding chrome; the scroll area takes any
+        overflow, so the rows are never squeezed to fit (which clipped the
+        first or last row). Growing only: setMinimumSize enlarges a visible
+        window when the content grows but never shrinks one when it shrinks."""
         self.layout().activate()
-        preferred = self.sizeHint()
+        chrome = self.layout().sizeHint() - self._grid_scroll.sizeHint()
+        preferred = self._grid_host.sizeHint() + chrome
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry().size()

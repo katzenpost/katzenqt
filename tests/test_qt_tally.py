@@ -322,6 +322,37 @@ def test_panel_grid_scrolls_instead_of_clipping():
         assert panel.maximumWidth() <= screen.availableGeometry().width()
 
 
+def test_panel_edit_vote_grows_the_window_to_fit():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id,
+        slots=("a very long option one", "a very long option two"),
+        votes=[(OWN_CAP, {"s0": "yes"})],
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+    panel.show()
+    QApplication.processEvents()
+
+    before = panel.minimumSize()
+    assert panel._edit_button.isHidden() is False
+
+    panel._edit_button.click()
+    QApplication.processEvents()
+
+    # Editing swaps the read-only cells for larger buttons; the window grows
+    # so the grid fits without scrollbars instead of the content overflowing.
+    after = panel.minimumSize()
+    viewport = panel._grid_scroll.viewport().size()
+    assert viewport.width() >= panel._grid_host.sizeHint().width()
+    assert viewport.height() >= panel._grid_host.sizeHint().height()
+    assert after.width() >= before.width()
+    assert after.height() >= before.height()
+    assert after != before
+
+
 def test_panel_voted_local_row_edits_and_resends():
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
