@@ -389,6 +389,10 @@ ci-local:
 	trap 'rm -rf "$$lock"' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
+	tmp="$(CURDIR)/.ci-local/tmp"
+	rm -rf "$$tmp"
+	mkdir -p "$$tmp"
+	export TMPDIR="$$tmp"
 	stale=()
 	while IFS= read -r container; do
 		[[ -n "$$container" ]] || continue
@@ -415,7 +419,7 @@ ci-local:
 	if ! podman image exists "$(ACT_RUNNER_IMAGE)"; then
 		podman pull "$(ACT_RUNNER_IMAGE)"
 	fi
-	state=$$(mktemp -d)
+	state=$$(mktemp -d "$$tmp/state.XXXXXXXXXX")
 	podman ps -a --format '{{.ID}}' > "$$state/containers.before"
 	podman volume ls --format '{{.Name}}' > "$$state/volumes.before"
 	podman images --filter dangling=true --format '{{.ID}}' > "$$state/images.before"
@@ -433,7 +437,7 @@ ci-local:
 		awk 'FILENAME == ARGV[1] { seen[$$0] = 1; next } !($$0 in seen)' \
 			"$$state/images.before" "$$state/images.after" \
 			| xargs -r podman image rm -f
-		rm -rf "$$state" "$$lock"
+		rm -rf "$$state" "$$lock" "$$tmp"
 	}
 	trap 'status=$$?; trap - EXIT INT TERM; cleanup; exit $$status' EXIT
 	trap 'exit 130' INT

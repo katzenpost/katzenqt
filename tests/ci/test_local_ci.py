@@ -122,6 +122,7 @@ def run(tmp_path: Path) -> Iterator[_Run]:
     act.write_text(
         'printf "%s\\n" "$PWD" > "$CALLS/cwd"\n'
         'printf "%s\\n" "$DOCKER_HOST" > "$CALLS/endpoint"\n'
+        'printf "%s\\n" "$TMPDIR" > "$CALLS/tmpdir"\n'
         'printf "%s\\n" "$@" > "$CALLS/args"\n'
         'touch "$CALLS/act-ran"\n'
         'exit "${ACT_STATUS:-0}"\n',
@@ -156,6 +157,9 @@ def test_make_runs_act_in_place_after_pinging_socket(run: _Run) -> None:
     calls = run.directory / "calls"
     assert (calls / "cwd").read_text().strip() == str(run.directory)
     assert (calls / "endpoint").read_text().strip() == f"unix://{run.socket}"
+    assert (calls / "tmpdir").read_text().strip() == str(
+        run.directory / ".ci-local/tmp"
+    )
     arguments = (calls / "args").read_text().splitlines()
     assert arguments == [
         "--rm", "--pull=false", "--concurrent-jobs", "1", "--network", "host",
@@ -173,6 +177,7 @@ def test_make_runs_act_in_place_after_pinging_socket(run: _Run) -> None:
     ]
     for name in ("uv-cache", "go-mod", "go-build", "cargo-home"):
         assert (run.directory / ".ci-local" / name).is_dir()
+    assert not (run.directory / ".ci-local/tmp").exists()
     assert "--bind" not in arguments
 
 
