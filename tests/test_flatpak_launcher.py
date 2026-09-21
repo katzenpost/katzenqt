@@ -89,5 +89,7 @@ def test_generated_configs_live_in_runtime_dir(launcher, tmp_path):
 
 def test_endpoint_reaches_default_abstract_socket(launcher, monkeypatch):
     monkeypatch.setattr(Path, "exists", lambda _: False)
-    monkeypatch.setattr(launcher, "alive", lambda address: address == "@katzenpost")
+    monkeypatch.setattr(
+        launcher, "alive", lambda address: address == "@katzenpost"
+    )
     assert launcher.endpoint() == "@katzenpost"

@@ -30,7 +30,9 @@ HOST = RUNTIME / "katzenpost" / "kpclientd.sock"
 SOCKET = ROOT / "kpclientd.sock"
 ABSTRACT_SOCKET = "@katzenpost"
 GUI = os.environ.get("KATZENQT_GUI") or (
-    "/app/bin/katzenqt-bin" if FLATPAK else (shutil.which("katzenqt") or "katzenqt")
+    "/app/bin/katzenqt-bin"
+    if FLATPAK
+    else (shutil.which("katzenqt") or "katzenqt")
 )
 
 
@@ -45,7 +47,9 @@ def alive(path: str) -> bool:
         return False
 
 
-def thin(address: str | Path, network: Literal["Unix", "Tcp"] = "Unix") -> Path:
+def thin(
+    address: str | Path, network: Literal["Unix", "Tcp"] = "Unix"
+) -> Path:
     """Write a private thin-client configuration for the selected endpoint."""
     if network not in ("Unix", "Tcp"):
         raise ValueError("network must be Unix or Tcp")
@@ -81,9 +85,7 @@ def main() -> None:
         )
         return
     if not address:
-        raise SystemExit(
-            "kpclientd is unavailable; start it and retry"
-        )
+        raise SystemExit("kpclientd is unavailable; start it and retry")
     os.environ["KATZENQT_THINCLIENT_CONFIG"] = str(thin(address))
     if FLATPAK:
         os.chdir("/app/share/katzenqt")

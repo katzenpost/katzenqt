@@ -277,8 +277,8 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
     cursor.execute("PRAGMA busy_timeout=250")
     cursor.close()
     # journal_mode=WAL lazily creates the -wal/-shm sidecars on first write,
-    # under the process umask rather than inheriting the main file's 0600 —
-    # restrict them too, now that they're guaranteed to exist.
+    # under the process umask rather than inheriting the main file's 0600,
+    # so restrict them too, now that they are guaranteed to exist.
     _restrict_state_file_perms(state_file)
 
 

@@ -1,6 +1,7 @@
 """Unit tests for the state-file permission clamp."""
 import os
 import stat
+from pathlib import Path
 
 from katzenqt import persistent
 from katzenqt.persistent import _restrict_state_file_perms
