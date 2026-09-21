@@ -56,14 +56,14 @@ Low priority; re-evaluate when we do the next dependency refresh.
 
 ## 9. Transfers panel entries for uploads, pausable and cancelable
 
-- [ ] Give uploads their own Transfers-panel rows, pausable and cancelable.
+- [x] Give uploads their own Transfers-panel rows, pausable and cancelable.
 
-Progress: Phase 1 (display) landed in `f901bf8` ("transfers: show in-progress
-uploads in the Transfers panel"); Phase 2 (pause/resume) landed in `42c0125`
+Done. Phase 1 (display) landed in `f901bf8` ("transfers: show in-progress
+uploads in the Transfers panel"); Phase 2 (pause/resume) in `42c0125`
 ("transfers: pause and resume in-progress uploads"); Phase 3's ordering
-prerequisite landed in `b24b9fb` ("conversation log: order from MAX+1 and render
-by actual order"). The `cancel_upload` half of Phase 3 remains; see the
-per-phase headings below for the exact steps.
+prerequisite in `b24b9fb` ("conversation log: order from MAX+1 and render by
+actual order") and cancel in `47d90ad` ("transfers: cancel in-progress
+uploads"). The per-phase detail below is retained for reference.
 
 The Transfers panel is receive-only today (`DownloadsModel` seeds from
 substream `ConversationPeer` rows). An in-progress upload has no row of its
@@ -152,7 +152,7 @@ upload is to wait it out.
   Pause/Resume enabled per that row's own direction and state (mirror
   `pause_peer_reads` / `resume_peer_reads`, `network.py:1309-1376`).
 
-### Phase 3 — cancel (requires order-based rendering first)
+### Phase 3 — cancel (done, `47d90ad`; ordering prerequisite `b24b9fb`)
 
 Ordering prerequisite done in `b24b9fb`:
 - `persistent.next_conversation_order` -> `coalesce(func.max(conversation_order),
@@ -162,10 +162,10 @@ Ordering prerequisite done in `b24b9fb`:
   `data()` / `index()`; inserts the tail on unchanged-prefix growth, resets on
   any other change. The `index_row == conversation_order` assumption is gone.
 
-Remaining: `cancel_upload(rcw_id)`. Cancel exists only while the upload is
-live (remaining agg PWAL > 0 and the I-chunk `PlaintextWAL.indirection ==
-rcw_id` still present); if the substream has completed, refuse. It cancels the
-in-flight write, then in one transaction deletes the agg C/F `PlaintextWAL`
+`cancel_upload(rcw_id)` landed in `47d90ad`. Cancel exists only while the
+upload is live (remaining agg PWAL > 0 and the I-chunk `PlaintextWAL.indirection
+== rcw_id` still present); if the substream has completed, refuse. It cancels
+the in-flight write, then in one transaction deletes the agg C/F `PlaintextWAL`
 rows, the I-chunk `PlaintextWAL`, the indirection `ReadCapWAL`, the
 `agg_bacap_stream` `WriteCapWAL`, that stream's MixWAL rows, and the optimistic
 `ConversationLog` row (its `outgoing_pwal` FK forces this); discards
