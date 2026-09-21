@@ -255,6 +255,7 @@ def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
 
     panel.show_survey(convo_id, mine)
     assert panel._close_button.isHidden() is False
+    assert panel._close_button.text() == "End poll"
     fired: "list[bool]" = []
     panel.closeRequested.connect(lambda: fired.append(True))
     panel._close_button.click()

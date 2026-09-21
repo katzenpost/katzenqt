@@ -66,7 +66,7 @@ def outcome_text(outcome: Outcome) -> str:
 
 class TallyPanel(QDialog):
     """Modeless poll window: header, per-slot totals, a click-to-cycle voting
-    grid, the per-voter detail and (for the creator) a Close button.
+    grid, the per-voter detail and (for the creator) an End button.
 
     One instance per open poll, created and shown by the MainWindow; the window
     title names the conversation the poll belongs to. The grid edits a local
@@ -102,7 +102,7 @@ class TallyPanel(QDialog):
         self._vote_button = QPushButton("Send vote")
         self._vote_button.setEnabled(False)
         self._vote_button.clicked.connect(self._submit)
-        self._close_button = QPushButton("Close poll")
+        self._close_button = QPushButton("End poll")
         self._close_button.hide()
         self._close_button.clicked.connect(self.closeRequested)
         self._voter_detail_button = QPushButton("Show who voted")
