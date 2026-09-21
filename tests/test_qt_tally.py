@@ -1,5 +1,5 @@
-"""Offscreen widget tests for ``katzenqt.qt_tally`` (the Polls tab, the voting
-panel and the create dialog) and for tally rows rendered by
+"""Offscreen widget tests for ``katzenqt.qt_tally`` (the modeless poll window
+and the create dialog) and for tally rows rendered by
 ``katzenqt.qt_models.ConversationLogModel``.
 
 These build QWidgets, so the module-scoped app is a QApplication (see the note
@@ -18,8 +18,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QModelIndex  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QModelIndex, Qt  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
@@ -29,12 +30,10 @@ from katzenqt.qt_models import (  # noqa: E402
     ConversationLogModel,
 )
 from katzenqt.qt_tally import (  # noqa: E402
-    PollsTabModel,
     TallyCreateDialog,
     TallyPanel,
-    polls_tab_label,
 )
-from katzenqt.tally import events, schema, sync  # noqa: E402
+from katzenqt.tally import engine, events, schema, sync  # noqa: E402
 from katzenqt.tally.controller import voter_id_from_read_cap  # noqa: E402
 from katzenqt.tally.schema import Mode  # noqa: E402
 
@@ -111,11 +110,14 @@ def _seed_survey(
     mode: Mode = Mode.APPROVAL,
     slots: "tuple[str, ...]" = ("chicken", "pasta"),
     creator_voter_id: "bytes | None" = None,
+    votes: "list[tuple[bytes, dict[str, str]]] | None" = None,
 ):
     doc = schema.new_survey_doc(
         survey_id, topic, mode, slots,
         creator=creator_voter_id or voter_id_from_read_cap(OWN_CAP),
     )
+    for cap, choice in votes or []:
+        engine.apply_vote(doc, voter_id_from_read_cap(cap), choice)
     blob = sync.full_state(doc)
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.TallyState(
@@ -123,14 +125,6 @@ def _seed_survey(
         ))
         sess.commit()
     return doc
-
-
-def _set_first_unread(convo_id: int, value: int) -> None:
-    with persistent.Session(persistent._engine_sync) as sess:
-        conv = sess.get(persistent.Conversation, convo_id)
-        conv.first_unread = value
-        sess.add(conv)
-        sess.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -194,45 +188,24 @@ def test_vote_for_an_unknown_survey_renders_invalid():
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "invalid"
 
 
-# ---------------------------------------------------------------------------
-# Polls tab model
-# ---------------------------------------------------------------------------
-
-
-def test_polls_tab_model_lists_surveys_for_the_conversation():
-    convo_id, peer_id = _make_convo_sync("alpha")
-    other_id, _ = _make_convo_sync("beta")
-    a_sid = uuid.uuid4().bytes
-    b_sid = uuid.uuid4().bytes
-    _seed_survey(convo_id, a_sid, topic="tea?")
-    _seed_survey(other_id, b_sid, topic="beer?")
-
-    model = PollsTabModel()
-    model.set_conversation_filter(convo_id)
-    assert model.rowCount() == 1
-    assert model.data(model.index(0), 0x201) == "tea?"
-    assert model.data(model.index(0), 0x204) == convo_id
-    assert model.data(model.index(0), 0x205) == "alpha"
-    assert model.summary_at(0).topic == "tea?"
-
-
-def test_polls_badge_counts_unread_create_rows():
+def test_unknown_vote_row_rewrites_when_the_survey_arrives():
+    """An early vote for a not-yet-seen survey renders as "unknown poll"; once
+    the survey arrives, a tally-event refresh must re-project the row."""
     convo_id, peer_id = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
-    doc = _seed_survey(convo_id, survey_id)
-    _seed_tally_row(convo_id, peer_id, events.build_create(survey_id, sync.full_state(doc)))
+    _seed_tally_row(convo_id, peer_id, events.build_vote(survey_id, {"s0": "yes"}))
 
-    model = PollsTabModel()
-    model.set_conversation_filter(convo_id)
-    _set_first_unread(convo_id, 0)
-    assert model.badge_count() == 1
-    _set_first_unread(convo_id, 5)  # everything read
-    assert model.badge_count() == 0
+    m = ConversationLogModel(convo_id)
+    m.set_row_count(1)
+    idx = m.index(0, 0, QModelIndex())
+    assert "vote for unknown poll" in m.data(idx, 0)
 
-
-def test_polls_tab_label_attaches_the_badge():
-    assert polls_tab_label(0) == "Polls"
-    assert polls_tab_label(3) == "Polls (3)"
+    _seed_survey(convo_id, survey_id, topic="lunch?")
+    m.refresh_tally_rows()
+    text = m.data(idx, 0)
+    assert "vote for unknown poll" not in text
+    assert 'voted on "[Poll] lunch?"' in text
+    assert m.data(idx, ROLE_CHAT_TALLY_KIND) == "vote"
 
 
 # ---------------------------------------------------------------------------
@@ -273,14 +246,18 @@ def test_panel_cycles_slots_and_submits_its_selection():
     fired: "list[dict]" = []
     panel.voteSubmitted.connect(fired.append)
 
+    assert panel._slot_buttons["s0"].text() == "–"
     panel._slot_buttons["s0"].click()
     assert panel.selection == {"s0": "yes"}
+    assert panel._slot_buttons["s0"].text() == "yes"
     assert panel._vote_button.isEnabled() is True
 
     panel._slot_buttons["s0"].click()  # yes -> no
     assert panel.selection == {"s0": "no"}
+    assert panel._slot_buttons["s0"].text() == "no"
     panel._slot_buttons["s0"].click()  # no -> blank (deselect)
     assert panel.selection == {}
+    assert panel._slot_buttons["s0"].text() == "–"
     assert panel._vote_button.isEnabled() is False
 
     panel._slot_buttons["s1"].click()
@@ -288,6 +265,165 @@ def test_panel_cycles_slots_and_submits_its_selection():
     panel._vote_button.click()
     assert fired == [{"s1": "no"}]
     assert panel._vote_button.isEnabled() is False  # submitted == current
+
+
+def test_panel_grid_lists_other_voters_choices():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id,
+        votes=[(ALICE_CAP, {"s0": "yes", "s1": "no"})],
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    assert {v.name for v in panel._voters} == {"me", "alice"}
+    texts = {label.text() for label in panel.findChildren(QLabel)}
+    assert {"yes", "no"} <= texts  # alice's ballot is rendered read-only
+
+
+def test_panel_grid_sizes_columns_and_aligns_names():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id, slots=("tacos", "sushi"))
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    # Names keep their natural width; the option columns share the rest.
+    assert panel._grid.columnStretch(0) == 0
+    assert panel._grid.columnStretch(1) == 1
+    assert panel._grid.columnStretch(2) == 1
+    # The name column and its heading are right-aligned.
+    name_labels = [
+        label for label in panel.findChildren(QLabel)
+        if label.text() in ("Voter", "me")
+    ]
+    assert name_labels
+    assert all(label.alignment() & Qt.AlignRight for label in name_labels)
+    # The local user has not voted: no Edit button until they do.
+    assert panel._edit_button.isHidden() is True
+
+
+def test_panel_grid_scrolls_instead_of_clipping():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id, slots=("tacos", "sushi"))
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    # The grid is hosted in a scroll area, so a large poll scrolls rather than
+    # squeezing the rows (which clipped the first or last row).
+    assert panel._grid_scroll.widget() is panel._grid_host
+    assert panel._grid_scroll.widgetResizable() is True
+    # The window opens at its preferred size, capped to the screen.
+    assert panel.minimumHeight() <= panel.maximumHeight()
+    screen = QGuiApplication.primaryScreen()
+    if screen is not None:
+        assert panel.maximumHeight() <= screen.availableGeometry().height()
+        assert panel.maximumWidth() <= screen.availableGeometry().width()
+
+
+def test_panel_edit_vote_grows_the_window_to_fit():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id,
+        slots=("a very long option one", "a very long option two"),
+        votes=[(OWN_CAP, {"s0": "yes"})],
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+    panel.show()
+    QApplication.processEvents()
+
+    before = panel.minimumSize()
+    assert panel._edit_button.isHidden() is False
+
+    panel._edit_button.click()
+    QApplication.processEvents()
+
+    # Editing swaps the read-only cells for larger buttons; the window grows
+    # so the grid fits without scrollbars instead of the content overflowing.
+    after = panel.minimumSize()
+    viewport = panel._grid_scroll.viewport().size()
+    assert viewport.width() >= panel._grid_host.sizeHint().width()
+    assert viewport.height() >= panel._grid_host.sizeHint().height()
+    assert after.width() >= before.width()
+    assert after.height() >= before.height()
+    assert after != before
+
+
+def test_panel_first_vote_grows_the_window_for_wider_values():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id, mode=Mode.AVAILABILITY,
+        slots=("a", "b", "c", "d", "e", "f"),
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+    panel.show()
+    QApplication.processEvents()
+
+    # Not voted yet: the local row is already in click-to-cycle edit mode, and
+    # each option button starts blank.
+    assert set(panel._slot_buttons) == {f"s{i}" for i in range(6)}
+    assert panel._slot_buttons["s0"].text() == "–"
+    before = panel.minimumSize()
+
+    # Cycling replaces the blank "–" with the longer "yes"/"maybe"/"no", so the
+    # grid widens; the window grows to fit instead of showing a scrollbar.
+    for choice in ("yes", "maybe", "no"):
+        panel._slot_buttons["s0"].click()
+        QApplication.processEvents()
+        assert panel._slot_buttons["s0"].text() == choice
+        viewport = panel._grid_scroll.viewport().size()
+        assert viewport.width() >= panel._grid_host.sizeHint().width()
+        assert viewport.height() >= panel._grid_host.sizeHint().height()
+
+    after = panel.minimumSize()
+    assert after.width() >= before.width()
+    assert after != before
+
+
+def test_panel_voted_local_row_edits_and_resends():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id, slots=("tacos", "sushi"),
+        votes=[(OWN_CAP, {"s0": "yes"})],
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    # Already voted: read-only cells with an Edit button, no toggles.
+    assert panel._slot_buttons == {}
+    assert panel._edit_button.isHidden() is False
+    assert panel._vote_button.isEnabled() is False
+
+    panel._edit_button.click()
+    assert set(panel._slot_buttons) == {"s0", "s1"}
+    assert panel._edit_button.isHidden() is True
+    # Entering edit mode alone changes nothing to send.
+    assert panel._vote_button.isEnabled() is False
+
+    panel._slot_buttons["s1"].click()  # blank -> yes
+    assert panel.selection == {"s0": "yes", "s1": "yes"}
+    assert panel._vote_button.isEnabled() is True  # edit re-activates Send
+
+    fired: "list[dict]" = []
+    panel.voteSubmitted.connect(fired.append)
+    panel._vote_button.click()
+    assert fired == [{"s0": "yes", "s1": "yes"}]
+    assert panel._vote_button.isEnabled() is False
+    assert panel._slot_buttons == {}  # back to read-only
+    assert panel._edit_button.isHidden() is False
 
 
 def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
@@ -306,18 +442,26 @@ def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
 
     panel.show_survey(convo_id, mine)
     assert panel._close_button.isHidden() is False
+    assert panel._close_button.text() == "End poll"
     fired: "list[bool]" = []
     panel.closeRequested.connect(lambda: fired.append(True))
     panel._close_button.click()
     assert fired == [True]
 
 
-def test_panel_new_poll_button_emits_new_poll_requested():
+def test_panel_window_title_names_the_conversation_and_topic():
+    convo_id, _ = _make_convo_sync("lobby")
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id, topic="dinner?")
+
     panel = TallyPanel()
-    fired: "list[bool]" = []
-    panel.newPollRequested.connect(lambda: fired.append(True))
-    panel._new_poll_button.click()
-    assert fired == [True]
+    panel.set_conversation_label("lobby")
+    assert panel.windowTitle() == "lobby — Poll"
+    assert panel.show_survey(convo_id, survey_id) is True
+    assert panel.windowTitle() == "lobby — Poll: dinner?"
+
+    panel.clear()
+    assert panel.windowTitle() == "lobby — Poll"
 
 
 def test_panel_clear_drops_the_current_survey():

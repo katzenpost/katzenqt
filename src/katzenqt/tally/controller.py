@@ -53,6 +53,24 @@ class ApplyResult:
     signal_send: bool = False
 
 
+@dataclass(frozen=True)
+class PendingTally:
+    """A tally vote or close that arrived before the survey it names.
+
+    A peer reads every member stream, so a vote can be consumed ahead of the
+    create on another stream. It is a no-op while the survey is unknown; the
+    raw message survives in the ConversationLog, and the ballot is buffered
+    here so it can be applied the moment the survey arrives (or a later
+    ``reconcile_from_log`` finds it). ``voter_id`` is resolved at buffer time
+    from the authenticated sender, exactly as the live path would.
+    """
+
+    voter_id: bytes
+    kind: GroupChatTypeEnum
+    choice: "dict[str, str] | None"
+    version: int
+
+
 def voter_id_from_read_cap(read_cap: bytes) -> bytes:
     """The stable, peer-independent voter identity: a hash of the capability's
     32-byte public-key prefix.
@@ -79,6 +97,9 @@ async def _voter_id(sess, peer: "persistent.ConversationPeer") -> bytes:
 class TallyController:
     def __init__(self) -> None:
         self._docs: "dict[tuple[int, bytes], Doc]" = {}
+        # Votes/closes seen before their survey was known, keyed by
+        # (conversation_id, survey_id); drained when the Doc first appears.
+        self._pending: "dict[tuple[int, bytes], list[PendingTally]]" = {}
 
     def get(self, conversation_id: int, survey_id: bytes) -> "Doc | None":
         return self._docs.get((conversation_id, survey_id))
@@ -201,6 +222,7 @@ class TallyController:
             )
             return
         doc = self._docs.get((conversation_id, survey_id))
+        is_new = doc is None
         try:
             if doc is None:
                 loaded = sync.load_doc(crdt)
@@ -213,8 +235,112 @@ class TallyController:
             )
             return
         if doc is None:
-            self._docs[(conversation_id, survey_id)] = loaded
+            doc = loaded
+            self._docs[(conversation_id, survey_id)] = doc
+        if is_new:
+            # A vote or close consumed before its survey arrived is buffered;
+            # apply it in the same transaction that first persists the Doc, so
+            # the poll is never briefly short a ballot.
+            self._drain_pending(doc, conversation_id, survey_id)
         await self._save(sess, survey_id, conversation_id)
+
+    def _buffer_pending(
+        self, conversation_id: int, survey_id: bytes, entry: PendingTally,
+    ) -> None:
+        """Queue a vote/close that arrived before its survey, in arrival order."""
+        pending = self._pending.setdefault((conversation_id, survey_id), [])
+        if entry not in pending:
+            pending.append(entry)
+
+    def _drain_pending(self, doc, conversation_id: int, survey_id: bytes) -> None:
+        """Apply the buffered votes/closes for a survey once its Doc exists.
+
+        Each is idempotent, so re-draining (a duplicate log row, or a create
+        whose blob already carried the ballot) changes nothing."""
+        pending = self._pending.pop((conversation_id, survey_id), None)
+        if not pending:
+            return
+        for entry in pending:
+            if entry.kind is GroupChatTypeEnum.TALLY_VOTE:
+                self._replay_vote(doc, entry)
+            elif entry.kind is GroupChatTypeEnum.TALLY_CLOSE:
+                self._replay_close(doc, entry)
+
+    def _replay_vote(self, doc, entry: PendingTally) -> None:
+        stored = engine.stored_choice(doc, entry.voter_id)
+        if stored is not None:
+            stored_version, stored_choices = stored
+            if entry.version < stored_version:
+                return
+            if entry.version == stored_version and stored_choices == (entry.choice or {}):
+                return
+        try:
+            engine.apply_vote(doc, entry.voter_id, entry.choice or {}, entry.version)
+        except ValueError as exc:
+            logger.warning(
+                "replaying vote on %s: invalid ballot: %s",
+                schema.survey_id_of(doc).hex(), exc,
+            )
+
+    def _replay_close(self, doc, entry: PendingTally) -> None:
+        creator = schema.creator_of(doc)
+        if creator is not None and creator != entry.voter_id:
+            return
+        if schema.status_of(doc) == "closed":
+            return
+        engine.close_survey(doc)
+
+    async def reconcile_from_log(self) -> None:
+        """Buffer tally votes/closes whose survey we have never persisted.
+
+        A peer reads every member stream, so a vote can be consumed ahead of
+        the create on another stream; it is a no-op then, and its row renders
+        as "unknown poll". The raw message is already in the ConversationLog,
+        so scan it once (at startup) and queue every such ballot for the
+        survey's Doc to drain when it arrives. Rows whose survey is already
+        persisted are skipped -- their ballot is already in the persisted Doc.
+        Writes nothing."""
+        async with persistent.asession() as sess:
+            known = set((await sess.exec(
+                persistent.select(persistent.TallyState.survey_id)
+            )).all())
+            rows = (await sess.exec(
+                persistent.select(persistent.ConversationLog).order_by(
+                    persistent.ConversationLog.conversation_id,
+                    persistent.ConversationLog.conversation_order,
+                )
+            )).all()
+            for row in rows:
+                payload = row.payload
+                if payload[:1] != b"F":
+                    continue
+                try:
+                    gcm = GroupChatMessage.from_cbor(payload[1:])
+                except Exception:
+                    continue
+                tally = getattr(gcm, "tally", None)
+                kind = gcm.msg_type
+                if tally is None or kind not in (
+                    GroupChatTypeEnum.TALLY_VOTE, GroupChatTypeEnum.TALLY_CLOSE,
+                ):
+                    continue
+                key = (row.conversation_id, tally.survey_id)
+                if tally.survey_id in known or key in self._docs:
+                    continue
+                peer = await sess.get(
+                    persistent.ConversationPeer, row.conversation_peer_id,
+                )
+                if peer is None:
+                    continue
+                voter = await _voter_id(sess, peer)
+                choice = (
+                    dict(tally.choice or {})
+                    if kind is GroupChatTypeEnum.TALLY_VOTE else None
+                )
+                self._buffer_pending(
+                    row.conversation_id, tally.survey_id,
+                    PendingTally(voter, kind, choice, tally.version),
+                )
 
     async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> ApplyResult:
         """Apply an inbound tally message to the local Doc and report how it
@@ -255,7 +381,15 @@ class TallyController:
         if kind is GroupChatTypeEnum.TALLY_VOTE:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
-                logger.warning("vote for unknown survey %s; dropping", survey_id.hex())
+                voter = await _voter_id(sess, peer)
+                self._buffer_pending(
+                    conversation_id, survey_id,
+                    PendingTally(voter, kind, dict(tally.choice or {}), tally.version),
+                )
+                logger.warning(
+                    "vote for unknown survey %s; buffering for replay",
+                    survey_id.hex(),
+                )
                 return ApplyResult("duplicate", "vote for unknown survey")
             voter = await _voter_id(sess, peer)
             try:
@@ -269,6 +403,11 @@ class TallyController:
         if kind is GroupChatTypeEnum.TALLY_CLOSE:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
+                voter = await _voter_id(sess, peer)
+                self._buffer_pending(
+                    conversation_id, survey_id,
+                    PendingTally(voter, kind, None, tally.version),
+                )
                 return ApplyResult("duplicate", "close for unknown survey")
             creator = schema.creator_of(doc)
             sender = await _voter_id(sess, peer)

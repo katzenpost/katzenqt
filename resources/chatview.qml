@@ -246,6 +246,11 @@ TreeView {
             // can't select text in QML Label, so we use a read-only text editor.: https://bugreports.qt.io/browse/QTBUG-14077
             textFormat: Text.PlainText // https://doc.qt.io/qt-6/qml-qtquick-text.html#textFormat-prop
             readOnly: true
+            // A tally row opens its poll from anywhere in the row. This
+            // read-only editor otherwise swallows the press over the message
+            // text; disabling it on tally rows lets the delegate's TapHandler
+            // receive the click. Chat rows keep selectable text.
+            enabled: model.is_tally !== true
             wrapMode: Text.Wrap
 	    // hovered: when mouse is over
             //Layout.fillWidth: parent

@@ -67,6 +67,20 @@ def current_version(doc: Doc, voter_id: bytes) -> int:
     return _stored_version(votes_map(doc), voter_id.hex())
 
 
+def stored_choice(doc: Doc, voter_id: bytes) -> "tuple[int, dict[str, str]] | None":
+    """The ``(version, choices)`` recorded for ``voter_id``, or ``None`` if they
+    have not voted. Lets a replay tell whether the ballot it holds is already
+    what the Doc records, without mutating it."""
+    votes = votes_map(doc)
+    key = voter_id.hex()
+    if key not in set(votes.keys()):
+        return None
+    vmap = votes[key]
+    choice = {k: vmap[k] for k in vmap.keys() if k != _VERSION_KEY}
+    version = vmap[_VERSION_KEY] if _VERSION_KEY in set(vmap.keys()) else 0
+    return version, choice
+
+
 def apply_vote(doc: Doc, voter_id: bytes, choice: "dict[str, str]", version: int = 0) -> None:
     """Record ``voter_id``'s ``choice`` (a ``slot_id -> availability`` map).
 
