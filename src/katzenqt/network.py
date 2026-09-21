@@ -1722,6 +1722,27 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         if parent_peer is not None:
             notify_conv_id = parent_peer.conversation.id
 
+    # Spill an attachment body before taking the writer lock: hashing and
+    # writing a large payload (plus its image thumbnail) can take a while, and
+    # holding the per-conversation lock across it starves concurrent appends
+    # (a GUI send, a poll create) on the same conversation. The spill is
+    # content-hash keyed, so a retried drain reuses the same file.
+    spilled_payload = None
+    if (
+        assembled is not None and assembled[0] == "F"
+        and not (cp.name.startswith(_SUBSTREAM_NAME_PREFIX) and parent_peer is None)
+    ):
+        spill_gcm = assembled[3]
+        if spill_gcm.file_upload is not None:
+            spill_conv_id = (
+                parent_peer.conversation.id
+                if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+                else cp.conversation.id
+            )
+            spilled_payload = _spill_attachment(
+                spill_gcm.file_upload, spill_gcm.membership_hash, spill_conv_id,
+            )
+
     try:
       async with persistent.conversation_log_order_lock(notify_conv_id):
         if assembled is not None and assembled[0] == "F":
@@ -1732,14 +1753,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 sess.add(cp)
             else:
                 if gcm.file_upload is not None:
-                    target_conv_id = (
-                        parent_peer.conversation.id
-                        if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
-                        else cp.conversation.id
-                    )
-                    full_payload = _spill_attachment(
-                        gcm.file_upload, gcm.membership_hash, target_conv_id,
-                    )
+                    # Spilled above, before the lock.
+                    full_payload = spilled_payload
+                    assert full_payload is not None
                 else:
                     if gcm.text is not None:
                         gcm.text = models.clamp_message_text(gcm.text)
