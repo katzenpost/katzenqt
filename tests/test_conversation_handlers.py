@@ -184,8 +184,10 @@ async def test_a_plain_chat_message_reports_no_peer_added() -> None:
             msg_type=models.GroupChatTypeEnum.TEXT,
             text="hello",
         )
-        added, _sig, peer_added, _tally = await conversation_handlers.dispatch(
-            sess, peer, gcm, b"F" + gcm.to_cbor(),
+        added, _sig, peer_added, _tally = (
+            await conversation_handlers.dispatch(
+                sess, peer, gcm, b"F" + gcm.to_cbor(),
+            )
         )
         assert added is True
         assert peer_added is None
