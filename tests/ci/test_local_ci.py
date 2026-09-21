@@ -162,8 +162,9 @@ def test_make_runs_act_in_place_after_pinging_socket(run: _Run) -> None:
     )
     arguments = (calls / "args").read_text().splitlines()
     assert arguments == [
-        "--rm", "--pull=false", "--concurrent-jobs", "1", "--network", "host",
-        "-P", "ubuntu-latest=ghcr.io/catthehacker/ubuntu:rust-24.04",
+        "-P", "ubuntu-24.04=localhost/katzenqt-act:latest",
+        "--rm", "--concurrent-jobs", "1", "--network", "host",
+        "-P", "ubuntu-latest=localhost/katzenqt-act:latest",
         "--container-daemon-socket", f"unix://{run.socket}",
         "--container-options",
         f'--volume "{run.directory}/.ci-local:{run.directory}/.ci-local"',

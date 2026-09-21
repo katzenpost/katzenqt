@@ -340,12 +340,31 @@ clean:
 	@rm $(SYSTEM_STAMP)
 
 
+ACT ?= act
+CONTAINER_ENGINE ?= podman
+CI_LOCAL_IMAGE ?= localhost/katzenqt-act:latest
+CI_LOCAL_SHELL_ARGS ?= --rm -it
 ACT_ARGS ?=
-ACT_RUNNER_IMAGE ?= ghcr.io/catthehacker/ubuntu:rust-24.04
+
+.PHONY: ci-local-image
+ci-local-image:
+	$(CONTAINER_ENGINE) build \
+		-f .github/act/Dockerfile \
+		-t $(CI_LOCAL_IMAGE) \
+		.
+
+.PHONY: ci-local-image-shell
+ci-local-image-shell:
+	$(CONTAINER_ENGINE) run $(CI_LOCAL_SHELL_ARGS) \
+		--network host \
+		--volume "$(CURDIR):$(CURDIR)" \
+		--workdir "$(CURDIR)" \
+		--entrypoint /bin/bash \
+		$(CI_LOCAL_IMAGE)
 
 .PHONY: ci-local
 ci-local:
-	@command -v act >/dev/null || { printf '%s\n' 'act is required' >&2; exit 1; }
+	@command -v "$(ACT)" >/dev/null || { printf '%s\n' '$(ACT) is required' >&2; exit 1; }
 	command -v curl >/dev/null || { printf '%s\n' 'curl is required' >&2; exit 1; }
 	command -v podman >/dev/null || { printf '%s\n' 'podman is required' >&2; exit 1; }
 	command -v python3 >/dev/null || { printf '%s\n' 'python3 is required' >&2; exit 1; }
@@ -416,9 +435,6 @@ ci-local:
 		fi
 		exit 1
 	fi
-	if ! podman image exists "$(ACT_RUNNER_IMAGE)"; then
-		podman pull "$(ACT_RUNNER_IMAGE)"
-	fi
 	state=$$(mktemp -d "$$tmp/state.XXXXXXXXXX")
 	podman ps -a --format '{{.ID}}' > "$$state/containers.before"
 	podman volume ls --format '{{.Name}}' > "$$state/volumes.before"
@@ -442,8 +458,8 @@ ci-local:
 	trap 'status=$$?; trap - EXIT INT TERM; cleanup; exit $$status' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
-	act --rm --pull=false --concurrent-jobs 1 --network host \
-		-P ubuntu-latest=$(ACT_RUNNER_IMAGE) \
+	"$(ACT)" -P "ubuntu-24.04=$(CI_LOCAL_IMAGE)" --rm --concurrent-jobs 1 --network host \
+		-P ubuntu-latest=$(CI_LOCAL_IMAGE) \
 		--container-daemon-socket "$$endpoint" \
 		--container-options '--volume "$(CURDIR)/.ci-local:$(CURDIR)/.ci-local"' \
 		--env "UV_CACHE_DIR=$(CURDIR)/.ci-local/uv-cache" \
