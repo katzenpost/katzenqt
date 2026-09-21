@@ -29,10 +29,10 @@ async def test_induction_failure_dialog_reports_the_error(
     async def finished(dialog: object) -> bool:
         return True
 
+    deferred: list[Any] = []
+
     def single_shot(delay: int, callback: Any) -> None:
-        # Qt would run the callback on the next event-loop turn; run it now so
-        # the deferred lambda is exercised the way it will be in the app.
-        callback()
+        deferred.append(callback)
 
     def critical(parent: object, title: str, text: str) -> None:
         dialogs.append((title, text))
@@ -55,5 +55,8 @@ async def test_induction_failure_dialog_reports_the_error(
         iothread=SimpleNamespace(run_in_io=run_in_io, kp_client=object()),
     )
     await katzen.MainWindow.induct_via_voucher(window)
+    assert deferred, "no dialog was scheduled"
+    for callback in deferred:
+        callback()
     assert dialogs, "no failure dialog was shown"
     assert any("induction exploded" in text for _, text in dialogs)
