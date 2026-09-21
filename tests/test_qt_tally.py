@@ -19,6 +19,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QModelIndex, Qt  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
@@ -299,6 +300,26 @@ def test_panel_grid_sizes_columns_and_aligns_names():
     assert all(label.alignment() & Qt.AlignRight for label in name_labels)
     # The local user has not voted: no Edit button until they do.
     assert panel._edit_button.isHidden() is True
+
+
+def test_panel_grid_scrolls_instead_of_clipping():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id, slots=("tacos", "sushi"))
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    # The grid is hosted in a scroll area, so a large poll scrolls rather than
+    # squeezing the rows (which clipped the first or last row).
+    assert panel._grid_scroll.widget() is panel._grid_host
+    assert panel._grid_scroll.widgetResizable() is True
+    # The window opens at its preferred size, capped to the screen.
+    assert panel.minimumHeight() <= panel.maximumHeight()
+    screen = QGuiApplication.primaryScreen()
+    if screen is not None:
+        assert panel.maximumHeight() <= screen.availableGeometry().height()
+        assert panel.maximumWidth() <= screen.availableGeometry().width()
 
 
 def test_panel_voted_local_row_edits_and_resends():

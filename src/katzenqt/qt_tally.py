@@ -24,11 +24,13 @@ job, in the same `run_in_io` style the chat composer uses.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCalendarWidget,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -88,6 +91,7 @@ class TallyPanel(QDialog):
         self._submit_base: "dict[str, str]" = {}
         self._selection: "dict[str, str]" = {}
         self._editing = False
+        self._sized = False
         self._cycle: "list[str]" = []  # availabilities to cycle (no blank)
         self._slot_text: "dict[str, str]" = {}
         self._slot_buttons: "dict[str, QToolButton]" = {}
@@ -98,7 +102,19 @@ class TallyPanel(QDialog):
         self._status_label = QLabel("")
         self._meta_label = QLabel("")
         self._outcome_label = QLabel("")
+
+        # The grid lives in a scroll area so a large poll scrolls instead of
+        # being squeezed (which used to clip the first or last row).
         self._grid = QGridLayout()
+        self._grid.setContentsMargins(4, 4, 4, 4)
+        self._grid.setHorizontalSpacing(12)
+        self._grid.setVerticalSpacing(4)
+        self._grid_host = QWidget()
+        self._grid_host.setLayout(self._grid)
+        self._grid_scroll = QScrollArea()
+        self._grid_scroll.setWidget(self._grid_host)
+        self._grid_scroll.setWidgetResizable(True)
+        self._grid_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self._vote_button = QPushButton("Send vote")
         self._vote_button.setEnabled(False)
@@ -121,7 +137,7 @@ class TallyPanel(QDialog):
         layout.addWidget(self._status_label)
         layout.addWidget(self._meta_label)
         layout.addWidget(self._outcome_label)
-        layout.addLayout(self._grid)
+        layout.addWidget(self._grid_scroll, 1)
         layout.addLayout(buttons)
 
     # -- population ----------------------------------------------------------
@@ -321,9 +337,32 @@ class TallyPanel(QDialog):
         self._edit_button.setVisible(
             me is not None and me.has_voted and not self._editing and is_open
         )
-        # Keep the window at least big enough to show the grid without clipping.
+        self._apply_size_constraints()
+
+    def _apply_size_constraints(self) -> None:
+        """Open at the preferred size, never larger than the screen.
+
+        The scroll area takes any overflow, so the rows are never squeezed to
+        fit (which clipped the first or last row)."""
         self.layout().activate()
-        self.setMinimumSize(self.minimumSizeHint())
+        preferred = self.sizeHint()
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry().size()
+            avail.setHeight(max(240, avail.height() - 80))  # title bar + margin
+            avail.setWidth(max(240, avail.width() - 40))
+            self.setMaximumSize(avail)
+            preferred = preferred.boundedTo(avail)
+        self.setMinimumSize(preferred)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._sized:
+            # The pre-show size hint can be a hair short; re-fit once the
+            # widget is polished so the first paint is not clipped.
+            self._sized = True
+            self._apply_size_constraints()
+            self.adjustSize()
 
     def _refresh_button(self, slot_id: str) -> None:
         avail = self._selection.get(slot_id)
