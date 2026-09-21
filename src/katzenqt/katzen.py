@@ -243,6 +243,38 @@ async def _menu_chosen(menu, global_pos):
     return local[0] if local else None
 
 
+async def _qml_source_ready(widget) -> None:
+    """Wait for a QQuickWidget to finish loading its source.
+
+    ``QQuickWidget.setSource`` loads asynchronously on first use. The old
+    ``self.app.processEvents()`` wait spins a nested Qt event loop inside a
+    QtAsyncio task, which re-enters task stepping and raises "Cannot enter
+    into task ... while another task ... is being executed". Await the widget's
+    ``statusChanged`` signal instead (Ready or Error both end the wait).
+    """
+    from PySide6.QtQuickWidgets import QQuickWidget
+
+    settled = (QQuickWidget.Status.Ready, QQuickWidget.Status.Error)
+    if widget.status() in settled:
+        return
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+
+    def _on_status(status):
+        if not fut.done() and status in settled:
+            fut.set_result(status)
+
+    widget.statusChanged.connect(_on_status)
+    try:
+        # Re-check after connecting: setSource may have settled between the
+        # initial status() read and the connect above.
+        if widget.status() in settled:
+            return
+        await fut
+    finally:
+        widget.statusChanged.disconnect(_on_status)
+
+
 async def _commit_new_conversation(
     wcapwal: persistent.WriteCapWAL,
     rcapwal: persistent.ReadCapWAL,
@@ -2258,10 +2290,18 @@ class MainWindow(QMainWindow):
                 "ctx": props,
             })
             self.ui.qml_ChatLines.setSource("resources/chatview.qml")
-            self.app.processEvents()  # wait for .rootObject() to be created
+            # Wait for the component to be created without spinning a nested
+            # Qt event loop (see _qml_source_ready).
+            await _qml_source_ready(self.ui.qml_ChatLines)
             root = self.ui.qml_ChatLines.rootObject()
-            root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
-            print("init first_unread", self.ui.qml_ChatLines.rootObject().property("ctx").value("first_unread"))
+            if root is not None:
+                root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
+                print("init first_unread", self.ui.qml_ChatLines.rootObject().property("ctx").value("first_unread"))
+            else:
+                logger.warning(
+                    "chatview.qml did not produce a root object; skipping "
+                    "chat context setup",
+                )
 
             #self.ui.qml_ChatLines.rootObject().setProperty("ctx", props)
             # >>> ct=PySide6.QtQml.QQmlContext(self.ui.qml_ChatLines.rootContext(), objParent=self.ui.qml_ChatLines.rootObject())
