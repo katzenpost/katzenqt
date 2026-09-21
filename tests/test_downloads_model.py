@@ -105,6 +105,20 @@ def test_set_paused_toggles_state_column():
     assert model.data(model.index(0, 0), ROLE_TRANSFER_ACTIVE) is True
 
 
+def test_set_paused_announces_display_role():
+    """Pausing changes the State text as well as the active flag, so the
+    dataChanged roles must include DisplayRole or the view keeps the old
+    'Uploading'/'Downloading' label."""
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
+    seen: "list[list[int]]" = []
+    model.dataChanged.connect(lambda _tl, _br, roles: seen.append(list(roles)))
+    model.set_paused(rcw_id, paused=True)
+    assert Qt.ItemDataRole.DisplayRole in seen[-1]
+    assert ROLE_TRANSFER_ACTIVE in seen[-1]
+
+
 def test_fail_transfer_keeps_row_visible_with_reason():
     """A failed transfer stays visible in the model with state
     'Failed: {reason}' so the user can see what went wrong."""

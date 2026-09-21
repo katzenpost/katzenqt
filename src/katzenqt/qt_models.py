@@ -208,7 +208,10 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         self._rows[rcw_id]["active"] = not paused
         row = self._idx(rcw_id)
         idx0 = self.index(row, 2)
-        self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_ACTIVE])
+        self.dataChanged.emit(
+            idx0, idx0,
+            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_ACTIVE],
+        )
 
     def fail_transfer(self, rcw_id: uuid.UUID, reason: str) -> None:
         """Mark a transfer as failed with a reason string.
@@ -226,7 +229,11 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         self._rows[rcw_id]["active"] = False  # no longer downloading
         row = self._idx(rcw_id)
         idx2 = self.index(row, 2)  # State column
-        self.dataChanged.emit(idx2, idx2, [ROLE_TRANSFER_FAILED, ROLE_TRANSFER_FAILURE_REASON])
+        self.dataChanged.emit(
+            idx2, idx2,
+            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_FAILED,
+             ROLE_TRANSFER_FAILURE_REASON],
+        )
 
     def remove_transfer(self, rcw_id: uuid.UUID) -> None:
         """Remove a transfer row from the model (user-dismissal of failed/complete)."""

@@ -216,8 +216,11 @@ class TestTransfersListenerDrainsEvents:
             def __init__(self):
                 self.calls = []
 
-            def start_transfer(self, rcw_id, conv_id, parent_name, total):
-                self.calls.append(("start", rcw_id, conv_id, parent_name, total))
+            def start_transfer(self, rcw_id, conv_id, parent_name, total,
+                               direction="download"):
+                self.calls.append(
+                    ("start", rcw_id, conv_id, parent_name, total, direction),
+                )
                 if boom_on == "started":
                     raise RuntimeError("boom")
 
@@ -237,6 +240,7 @@ class TestTransfersListenerDrainsEvents:
     @pytest.mark.asyncio
     async def test_events_are_dispatched_to_the_model(self, monkeypatch):
         rcw = __import__("uuid").uuid4()
+        up_rcw = __import__("uuid").uuid4()
         queue = _FakeQueue([
             ("started", rcw, 7, 3, "alice"),
             ("piece", rcw, 1),
@@ -244,6 +248,11 @@ class TestTransfersListenerDrainsEvents:
             ("paused", rcw),
             ("resumed", rcw),
             ("completed", rcw),
+            ("upload_started", up_rcw, 7, 25, "bob-conv"),
+            ("upload_piece", up_rcw, 6),
+            ("upload_paused", up_rcw),
+            ("upload_resumed", up_rcw),
+            ("upload_completed", up_rcw),
         ])
         monkeypatch.setattr(network, "substream_progress_queue", queue)
         model = self._fake_transfers_model(boom_on=None)
@@ -254,12 +263,17 @@ class TestTransfersListenerDrainsEvents:
         )
 
         assert model.calls == [
-            ("start", rcw, 7, "alice", 3),
+            ("start", rcw, 7, "alice", 3, "download"),
             ("piece", rcw, 1),
             ("piece", rcw, 2),
             ("paused", rcw, True),
             ("paused", rcw, False),  # resumed event -> set_paused(paused=False)
             ("complete", rcw),
+            ("start", up_rcw, 7, "bob-conv", 25, "upload"),
+            ("piece", up_rcw, 6),
+            ("paused", up_rcw, True),
+            ("paused", up_rcw, False),
+            ("complete", up_rcw),
         ]
 
     @pytest.mark.asyncio
@@ -281,7 +295,7 @@ class TestTransfersListenerDrainsEvents:
             )
 
         assert window.transfers_model.calls == [
-            ("start", rcw, 7, "alice", 3),
+            ("start", rcw, 7, "alice", 3, "download"),
             ("piece", rcw, 1),
         ]
         assert any(

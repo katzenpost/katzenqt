@@ -1742,6 +1742,10 @@ class MainWindow(QMainWindow):
                     self.transfers_model.set_paused(rcw_id, paused=True)
                 elif kind == "resumed":
                     self.transfers_model.set_paused(rcw_id, paused=False)
+                elif kind == "upload_paused":
+                    self.transfers_model.set_paused(rcw_id, paused=True)
+                elif kind == "upload_resumed":
+                    self.transfers_model.set_paused(rcw_id, paused=False)
                 elif kind == "failed":
                     self.transfers_model.fail_transfer(rcw_id, event[2])
             except asyncio.CancelledError:
