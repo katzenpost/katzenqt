@@ -55,6 +55,21 @@ async def _add_peer(conversation_id: int, name: str, *, active: bool = True) -> 
         await sess.commit()
 
 
+async def _add_peer_with_cap(
+    conversation_id: int, name: str, read_cap: bytes,
+) -> None:
+    rcw = persistent.ReadCapWAL(
+        id=uuid.uuid4(), read_cap=read_cap, next_index=read_cap[-104:],
+    )
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        sess.add(rcw)
+        sess.add(persistent.ConversationPeer(
+            name=name, read_cap_id=rcw.id, active=True, conversation=conv,
+        ))
+        await sess.commit()
+
+
 async def _add_pending(conversation_id: int) -> uuid.UUID:
     async with persistent.asession() as sess:
         pv = persistent.PendingVoucher(
@@ -358,6 +373,42 @@ class TestPeerHasReadCap:
         async with persistent.asession() as sess:
             assert await persistent.peer_has_read_cap(
                 sess, conv_b, b"\x01" * 136,
+            ) is False
+
+    @pytest.mark.asyncio
+    async def test_same_public_key_different_index_state_is_held(self):
+        """A member's stream can be held under caps sharing the public key but
+        differing in the salt-derived index state (a joiner's un-mutated cap,
+        the salt-mutated cap the group inducted, or a re-induction's fresh
+        salt). Dedup must treat them as the same member, or the re-induction
+        adds a peer that polls a box sequence nobody writes."""
+        conversation_id = await _make_conversation()
+        await _add_peer_with_cap(
+            conversation_id, "carol", b"\x07" * 32 + b"\x01" * 104,
+        )
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x07" * 32 + b"\x02" * 104,
+            ) is True
+
+    @pytest.mark.asyncio
+    async def test_different_public_key_is_not_held(self):
+        conversation_id = await _make_conversation()
+        await _add_peer_with_cap(
+            conversation_id, "carol", b"\x07" * 32 + b"\x01" * 104,
+        )
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x08" * 32 + b"\x01" * 104,
+            ) is False
+
+    @pytest.mark.asyncio
+    async def test_short_cap_is_not_held(self):
+        conversation_id = await _make_conversation()
+        await _add_peer(conversation_id, "alice")
+        async with persistent.asession() as sess:
+            assert await persistent.peer_has_read_cap(
+                sess, conversation_id, b"\x01" * 16,
             ) is False
 
 

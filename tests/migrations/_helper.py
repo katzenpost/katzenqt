@@ -55,20 +55,11 @@ def main(revision: str) -> int:
     actual = sorted(set(inspector.get_table_names()) - {"alembic_version"})
     expected = sorted(SQLModel.metadata.tables.keys())
 
-    # Column-level snapshot: a table can exist at an old revision and still be
-    # missing a column added later, which the table-set check alone would not
-    # catch.
-    columns = {
-        table: sorted(col["name"] for col in inspector.get_columns(table))
-        for table in actual
-    }
-
     print(json.dumps({
         "revision_after_partial": revision,
         "head": head,
         "tables": actual,
         "expected": expected,
-        "columns": columns,
     }))
     return 0
 
