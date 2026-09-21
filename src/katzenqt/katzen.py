@@ -1151,6 +1151,27 @@ class MainWindow(QMainWindow):
         self._poll_windows: "dict[tuple[int, bytes], TallyPanel]" = {}
         self.ui.new_poll_button.clicked.connect(lambda: self.new_poll())
 
+        # Keep the composer as short as its current tab needs. QTabWidget's
+        # size hint is the max over every page (and a hidden page's hint is
+        # only computed once it is shown), so otherwise it grows to the
+        # tallest tab ever visited and never shrinks back.
+        self.ui.singlemultitab.currentChanged.connect(self._fit_composer)
+        self._fit_composer()
+
+    # -- composer input tabs -------------------------------------------------
+
+    def _fit_composer(self, *_) -> None:
+        """Clamp the composer's tab widget to the height of its current tab."""
+        tabs = self.ui.singlemultitab
+        page = tabs.currentWidget()
+        if page is None:
+            return
+        chrome = (
+            tabs.tabBar().sizeHint().height()
+            + 2 * tabs.style().pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth)
+        )
+        tabs.setMaximumHeight(page.sizeHint().height() + chrome)
+
     # -- tally / polls -------------------------------------------------------
 
     def _open_poll_window(self, conversation_id: int, survey_id: bytes) -> None:
@@ -1932,6 +1953,8 @@ class MainWindow(QMainWindow):
         elif has_files:
             self.ui.attached_files_QListWidget.setCurrentRow(0)
         self._update_attachment_controls()
+        # The attachment page's height can change as files are added/removed.
+        self._fit_composer()
 
     @async_cb
     async def conversation_selected(self, selected:QTreeWidgetItem, old:QTreeWidgetItem|None):
