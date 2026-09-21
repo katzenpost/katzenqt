@@ -29,15 +29,16 @@ def _sample_doc() -> dict:
         "Epoch": _EPOCH,
         "GenesisEpoch": 1000,
         "Topology": [
-            [_blob({"Name": "mix1", "Addresses": {"tcp": ["mix1:1000"]}})],
-            [_blob({"Name": "mix2", "Addresses": {"tcp": ["mix2:1000"]}})],
+            [_blob({"Name": "mix1", "Addresses": {"tcp4": ["tcp://10.89.0.12:1021"]}})],
+            [_blob({"Name": "mix2", "Addresses": {"tcp4": ["tcp://10.89.0.6:1024"]}})],
         ],
         "GatewayNodes": [
-            _blob({"Name": "gw1", "Addresses": {"tcp": ["gw1:1006"]}}),
+            _blob({"Name": "gw1", "Addresses": {"tcp4": ["tcp://10.89.0.11:1006"]}}),
         ],
         "ServiceNodes": [],
+        # Storage replicas arrive already decoded as maps, not CBOR blobs.
         "StorageReplicas": [
-            _blob({"Name": "rep1", "Addresses": {"tcp": ["rep1:2000"]}}),
+            {"Name": "rep1", "Addresses": {"tcp": ["tcp://replica1:1036"]}},
         ],
     }
 
@@ -60,12 +61,23 @@ def test_summarize_pki_document_decodes_topology_and_consensus():
     assert summary.epochs_elapsed == _EPOCH - 1000
     assert summary.consensus_seconds == (_EPOCH - 1000) * _PERIOD
     assert summary.mix_layers[0][0].name == "mix1"
-    assert summary.mix_layers[0][0].addresses == ["tcp://mix1:1000"]
+    assert summary.mix_layers[0][0].addresses == ["tcp://10.89.0.12:1021"]
     assert summary.mix_layers[1][0].name == "mix2"
     assert summary.gateways[0].name == "gw1"
-    assert summary.gateways[0].addresses == ["tcp://gw1:1006"]
+    assert summary.gateways[0].addresses == ["tcp://10.89.0.11:1006"]
     assert summary.service_nodes == []
     assert summary.storage_replicas[0].name == "rep1"
+    assert summary.storage_replicas[0].addresses == ["tcp://replica1:1036"]
+
+
+def test_node_address_without_a_scheme_gets_the_transport_prefix():
+    doc = {
+        "GatewayNodes": [
+            _blob({"Name": "gw", "Addresses": {"tcp": ["gw:1234"]}}),
+        ],
+    }
+    summary = network.summarize_pki_document(doc, now=_NOW)
+    assert summary.gateways[0].addresses == ["tcp://gw:1234"]
 
 
 def test_summarize_pki_document_is_none_without_a_document():
@@ -105,10 +117,17 @@ async def test_consensus_dialog_renders_the_summary_and_tree():
     assert dialog._fields["epochs"].text() == str(_EPOCH - 1000)
     assert dialog._fields["period"].text() != "—"
     assert dialog._fields["consensus"].text() != "—"
-    # Two mix layers + gateways + service nodes + storage replicas.
+    # Gateways first, then two mix layers, service nodes, storage replicas.
     assert dialog._tree.topLevelItemCount() == 5
-    assert dialog._tree.topLevelItem(0).child(0).text(0) == "mix1"
-    assert dialog._tree.topLevelItem(2).child(0).text(0) == "gw1"
+    assert dialog._tree.topLevelItem(0).text(0) == "Gateways"
+    assert dialog._tree.topLevelItem(0).child(0).text(0) == "gw1"
+    assert dialog._tree.topLevelItem(1).child(0).text(0) == "mix1"
+    assert dialog._tree.topLevelItem(2).child(0).text(0) == "mix2"
+    assert dialog._tree.topLevelItem(4).text(0) == "Storage replicas"
+    assert dialog._tree.topLevelItem(4).child(0).text(0) == "rep1"
+    # Selecting a cell must paint the highlight behind the text.
+    style = dialog._tree.styleSheet()
+    assert "background-color" in style and "color" in style
     dialog.deleteLater()
     _ = app
 

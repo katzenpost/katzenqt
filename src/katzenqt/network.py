@@ -651,25 +651,29 @@ class ConsensusSummary(NamedTuple):
 
 def _node_from_descriptor(desc: "dict") -> ConsensusNode:
     addresses = [
-        f"{transport}://{addr}"
+        addr if "://" in addr else f"{transport}://{addr}"
         for transport, addrs in (desc.get("Addresses") or {}).items()
         for addr in addrs
     ]
     return ConsensusNode(name=str(desc.get("Name") or "?"), addresses=addresses)
 
 
-def _decode_nodes(blobs) -> "list[ConsensusNode]":
-    """Decode the CBOR-encoded descriptor blobs the PKI document carries.
+def _decode_nodes(entries) -> "list[ConsensusNode]":
+    """Decode the node descriptors the PKI document carries.
 
     The daemon strips the document's signatures and cert wrapper before
-    forwarding it; each node entry is a CBOR byte string rather than a map
-    (see the thin client's pretty_print_pki_doc)."""
+    forwarding it; mix, gateway and service entries are CBOR byte strings
+    (see the thin client's pretty_print_pki_doc), while storage replicas
+    arrive already decoded as maps."""
     nodes = []
-    for blob in blobs or []:
-        try:
-            desc = cbor2.loads(blob)
-        except Exception:
-            continue
+    for entry in entries or []:
+        if isinstance(entry, dict):
+            desc = entry
+        else:
+            try:
+                desc = cbor2.loads(entry)
+            except Exception:
+                continue
         if isinstance(desc, dict):
             nodes.append(_node_from_descriptor(desc))
     return nodes

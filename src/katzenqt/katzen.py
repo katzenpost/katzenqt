@@ -474,8 +474,11 @@ class ConsensusDialog(QDialog):
             form.addRow(label, value)
             self._fields[key] = value
         layout.addLayout(form)
+        self.resize(760, 520)
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Node", "Addresses"])
+        self._tree.header().setStretchLastSection(True)
+        self._apply_selection_style()
         layout.addWidget(self._tree)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
@@ -506,14 +509,29 @@ class ConsensusDialog(QDialog):
         self._last_epoch = summary.epoch
         self._rebuild_tree(summary)
 
+    def _apply_selection_style(self) -> None:
+        """Paint selected rows with the themed highlight.
+
+        The generated MainWindow stylesheet styles ``QTreeView::item:selected``
+        with a border only; that suppresses the highlight fill while Qt still
+        draws the text in the palette's highlighted colour, so a selected cell
+        is illegible. Set both colours explicitly from the live palette."""
+        pal = self._tree.palette()
+        self._tree.setStyleSheet(
+            "QTreeView::item:selected {"
+            f" background-color: {pal.highlight().color().name()};"
+            f" color: {pal.highlightedText().color().name()};"
+            "}"
+        )
+
     def _rebuild_tree(self, summary) -> None:
         self._tree.clear()
-        groups = [
+        groups = [("Gateways", summary.gateways)]
+        groups += [
             (f"Layer {i}", layer)
             for i, layer in enumerate(summary.mix_layers)
         ]
         groups += [
-            ("Gateways", summary.gateways),
             ("Service nodes", summary.service_nodes),
             ("Storage replicas", summary.storage_replicas),
         ]
@@ -523,8 +541,10 @@ class ConsensusDialog(QDialog):
             for node in nodes:
                 QTreeWidgetItem(parent, [node.name, ", ".join(node.addresses)])
         self._tree.expandAll()
+        self._tree.resizeColumnToContents(0)
 
     def showEvent(self, event) -> None:
+        self._apply_selection_style()
         self.refresh()
         self._timer.start()
         super().showEvent(event)
