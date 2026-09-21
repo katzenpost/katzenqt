@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -92,13 +93,26 @@ def run(tmp_path: Path) -> Iterator[_Run]:
         path.chmod(0o755)
     podman = binary / "podman"
     podman.write_text(
-        'printf "%s\\n" "$*" >> "$CALLS/podman"\n'
+        'printf "%s\n" "$*" >> "$CALLS/podman"\n'
         'ran="$CALLS/act-ran"\n'
+        'if [[ "$1 $2 $3" == "ps -a --filter" ]]; then\n'
+        '  if [[ "${STALE_LOCAL_CI:-}" == 1 ]]; then\n'
+        '    printf "stale-local\nother-container\n"\n'
+        '  fi\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [[ "$1" == inspect ]]; then\n'
+        '  case "$4" in\n'
+        '    stale-local) printf "%s/.ci-local/epoch-integration/katzenpost/docker/mixnet-alpine\n" "$PWD" ;;\n'
+        '    other-container) printf "/tmp/other-project\n" ;;\n'
+        '  esac\n'
+        '  exit 0\n'
+        'fi\n'
         'case "$1 $2" in\n'
         '  "image exists") exit 0 ;;\n'
-        '  "ps -a") [[ -e "$ran" ]] && printf "new-container\\nnew-buildkit\\n" ;;\n'
-        '  "volume ls") [[ -e "$ran" ]] && printf "act-test-volume\\nbuildkit-volume\\n" ;;\n'
-        '  "images --filter") [[ -e "$ran" ]] && printf "new-dangling-image\\n" ;;\n'
+        '  "ps -a") [[ -e "$ran" ]] && printf "new-container\nnew-buildkit\n" ;;\n'
+        '  "volume ls") [[ -e "$ran" ]] && printf "act-test-volume\nbuildkit-volume\n" ;;\n'
+        '  "images --filter") [[ -e "$ran" ]] && printf "new-dangling-image\n" ;;\n'
         'esac\n'
         'exit 0\n',
         encoding="ascii",
@@ -178,6 +192,7 @@ def test_act_failure_fails_make(run: _Run) -> None:
     assert result.returncode != 0
     assert "Error 7" in result.stderr
     assert (run.directory / "calls/cwd").exists()
+    assert not (run.directory / ".ci-local/ci-local.lock").exists()
 
 
 def test_cleanup_removes_resources_created_by_act(run: _Run) -> None:
@@ -191,6 +206,52 @@ def test_cleanup_removes_resources_created_by_act(run: _Run) -> None:
     assert "image rm -f new-dangling-image" in calls
     assert not any("new-mixnet-image" in call for call in calls)
 
+
+
+def test_active_local_ci_lock_stops_before_act(run: _Run) -> None:
+    lock = run.directory / ".ci-local/ci-local.lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n", encoding="ascii")
+    with _api(run.socket):
+        result = run.make()
+    assert result.returncode != 0
+    assert "ci-local is already running" in result.stderr
+    assert not (run.directory / "calls/cwd").exists()
+
+
+
+def test_stale_local_ci_lock_is_recovered(run: _Run) -> None:
+    lock = run.directory / ".ci-local/ci-local.lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text("999999999\n", encoding="ascii")
+    with _api(run.socket):
+        result = run.make()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not lock.exists()
+
+def test_stale_local_ci_state_is_removed_before_act(run: _Run) -> None:
+    run.env["STALE_LOCAL_CI"] = "1"
+    with _api(run.socket):
+        result = run.make()
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (run.directory / "calls/podman").read_text().splitlines()
+    assert "rm -f -v stale-local" in calls
+    assert not any(
+        call.startswith("rm -f -v") and "other-container" in call
+        for call in calls
+    )
+
+
+def test_busy_mixnet_port_stops_before_act(run: _Run) -> None:
+    python = run.directory / "bin/python3"
+    python.unlink()
+    python.write_text("exit 0\n", encoding="ascii")
+    python.chmod(0o755)
+    with _api(run.socket):
+        result = run.make()
+    assert result.returncode != 0
+    assert "port 64331 is already in use" in result.stderr
+    assert not (run.directory / "calls/cwd").exists()
 
 def test_an_explicit_local_endpoint_is_checked_and_used(run: _Run) -> None:
     endpoint = run.runtime / "selected.sock"
@@ -237,7 +298,7 @@ def test_bad_api_response_stops_before_act(
     assert not (run.directory / "calls/cwd").exists()
 
 
-@pytest.mark.parametrize("name", ["act", "curl", "podman"])
+@pytest.mark.parametrize("name", ["act", "curl", "podman", "python3"])
 def test_missing_program_has_an_actionable_error(run: _Run, name: str) -> None:
     (run.directory / "bin" / name).unlink()
     result = run.make()
