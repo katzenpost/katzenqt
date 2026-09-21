@@ -353,6 +353,41 @@ def test_panel_edit_vote_grows_the_window_to_fit():
     assert after != before
 
 
+def test_panel_first_vote_grows_the_window_for_wider_labels():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id,
+        slots=("a very long option one", "a very long option two"),
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+    panel.show()
+    QApplication.processEvents()
+
+    # Not voted yet: the local row is already in click-to-cycle edit mode.
+    assert set(panel._slot_buttons) == {"s0", "s1"}
+    before = panel.minimumSize()
+
+    # Cycling an option appends ": <choice>" to the button label, widening the
+    # grid; the window grows to fit instead of showing a scrollbar.
+    panel._slot_buttons["s0"].click()  # blank -> yes
+    QApplication.processEvents()
+    after = panel.minimumSize()
+    viewport = panel._grid_scroll.viewport().size()
+    assert viewport.width() >= panel._grid_host.sizeHint().width()
+    assert after.width() >= before.width()
+    assert after != before
+
+    # Cycling on to another label still fits without scrollbars.
+    panel._slot_buttons["s0"].click()  # yes -> no
+    QApplication.processEvents()
+    viewport = panel._grid_scroll.viewport().size()
+    assert viewport.width() >= panel._grid_host.sizeHint().width()
+    assert viewport.height() >= panel._grid_host.sizeHint().height()
+
+
 def test_panel_voted_local_row_edits_and_resends():
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes

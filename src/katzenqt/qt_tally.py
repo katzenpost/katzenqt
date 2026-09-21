@@ -338,10 +338,13 @@ class TallyPanel(QDialog):
             me is not None and me.has_voted and not self._editing and is_open
         )
         self._apply_size_constraints()
-        # A QGridLayout does not refresh its size hint until the pending layout
-        # request is processed, so re-fit once the event loop has run; reading
-        # the hint synchronously would use the pre-edit size and miss the
-        # growth when Edit vote swaps cells for buttons.
+        self._refit_to_content()
+
+    def _refit_to_content(self) -> None:
+        """Re-apply the size constraints once the pending layout request has
+        run: a QGridLayout (or a QToolButton whose text changed) does not
+        refresh its size hint before then, so reading it synchronously would
+        miss the growth."""
         QTimer.singleShot(0, self._apply_size_constraints)
 
     def _apply_size_constraints(self) -> None:
@@ -403,6 +406,7 @@ class TallyPanel(QDialog):
             self._selection.pop(slot_id, None)
         self._refresh_button(slot_id)
         self._update_vote_enabled()
+        self._refit_to_content()
 
     @property
     def selection(self) -> "dict[str, str]":
