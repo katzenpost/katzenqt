@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 
 from pycrdt import Doc
 
@@ -32,6 +33,42 @@ logger = logging.getLogger(__name__)
 _MAX_SURVEY_ID_LEN = 64
 
 _MAX_CRDT_BLOB = 512 * 1024
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    """The outcome of applying one inbound tally message.
+
+    ``status`` is ``"applied"`` (state changed), ``"duplicate"`` (well-formed
+    but no effect: an older vote version, or a vote for a survey we do not
+    hold), or ``"rejected"`` (malformed or not accepted: an oversized id or
+    blob, an invalid vote, a close from a non-creator, or an undecodable
+    payload). ``detail`` is a short human phrase describing a rejection, for
+    the timeline row. ``signal_send`` is True when outbound work was staged and
+    the send loop must be poked.
+    """
+
+    status: str
+    detail: str = ""
+    signal_send: bool = False
+
+
+@dataclass(frozen=True)
+class PendingTally:
+    """A tally vote or close that arrived before the survey it names.
+
+    A peer reads every member stream, so a vote can be consumed ahead of the
+    create on another stream. It is a no-op while the survey is unknown; the
+    raw message survives in the ConversationLog, and the ballot is buffered
+    here so it can be applied the moment the survey arrives (or a later
+    ``reconcile_from_log`` finds it). ``voter_id`` is resolved at buffer time
+    from the authenticated sender, exactly as the live path would.
+    """
+
+    voter_id: bytes
+    kind: GroupChatTypeEnum
+    choice: "dict[str, str] | None"
+    version: int
 
 
 def voter_id_from_read_cap(read_cap: bytes) -> bytes:
@@ -60,6 +97,9 @@ async def _voter_id(sess, peer: "persistent.ConversationPeer") -> bytes:
 class TallyController:
     def __init__(self) -> None:
         self._docs: "dict[tuple[int, bytes], Doc]" = {}
+        # Votes/closes seen before their survey was known, keyed by
+        # (conversation_id, survey_id); drained when the Doc first appears.
+        self._pending: "dict[tuple[int, bytes], list[PendingTally]]" = {}
 
     def get(self, conversation_id: int, survey_id: bytes) -> "Doc | None":
         return self._docs.get((conversation_id, survey_id))
@@ -97,7 +137,8 @@ class TallyController:
         row = await sess.get(persistent.TallyState, survey_id)
         if row is None:
             sess.add(persistent.TallyState(
-                survey_id=survey_id, conversation_id=conversation_id, doc_state=blob,
+                survey_id=survey_id, conversation_id=conversation_id,
+                doc_state=blob,
             ))
         elif row.conversation_id != conversation_id:
             logger.warning(
@@ -181,6 +222,7 @@ class TallyController:
             )
             return
         doc = self._docs.get((conversation_id, survey_id))
+        is_new = doc is None
         try:
             if doc is None:
                 loaded = sync.load_doc(crdt)
@@ -193,16 +235,120 @@ class TallyController:
             )
             return
         if doc is None:
-            self._docs[(conversation_id, survey_id)] = loaded
+            doc = loaded
+            self._docs[(conversation_id, survey_id)] = doc
+        if is_new:
+            # A vote or close consumed before its survey arrived is buffered;
+            # apply it in the same transaction that first persists the Doc, so
+            # the poll is never briefly short a ballot.
+            self._drain_pending(doc, conversation_id, survey_id)
         await self._save(sess, survey_id, conversation_id)
 
-    async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> bool:
-        """Apply an inbound tally message to the local Doc. Returns True when
-        outbound work was staged in ``sess`` and the send loop must be poked."""
+    def _buffer_pending(
+        self, conversation_id: int, survey_id: bytes, entry: PendingTally,
+    ) -> None:
+        """Queue a vote/close that arrived before its survey, in arrival order."""
+        pending = self._pending.setdefault((conversation_id, survey_id), [])
+        if entry not in pending:
+            pending.append(entry)
+
+    def _drain_pending(self, doc, conversation_id: int, survey_id: bytes) -> None:
+        """Apply the buffered votes/closes for a survey once its Doc exists.
+
+        Each is idempotent, so re-draining (a duplicate log row, or a create
+        whose blob already carried the ballot) changes nothing."""
+        pending = self._pending.pop((conversation_id, survey_id), None)
+        if not pending:
+            return
+        for entry in pending:
+            if entry.kind is GroupChatTypeEnum.TALLY_VOTE:
+                self._replay_vote(doc, entry)
+            elif entry.kind is GroupChatTypeEnum.TALLY_CLOSE:
+                self._replay_close(doc, entry)
+
+    def _replay_vote(self, doc, entry: PendingTally) -> None:
+        stored = engine.stored_choice(doc, entry.voter_id)
+        if stored is not None:
+            stored_version, stored_choices = stored
+            if entry.version < stored_version:
+                return
+            if entry.version == stored_version and stored_choices == (entry.choice or {}):
+                return
+        try:
+            engine.apply_vote(doc, entry.voter_id, entry.choice or {}, entry.version)
+        except ValueError as exc:
+            logger.warning(
+                "replaying vote on %s: invalid ballot: %s",
+                schema.survey_id_of(doc).hex(), exc,
+            )
+
+    def _replay_close(self, doc, entry: PendingTally) -> None:
+        creator = schema.creator_of(doc)
+        if creator is not None and creator != entry.voter_id:
+            return
+        if schema.status_of(doc) == "closed":
+            return
+        engine.close_survey(doc)
+
+    async def reconcile_from_log(self) -> None:
+        """Buffer tally votes/closes whose survey we have never persisted.
+
+        A peer reads every member stream, so a vote can be consumed ahead of
+        the create on another stream; it is a no-op then, and its row renders
+        as "unknown poll". The raw message is already in the ConversationLog,
+        so scan it once (at startup) and queue every such ballot for the
+        survey's Doc to drain when it arrives. Rows whose survey is already
+        persisted are skipped -- their ballot is already in the persisted Doc.
+        Writes nothing."""
+        async with persistent.asession() as sess:
+            known = set((await sess.exec(
+                persistent.select(persistent.TallyState.survey_id)
+            )).all())
+            rows = (await sess.exec(
+                persistent.select(persistent.ConversationLog).order_by(
+                    persistent.ConversationLog.conversation_id,
+                    persistent.ConversationLog.conversation_order,
+                )
+            )).all()
+            for row in rows:
+                payload = row.payload
+                if payload[:1] != b"F":
+                    continue
+                try:
+                    gcm = GroupChatMessage.from_cbor(payload[1:])
+                except Exception:
+                    continue
+                tally = getattr(gcm, "tally", None)
+                kind = gcm.msg_type
+                if tally is None or kind not in (
+                    GroupChatTypeEnum.TALLY_VOTE, GroupChatTypeEnum.TALLY_CLOSE,
+                ):
+                    continue
+                key = (row.conversation_id, tally.survey_id)
+                if tally.survey_id in known or key in self._docs:
+                    continue
+                peer = await sess.get(
+                    persistent.ConversationPeer, row.conversation_peer_id,
+                )
+                if peer is None:
+                    continue
+                voter = await _voter_id(sess, peer)
+                choice = (
+                    dict(tally.choice or {})
+                    if kind is GroupChatTypeEnum.TALLY_VOTE else None
+                )
+                self._buffer_pending(
+                    row.conversation_id, tally.survey_id,
+                    PendingTally(voter, kind, choice, tally.version),
+                )
+
+    async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> ApplyResult:
+        """Apply an inbound tally message to the local Doc and report how it
+        was handled (see :class:`ApplyResult`)."""
         tally = gcm.tally
         if tally is None:
             logger.warning("tally message with no payload; dropping")
-            return False
+            return ApplyResult("rejected", "tally message with no payload")
         survey_id = tally.survey_id
         conversation_id = peer.conversation.id
         kind = gcm.msg_type
@@ -212,63 +358,92 @@ class TallyController:
                 "dropping tally message: survey id of %d bytes exceeds cap %d",
                 len(survey_id), _MAX_SURVEY_ID_LEN,
             )
-            return False
+            return ApplyResult(
+                "rejected",
+                f"survey id of {len(survey_id)} bytes exceeds the {_MAX_SURVEY_ID_LEN}-byte cap",
+            )
         if tally.crdt is not None and len(tally.crdt) > _MAX_CRDT_BLOB:
             logger.warning(
                 "dropping tally message: crdt blob of %d bytes exceeds cap %d",
                 len(tally.crdt), _MAX_CRDT_BLOB,
             )
-            return False
+            return ApplyResult(
+                "rejected",
+                f"crdt blob of {len(tally.crdt)} bytes exceeds the {_MAX_CRDT_BLOB}-byte cap",
+            )
 
         if kind is GroupChatTypeEnum.TALLY_CREATE:
             if await self._foreign_conversation(sess, survey_id, conversation_id):
-                return False
+                return ApplyResult("rejected", "survey belongs to another conversation")
             await self._apply_full_or_update(sess, conversation_id, survey_id, tally.crdt)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_VOTE:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
-                logger.warning("vote for unknown survey %s; dropping", survey_id.hex())
-                return False
+                voter = await _voter_id(sess, peer)
+                self._buffer_pending(
+                    conversation_id, survey_id,
+                    PendingTally(voter, kind, dict(tally.choice or {}), tally.version),
+                )
+                logger.warning(
+                    "vote for unknown survey %s; buffering for replay",
+                    survey_id.hex(),
+                )
+                return ApplyResult("duplicate", "vote for unknown survey")
             voter = await _voter_id(sess, peer)
             try:
                 engine.apply_vote(doc, voter, tally.choice or {}, tally.version)
             except ValueError as exc:
                 logger.warning("rejecting invalid vote on %s: %s", survey_id.hex(), exc)
-                return False
+                return ApplyResult("rejected", f"invalid vote: {exc}")
             await self._save(sess, survey_id, conversation_id)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_CLOSE:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
-                return False
+                voter = await _voter_id(sess, peer)
+                self._buffer_pending(
+                    conversation_id, survey_id,
+                    PendingTally(voter, kind, None, tally.version),
+                )
+                return ApplyResult("duplicate", "close for unknown survey")
             creator = schema.creator_of(doc)
             sender = await _voter_id(sess, peer)
             if creator is not None and creator != sender:
                 logger.warning("ignoring close of %s from a non-creator", survey_id.hex())
-                return False
+                return ApplyResult("rejected", "close ignored: not the creator")
             engine.close_survey(doc)
             await self._save(sess, survey_id, conversation_id)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_SYNC_RESP:
             if await self._foreign_conversation(sess, survey_id, conversation_id):
-                return False
+                return ApplyResult("rejected", "survey belongs to another conversation")
             await self._apply_full_or_update(sess, conversation_id, survey_id, tally.crdt)
-            return False
+            return ApplyResult("applied")
 
         if kind is GroupChatTypeEnum.TALLY_SYNC_REQ:
             doc = await self._ensure_loaded(sess, conversation_id, survey_id)
             if doc is None:
-                return False
-            diff = sync.diff_since(doc, tally.crdt or b"")
+                return ApplyResult("duplicate", "sync request for unknown survey")
+            try:
+                diff = sync.diff_since(doc, tally.crdt or b"")
+            except ValueError as exc:
+                # A malformed state vector must not wedge the receive loop with
+                # a raise out of dispatch; drop the request like any other
+                # undecodable tally payload.
+                logger.warning(
+                    "dropping sync request for survey %s: undecodable state "
+                    "vector: %s", survey_id.hex(), exc,
+                )
+                return ApplyResult("rejected", f"undecodable state vector: {exc}")
             await send.stage_outbound(sess, peer.conversation, build_sync_response(survey_id, diff))
-            return True
+            return ApplyResult("applied", signal_send=True)
 
         logger.warning("unhandled tally kind %s", kind)
-        return False
+        return ApplyResult("rejected", f"unhandled tally kind {kind}")
 
 
 # The process holds a single controller; the receive dispatch and the headless
@@ -276,5 +451,5 @@ class TallyController:
 INSTANCE = TallyController()
 
 
-async def handle_event(sess, peer, gcm: GroupChatMessage) -> bool:
+async def handle_event(sess, peer, gcm: GroupChatMessage) -> ApplyResult:
     return await INSTANCE.handle_event(sess, peer, gcm)

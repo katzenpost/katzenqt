@@ -23,9 +23,11 @@ from .engine import (
     outcome,
     tally,
 )
+from .controller import ApplyResult
 from .schema import Mode, domain, new_survey_doc, slot_id, slots_of
 
 __all__ = [
+    "ApplyResult",
     "Mode",
     "Outcome",
     "SlotTally",

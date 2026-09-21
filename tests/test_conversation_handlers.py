@@ -100,7 +100,7 @@ class TestHandleIntroductionSelfRecognition:
                     display_name="self", read_cap=own_read_cap,
                 ),
             )
-            added, _signal, peer_added = await conversation_handlers._handle_introduction(
+            added, _signal, peer_added, _tally = await conversation_handlers._handle_introduction(
                 sess, own_peer, gcm, b"F" + gcm.to_cbor(),
             )
             assert added is True  # the message itself is still logged
@@ -129,7 +129,7 @@ class TestHandleIntroductionSelfRecognition:
                     display_name="carol", read_cap=newcomer_rc,
                 ),
             )
-            added, _signal, peer_added = await conversation_handlers._handle_introduction(
+            added, _signal, peer_added, _tally = await conversation_handlers._handle_introduction(
                 sess, own_peer, gcm, b"F" + gcm.to_cbor(),
             )
             assert added is True
@@ -151,7 +151,7 @@ async def test_introduction_respects_member_limit(monkeypatch):
             msg_type=models.GroupChatTypeEnum.INTRODUCTION,
             introduction=models.GroupChatPleaseAdd(display_name="bob", read_cap=cap),
         )
-        _, _, added = await conversation_handlers._handle_introduction(
+        _, _, added, _tally = await conversation_handlers._handle_introduction(
             sess, peer, gcm, b"F" + gcm.to_cbor(),
         )
         assert added is None

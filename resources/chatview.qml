@@ -215,7 +215,8 @@ TreeView {
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
 	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)
-	    color: (model.network_status > 0 ? "red" : sysPalette.text)
+	    font.italic: model.is_tally === true
+	    color: (model.network_status > 0 ? "red" : (model.is_tally ? sysPalette.highlight : sysPalette.text))
           }
 
 	  RowLayout {
@@ -245,6 +246,11 @@ TreeView {
             // can't select text in QML Label, so we use a read-only text editor.: https://bugreports.qt.io/browse/QTBUG-14077
             textFormat: Text.PlainText // https://doc.qt.io/qt-6/qml-qtquick-text.html#textFormat-prop
             readOnly: true
+            // A tally row opens its poll from anywhere in the row. This
+            // read-only editor otherwise swallows the press over the message
+            // text; disabling it on tally rows lets the delegate's TapHandler
+            // receive the click. Chat rows keep selectable text.
+            enabled: model.is_tally !== true
             wrapMode: Text.Wrap
 	    // hovered: when mouse is over
             //Layout.fillWidth: parent
@@ -257,7 +263,9 @@ TreeView {
             //selectByMouse: true
             text: model.display
 	    font.family: (ctx["messageText.font.family"] ?ctx["messageText.font.family"]:"Serif")
-	    font.pointSize: (ctx["messageText.font.pointSize"] ? ctx["messageText.font.pointSize"] : 11)
+	    font.pointSize: (ctx["messageText.font.pointSize"] ?ctx["messageText.font.pointSize"] : 11)
+	    font.italic: model.is_tally === true
+	    color: model.is_tally === true ? sysPalette.highlight : sysPalette.text
 	    background: Rectangle {
 	      color: hovered ? sysPalette.alternateBase : sysPalette.base
 	    }
@@ -275,19 +283,19 @@ TreeView {
             Button {
               text: "Play"
               // voice notes only, and only when this row is not already playing
-              visible: model.is_audio_message
+              visible: model.is_audio_message === true
                     && chatController.playingMessageId !== model.message_id
               onClicked: chatController.playReceivedMessage(model.message_id)
             }
             Button {
               text: "Stop"
-              visible: model.is_audio_message
+              visible: model.is_audio_message === true
                     && chatController.playingMessageId === model.message_id
               onClicked: chatController.stopAudioPlayback()
             }
             Button {
               text: "Open"
-              visible: !model.is_audio_message  // let the OS pick a handler
+              visible: model.is_audio_message !== true  // let the OS pick a handler
               onClicked: chatController.openAttachment(model.message_id)
             }
             Button {
@@ -298,6 +306,13 @@ TreeView {
 
           } // Column messageColumn
 } // contentItem: Row
+
+          // A tally row (poll create/vote/close/sync) opens its survey in the
+          // Polls panel. Chat rows leave tally_survey_id unset.
+          TapHandler {
+            enabled: model.tally_survey_id !== undefined && model.tally_survey_id !== null
+            onTapped: chatController.openPoll(model.tally_survey_id)
+          }
         } // delegate: TreeViewDelegate
 
 } // TreeView

@@ -19,6 +19,7 @@ from katzenqt.tally.schema import Mode, votes_map
 
 ALICE_CAP = bytes([0x02]) * 136
 BOB_CAP = bytes([0x03]) * 136
+CAROL_CAP = bytes([0x05]) * 136
 OWN_CAP = bytes([0x01]) * 136
 
 
@@ -132,7 +133,7 @@ async def test_state_persists_and_a_fresh_controller_reloads_it():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_routes_tally_off_the_log_and_chat_into_it():
+async def test_dispatch_logs_tally_rows_and_routes_chat_too():
     survey_id = uuid.uuid4().bytes
     conversation_handlers.tally_controller.INSTANCE._docs.clear()
     async with persistent.asession() as sess:
@@ -140,18 +141,25 @@ async def test_dispatch_routes_tally_off_the_log_and_chat_into_it():
 
         blob = sync.full_state(schema.new_survey_doc(survey_id, "t", Mode.APPROVAL, ["a"]))
         create = events.build_create(survey_id, blob)
-        added, _sig, _pa = await conversation_handlers.dispatch(sess, peers["alice"], create, b"ignored")
-        assert added is False  # tally create does not add a chat row
+        added, _sig, _pa, tally_added = await conversation_handlers.dispatch(
+            sess, peers["alice"], create, b"F" + create.to_cbor(),
+        )
+        assert added is True  # a tally message is an ordinary chat row
+        assert tally_added is True  # ...and the poll views must refresh
 
         vote = events.build_vote(survey_id, {"s0": "yes"})
-        added, _sig, _pa = await conversation_handlers.dispatch(sess, peers["alice"], vote, b"ignored")
-        assert added is False
+        added, _sig, _pa, tally_added = await conversation_handlers.dispatch(
+            sess, peers["alice"], vote, b"F" + vote.to_cbor(),
+        )
+        assert added is True
+        assert tally_added is True
 
         text = models.GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
-        added, _sig, _pa = await conversation_handlers.dispatch(
+        added, _sig, _pa, tally_added = await conversation_handlers.dispatch(
             sess, peers["alice"], text, b"F" + text.to_cbor(),
         )
         assert added is True  # ordinary chat still lands in the log
+        assert tally_added is False
         convo_id = convo.id  # capture before commit expires the attribute
         await sess.commit()
 
@@ -160,7 +168,7 @@ async def test_dispatch_routes_tally_off_the_log_and_chat_into_it():
                 persistent.ConversationLog.conversation_id == convo_id
             )
         )).all()
-        assert len(rows) == 1
+        assert len(rows) == 3
 
 
 @pytest.mark.asyncio
@@ -221,8 +229,8 @@ async def test_cross_conversation_apply_is_isolated():
         await ctrl.handle_event(sess, peers_a["alice"], events.build_vote(survey_id, {"s0": "yes"}))
 
         other_blob = sync.full_state(schema.new_survey_doc(survey_id, "hijack", Mode.APPROVAL, ["a"]))
-        assert await ctrl.handle_event(sess, peers_b["bob"], events.build_create(survey_id, other_blob)) is False
-        assert await ctrl.handle_event(sess, peers_b["bob"], events.build_vote(survey_id, {"s0": "no"})) is False
+        assert (await ctrl.handle_event(sess, peers_b["bob"], events.build_create(survey_id, other_blob))).status == "rejected"
+        assert (await ctrl.handle_event(sess, peers_b["bob"], events.build_vote(survey_id, {"s0": "no"}))).status != "applied"
 
         a_id, b_id = convo_a.id, convo_b.id
         await sess.commit()
@@ -243,7 +251,7 @@ async def test_oversized_survey_id_is_dropped():
     async with persistent.asession() as sess:
         convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
         blob = sync.full_state(schema.new_survey_doc(huge_id, "t", Mode.APPROVAL, ["a"]))
-        assert await ctrl.handle_event(sess, peers["alice"], events.build_create(huge_id, blob)) is False
+        assert (await ctrl.handle_event(sess, peers["alice"], events.build_create(huge_id, blob))).status == "rejected"
         convo_id = convo.id
         await sess.commit()
 
@@ -261,7 +269,7 @@ async def test_oversized_crdt_blob_is_dropped():
     async with persistent.asession() as sess:
         convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
         giant = b"\x00" * (controller_mod._MAX_CRDT_BLOB + 1)
-        assert await ctrl.handle_event(sess, peers["alice"], events.build_create(survey_id, giant)) is False
+        assert (await ctrl.handle_event(sess, peers["alice"], events.build_create(survey_id, giant))).status == "rejected"
         convo_id = convo.id
         await sess.commit()
 
@@ -281,3 +289,185 @@ async def test_undecodable_crdt_is_dropped_not_raised(caplog):
     from katzenqt.tally import sync
     with pytest.raises(ValueError):
         sync.load_doc(b"\xde\xad\xbe\xef" * 8)
+
+
+@pytest.mark.asyncio
+async def test_malformed_sync_request_is_dropped_not_raised(caplog):
+    """A TALLY_SYNC_REQ carrying a garbage state vector must not raise out of
+    dispatch (which would wedge the receive loop); it is dropped like any other
+    undecodable tally payload, and no reply is staged (False return)."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
+        # A sender with no useful history sends a malformed state vector.
+        await ctrl.create_local(sess, convo, survey_id, "t", Mode.APPROVAL, ["a"])
+        bad_req = events.build_sync_request(survey_id, b"\xde\xad\xbe\xef" * 16)
+        assert (await ctrl.handle_event(sess, peers["alice"], bad_req)).status == "rejected"
+        await sess.commit()
+
+
+@pytest.mark.asyncio
+async def test_apply_and_reject_verdicts_for_received_events():
+    """`handle_event` reports applied/rejected for the timeline, and a rejected
+    event changes nothing."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
+        blob = sync.full_state(schema.new_survey_doc(survey_id, "t", Mode.APPROVAL, ["a"]))
+        create = await ctrl.handle_event(sess, peers["alice"], events.build_create(survey_id, blob))
+        assert create.status == "applied"
+        convo_id = convo.id
+        await sess.commit()
+
+    from katzenqt.conversation_handlers import _conversation_peers
+    async with persistent.asession() as sess:
+        alice = next(
+            p for p in await _conversation_peers(sess, convo_id) if p.name == "alice"
+        )
+        applied = await ctrl.handle_event(sess, alice, events.build_vote(survey_id, {"s0": "yes"}))
+        assert applied.status == "applied"
+        # An oversized survey id is rejected and changes nothing.
+        rejected = await ctrl.handle_event(
+            sess, alice, events.build_create(b"\x01" * 65, blob),
+        )
+        assert rejected.status == "rejected"
+        assert rejected.detail
+        await sess.commit()
+
+    assert engine.tally(ctrl.get(convo_id, survey_id)).n_voters == 1
+
+
+# ---------------------------------------------------------------------------
+# Out-of-order votes: a vote consumed before the survey it names
+# ---------------------------------------------------------------------------
+
+
+def _created_doc_blob(survey_id, topic="t", slots=("a", "b")):
+    doc = schema.new_survey_doc(survey_id, topic, Mode.APPROVAL, list(slots))
+    return sync.full_state(doc)
+
+
+@pytest.mark.asyncio
+async def test_vote_before_create_is_applied_when_the_survey_arrives():
+    """A vote on one member's stream can be consumed before the create on
+    another's. It is a no-op while the survey is unknown, then applied (from
+    the buffer) the moment the create builds the Doc."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(
+            sess, "g", OWN_CAP, {"alice": ALICE_CAP, "carol": CAROL_CAP},
+        )
+        vote = await ctrl.handle_event(
+            sess, peers["carol"], events.build_vote(survey_id, {"s0": "yes"}),
+        )
+        assert vote.status == "duplicate"  # unknown survey: buffered, not applied
+        applied = await ctrl.handle_event(
+            sess, peers["alice"],
+            events.build_create(survey_id, _created_doc_blob(survey_id)),
+        )
+        assert applied.status == "applied"
+        convo_id = convo.id
+        await sess.commit()
+
+    result = engine.tally(ctrl.get(convo_id, survey_id))
+    assert result.n_voters == 1
+    assert result.slots[0].yes == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_buffers_an_early_vote_then_the_create_applies_it():
+    """A vote whose create was never processed in a previous session is
+    recovered from the ConversationLog at startup and applied when the create
+    finally arrives."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(
+            sess, "g", OWN_CAP, {"alice": ALICE_CAP, "carol": CAROL_CAP},
+        )
+        vote = events.build_vote(survey_id, {"s0": "yes"})
+        sess.add(persistent.ConversationLog(
+            conversation_id=convo.id, conversation_peer_id=peers["carol"].id,
+            conversation_order=0, payload=b"F" + vote.to_cbor(),
+        ))
+        convo_id = convo.id
+        await sess.commit()
+
+    await ctrl.reconcile_from_log()
+    assert (convo_id, survey_id) in ctrl._pending
+
+    from katzenqt.conversation_handlers import _conversation_peers
+
+    async with persistent.asession() as sess:
+        alice = next(
+            p for p in await _conversation_peers(sess, convo_id) if p.name == "alice"
+        )
+        applied = await ctrl.handle_event(
+            sess, alice,
+            events.build_create(survey_id, _created_doc_blob(survey_id)),
+        )
+        assert applied.status == "applied"
+        await sess.commit()
+
+    result = engine.tally(ctrl.get(convo_id, survey_id))
+    assert result.n_voters == 1
+    assert result.slots[0].yes == 1
+    assert (convo_id, survey_id) not in ctrl._pending
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ignores_surveys_we_already_persisted():
+    """Once a survey is persisted its ballots are already in the Doc, so the
+    log scan must not re-buffer them (that is what makes startup replay
+    idempotent)."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(
+            sess, "g", OWN_CAP, {"alice": ALICE_CAP, "carol": CAROL_CAP},
+        )
+        doc = schema.new_survey_doc(survey_id, "t", Mode.APPROVAL, ["a", "b"])
+        sess.add(persistent.TallyState(
+            survey_id=survey_id, conversation_id=convo.id,
+            doc_state=sync.full_state(doc),
+        ))
+        vote = events.build_vote(survey_id, {"s0": "yes"})
+        sess.add(persistent.ConversationLog(
+            conversation_id=convo.id, conversation_peer_id=peers["carol"].id,
+            conversation_order=0, payload=b"F" + vote.to_cbor(),
+        ))
+        convo_id = convo.id
+        await sess.commit()
+
+    await ctrl.reconcile_from_log()
+    assert ctrl._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_buffered_vote_already_in_the_create_blob_is_not_double_applied():
+    """A create may already carry a ballot (e.g. the creator had it); the
+    buffered copy must not overwrite or duplicate it."""
+    ctrl = TallyController()
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(
+            sess, "g", OWN_CAP, {"alice": ALICE_CAP, "carol": CAROL_CAP},
+        )
+        await ctrl.handle_event(
+            sess, peers["carol"], events.build_vote(survey_id, {"s0": "yes"}),
+        )
+        doc = schema.new_survey_doc(survey_id, "t", Mode.APPROVAL, ["a", "b"])
+        engine.apply_vote(doc, voter_id_from_read_cap(CAROL_CAP), {"s0": "yes"}, 0)
+        await ctrl.handle_event(
+            sess, peers["alice"],
+            events.build_create(survey_id, sync.full_state(doc)),
+        )
+        convo_id = convo.id
+        await sess.commit()
+
+    result = engine.tally(ctrl.get(convo_id, survey_id))
+    assert result.n_voters == 1
+    assert result.slots[0].yes == 1

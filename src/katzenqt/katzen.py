@@ -57,6 +57,13 @@ from .models import (GroupChatFileUpload,
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
+from .qt_tally import TallyCreateDialog, TallyPanel
+from .tally import controller as tally_controller
+from .tally import events as tally_events
+from .tally import presenter as tally_presenter
+from .tally import schema as tally_schema
+from .tally import send as tally_send
+from .tally import sync as tally_sync
 from .ui_font_settings import Ui_FontSettingsDialog  # ui_font_settings.py
 from .ui_mixchat import Ui_MainWindow  # ui_mixchat.py
 
@@ -110,8 +117,19 @@ class AsyncioThread(threading.Thread):
             print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
         self.loop.run_until_complete(self.warm_engine())
+        self.loop.run_until_complete(self.reconcile_tally_once())
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
+
+    async def reconcile_tally_once(self):
+        """Buffer early tally ballots from the conversation logs before the
+        receive loops start, so a vote consumed ahead of its poll is applied
+        when the poll arrives (see ``TallyController.reconcile_from_log``).
+        Best-effort: a failure must not keep the client from starting."""
+        try:
+            await tally_controller.INSTANCE.reconcile_from_log()
+        except Exception as e:
+            logger.error("startup tally reconcile failed: %s", e, exc_info=e)
 
     async def run_in_io(self, fn):
         """Run (fn) in the io loop, to work around QtAsyncio not providing sock_connect etc.
@@ -1184,6 +1202,195 @@ class MainWindow(QMainWindow):
         self.transfers_view.setMinimumHeight(80)
         self.ui.gridLayout_2.addWidget(self.transfers_view, 2, 0, 1, 1)
 
+        # Poll windows: one modeless TallyPanel per open poll, keyed by
+        # (conversation_id, survey_id). Clicking a tally row in the chat log
+        # opens/raises that poll's window; the New-poll composer tab creates one.
+        self._poll_windows: "dict[tuple[int, bytes], TallyPanel]" = {}
+        self.ui.new_poll_button.clicked.connect(lambda: self.new_poll())
+
+        # Keep the composer as short as its current tab needs. QTabWidget's
+        # size hint is the max over every page (and a hidden page's hint is
+        # only computed once it is shown), so otherwise it grows to the
+        # tallest tab ever visited and never shrinks back.
+        self.ui.singlemultitab.currentChanged.connect(self._fit_composer)
+        self._fit_composer()
+
+    # -- composer input tabs -------------------------------------------------
+
+    def _fit_composer(self, *_) -> None:
+        """Clamp the composer's tab widget to the height of its current tab."""
+        tabs = self.ui.singlemultitab
+        page = tabs.currentWidget()
+        if page is None:
+            return
+        chrome = (
+            tabs.tabBar().sizeHint().height()
+            + 2 * tabs.style().pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth)
+        )
+        tabs.setMaximumHeight(page.sizeHint().height() + chrome)
+
+    # -- tally / polls -------------------------------------------------------
+
+    def _open_poll_window(self, conversation_id: int, survey_id: bytes) -> None:
+        """Show (or raise) the poll window for one survey, creating it on first
+        open. Windows are independent and modeless, so several polls can be
+        open at once; each title names its conversation."""
+        key = (conversation_id, survey_id)
+        panel = self._poll_windows.get(key)
+        if panel is None:
+            panel = TallyPanel(self)
+            name = tally_presenter.conversation_names().get(
+                conversation_id, f"#{conversation_id}"
+            )
+            panel.set_conversation_label(name)
+            panel.voteSubmitted.connect(
+                lambda choice, p=panel: self.tally_vote(p, choice)
+            )
+            panel.closeRequested.connect(lambda p=panel: self.tally_close(p))
+            panel.finished.connect(
+                lambda _result=0, k=key: self._poll_windows.pop(k, None)
+            )
+            panel.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+            if not panel.show_survey(conversation_id, survey_id):
+                panel.deleteLater()
+                return
+            self._poll_windows[key] = panel
+        elif not panel.show_survey(conversation_id, survey_id):
+            return
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+
+    def _refresh_tally_views(self, conversation_id: int) -> None:
+        """Re-render the tally-derived views for a conversation after a tally
+        notification: every open poll window, plus the chat log's tally rows
+        (their text depends on the survey state, which just changed)."""
+        convo_state = self.conversation_state_by_id.get(conversation_id)
+        if convo_state is not None:
+            convo_state.conversation_log_model.refresh_tally_rows()
+        for key, panel in list(self._poll_windows.items()):
+            if key[0] == conversation_id:
+                panel.show_survey(*key)
+
+    @Slot(str)
+    def openPoll(self, survey_id_hex: str) -> None:
+        """Open a survey's poll window (QML placeholder click)."""
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        try:
+            survey_id = bytes.fromhex(survey_id_hex)
+        except ValueError:
+            return
+        self._open_poll_window(convo_state.conversation_id, survey_id)
+
+    def _show_action_error(self, title: str, error: BaseException) -> None:
+        """Report a failed UI action to the user without nesting a Qt loop."""
+        logger.error("%s: %s", title, error, exc_info=error)
+        QTimer.singleShot(0, lambda: QMessageBox.critical(
+            self, APP_NAME, f"{title}:\n{error}",
+        ))
+
+    @async_cb
+    async def tally_vote(self, panel: TallyPanel, choice) -> None:
+        """Persist the panel's edited selection and broadcast it."""
+        key = panel.current_survey()
+        if key is None:
+            return
+        conversation_id, survey_id = key
+        # The vote is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
+        try:
+            await self.iothread.run_in_io(
+                _io_tally_vote(conversation_id, survey_id, dict(choice))
+            )
+        except Exception as e:
+            self._show_action_error("Could not send your vote", e)
+            return
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def tally_close(self, panel: TallyPanel) -> None:
+        """Close the panel's survey (only the creator may) and broadcast it."""
+        key = panel.current_survey()
+        if key is None:
+            return
+        conversation_id, survey_id = key
+        # The close is staged on the same stream as chat; refuse until joined.
+        if await self._refuse_unless_joined(conversation_id):
+            return
+        try:
+            await self.iothread.run_in_io(
+                _io_tally_close(conversation_id, survey_id)
+            )
+        except Exception as e:
+            self._show_action_error("Could not end the poll", e)
+            return
+        self._refresh_tally_views(conversation_id)
+
+    @async_cb
+    async def new_poll(self) -> None:
+        """Open the create dialog; its accept signal drives the create.
+
+        The create deliberately does not run as this task's continuation. A
+        dialog resumes the awaiting task via its ``finished`` signal, and a
+        task swallowed by a nested Qt loop would silently drop the poll (see
+        the QtAsyncio re-entrancy note in AGENTS.md). Instead the dialog's
+        ``accepted`` signal calls a plain slot that snapshots the fields and
+        schedules the create, so it runs from top-level dispatch whatever
+        happens to this task.
+        """
+        convo_state = self.convo_state_or_none()
+        if convo_state is None:
+            return
+        # Creating a poll publishes it on the same stream as chat; refuse
+        # before opening the dialog so no work is discarded.
+        if await self._refuse_unless_joined(convo_state.conversation_id):
+            return
+        conversation_id = convo_state.conversation_id
+        dialog = TallyCreateDialog(self)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Read the fields in the signal handler, before the dialog is deleted.
+        dialog.accepted.connect(lambda: self._create_poll(
+            conversation_id, dialog.topic(), dialog.mode(), dialog.slots(),
+        ))
+        logger.info("poll create: dialog opened for conversation %d", conversation_id)
+        dialog.open()
+
+    @async_cb
+    async def _create_poll(self, conversation_id, topic, mode, slots) -> None:
+        """Create and broadcast a survey; report a failure to the user."""
+        if not topic or not slots:
+            return
+        logger.info("poll create: accepted %d option(s)", len(slots))
+        try:
+            survey_id = await self.iothread.run_in_io(
+                _io_tally_create(conversation_id, topic, mode, slots)
+            )
+        except Exception as e:
+            self._show_action_error("Could not create the poll", e)
+            return
+        self._refresh_tally_views(conversation_id)
+        if survey_id is not None:
+            self.openPoll(survey_id.hex())
+
+    async def tally_listener(self) -> None:
+        """Refresh the poll views when the receive path consumed a tally event
+        (mirrors receive_msg_listener for the chat log)."""
+        while True:
+            try:
+                conversation_id = await self.iothread.run_in_io(
+                    network.tally_update_queue.get()
+                )
+                self._refresh_tally_views(conversation_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(
+                    "tally_listener: dropping an item after %s", e, exc_info=e,
+                )
+
     async def _enqueue_outgoing_gcm(
         self,
         convo_state: "ConversationUIState",
@@ -1413,7 +1620,7 @@ class MainWindow(QMainWindow):
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
             return
-        convo_state.conversation_log_model.increment_row_count()
+        convo_state.conversation_log_model.refresh_row_count()
         # And then we can increment the row count to let the UI register it:
 
         # x) Scrolling - two cases:
@@ -1843,6 +2050,8 @@ class MainWindow(QMainWindow):
         elif has_files:
             self.ui.attached_files_QListWidget.setCurrentRow(0)
         self._update_attachment_controls()
+        # The attachment page's height can change as files are added/removed.
+        self._fit_composer()
 
     @async_cb
     async def conversation_selected(self, selected:QTreeWidgetItem, old:QTreeWidgetItem|None):
@@ -1968,6 +2177,10 @@ class MainWindow(QMainWindow):
         self.ui.attach_file_button.setEnabled(True)
         self.ui.attached_files_QListWidget.setEnabled(True)
 
+        # The new-poll composer tab likewise starts disabled.
+        self.ui.poll_tab.setEnabled(True)
+        self.ui.new_poll_button.setEnabled(True)
+
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
 
@@ -2077,7 +2290,8 @@ class MainWindow(QMainWindow):
             )
             replace_box.setDefaultButton(QMessageBox.StandardButton.No)
             result = await _dialog_finished(replace_box)
-            if replace_box.standardButton(result) != QMessageBox.StandardButton.Yes:
+            # finished() returns the clicked StandardButton, not a widget.
+            if result != QMessageBox.StandardButton.Yes:
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
@@ -2353,6 +2567,99 @@ class MixSystrayIcon(QSystemTrayIcon):
         print("Someone clicked message", args, kwargs)
 
     
+async def _stage_local_tally(sess, convo, gcm) -> None:
+    """Stage an outbound tally message and append its optimistic chat row.
+
+    Runs inside the caller's ``conversation_log_order_lock``: the row's order is
+    a COUNT subquery evaluated at commit, so it must not race a concurrent
+    append. ``network_status=1`` marks the row pending until the send clears.
+    """
+    final_pwal_id = await tally_send.stage_outbound(sess, convo, gcm)
+    sess.add(persistent.ConversationLog(
+        conversation_id=convo.id,
+        conversation_peer_id=convo.own_peer_id,
+        conversation_order=persistent.next_conversation_order(convo.id),
+        payload=b"F" + gcm.to_cbor(),
+        network_status=1,
+        outgoing_pwal=final_pwal_id,
+    ))
+
+
+async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes | None":
+    """Create a survey, persist it and stage its broadcast, on the io loop.
+
+    Returns the survey id (None on failure).
+    """
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            logger.error("tally create: conversation %d not found", conversation_id)
+            return None
+        waited_from = time.monotonic()
+        async with persistent.conversation_log_order_lock(conversation_id):
+            waited = time.monotonic() - waited_from
+            if waited > 1.0:
+                # The io loop serialises every conversation append behind this
+                # lock; a long wait means synchronous work (e.g. serialising a
+                # large upload) is starving the loop.
+                logger.warning(
+                    "tally create: waited %.1fs for the conversation log lock "
+                    "(conversation %d)", waited, conversation_id,
+                )
+            doc = await tally_controller.INSTANCE.create_local(
+                sess, convo, survey_id, topic, mode, slots,
+            )
+            blob = tally_sync.full_state(doc)
+            await _stage_local_tally(
+                sess, convo, tally_events.build_create(survey_id, blob),
+            )
+            await sess.commit()
+    logger.info("tally create: staged survey %s", survey_id.hex())
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return survey_id
+
+
+async def _io_tally_vote(conversation_id: int, survey_id: bytes, choice) -> bool:
+    """Record our vote locally and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        async with persistent.conversation_log_order_lock(conversation_id):
+            version = await tally_controller.INSTANCE.cast_local_vote(
+                sess, convo, survey_id, choice,
+            )
+            if version is None:
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_vote(survey_id, choice, version),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return True
+
+
+async def _io_tally_close(conversation_id: int, survey_id: bytes) -> bool:
+    """Close a survey we created and stage the broadcast, on the io loop."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        if convo is None:
+            return False
+        async with persistent.conversation_log_order_lock(conversation_id):
+            if not await tally_controller.INSTANCE.close_local(sess, convo, survey_id):
+                return False
+            await _stage_local_tally(
+                sess, convo, tally_events.build_close(survey_id),
+            )
+            await sess.commit()
+    await network.conversation_update_queue.put((conversation_id, False))
+    await network.check_for_new()
+    return True
+
+
 async def add_conversation(window, convo: persistent.Conversation) -> None:
     window.conversation_log_models = getattr(window, "conversation_log_models", dict())
 
@@ -2395,7 +2702,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
             .select_from(persistent.ConversationLog)
             .where(persistent.ConversationLog.conversation_id == convo.id)
         ).first()
-        convo_state.conversation_log_model.row_count = msg_count
+    convo_state.conversation_log_model.set_row_count(msg_count)
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
     # Append the new conversation to the "real" model window.all_contacts,
@@ -2488,6 +2795,9 @@ async def main(window: MainWindow):
     )
     window._supervised_listener(
         "peer_added_listener", window.peer_added_listener, restart_on_finish=True,
+    )
+    window._supervised_listener(
+        "tally_listener", window.tally_listener, restart_on_finish=True,
     )
     window._supervised_listener(
         "transfers_listener", window.transfers_listener, restart_on_finish=True,

@@ -54,6 +54,9 @@ ROLE_CHAT_IS_AUDIO_MESSAGE = 0x105
 ROLE_CHAT_ATTACHMENT_KIND = 0x106  # QML: attachment_kind, drives Play/Open/Save visibility
 ROLE_CHAT_ATTACHMENT_REL_PATH = 0x107  # QML: attachment_rel_path, spilled file (received only)
 ROLE_CHAT_PICTURE_PATH = 0x108  # QML: picture_path, thumbnail rel_path for image attachments
+ROLE_CHAT_TALLY_KIND = 0x109  # QML: tally_kind, one of create/vote/recast/close/sync/invalid (tally rows only)
+ROLE_CHAT_TALLY_SURVEY_ID = 0x10A  # QML: tally_survey_id, survey id hex to open on click (tally rows only)
+ROLE_CHAT_IS_TALLY = 0x10B  # QML: is_tally, true for tally rows (so the delegate can style/click them)
 
 # Custom roles for the Transfers panel. The table is driven by DownloadsModel
 # below; these roles let a future delegate/QML entry fetch the
@@ -452,6 +455,68 @@ def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
     return None
 
 
+def _is_tally_type(msg_type) -> bool:
+    """True for the tally protocol's message family."""
+    from .models import GroupChatTypeEnum as T
+
+    return msg_type in (
+        T.TALLY_CREATE, T.TALLY_VOTE, T.TALLY_CLOSE,
+        T.TALLY_SYNC_REQ, T.TALLY_SYNC_RESP,
+    )
+
+
+_TALLY_ROW_CACHE: "dict[tuple, object]" = {}
+
+
+def _tally_row(cl):
+    """The projected :class:`presenter.TallyRowText` for a tally log row, or
+    None when the row is not a tally message. Cached by row id: a log row's
+    payload and peer name do not change."""
+    if cl.payload[:1] != b"F":
+        return None
+    key = (str(cl.id), cl.conversation_peer.name if cl.conversation_peer else "")
+    cached = _TALLY_ROW_CACHE.get(key, False)
+    if cached is not False:
+        return cached
+    from .models import GroupChatMessage
+    from .tally import presenter
+
+    try:
+        gcm = GroupChatMessage.from_cbor(cl.payload[1:])
+    except Exception:
+        return None
+    if getattr(gcm, "tally", None) is None and not _is_tally_type(gcm.msg_type):
+        return None
+    summary = None
+    if gcm.tally is not None:
+        summary = _tally_survey_summary(cl.conversation_id, gcm.tally.survey_id)
+    row = presenter.tally_row_text(
+        gcm,
+        actor_name=cl.conversation_peer.name if cl.conversation_peer else "?",
+        survey_summary=summary,
+    )
+    _TALLY_ROW_CACHE[key] = row
+    return row
+
+
+def _tally_survey_summary(conversation_id: int, survey_id: bytes):
+    """Project the persisted survey a tally row concerns, or None if absent."""
+    from .tally import presenter
+    from .tally.sync import load_doc
+
+    blob = presenter.survey_doc(conversation_id, survey_id)
+    if blob is None:
+        return None
+    try:
+        doc = load_doc(blob)
+    except ValueError:
+        return None
+    return presenter.summarize(
+        doc, conversation_id=conversation_id,
+        voter_names=presenter.voter_names(conversation_id),
+    )
+
+
 def lru_cache_for_data_roles(maxsize=10000):
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
     def decorator(func):
@@ -468,6 +533,13 @@ def lru_cache_for_data_roles(maxsize=10000):
                 if ret != 1:  # received or sent, but not "pending"
                     indices_with_stable_network_status[index] = ret
                 return ret
+        # Expose a cache_clear so a model reset (row removal) can drop stale
+        # cells: the value cache indexes by QModelIndex, and the stable-status
+        # map keys by index too.
+        def cache_clear() -> None:
+            cached_func.cache_clear()
+            indices_with_stable_network_status.clear()
+        wrapper.cache_clear = cache_clear
         return wrapper
     return decorator
 
@@ -484,6 +556,16 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
+        # The row count is cached and re-read from the database by
+        # refresh_row_count() (called on a conversation-update notification).
+        # Deriving it from the log, rather than incrementing a counter at each
+        # writer, means a writer that forgets to notify cannot desync the view
+        # permanently: the next notification re-reads the truth. ``_row_count``
+        # is the DB truth (what rowCount() returns); ``_view_count`` is how many
+        # rows Qt has actually been told about, which drives insert/reset
+        # transitions.
+        self._row_count = 0
+        self._view_count = 0
 
     def roleNames(self):
         """These map names used in QML to ints used in QAbstractItemModel
@@ -506,40 +588,123 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND: QByteArray(b'attachment_kind'),
             ROLE_CHAT_ATTACHMENT_REL_PATH: QByteArray(b'attachment_rel_path'),
             ROLE_CHAT_PICTURE_PATH: QByteArray(b'picture_path'),
+            ROLE_CHAT_TALLY_KIND: QByteArray(b'tally_kind'),
+            ROLE_CHAT_TALLY_SURVEY_ID: QByteArray(b'tally_survey_id'),
+            ROLE_CHAT_IS_TALLY: QByteArray(b'is_tally'),
         }
 
-    @lru_cache(maxsize=10000)
     def index(self, row:int, column:int, parent:QModelIndex | None) -> QModelIndex:
+        """A standard flat-list index: no custom internal id, and out-of-range
+        rows are invalid. QML's TreeView adapts this model through
+        QQmlTreeModelToTableModel, which stores QPersistentModelIndexes; an
+        index identity derived from the row (and cached) desyncs that adapter
+        across inserts and crashes it."""
         if parent and parent.isValid():
             return QModelIndex()
-        qmi = self.createIndex(row,column, id=row*(column+1))
-        return qmi
+        if row < 0 or row >= self._row_count or column < 0:
+            return QModelIndex()
+        return self.createIndex(row, column)
 
-    @lru_cache(maxsize=10000)
     def parent(self, child:QModelIndex|QPersistentModelIndex) -> QModelIndex:
         """Since we don't have any trees here, nochild indices have parents"""
         return QModelIndex()
     def rowCount(self, parent:QModelIndex|None) -> int:
-        """number of chat messages.
-        we set this initially when loading in add_conversation(),
-        and then each time we receive a message
-        or write a message ourselves.
+        """number of chat messages, from the cached DB count (see
+        refresh_row_count). Qt calls this during layout/paint, so it must not
+        query; the cache is refreshed on each conversation-update notification.
         """
         if not parent or parent.row() == -1:
-            return self.row_count
+            return self._row_count
         return 0
 
-    def increment_row_count(self):
-        qmi = QModelIndex()
-        self.beginInsertRows(qmi, self.row_count-1, self.row_count-1)
-        self.row_count += 1
-        self.endInsertRows()
+    def _query_row_count(self) -> int:
+        with persistent.Session(persistent._engine_sync) as sess:
+            return int(sess.exec(
+                select(persistent.sa.func.count())
+                .select_from(persistent.ConversationLog)
+                .where(
+                    persistent.ConversationLog.conversation_id == self.convo_id
+                )
+            ).one())
+
+    def set_row_count(self, count: int) -> None:
+        """Seed the cached count without emitting signals (startup, when the
+        view has no rows yet). Both the DB-truth count and the count Qt has
+        been told about start equal, so the first later insert uses a range the
+        view can accept."""
+        self._row_count = int(count)
+        self._view_count = int(count)
+        self._clear_data_caches()
+
+    def refresh_row_count(self) -> None:
+        """Re-read the log's row count and reconcile the view.
+
+        Transitions are driven by ``_view_count`` (rows Qt has actually been
+        told about), never by the raw DB count: seeding the count at startup
+        without an insert means the view's bookkeeping can lag the model's, and
+        emitting a range computed from the DB count then crashes the view.
+        Growth inserts the missing tail, a shrink resets the model, and no
+        change repaints in place. Because the count comes from the log, a
+        writer that appends a row without notifying this model self-heals on
+        the next notification instead of desyncing the view permanently.
+        """
+        new_count = self._query_row_count()
+        if new_count > self._view_count:
+            qmi = QModelIndex()
+            self.beginInsertRows(qmi, self._view_count, new_count - 1)
+            self._row_count = new_count
+            self._view_count = new_count
+            self.endInsertRows()
+            return
+        if new_count < self._view_count:
+            # Shrink: rows were removed. Reset rather than compute a delta, so
+            # any shifted indices and stale cached cells are dropped wholesale.
+            # Clear the caches before the transition, not between begin/end.
+            self._clear_data_caches()
+            self.beginResetModel()
+            self._row_count = new_count
+            self._view_count = new_count
+            self.endResetModel()
+            return
+        # Count unchanged: repaint in place (no transition).
+        self.redraw_network_status()
 
     def redraw_network_status(self):
-        """Force the view to refresh without actually changing anything."""
-        qmi = QModelIndex()
-        self.beginInsertRows(qmi, 1,0)
-        self.endInsertRows()
+        """Repaint the network-status column without changing the row set."""
+        if self._view_count == 0:
+            return
+        top = self.index(0, 0, QModelIndex())
+        bottom = self.index(self._view_count - 1, 0, QModelIndex())
+        self.dataChanged.emit(top, bottom, [ROLE_CHAT_NETWORK_STATUS])
+
+    def _clear_data_caches(self) -> None:
+        """Drop cached data()/tally-row cells after the row count changed.
+
+        ``data()`` is lru-cached per (model, index, role) and tally rows are
+        cached per row id; a reset (deletion) can shift rows and invalidate
+        both, so any count change clears them.
+        """
+        clear = getattr(self.data, "cache_clear", None)
+        if clear is not None:
+            clear()
+        _TALLY_ROW_CACHE.clear()
+
+    def refresh_tally_rows(self) -> None:
+        """Re-project every row after a tally event.
+
+        A tally row's text depends on whether the survey it names is known and
+        on that survey's current state: an early vote renders as "unknown poll"
+        until the create arrives, and a create's placeholder gains its vote
+        counts. Both are cached by row id, so drop the caches and repaint all
+        roles."""
+        self._clear_data_caches()
+        if self._view_count == 0:
+            return
+        self.dataChanged.emit(
+            self.index(0, 0, QModelIndex()),
+            self.index(self._view_count - 1, 0, QModelIndex()),
+            [],
+        )
 
     def columnCount(self, parent:QModelIndex|QPersistentModelIndex|None) -> int:
         if parent.isValid():
@@ -562,6 +727,9 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_ATTACHMENT_KIND,
             ROLE_CHAT_ATTACHMENT_REL_PATH,
             ROLE_CHAT_PICTURE_PATH,
+            ROLE_CHAT_TALLY_KIND,
+            ROLE_CHAT_TALLY_SURVEY_ID,
+            ROLE_CHAT_IS_TALLY,
         ):
             return None
         index_row : int = index.row()
@@ -569,6 +737,19 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         # TODO we definitely want to paginate this stuff for performance reasons,
         # and when we do we want order by:
         # sa_relationship_kwargs={"order_by": "conversation_order", "lazy": "dynamic"},
+        #
+        # TODO (2026-09-20) DB-chatter reductions, not urgent:
+        #   - data() opens a Session and runs one indexed SELECT per uncached
+        #     (index, role); a fast scroll over unseen rows can burst many
+        #     one-query sessions. A per-conversation in-model row cache keyed
+        #     by conversation_order (invalidated on insert/reset) would remove
+        #     the per-paint queries.
+        #   - redraw_network_status() emits dataChanged over the whole range on
+        #     every conversation notification, making the view re-ask roles for
+        #     every row. Narrow it to the row whose status actually changed (the
+        #     ACK path) instead.
+        #   - refresh_row_count() runs one COUNT(*) per conversation event (not
+        #     per scroll/mouse); that cadence is fine, keep it tied to events.
 
         with persistent.Session(persistent._engine_sync) as sess:
                 cl = sess.exec(
@@ -577,6 +758,10 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                         persistent.ConversationLog.conversation_order == index_row,
                     )
                 ).first()
+                if cl is None:
+                    # The count can briefly outrun the committed rows (or a
+                    # reset can race a paint); never deref None for a role.
+                    return None
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
                     if cl.network_status == 1:
@@ -587,6 +772,20 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 elif role == ROLE_CHAT_MESSAGE_ID:
                     return str(cl.id)
                 else:
+                    tally = _tally_row(cl)
+                    if tally is not None:
+                        if role == 0:
+                            return tally.text
+                        if role == ROLE_CHAT_TALLY_KIND:
+                            return tally.kind
+                        if role == ROLE_CHAT_TALLY_SURVEY_ID:
+                            return tally.survey_id.hex() if tally.survey_id else None
+                        if role == ROLE_CHAT_IS_TALLY:
+                            return True
+                        if role == ROLE_CHAT_AUTHOR:
+                            return cl.conversation_peer.name
+                        # No attachment/picture roles for tally rows.
+                        return None
                     # Derive display text and attachment roles from the payload.
                     # INTRODUCTION rows carry no body text, so surface the
                     # announcement ("<author> added <name>") before the
@@ -684,8 +883,10 @@ class ConversationUIState(BaseModel):
     attached_files : set[str] = Field(default_factory=set)
 
     first_unread : int = 0
-    # (projected) ConversationLog.conversation_order of first message the user
-    # hasn't "read" yet - it doesn't have to exist in ConversationLog yet.
+    # ConversationLog.conversation_order of the first message the user hasn't
+    # "read" yet. QML's marker walks visible rows and the timeline is exactly
+    # the conversation log (tally messages are ordinary rows), so this is both
+    # the row index and the order.
 
     def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
         props = QQmlPropertyMap(rootObject)

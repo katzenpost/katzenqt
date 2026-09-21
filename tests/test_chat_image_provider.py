@@ -9,7 +9,12 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QSize  # noqa: E402
-from PySide6.QtGui import QGuiApplication, QImage  # noqa: E402
+from PySide6.QtGui import QImage  # noqa: E402
+# QApplication (not QGuiApplication): test_qt_tally builds QWidgets, and only
+# one Qt application instance may exist per process, so every module must agree
+# on the widest base class. QApplication is a strict superset, so these
+# model-provider tests behave identically under it.
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from katzenqt import persistent  # noqa: E402
 from katzenqt.attachment_images import THUMB_MAX_PX  # noqa: E402
@@ -18,7 +23,7 @@ from katzenqt.qt_models import ChatImageProvider  # noqa: E402
 
 @pytest.fixture(scope="module", autouse=True)
 def _qt_app() -> Iterator[QCoreApplication]:
-    app = QGuiApplication.instance() or QGuiApplication([])
+    app = QApplication.instance() or QApplication([])
     yield app
 
 

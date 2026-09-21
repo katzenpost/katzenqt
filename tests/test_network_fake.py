@@ -909,6 +909,39 @@ class TestDrainMixwalReadSingle:
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
+    async def test_tally_event_logs_a_row_and_notifies_the_gui(self, fake_thinclient):
+        # A received tally create becomes a ConversationLog row (the timeline
+        # shows it) and must push the conversation onto tally_update_queue
+        # *after* the consume-commit, so the GUI repaints against committed
+        # TallyState.
+        from katzenqt import conversation_handlers
+        from katzenqt.tally import events, schema, sync
+        from katzenqt.tally.engine import Mode
+
+        conversation_handlers.tally_controller.INSTANCE._docs.clear()
+        survey_id = uuid.uuid4().bytes
+        blob = sync.full_state(
+            schema.new_survey_doc(survey_id, "who's up", Mode.APPROVAL, ["monday"])
+        )
+        payload = b"F" + events.build_create(survey_id, blob).to_cbor()
+        setup = await _set_up_read_flow(fake_thinclient, plaintext=payload)
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient,
+            rcw_read_cap=setup["read_cap"],
+            mw=mw,
+            draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            surveys = (await sess.exec(select(persistent.TallyState))).all()
+            assert len(surveys) == 1 and surveys[0].survey_id == survey_id
+            log = (await sess.exec(select(persistent.ConversationLog))).all()
+            assert len(log) == 1
+        assert network.tally_update_queue.qsize() == 1
+        assert await network.tally_update_queue.get() == setup["conversation_id"]
+
+    @pytest.mark.asyncio
     async def test_lost_read_reply_is_recovered_by_watchdog(self, fake_thinclient):
         # A lost read reply (thinclient query-id no-listener drop, e.g. after a
         # daemon reconnect/replay) must not strand the read forever: the

@@ -80,6 +80,9 @@ def _reset_network_module_state():
             setattr(network, name, asyncio.Event())
         getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
+        # Tally events are drained by the GUI in whole lumps; a fresh queue per
+        # test keeps leftovers from one test out of the next.
+        setattr(network, "tally_update_queue", asyncio.Queue())
         # Transfers-panel events must not leak across tests.
         while not network.substream_progress_queue.empty():
             network.substream_progress_queue.get_nowait()

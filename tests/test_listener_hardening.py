@@ -48,8 +48,8 @@ class _BoomLogModel:
     def __init__(self):
         self.calls = []
 
-    def increment_row_count(self):
-        self.calls.append("increment")
+    def refresh_row_count(self):
+        self.calls.append("refresh")
         raise RuntimeError("boom")
 
     def redraw_network_status(self):
@@ -116,7 +116,7 @@ class TestReceiveMsgListenerSurvives:
                 katzen.MainWindow.receive_msg_listener.__get__(window)()
             )
 
-        assert log_model.calls == ["increment", "redraw"]
+        assert log_model.calls == ["refresh", "redraw"]
         assert any(
             "receive_msg_listener: dropping an item after boom" in r.message
             for r in caplog.records

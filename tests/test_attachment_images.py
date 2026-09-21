@@ -12,7 +12,12 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QBuffer, QCoreApplication  # noqa: E402
-from PySide6.QtGui import QGuiApplication, QImage  # noqa: E402
+from PySide6.QtGui import QImage  # noqa: E402
+# QApplication (not QGuiApplication): test_qt_tally builds QWidgets, and only
+# one Qt application instance may exist per process, so every module must agree
+# on the widest base class. QApplication is a strict superset, so image
+# encode/decode behaves identically under it.
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from katzenqt import attachment_images, persistent  # noqa: E402
 
@@ -21,7 +26,7 @@ from katzenqt import attachment_images, persistent  # noqa: E402
 def _qt_app() -> Iterator[QCoreApplication]:
     """QImage encode/decode needs a live Qt GUI application; create one
     offscreen so the suite runs without a display."""
-    app = QGuiApplication.instance() or QGuiApplication([])
+    app = QApplication.instance() or QApplication([])
     yield app
 
 

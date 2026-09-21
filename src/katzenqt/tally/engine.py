@@ -42,6 +42,17 @@ class TallyResult:
     slots: "list[SlotTally]"
 
 
+@dataclass(frozen=True)
+class VoterChoice:
+    """One voter's recorded vote: the availability they marked on each slot
+    (a slot they left unmarked is omitted, so an all-no vote is ``{}``), plus
+    the version used to order recasts."""
+
+    voter_id: bytes
+    version: int
+    choices: "dict[str, str]"
+
+
 def _stored_version(votes: Map, key: str) -> int:
     """The version of the vote under ``key``, or ``-1`` if there is none."""
     if key not in set(votes.keys()):
@@ -54,6 +65,20 @@ def current_version(doc: Doc, voter_id: bytes) -> int:
     """The version of ``voter_id``'s recorded vote, or ``-1`` if they have not
     yet voted. Callers bump this to mint the next version on a recast."""
     return _stored_version(votes_map(doc), voter_id.hex())
+
+
+def stored_choice(doc: Doc, voter_id: bytes) -> "tuple[int, dict[str, str]] | None":
+    """The ``(version, choices)`` recorded for ``voter_id``, or ``None`` if they
+    have not voted. Lets a replay tell whether the ballot it holds is already
+    what the Doc records, without mutating it."""
+    votes = votes_map(doc)
+    key = voter_id.hex()
+    if key not in set(votes.keys()):
+        return None
+    vmap = votes[key]
+    choice = {k: vmap[k] for k in vmap.keys() if k != _VERSION_KEY}
+    version = vmap[_VERSION_KEY] if _VERSION_KEY in set(vmap.keys()) else 0
+    return version, choice
 
 
 def apply_vote(doc: Doc, voter_id: bytes, choice: "dict[str, str]", version: int = 0) -> None:
@@ -88,16 +113,30 @@ def close_survey(doc: Doc) -> None:
         meta_map(doc)["status"] = "closed"
 
 
+def per_voter(doc: Doc) -> "list[VoterChoice]":
+    """The per-voter detail view: each recorded vote keyed to its voter id,
+    with the slot availability map and the vote's version. Pure: reads the
+    ``Doc`` and stores nothing. Voter order is the sorted hex keys, so two
+    peers derive the same list. The voter id is the payload-independent
+    identity (see ``controller.voter_id_from_read_cap``)."""
+    votes = votes_map(doc)
+    out = []
+    for voter in sorted(votes.keys()):
+        vmap = votes[voter]
+        choice = {k: vmap[k] for k in vmap.keys() if k != _VERSION_KEY}
+        version = vmap[_VERSION_KEY] if _VERSION_KEY in set(vmap.keys()) else 0
+        out.append(VoterChoice(
+            voter_id=bytes.fromhex(voter), version=version, choices=choice,
+        ))
+    return out
+
+
 def tally(doc: Doc) -> TallyResult:
     """Derive the per-slot counts. Pure: it reads the ``Doc`` and stores nothing.
 
     A voter who omitted a slot counts as ``no`` for that slot.
     """
-    votes = votes_map(doc)
-    choices = []
-    for voter in votes.keys():
-        vmap = votes[voter]
-        choices.append({k: vmap[k] for k in vmap.keys() if k != _VERSION_KEY})
+    choices = [v.choices for v in per_voter(doc)]
 
     slots = []
     for sid, text in slots_of(doc):
