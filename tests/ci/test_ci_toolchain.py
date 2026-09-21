@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -75,6 +76,13 @@ def test_packaged_compilers_reach_later_steps(
     if not unversioned_present:
         for name in ("cargo", "rustc"):
             (tmp_path / "bin" / name).unlink()
+        system = tmp_path / "system"
+        system.mkdir()
+        for name in ("bash", "dirname", "env", "ln", "mktemp"):
+            source = shutil.which(name)
+            assert source is not None
+            (system / name).symlink_to(source)
+        env["PATH"] = f"{tmp_path / 'bin'}:{system}"
     run = _run_setup(env)
     assert run.returncode == 0, run.stdout + run.stderr
     calls = (tmp_path / "calls").read_text(encoding="ascii").splitlines()
