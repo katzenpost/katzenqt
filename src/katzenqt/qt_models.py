@@ -441,8 +441,8 @@ def _substream_parent_name(sess, cp) -> str:
 
 
 PACKET_COLUMNS = (
-    "Sent", "Dir", "Kind", "Stream", "Pos", "Status", "In flight",
-    "Timeout in", "Detail",
+    "Sent", "Dir", "Kind", "Stream", "Pos", "Status", "Retry", "In flight",
+    "Timeout in",
 )
 
 _PACKET_STATUS_LABELS = {
@@ -461,16 +461,16 @@ _PACKET_STATUS_LABELS = {
 class PacketsModel(QtCore.QAbstractTableModel):
     """Table of per-packet records from ``network.packets_snapshot()``.
 
-    Stream labels (contact / substream-of-parent / conversation) are resolved
-    lazily from the sync engine and cached per stream id. The Packets dialog
-    drives ``refresh()`` on a timer.
+    Stream labels and substream totals are resolved lazily from the sync
+    engine and cached per stream id. The Packets dialog drives ``refresh()`` on
+    a timer.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._rows: "list[dict]" = []
         self._ids: "list[str]" = []
-        self._labels: "dict[object, str]" = {}
+        self._stream_info: "dict[object, tuple[str, int | None]]" = {}
 
     def rowCount(self, parent=None) -> int:  # type: ignore[override]
         if parent is not None and parent.isValid():
@@ -526,53 +526,54 @@ class PacketsModel(QtCore.QAbstractTableModel):
         if column == 2:
             return row["kind"].replace("_", " ")
         if column == 3:
-            return self._stream_label(row)
+            return self._stream_info_for(row)[0]
         if column == 4:
-            if row["box_index"] is None:
+            position = row["box_position"]
+            if position is None:
+                position = row["box_index"]
+            if position is None:
                 return "—"
-            if row["ordinal"] is None:
-                return str(row["box_index"])
-            return f"{row['box_index']} (#{row['ordinal']})"
+            total = self._stream_info_for(row)[1]
+            if total:
+                return f"{position}/{total}"
+            return str(position)
         if column == 5:
             return _PACKET_STATUS_LABELS.get(row["status"], row["status"])
         if column == 6:
+            return str(max(int(row.get("attempt", 1)) - 1, 0))
+        if column == 7:
             end = row["finished_at"]
             if end is None:
                 end = time.monotonic()
             return network.format_duration(end - row["sent_at"])
-        if column == 7:
+        if column == 8:
             if row["finished_at"] is not None or row["timeout_s"] is None:
                 return "—"
             remaining = row["sent_at"] + row["timeout_s"] - time.monotonic()
             if remaining <= 0:
                 return "overdue"
             return network.format_duration(remaining)
-        if column == 8:
-            detail = row.get("detail")
-            envelope = row.get("envelope_hash")
-            short = (
-                bytes(envelope)[:4].hex()
-                if isinstance(envelope, (bytes, bytearray)) else ""
-            )
-            if detail and short:
-                return f"{detail} · {short}"
-            return detail or short or ""
         return None
 
-    def _stream_label(self, row) -> str:
+    def _stream_info_for(self, row) -> "tuple[str, int | None]":
         kind = row["kind"]
         if kind.startswith("voucher"):
-            return row.get("stage") or "voucher"
+            return (row.get("stage") or "voucher", None)
         stream_id = row["stream_id"]
         if stream_id is None:
-            return "—"
-        if stream_id in self._labels:
-            return self._labels[stream_id]
-        label = self._query_stream_label(stream_id)
-        self._labels[stream_id] = label
-        return label
+            return ("—", None)
+        if stream_id in self._stream_info:
+            return self._stream_info[stream_id]
+        info = self._query_stream_info(stream_id)
+        self._stream_info[stream_id] = info
+        return info
 
-    def _query_stream_label(self, stream_id) -> str:
+    def _query_stream_info(self, stream_id) -> "tuple[str, int | None]":
+        """(label, substream_total_chunks) for a stream id.
+
+        The total is set only for file-transfer substreams, on the substream's
+        own ReadCapWAL (a read) or its indirection ReadCapWAL (an agg write).
+        """
         from .network import _SUBSTREAM_NAME_PREFIX, _substream_parent_id
         with persistent.Session(persistent._engine_sync) as sess:
             cp = sess.exec(
@@ -582,21 +583,35 @@ class PacketsModel(QtCore.QAbstractTableModel):
             ).first()
             if cp is not None:
                 if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+                    rcw = sess.get(persistent.ReadCapWAL, stream_id)
+                    total = rcw.substream_total_chunks if rcw is not None else None
                     parent_id = _substream_parent_id(cp.name)
                     parent = (
                         sess.get(persistent.ConversationPeer, parent_id)
                         if parent_id is not None else None
                     )
                     if parent is not None:
-                        return f"substream of {parent.name}"
-                    return "substream"
-                return cp.name
+                        return (f"substream of {parent.name}", total)
+                    return ("substream", total)
+                return (cp.name, None)
+            conv = sess.exec(
+                select(persistent.Conversation).where(
+                    persistent.Conversation.write_cap == stream_id,
+                )
+            ).first()
+            if conv is not None:
+                own = (
+                    sess.get(persistent.ConversationPeer, conv.own_peer_id)
+                    if conv.own_peer_id is not None else None
+                )
+                return (f"{own.name if own is not None else 'you'} in {conv.name}", None)
             rcw = sess.exec(
                 select(persistent.ReadCapWAL).where(
                     persistent.ReadCapWAL.write_cap_id == stream_id,
                 )
             ).first()
             if rcw is not None:
+                total = rcw.substream_total_chunks
                 pwal = sess.exec(
                     select(persistent.PlaintextWAL).where(
                         persistent.PlaintextWAL.bacap_stream == stream_id,
@@ -607,16 +622,9 @@ class PacketsModel(QtCore.QAbstractTableModel):
                         persistent.Conversation, pwal.conversation_id,
                     )
                     if conv is not None:
-                        return f"substream of {conv.name}"
-                return "substream"
-            conv = sess.exec(
-                select(persistent.Conversation).where(
-                    persistent.Conversation.write_cap == stream_id,
-                )
-            ).first()
-            if conv is not None:
-                return conv.name
-        return str(stream_id)[:8]
+                        return (f"substream of {conv.name}", total)
+                return ("substream", total)
+        return (str(stream_id)[:8], None)
 
 
 class AttachmentDisplay(NamedTuple):

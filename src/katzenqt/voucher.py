@@ -30,7 +30,7 @@ from sqlmodel import select
 from . import models, persistent
 from .katzen_util import create_task
 from .network import (
-    _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX,
+    _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _box_position,
     _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
     check_for_new, conversation_update_queue, ConnectionLifeInterruptedError,
     PacketContext,
@@ -203,6 +203,9 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
             publish_context = PacketContext(
                 "voucher_write",
                 box_index=int.from_bytes(message_box_index[:8], "little"),
+                box_position=_box_position(
+                    int.from_bytes(message_box_index[:8], "little"), write_cap,
+                ),
                 timeout_s=READ_WATCHDOG_SECONDS,
             )
             await _rpc_racing_connection_life(
@@ -289,6 +292,9 @@ async def _read_box(
             read_context = PacketContext(
                 "voucher_read",
                 box_index=int.from_bytes(message_box_index[:8], "little"),
+                box_position=_box_position(
+                    int.from_bytes(message_box_index[:8], "little"), read_cap,
+                ),
                 timeout_s=READ_WATCHDOG_SECONDS,
                 stage=stage,
             )

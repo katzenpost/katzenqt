@@ -134,15 +134,16 @@ class PacketContext:
     """
 
     __slots__ = (
-        "kind", "stream_id", "box_index", "timeout_s", "timed_out", "packet_id",
-        "stage",
+        "kind", "stream_id", "box_index", "box_position", "timeout_s",
+        "timed_out", "packet_id", "stage",
     )
 
     def __init__(self, kind: str, *, stream_id=None, box_index=None,
-                 timeout_s=None, stage=None):
+                 box_position=None, timeout_s=None, stage=None):
         self.kind = kind
         self.stream_id = stream_id
         self.box_index = box_index
+        self.box_position = box_position
         self.timeout_s = timeout_s
         self.stage = stage
         self.timed_out = False
@@ -151,9 +152,9 @@ class PacketContext:
 
 class _PacketRecord:
     __slots__ = (
-        "id", "kind", "stream_id", "box_index", "ordinal", "sent_at",
-        "sent_wall", "timeout_s", "status", "finished_at", "envelope_hash",
-        "detail", "stage",
+        "id", "kind", "stream_id", "box_index", "box_position", "attempt",
+        "sent_at", "sent_wall", "timeout_s", "status", "finished_at",
+        "envelope_hash", "stage",
     )
 
     def __init__(self, packet_id, context, envelope_hash):
@@ -161,14 +162,14 @@ class _PacketRecord:
         self.kind = context.kind
         self.stream_id = context.stream_id
         self.box_index = context.box_index
-        self.ordinal = _next_packet_ordinal(context.stream_id)
+        self.box_position = context.box_position
+        self.attempt = _next_packet_attempt(context)
         self.sent_at = time.monotonic()
         self.sent_wall = time.time()
         self.timeout_s = context.timeout_s
         self.status = PACKET_STATUS_IN_FLIGHT
         self.finished_at = None
         self.envelope_hash = envelope_hash
-        self.detail = None
         self.stage = context.stage
 
 
@@ -177,19 +178,45 @@ _packets: "dict[str, _PacketRecord]" = {}
 # configured retention limit. In-flight packets are always kept.
 _packet_finished_order: "list[str]" = []
 _packet_finished_limit = DEFAULT_PACKET_FINISHED_LIMIT
-_packet_ordinals: "dict[object, int]" = {}
+# Send attempts per (stream, box) -- or (kind, box) for streamless vouchers --
+# so the Packets window can show how many times a box has been retried. Capped
+# FIFO, since a long session touches many distinct boxes.
+_packet_attempts: "dict[object, int]" = {}
+_packet_attempt_order: "list[object]" = []
+_PACKET_ATTEMPT_CAP = 8192
 # Records are written on the io loop and read/cleared from the Qt thread (the
 # Packets dialog), so every registry mutation takes this short lock; it is
 # never held across an await.
 _packets_lock = threading.Lock()
 
 
-def _next_packet_ordinal(stream_id) -> "int | None":
-    if stream_id is None:
+def _packet_attempt_key(context: PacketContext):
+    if context.stream_id is not None:
+        return (context.stream_id, context.box_index)
+    return (context.kind, context.box_index)
+
+
+def _box_position(box_index, cap: "bytes | None") -> "int | None":
+    """1-based position of ``box_index`` within its stream, using the stream's
+    first BACAP counter in the cap's trailing 104-byte index (present in both
+    the 168-byte write cap and the 136-byte read cap). None when it can't be
+    derived."""
+    if box_index is None or not cap or len(cap) < 104:
         return None
-    ordinal = _packet_ordinals.get(stream_id, 0) + 1
-    _packet_ordinals[stream_id] = ordinal
-    return ordinal
+    first = int.from_bytes(cap[-104:][:8], "little")
+    position = int(box_index) - first + 1
+    return position if position >= 1 else None
+
+
+def _next_packet_attempt(context: PacketContext) -> int:
+    key = _packet_attempt_key(context)
+    if key not in _packet_attempts:
+        _packet_attempt_order.append(key)
+    attempt = _packet_attempts.get(key, 0) + 1
+    _packet_attempts[key] = attempt
+    while len(_packet_attempt_order) > _PACKET_ATTEMPT_CAP:
+        _packet_attempts.pop(_packet_attempt_order.pop(0), None)
+    return attempt
 
 
 def packet_begin(context: PacketContext, envelope_hash=None) -> str:
@@ -201,7 +228,7 @@ def packet_begin(context: PacketContext, envelope_hash=None) -> str:
         return packet_id
 
 
-def packet_finish(packet_id: "str | None", status: str, *, detail=None) -> None:
+def packet_finish(packet_id: "str | None", status: str) -> None:
     """Mark a send finished and retain it subject to the limit."""
     if packet_id is None:
         return
@@ -210,7 +237,6 @@ def packet_finish(packet_id: "str | None", status: str, *, detail=None) -> None:
         if record is None:
             return
         record.status = status
-        record.detail = detail
         record.finished_at = time.monotonic()
         _packet_finished_order.append(packet_id)
         _prune_finished_packets_locked()
@@ -250,14 +276,14 @@ def packets_snapshot() -> "list[dict]":
                 "kind": record.kind,
                 "stream_id": record.stream_id,
                 "box_index": record.box_index,
-                "ordinal": record.ordinal,
+                "box_position": record.box_position,
+                "attempt": record.attempt,
                 "sent_at": record.sent_at,
                 "sent_wall": record.sent_wall,
                 "timeout_s": record.timeout_s,
                 "status": record.status,
                 "finished_at": record.finished_at,
                 "envelope_hash": record.envelope_hash,
-                "detail": record.detail,
                 "stage": record.stage,
             }
             for record in _packets.values()
@@ -270,7 +296,8 @@ def reset_packets() -> None:
     with _packets_lock:
         _packets.clear()
         _packet_finished_order.clear()
-        _packet_ordinals.clear()
+        _packet_attempts.clear()
+        _packet_attempt_order.clear()
         _packet_finished_limit = DEFAULT_PACKET_FINISHED_LIMIT
 
 
@@ -335,19 +362,15 @@ def install_stats_counters(connection) -> None:
                 PACKET_STATUS_TIMED_OUT if timed_out else PACKET_STATUS_CANCELLED,
             )
             raise
-        except BaseException as exc:
-            packet_finish(packet_id, PACKET_STATUS_ERROR, detail=type(exc).__name__)
+        except BaseException:
+            packet_finish(packet_id, PACKET_STATUS_ERROR)
             raise
         finally:
             stats.packets_in_flight -= 1
         if is_read:
-            plaintext = getattr(result, "plaintext", b"")
-            if plaintext:
+            if getattr(result, "plaintext", b""):
                 stats.reads_with_payload += 1
-                packet_finish(
-                    packet_id, PACKET_STATUS_PAYLOAD,
-                    detail=_packet_payload_detail(plaintext),
-                )
+                packet_finish(packet_id, PACKET_STATUS_PAYLOAD)
             else:
                 packet_finish(packet_id, PACKET_STATUS_EMPTY)
         elif is_write:
@@ -358,12 +381,6 @@ def install_stats_counters(connection) -> None:
     connection.encrypt_read = encrypt_read
     connection.encrypt_write = encrypt_write
     connection.start_resending_encrypted_message = start_resending_encrypted_message
-
-
-def _packet_payload_detail(plaintext: bytes) -> str:
-    chunk_type = plaintext[:1]
-    label = chunk_type.decode("ascii", "replace") if chunk_type in b"CFI" else "?"
-    return f"{len(plaintext)} B ({label})"
 
 
 conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
@@ -790,6 +807,10 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         "write",
         stream_id=mw.bacap_stream,
         box_index=int.from_bytes(mw.current_message_index[:8], "little"),
+        box_position=_box_position(
+            int.from_bytes(mw.current_message_index[:8], "little"),
+            wcw.write_cap,
+        ),
         timeout_s=READ_WATCHDOG_SECONDS,
     )
     try:
@@ -1403,6 +1424,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             "substream_read" if is_substream else "contact_read",
             stream_id=bacap_uuid,
             box_index=int.from_bytes(mw.current_message_index[:8], "little"),
+            box_position=_box_position(
+                int.from_bytes(mw.current_message_index[:8], "little"),
+                rcw_read_cap,
+            ),
             timeout_s=read_watchdog_s,
         ),
     )
