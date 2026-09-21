@@ -1724,14 +1724,15 @@ class MainWindow(QMainWindow):
                         rcw_id, conv_id, parent_name, total,
                     )
                 elif kind == "upload_started":
-                    _, _, conv_id, total, parent_name = event
+                    _, _, conv_id, total, total_bytes, parent_name = event
                     self.transfers_model.start_transfer(
-                        rcw_id, conv_id, parent_name, total, direction="upload",
+                        rcw_id, conv_id, parent_name, total,
+                        direction="upload", raw_bytes=total_bytes,
                     )
                 elif kind == "piece":
-                    self.transfers_model.notify_piece(rcw_id, event[2])
+                    self.transfers_model.notify_piece(rcw_id, event[2], event[3])
                 elif kind == "upload_piece":
-                    self.transfers_model.notify_piece(rcw_id, event[2])
+                    self.transfers_model.notify_piece(rcw_id, event[2], event[3])
                 elif kind == "completed":
                     self.transfers_model.complete_transfer(rcw_id)
                 elif kind == "upload_completed":

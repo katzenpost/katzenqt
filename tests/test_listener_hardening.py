@@ -217,15 +217,16 @@ class TestTransfersListenerDrainsEvents:
                 self.calls = []
 
             def start_transfer(self, rcw_id, conv_id, parent_name, total,
-                               direction="download"):
+                               direction="download", raw_bytes=0):
                 self.calls.append(
-                    ("start", rcw_id, conv_id, parent_name, total, direction),
+                    ("start", rcw_id, conv_id, parent_name, total, direction,
+                     raw_bytes),
                 )
                 if boom_on == "started":
                     raise RuntimeError("boom")
 
-            def notify_piece(self, rcw_id, pieces):
-                self.calls.append(("piece", rcw_id, pieces))
+            def notify_piece(self, rcw_id, pieces, raw_bytes=None):
+                self.calls.append(("piece", rcw_id, pieces, raw_bytes))
                 if boom_on == "piece":
                     raise RuntimeError("boom")
 
@@ -243,13 +244,13 @@ class TestTransfersListenerDrainsEvents:
         up_rcw = __import__("uuid").uuid4()
         queue = _FakeQueue([
             ("started", rcw, 7, 3, "alice"),
-            ("piece", rcw, 1),
-            ("piece", rcw, 2),
+            ("piece", rcw, 1, 1529),
+            ("piece", rcw, 2, 3058),
             ("paused", rcw),
             ("resumed", rcw),
             ("completed", rcw),
-            ("upload_started", up_rcw, 7, 25, "bob-conv"),
-            ("upload_piece", up_rcw, 6),
+            ("upload_started", up_rcw, 7, 25, 25000, "bob-conv"),
+            ("upload_piece", up_rcw, 6, 30000),
             ("upload_paused", up_rcw),
             ("upload_resumed", up_rcw),
             ("upload_completed", up_rcw),
@@ -263,14 +264,14 @@ class TestTransfersListenerDrainsEvents:
         )
 
         assert model.calls == [
-            ("start", rcw, 7, "alice", 3, "download"),
-            ("piece", rcw, 1),
-            ("piece", rcw, 2),
+            ("start", rcw, 7, "alice", 3, "download", 0),
+            ("piece", rcw, 1, 1529),
+            ("piece", rcw, 2, 3058),
             ("paused", rcw, True),
             ("paused", rcw, False),  # resumed event -> set_paused(paused=False)
             ("complete", rcw),
-            ("start", up_rcw, 7, "bob-conv", 25, "upload"),
-            ("piece", up_rcw, 6),
+            ("start", up_rcw, 7, "bob-conv", 25, "upload", 25000),
+            ("piece", up_rcw, 6, 30000),
             ("paused", up_rcw, True),
             ("paused", up_rcw, False),
             ("complete", up_rcw),
@@ -283,7 +284,7 @@ class TestTransfersListenerDrainsEvents:
         rcw = __import__("uuid").uuid4()
         queue = _FakeQueue([
             ("started", rcw, 7, 3, "alice"),  # boom
-            ("piece", rcw, 1),                # must still get through
+            ("piece", rcw, 1, 1529),          # must still get through
         ])
         monkeypatch.setattr(network, "substream_progress_queue", queue)
         window = _fake_window(
@@ -295,8 +296,8 @@ class TestTransfersListenerDrainsEvents:
             )
 
         assert window.transfers_model.calls == [
-            ("start", rcw, 7, "alice", 3, "download"),
-            ("piece", rcw, 1),
+            ("start", rcw, 7, "alice", 3, "download", 0),
+            ("piece", rcw, 1, 1529),
         ]
         assert any(
             "transfers_listener: dropping an item after boom" in r.message

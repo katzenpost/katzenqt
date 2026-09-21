@@ -51,18 +51,20 @@ peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 # Substream file-transfer progress for the GUI Transfers panel.
 # Download events are ``(kind, rcw_id, *extra)``:
 #   ("started", rcw_id, conversation_id, total_or_None, parent_name)
-#   ("piece",    rcw_id, count_or_None)      # count is pieces received so far
+#   ("piece",    rcw_id, count, received_bytes)  # pieces and effective bytes so far
 #   ("completed", rcw_id)
 #   ("paused",   rcw_id)
 #   ("resumed",  rcw_id)
 #   ("failed",   rcw_id, reason_str)         # unprocessable chunk
 # Upload events mirror them under distinct kinds, keyed by the indirection
 # ReadCapWAL id:
-#   ("upload_started",   rcw_id, conversation_id, total_or_None, name)
-#   ("upload_piece",     rcw_id, sent_count)
+#   ("upload_started",   rcw_id, conversation_id, total_or_None, total_bytes, name)
+#   ("upload_piece",     rcw_id, sent_count, remaining_bytes)
 #   ("upload_completed", rcw_id)             # last C/F chunk ACK'd
 #   ("upload_paused",    rcw_id)
 #   ("upload_resumed",   rcw_id)
+# Byte counts are effective payload bytes (the chunk-type prefix and any
+# wire/framing overhead excluded).
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
 substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
@@ -118,7 +120,7 @@ async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
         # it until the last C/F chunk is ACK'd (see drain_mixwal_write_single).
         substream_progress_queue.put_nowait((
             "upload_started", upload.rcw_id, upload.conversation_id,
-            upload.total_chunks, upload.parent_name,
+            upload.total_chunks, upload.total_bytes, upload.parent_name,
         ))
     await check_for_new()
 
@@ -438,7 +440,8 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
             substream_progress_queue.put_nowait(("upload_completed", progress.rcw_id))
         else:
             substream_progress_queue.put_nowait(
-                ("upload_piece", progress.rcw_id, progress.sent),
+                ("upload_piece", progress.rcw_id, progress.sent,
+                 progress.remaining_bytes),
             )
 
 _SUBSTREAM_NAME_PREFIX = models.SUBSTREAM_NAME_PREFIX
@@ -1102,17 +1105,29 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             ))
 
     # Substream progress events, held until the transaction
-    # commits and fired for the GUI's transfers_listener. count() runs in
-    # the same (unflushed) transaction, so it already includes the row
+    # commits and fired for the GUI's transfers_listener. count()/sum() run in
+    # the same (unflushed) transaction, so they already include the row
     # just added above -- matching the ReceivedPiece count the Transfers
-    # panel shows.
+    # panel shows. The byte sum is the effective payload (ReceivedPiece.chunk
+    # has the 1-byte chunk-type prefix already stripped), used for the rate
+    # column.
     substream_progress = []
     if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
-        piece_count = (await sess.exec(
-            select(persistent.sa.func.count()).select_from(persistent.ReceivedPiece)
+        piece_count, received_bytes = (await sess.exec(
+            select(
+                persistent.sa.func.count(),
+                persistent.sa.func.coalesce(
+                    persistent.sa.func.sum(
+                        persistent.sa.func.length(persistent.ReceivedPiece.chunk),
+                    ),
+                    0,
+                ),
+            ).select_from(persistent.ReceivedPiece)
             .where(persistent.ReceivedPiece.read_cap == mw.bacap_stream)
         )).one()
-        substream_progress.append(("piece", mw.bacap_stream, int(piece_count)))
+        substream_progress.append((
+            "piece", mw.bacap_stream, int(piece_count), int(received_bytes),
+        ))
 
     assembled = await _try_assemble(
         sess, mw.bacap_stream, mw.current_message_index[:8],

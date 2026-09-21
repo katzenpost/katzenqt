@@ -160,12 +160,14 @@ class OutboundUpload(NamedTuple):
     """A substream file transfer opened by an outbound commit.
 
     ``total_chunks`` is the substream's C-chunks plus final F (the indirection
-    ``ReadCapWAL.substream_total_chunks``); ``parent_name`` is the conversation
-    name, shown as the Transfers-panel "Contact" for an upload.
+    ``ReadCapWAL.substream_total_chunks``); ``total_bytes`` is the effective
+    payload byte count (chunk-type prefixes excluded); ``parent_name`` is the
+    conversation name, shown as the Transfers-panel "Contact" for an upload.
     """
     rcw_id: uuid.UUID
     conversation_id: int
     total_chunks: int | None
+    total_bytes: int
     parent_name: str
 
 
@@ -175,10 +177,13 @@ class UploadAck(NamedTuple):
     ``sent`` is ``total - remaining PlaintextWAL rows`` on the substream; equal
     to ``total`` when the substream has fully drained (the Transfers row is
     then complete, even though the I-chunk has not yet been dispatched).
+    ``remaining_bytes`` is the effective payload bytes still to send, used for
+    the Transfers panel's rate column.
     """
     rcw_id: uuid.UUID
     sent: int
     total: int
+    remaining_bytes: int
 
 
 async def _outbound_upload_from_entries(
@@ -198,10 +203,19 @@ async def _outbound_upload_from_entries(
         return None
     rcw = next((o for o in db_entries if o.id == i_chunk.indirection), None)
     conv = await sess.get(Conversation, conversation_id)
+    # Effective payload bytes: the agg C/F PlaintextWALs on the substream,
+    # each carrying a 1-byte chunk-type prefix before its data.
+    total_bytes = sum(
+        max(len(o.bacap_payload) - 1, 0)
+        for o in db_entries
+        if isinstance(o, PlaintextWAL)
+        and rcw is not None and o.bacap_stream == rcw.write_cap_id
+    )
     return OutboundUpload(
         rcw_id=i_chunk.indirection,
         conversation_id=conversation_id,
         total_chunks=rcw.substream_total_chunks if rcw is not None else None,
+        total_bytes=total_bytes,
         parent_name=conv.name if conv is not None else "",
     )
 
@@ -704,7 +718,8 @@ async def upload_progress_after_ack(bacap_stream: uuid.UUID) -> "UploadAck | Non
     bacap_stream`` discriminates it from the main conversation stream (whose
     own-peer ReadCapWAL has no total) and from inbound substreams (whose
     ReadCapWAL has no ``write_cap_id``). PWAL rows are deleted as their ACKs
-    land, so the remaining count is the outstanding chunk count.
+    land, so the remaining count is the outstanding chunk count and the
+    remaining byte sum is the effective payload still to send.
     """
     async with asession() as sess:
         rcw = (await sess.exec(select(ReadCapWAL).where(
@@ -713,13 +728,22 @@ async def upload_progress_after_ack(bacap_stream: uuid.UUID) -> "UploadAck | Non
         ))).first()
         if rcw is None:
             return None
-        remaining = int((await sess.exec(
-            select(count()).select_from(PlaintextWAL).where(
+        remaining, remaining_bytes = (await sess.exec(
+            select(
+                count(),
+                sa.func.coalesce(
+                    sa.func.sum(sa.func.length(PlaintextWAL.bacap_payload) - 1),
+                    0,
+                ),
+            ).select_from(PlaintextWAL).where(
                 PlaintextWAL.bacap_stream == bacap_stream,
             )
-        )).one())
+        )).one()
         total = int(rcw.substream_total_chunks)
-        return UploadAck(rcw_id=rcw.id, sent=total - remaining, total=total)
+        return UploadAck(
+            rcw_id=rcw.id, sent=total - int(remaining), total=total,
+            remaining_bytes=int(remaining_bytes),
+        )
 
 
 def _read_wcw_precheck(bacap_stream) -> "bytes | None":

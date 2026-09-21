@@ -7,6 +7,7 @@ from PySide6.QtQuick import QQuickImageProvider
 
 from pydantic import BaseModel, Field
 from sqlmodel import select
+import time
 import uuid
 from typing import Any, NamedTuple
 
@@ -70,6 +71,7 @@ ROLE_TRANSFER_ACTIVE = 0x205  # True = downloading, False = paused
 ROLE_TRANSFER_FAILED = 0x206  # True = failed, False/missing = active or paused
 ROLE_TRANSFER_FAILURE_REASON = 0x207  # reason string for failed transfers
 ROLE_TRANSFER_DIRECTION = 0x208  # "upload" or "download"
+ROLE_TRANSFER_RATE = 0x209  # bytes/sec over active transfer time
 
 _TRANSFER_ROLES = {
     ROLE_TRANSFER_RCW_ID: QByteArray(b"transfer_rcw_id"),
@@ -81,7 +83,20 @@ _TRANSFER_ROLES = {
     ROLE_TRANSFER_FAILED: QByteArray(b"transfer_failed"),
     ROLE_TRANSFER_FAILURE_REASON: QByteArray(b"transfer_failure_reason"),
     ROLE_TRANSFER_DIRECTION: QByteArray(b"transfer_direction"),
+    ROLE_TRANSFER_RATE: QByteArray(b"transfer_rate"),
 }
+
+
+def format_rate(bytes_per_second: float) -> str:
+    """Human-readable transfer rate, e.g. ``1.2 MiB/s``."""
+    value = max(bytes_per_second, 0.0)
+    for unit in ("B/s", "KiB/s", "MiB/s"):
+        if value < 1024:
+            if unit == "B/s":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB/s"
 
 
 class DownloadsModel(QtCore.QAbstractTableModel):
@@ -111,14 +126,14 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         return len(self._order)
 
     def columnCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:  # type: ignore[override]
-        return 3
+        return 4
 
     def headerData(self, section: int, orientation: "QtCore.Qt.Orientation", role: int = 0) -> object:  # type: ignore[override]
         if role != QtCore.Qt.ItemDataRole.DisplayRole:
             return None
         if orientation != QtCore.Qt.Orientation.Horizontal:
             return None
-        return ("Contact", "Progress", "State")[section]
+        return ("Contact", "Progress", "State", "Rate")[section]
 
     def data(self, index: "QtCore.QModelIndex", role: int = 0) -> object:  # type: ignore[override]
         if not index.isValid() or not (0 <= index.row() < len(self._order)):
@@ -140,6 +155,8 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 if not row.get("active", True):
                     return "Paused"
                 return "Uploading" if row.get("direction") == "upload" else "Downloading"
+            if index.column() == 3:
+                return self._rate_text(row)
             return None
         if role == ROLE_TRANSFER_RCW_ID:
             return str(rcw_id)
@@ -159,12 +176,34 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             return row.get("failure_reason")
         if role == ROLE_TRANSFER_DIRECTION:
             return row.get("direction", "download")
+        if role == ROLE_TRANSFER_RATE:
+            return self._rate_text(row)
         return None
+
+    def _rate_text(self, row: dict) -> str:
+        """Average effective-payload rate over the row's active transfer time.
+
+        Paused or failed rows show zero. The baseline is reset when the row
+        first appears and again on each unpause, so the rate is "since the
+        transfer (re)started", not since the row was created.
+        """
+        if row.get("failed", False) or not row.get("active", True):
+            return "0 B/s"
+        elapsed = time.monotonic() - float(row.get("rate_started_at", 0.0))
+        if elapsed < 1.0:
+            return "—"
+        raw = int(row.get("raw_bytes", 0))
+        base = int(row.get("rate_base", 0))
+        if row.get("direction") == "upload":
+            transferred = base - raw
+        else:
+            transferred = raw - base
+        return format_rate(max(transferred, 0) / elapsed)
 
     # -- mutations (Qt-listener thread) ------------------------------------
 
     def start_transfer(self, rcw_id: uuid.UUID, conversation_id, parent_name, total,
-                       direction: str = "download") -> None:
+                       direction: str = "download", raw_bytes: int = 0) -> None:
         if rcw_id in self._rows:
             # Already tracked; refresh the denominator if it became known.
             if total is not None:
@@ -181,17 +220,31 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             "total": total,
             "active": True,
             "direction": direction,
+            # Rate state: raw_bytes is the latest absolute metric (bytes
+            # received for a download, bytes still to send for an upload);
+            # rate_base is the value the current rate interval started from.
+            "raw_bytes": int(raw_bytes),
+            "rate_base": int(raw_bytes),
+            "rate_started_at": time.monotonic(),
         }
         self._order.append(rcw_id)
         self.endInsertRows()
 
-    def notify_piece(self, rcw_id: uuid.UUID, pieces) -> None:
+    def notify_piece(self, rcw_id: uuid.UUID, pieces, raw_bytes=None) -> None:
         if rcw_id not in self._rows:
             return
         self._rows[rcw_id]["pieces"] = pieces
+        if raw_bytes is not None:
+            self._rows[rcw_id]["raw_bytes"] = int(raw_bytes)
         row = self._idx(rcw_id)
+        # Progress and Rate both derive from the new piece, so repaint both.
         idx0 = self.index(row, 1)
-        self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_PIECES])
+        idx1 = self.index(row, 3)
+        self.dataChanged.emit(
+            idx0, idx1,
+            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_PIECES,
+             ROLE_TRANSFER_RATE],
+        )
 
     def complete_transfer(self, rcw_id: uuid.UUID) -> None:
         if rcw_id not in self._rows:
@@ -206,11 +259,20 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         if rcw_id not in self._rows:
             return
         self._rows[rcw_id]["active"] = not paused
+        if not paused:
+            # Unpause resets the rate interval: the next rate is measured from
+            # the byte count at resume, not since the transfer first appeared.
+            self._rows[rcw_id]["rate_base"] = int(
+                self._rows[rcw_id].get("raw_bytes", 0)
+            )
+            self._rows[rcw_id]["rate_started_at"] = time.monotonic()
         row = self._idx(rcw_id)
         idx0 = self.index(row, 2)
+        idx1 = self.index(row, 3)
         self.dataChanged.emit(
-            idx0, idx0,
-            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_ACTIVE],
+            idx0, idx1,
+            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_ACTIVE,
+             ROLE_TRANSFER_RATE],
         )
 
     def fail_transfer(self, rcw_id: uuid.UUID, reason: str) -> None:
@@ -229,10 +291,11 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         self._rows[rcw_id]["active"] = False  # no longer downloading
         row = self._idx(rcw_id)
         idx2 = self.index(row, 2)  # State column
+        idx3 = self.index(row, 3)  # Rate column (forced to 0 B/s)
         self.dataChanged.emit(
-            idx2, idx2,
+            idx2, idx3,
             [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_FAILED,
-             ROLE_TRANSFER_FAILURE_REASON],
+             ROLE_TRANSFER_FAILURE_REASON, ROLE_TRANSFER_RATE],
         )
 
     def remove_transfer(self, rcw_id: uuid.UUID) -> None:
@@ -274,20 +337,34 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 rcw = sess.get(persistent.ReadCapWAL, cp.read_cap_id)
                 if rcw is None:
                     continue
-                recv_count = sess.exec(
-                    select(persistent.sa.func.count()).select_from(persistent.ReceivedPiece)
+                recv_count, recv_bytes = sess.exec(
+                    select(
+                        persistent.sa.func.count(),
+                        persistent.sa.func.coalesce(
+                            persistent.sa.func.sum(
+                                persistent.sa.func.length(
+                                    persistent.ReceivedPiece.chunk,
+                                ),
+                            ),
+                            0,
+                        ),
+                    ).select_from(persistent.ReceivedPiece)
                     .where(persistent.ReceivedPiece.read_cap == rcw.id)
                 ).one()
                 parent = _substream_parent_name(sess, cp)
                 # Resumable = active, or received something but not yet
                 # assembled to the terminal F (still has pieces outstanding).
                 if cp.active or int(recv_count):
+                    # Rate counts from the on-disk byte count at seed, so a
+                    # transfer resumed across a relaunch starts at zero.
                     self.start_transfer(
                         rcw.id, cp.conversation.id, parent,
-                        rcw.substream_total_chunks,
+                        rcw.substream_total_chunks, raw_bytes=int(recv_bytes),
                     )
                     if int(recv_count):
-                        self.notify_piece(rcw.id, int(recv_count))
+                        self.notify_piece(
+                            rcw.id, int(recv_count), int(recv_bytes),
+                        )
                     if not cp.active:
                         self.set_paused(rcw.id, paused=True)
 
@@ -312,22 +389,35 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             rcw = sess.get(persistent.ReadCapWAL, i_chunk.indirection)
             if rcw is None or rcw.write_cap_id is None:
                 continue
-            remaining = int(sess.exec(
-                select(persistent.sa.func.count())
-                .select_from(persistent.PlaintextWAL)
+            remaining, remaining_bytes = sess.exec(
+                select(
+                    persistent.sa.func.count(),
+                    persistent.sa.func.coalesce(
+                        persistent.sa.func.sum(
+                            persistent.sa.func.length(
+                                persistent.PlaintextWAL.bacap_payload,
+                            ) - 1,
+                        ),
+                        0,
+                    ),
+                ).select_from(persistent.PlaintextWAL)
                 .where(persistent.PlaintextWAL.bacap_stream == rcw.write_cap_id)
-            ).one())
+            ).one()
+            remaining = int(remaining)
+            remaining_bytes = int(remaining_bytes)
             if remaining <= 0:
                 continue
             conv = sess.get(persistent.Conversation, i_chunk.conversation_id)
             total = rcw.substream_total_chunks
+            # Rate counts from the bytes still outstanding at seed, so a
+            # transfer resumed across a relaunch starts at zero.
             self.start_transfer(
                 rcw.id, i_chunk.conversation_id,
                 conv.name if conv is not None else "",
-                total, direction="upload",
+                total, direction="upload", raw_bytes=remaining_bytes,
             )
             if total is not None:
-                self.notify_piece(rcw.id, total - remaining)
+                self.notify_piece(rcw.id, total - remaining, remaining_bytes)
             agg_wcw = sess.get(persistent.WriteCapWAL, rcw.write_cap_id)
             if agg_wcw is not None and agg_wcw.paused:
                 self.set_paused(rcw.id, paused=True)

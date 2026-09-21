@@ -1343,7 +1343,8 @@ class TestDrainMixwalReadSingle:
     ):
         """Reading a C-chunk on a substream peer queues a
         single ``piece`` event carrying the accumulated ReceivedPiece count
-        for that substream (matching the Transfers panel's n/total)."""
+        and effective payload bytes for that substream (matching the Transfers
+        panel's n/total and rate)."""
         setup = await _set_up_read_flow(
             fake_thinclient, peer_name=":substream:2:abc", plaintext=b"Cchunk",
         )
@@ -1357,6 +1358,7 @@ class TestDrainMixwalReadSingle:
         assert event[0] == "piece"
         assert event[1] == setup["bacap_stream"]
         assert event[2] == 1  # the C-chunk just stored counts as one piece
+        assert event[3] == 5  # b"chunk": payload after the type byte
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
@@ -3758,8 +3760,11 @@ class TestUploadTransferEvents:
             final_pwal_id=i_chunk.id,
         )
         event = network.substream_progress_queue.get_nowait()
+        # chunk payload is b"Cx": one effective payload byte after the
+        # 1-byte chunk-type prefix.
         assert event == (
-            "upload_started", rcw_id, setup["conversation_id"], 3, "carol-conv",
+            "upload_started", rcw_id, setup["conversation_id"], 3, 1,
+            "carol-conv",
         )
         assert network.substream_progress_queue.empty()
 
@@ -3775,7 +3780,9 @@ class TestUploadTransferEvents:
             fake_thinclient, mw, {setup["agg"]},
         )
         event = network.substream_progress_queue.get_nowait()
-        assert event == ("upload_piece", setup["rcw_id"], 2)
+        # each b"Cchunk" payload is 5 effective bytes (6 minus the type byte);
+        # one of the two present chunks was ACK'd, leaving 5 bytes outstanding.
+        assert event == ("upload_piece", setup["rcw_id"], 2, 5)
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
