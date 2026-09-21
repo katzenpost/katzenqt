@@ -23,7 +23,7 @@ job, in the same `run_in_io` style the chat composer uses.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCalendarWidget,
     QComboBox,
@@ -103,12 +103,16 @@ class TallyPanel(QDialog):
         self._vote_button = QPushButton("Send vote")
         self._vote_button.setEnabled(False)
         self._vote_button.clicked.connect(self._submit)
+        self._edit_button = QPushButton("Edit vote")
+        self._edit_button.clicked.connect(self._start_editing)
+        self._edit_button.hide()
         self._close_button = QPushButton("End poll")
         self._close_button.hide()
         self._close_button.clicked.connect(self.closeRequested)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self._vote_button)
+        buttons.addWidget(self._edit_button)
         buttons.addStretch(1)
         buttons.addWidget(self._close_button)
 
@@ -192,6 +196,10 @@ class TallyPanel(QDialog):
         same = self._survey_key == (conversation_id, survey_id)
         self._survey_key = (conversation_id, survey_id)
         self.set_survey(summary, voters, preserve_edits=same and self._editing)
+        if not self.isVisible():
+            # First open (or reopened): size to the content rather than the
+            # default. A refresh of an open window never resizes it.
+            self.adjustSize()
         return True
 
     def current_survey(self) -> "tuple[int, bytes] | None":
@@ -215,6 +223,7 @@ class TallyPanel(QDialog):
         self._meta_label.setText("")
         self._outcome_label.setText("")
         self._vote_button.setEnabled(False)
+        self._edit_button.hide()
         self._close_button.hide()
         self._update_window_title()
 
@@ -238,7 +247,6 @@ class TallyPanel(QDialog):
                 widget.deleteLater()
         self._slot_buttons.clear()
         self._slot_text.clear()
-        self._edit_button = None
 
     @staticmethod
     def _slot_totals(slot) -> str:
@@ -250,28 +258,41 @@ class TallyPanel(QDialog):
 
     def _rebuild_grid(self) -> None:
         """Draw the header row (one column per option) and one row per voter.
-        The local user's row is click-to-cycle while editing, read-only with an
+
+        The name column is right-aligned and sized to its content; the option
+        columns share the remaining width and centre their headings and cells.
+        The local user's row is click-to-cycle while editing, read-only with the
         Edit button once they have voted."""
         self._clear_grid()
         summary = self._summary
         if summary is None:
             return
         slots = summary.slots
-        actions_col = len(slots) + 1
-        self._grid.addWidget(QLabel("Voter"), 0, 0)
+
+        voter_header = QLabel("Voter")
+        voter_header.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._grid.addWidget(voter_header, 0, 0)
         for col, slot in enumerate(slots, start=1):
             self._slot_text[slot.slot_id] = slot.text or slot.slot_id
             header = QLabel(self._slot_text[slot.slot_id])
+            header.setAlignment(Qt.AlignCenter)
             header.setToolTip(self._slot_totals(slot))
-            self._grid.addWidget(header, 0, col)
+            self._grid.addWidget(header, 0, col, Qt.AlignCenter)
 
         is_open = summary.status == "open"
+        me = next(
+            (
+                v for v in self._voters
+                if summary.my_voter_id is not None
+                and v.voter_id == summary.my_voter_id
+            ),
+            None,
+        )
         for row, voter in enumerate(self._voters, start=1):
-            is_me = (
-                summary.my_voter_id is not None
-                and voter.voter_id == summary.my_voter_id
-            )
-            self._grid.addWidget(QLabel(voter.name), row, 0)
+            is_me = voter is me
+            name = QLabel(voter.name)
+            name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._grid.addWidget(name, row, 0)
             editable = is_me and self._editing and is_open
             for col, slot in enumerate(slots, start=1):
                 if editable:
@@ -282,18 +303,27 @@ class TallyPanel(QDialog):
                     button.clicked.connect(
                         lambda _=False, sid=slot.slot_id: self._cycle_slot(sid)
                     )
-                    self._grid.addWidget(button, row, col)
+                    self._grid.addWidget(button, row, col, Qt.AlignCenter)
                 else:
                     avail = (
                         self._selection.get(slot.slot_id)
                         if is_me
                         else voter.choices.get(slot.slot_id)
                     )
-                    self._grid.addWidget(QLabel(avail or ""), row, col)
-            if is_me and not self._editing and voter.has_voted and is_open:
-                self._edit_button = QPushButton("Edit vote")
-                self._edit_button.clicked.connect(self._start_editing)
-                self._grid.addWidget(self._edit_button, row, actions_col)
+                    cell = QLabel(avail or "")
+                    cell.setAlignment(Qt.AlignCenter)
+                    self._grid.addWidget(cell, row, col, Qt.AlignCenter)
+
+        # The name column keeps its natural width; the option columns share the
+        # rest equally so the grid fills the window with no gap.
+        for col in range(len(slots) + 1):
+            self._grid.setColumnStretch(col, 0 if col == 0 else 1)
+        self._edit_button.setVisible(
+            me is not None and me.has_voted and not self._editing and is_open
+        )
+        # Keep the window at least big enough to show the grid without clipping.
+        self.layout().activate()
+        self.setMinimumSize(self.minimumSizeHint())
 
     def _refresh_button(self, slot_id: str) -> None:
         avail = self._selection.get(slot_id)

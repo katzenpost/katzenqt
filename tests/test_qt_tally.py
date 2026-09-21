@@ -18,7 +18,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QModelIndex  # noqa: E402
+from PySide6.QtCore import QModelIndex, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
@@ -278,6 +278,29 @@ def test_panel_grid_lists_other_voters_choices():
     assert {"yes", "no"} <= texts  # alice's ballot is rendered read-only
 
 
+def test_panel_grid_sizes_columns_and_aligns_names():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id, slots=("tacos", "sushi"))
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    # Names keep their natural width; the option columns share the rest.
+    assert panel._grid.columnStretch(0) == 0
+    assert panel._grid.columnStretch(1) == 1
+    assert panel._grid.columnStretch(2) == 1
+    # The name column and its heading are right-aligned.
+    name_labels = [
+        label for label in panel.findChildren(QLabel)
+        if label.text() in ("Voter", "me")
+    ]
+    assert name_labels
+    assert all(label.alignment() & Qt.AlignRight for label in name_labels)
+    # The local user has not voted: no Edit button until they do.
+    assert panel._edit_button.isHidden() is True
+
+
 def test_panel_voted_local_row_edits_and_resends():
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
@@ -291,11 +314,12 @@ def test_panel_voted_local_row_edits_and_resends():
 
     # Already voted: read-only cells with an Edit button, no toggles.
     assert panel._slot_buttons == {}
-    assert panel._edit_button is not None
+    assert panel._edit_button.isHidden() is False
     assert panel._vote_button.isEnabled() is False
 
     panel._edit_button.click()
     assert set(panel._slot_buttons) == {"s0", "s1"}
+    assert panel._edit_button.isHidden() is True
     # Entering edit mode alone changes nothing to send.
     assert panel._vote_button.isEnabled() is False
 
@@ -309,7 +333,7 @@ def test_panel_voted_local_row_edits_and_resends():
     assert fired == [{"s0": "yes", "s1": "yes"}]
     assert panel._vote_button.isEnabled() is False
     assert panel._slot_buttons == {}  # back to read-only
-    assert panel._edit_button is not None
+    assert panel._edit_button.isHidden() is False
 
 
 def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
