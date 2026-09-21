@@ -119,7 +119,21 @@ class AsyncioThread(threading.Thread):
         Would be nice to have a "with" context handler I guess.
 
         """
-        ffff = asyncio.run_coroutine_threadsafe(fn, self.loop)
+        scheduled = time.monotonic()
+
+        async def _run():
+            # How long the io loop took to pick this up. A large delay means the
+            # loop is blocked by a synchronous stretch (e.g. serialising an
+            # attachment) rather than by this coroutine's own work.
+            delay = time.monotonic() - scheduled
+            if delay > 1.0:
+                logger.warning(
+                    "io loop took %.1fs to start a run_in_io coroutine; it is "
+                    "blocked by synchronous work", delay,
+                )
+            return await fn
+
+        ffff = asyncio.run_coroutine_threadsafe(_run(), self.loop)
         res = await asyncio.wrap_future(ffff)
         assert ffff.exception() is None
         assert ffff.result() == res
@@ -1198,8 +1212,8 @@ class MainWindow(QMainWindow):
             bacap_stream=convo_state.own_peer_bacap_uuid,
             messages=[gcm],
         )
-        print("serializing SendOperation for outgoing message", send_op)
-        new_write_caps, db_entries = send_op.serialize(
+        logger.debug("serializing %d outgoing message(s)", len(send_op.messages))
+        new_write_caps, db_entries = await send_op.serialize_async(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo_state.conversation_id,
         )
@@ -1285,7 +1299,7 @@ class MainWindow(QMainWindow):
             messages=[group_chat_message]
         )
         # TODO this code is duplicated in self.send_file
-        new_write_caps, db_entries = send_op.serialize(
+        new_write_caps, db_entries = await send_op.serialize_async(
             chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
             conversation_id=convo_state.conversation_id)
 

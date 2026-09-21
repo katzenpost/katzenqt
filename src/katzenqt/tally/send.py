@@ -22,7 +22,7 @@ async def stage_outbound(sess, conversation: "persistent.Conversation", gcm: "mo
     """Serialise ``gcm`` and stage its rows in ``sess``. Returns the id of the
     final PlaintextWAL, which lands in SentLog once the message has cleared."""
     send_op = models.SendOperation(bacap_stream=conversation.write_cap, messages=[gcm])
-    new_write_caps, db_entries = send_op.serialize(
+    new_write_caps, db_entries = await send_op.serialize_async(
         chunk_size=_CHUNK_SIZE, conversation_id=conversation.id,
     )
     for cap_uuid in new_write_caps:
