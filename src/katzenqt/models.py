@@ -1,4 +1,5 @@
 import annotated_types
+import asyncio
 from typing_extensions import Annotated
 from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict, field_serializer, model_validator
 import cbor2
@@ -219,6 +220,19 @@ class SendOperation(BaseModel):
             )
         )
         return [agg_bacap_stream], agg
+
+    async def serialize_async(
+        self, *, chunk_size: int, conversation_id: int,
+    ) -> "Tuple[List[uuid.UUID], List[persistent.PlaintextWAL]]":
+        """Off-loop wrapper around :meth:`serialize`.
+
+        Serialising a large message (CBOR-encoding an attachment, then splitting
+        it into BACAP chunks) is a long synchronous stretch. Run it on the
+        executor so the calling event loop — Qt or io — stays responsive."""
+        return await asyncio.to_thread(
+            self.serialize, chunk_size=chunk_size, conversation_id=conversation_id,
+        )
+
 
 class GroupChatFileUpload(BaseModel):
     model_config = {'validate_assignment': True}

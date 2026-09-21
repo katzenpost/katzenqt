@@ -575,7 +575,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
             send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
-            new_write_caps, db_entries = send_op.serialize(
+            new_write_caps, db_entries = await send_op.serialize_async(
                 chunk_size=1530, conversation_id=conversation_id,
             )
             final_pwal_id = db_entries[-1].id

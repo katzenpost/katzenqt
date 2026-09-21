@@ -3,6 +3,7 @@ import uuid
 import hypothesis
 import hypothesis.strategies as st
 import pydantic
+import pytest
 from hypothesis import example, given
 
 from katzenqt import models, persistent
@@ -159,3 +160,26 @@ def test_clamp_message_text_is_idempotent():
     once = models.clamp_message_text(oversized)
     twice = models.clamp_message_text(once)
     assert once == twice
+
+
+@pytest.mark.asyncio
+async def test_serialize_async_matches_serialize():
+    """The off-loop wrapper produces the same chunking as the sync method."""
+    m = models.GroupChatMessage(version=0, membership_hash=b"a" * 32, text="hello world")
+    s = models.SendOperation(messages=[m], bacap_stream=uuid.uuid4())
+
+    sync_caps, sync_rows = s.serialize(chunk_size=1530, conversation_id=7)
+    async_caps, async_rows = await s.serialize_async(
+        chunk_size=1530, conversation_id=7,
+    )
+
+    assert len(async_caps) == len(sync_caps)
+    assert [r.bacap_payload for r in async_rows] == [
+        r.bacap_payload for r in sync_rows
+    ]
+
+
+@pytest.mark.asyncio
+async def test_serialize_async_empty_message_list():
+    s = models.SendOperation(messages=[], bacap_stream=uuid.uuid4())
+    assert await s.serialize_async(chunk_size=1530, conversation_id=1) == ([], [])
