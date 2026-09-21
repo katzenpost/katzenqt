@@ -3678,6 +3678,7 @@ async def _set_up_upload_flow(
     agg = uuid.uuid4()
     rcw_id = uuid.uuid4()
     first_chunk_id = uuid.uuid4()
+    i_chunk_id = uuid.uuid4()
     async with persistent.asession() as sess:
         sess.add(persistent.WriteCapWAL(
             id=agg, write_cap=agg_kp.write_cap,
@@ -3689,7 +3690,7 @@ async def _set_up_upload_flow(
             substream_total_chunks=total_chunks,
         ))
         sess.add(persistent.PlaintextWAL(
-            id=uuid.uuid4(), bacap_stream=setup["bacap_stream"],
+            id=i_chunk_id, bacap_stream=setup["bacap_stream"],
             conversation_id=setup["conversation_id"], bacap_payload=b"",
             indirection=rcw_id,
         ))
@@ -3717,7 +3718,8 @@ async def _set_up_upload_flow(
             is_read=False,
         ))
         await sess.commit()
-    setup.update({"agg": agg, "rcw_id": rcw_id, "mw_id": mw_id})
+    setup.update({"agg": agg, "rcw_id": rcw_id, "mw_id": mw_id,
+                  "i_chunk_id": i_chunk_id})
     return setup
 
 
@@ -3849,4 +3851,69 @@ class TestUploadTransferEvents:
         # The main stream's own-peer ReadCapWAL has no write_cap_id, so it is
         # not an upload and pause is a no-op.
         await network.pause_upload(rcw_id=setup["bacap_stream"])
+        assert network.substream_progress_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_cancel_upload_removes_rows_and_bubble(self, fake_thinclient):
+        _drain_progress_queue()
+        setup = await _set_up_upload_flow(
+            fake_thinclient, total_chunks=3, chunks_present=2,
+        )
+        async with persistent.asession() as sess:
+            sess.add(persistent.ConversationLog(
+                id=uuid.uuid4(), conversation_id=setup["conversation_id"],
+                conversation_peer_id=setup["peer_id"],
+                conversation_order=0, payload=b"Flocal",
+                network_status=1, outgoing_pwal=setup["i_chunk_id"],
+            ))
+            await sess.commit()
+        await network.cancel_upload(rcw_id=setup["rcw_id"])
+        async with persistent.asession() as sess:
+            assert await sess.get(
+                persistent.PlaintextWAL, setup["i_chunk_id"]) is None
+            assert await sess.get(
+                persistent.WriteCapWAL, setup["agg"]) is None
+            assert await sess.get(
+                persistent.ReadCapWAL, setup["rcw_id"]) is None
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            agg_pwals = (await sess.exec(
+                select(persistent.PlaintextWAL).where(
+                    persistent.PlaintextWAL.bacap_stream == setup["agg"],
+                )
+            )).all()
+            assert agg_pwals == []
+            convlogs = (await sess.exec(
+                select(persistent.ConversationLog).where(
+                    persistent.ConversationLog.outgoing_pwal
+                    == setup["i_chunk_id"],
+                )
+            )).all()
+            assert convlogs == []
+        assert network.substream_progress_queue.get_nowait() == (
+            "upload_cancelled", setup["rcw_id"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_upload_refuses_once_i_chunk_is_gone(
+        self, fake_thinclient,
+    ):
+        _drain_progress_queue()
+        setup = await _set_up_upload_flow(
+            fake_thinclient, total_chunks=3, chunks_present=2,
+        )
+        # Simulate the substream having completed and the I-chunk dispatched:
+        # the upload is no longer cancellable.
+        async with persistent.asession() as sess:
+            i_chunk = await sess.get(
+                persistent.PlaintextWAL, setup["i_chunk_id"])
+            await sess.delete(i_chunk)
+            await sess.commit()
+        await network.cancel_upload(rcw_id=setup["rcw_id"])
+        async with persistent.asession() as sess:
+            remaining = (await sess.exec(
+                select(persistent.PlaintextWAL).where(
+                    persistent.PlaintextWAL.bacap_stream == setup["agg"],
+                )
+            )).all()
+            assert len(remaining) == 2
         assert network.substream_progress_queue.empty()

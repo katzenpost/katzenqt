@@ -1666,6 +1666,7 @@ class MainWindow(QMainWindow):
             active = bool(row_data.get("active", True))
             pgm = api.addAction("Pause upload")
             rgm = api.addAction("Resume upload")
+            cgm = api.addAction("Cancel upload")
             pgm.setEnabled(active)
             rgm.setEnabled(not active)
             chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
@@ -1676,6 +1677,10 @@ class MainWindow(QMainWindow):
             elif chosen is rgm and not active:
                 await self.iothread.run_in_io(
                     network.resume_upload(rcw_id=rcw_id),
+                )
+            elif chosen is cgm:
+                await self.iothread.run_in_io(
+                    network.cancel_upload(rcw_id=rcw_id),
                 )
             return
         with persistent.Session(persistent._engine_sync) as sess:
@@ -1730,6 +1735,8 @@ class MainWindow(QMainWindow):
                 elif kind == "completed":
                     self.transfers_model.complete_transfer(rcw_id)
                 elif kind == "upload_completed":
+                    self.transfers_model.complete_transfer(rcw_id)
+                elif kind == "upload_cancelled":
                     self.transfers_model.complete_transfer(rcw_id)
                 elif kind == "paused":
                     self.transfers_model.set_paused(rcw_id, paused=True)

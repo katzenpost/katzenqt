@@ -1467,6 +1467,81 @@ async def resume_upload(*, rcw_id: uuid.UUID) -> None:
     substream_progress_queue.put_nowait(("upload_resumed", rcw_id))
 
 
+async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
+    """Cancel an in-flight outbound substream before it is announced.
+
+    An upload is only cancellable while its substream is still draining (the
+    gated I-chunk has not been dispatched); once the I-chunk can dispatch, the
+    data is already on couriers and there is nothing left to cancel. Cancels
+    the in-flight write, then deletes the substream's WAL rows and the
+    optimistic ConversationLog bubble in one transaction. Boxes already ACK'd
+    are orphaned but unreachable: without the I-chunk no reader learns the
+    substream's read cap, and they expire.
+
+    ``rcw_id`` is the indirection ReadCapWAL id (the Transfers row key).
+    """
+    async with persistent.asession() as sess:
+        i_chunk = (await sess.exec(select(persistent.PlaintextWAL).where(
+            persistent.PlaintextWAL.indirection == rcw_id,
+        ))).first()
+        if i_chunk is None:
+            # The substream already completed and its I-chunk was dispatched
+            # (or this cancel already ran): nothing to cancel.
+            return
+        rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+        agg = rcw.write_cap_id if rcw is not None else None
+        if agg is None:
+            return
+        remaining = int((await sess.exec(
+            select(persistent.sa.func.count())
+            .select_from(persistent.PlaintextWAL)
+            .where(persistent.PlaintextWAL.bacap_stream == agg)
+        )).one())
+        if remaining <= 0:
+            return
+        i_chunk_id = i_chunk.id
+        conv_id = i_chunk.conversation_id
+    task = _inflight_writes.get(agg)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # cancellation is the point
+            pass
+    _inflight_writes.pop(agg, None)
+    __resend_queue.discard(agg)
+    async with persistent.asession() as sess:
+        for mw in (await sess.exec(select(persistent.MixWAL).where(
+            persistent.MixWAL.bacap_stream == agg,
+        ))).all():
+            await sess.delete(mw)
+        for pwal in (await sess.exec(select(persistent.PlaintextWAL).where(
+            persistent.PlaintextWAL.bacap_stream == agg,
+        ))).all():
+            await sess.delete(pwal)
+        # The bubble's outgoing_pwal FK points at the I-chunk, so it has to go
+        # in the same transaction.
+        convlog = (await sess.exec(select(persistent.ConversationLog).where(
+            persistent.ConversationLog.outgoing_pwal == i_chunk_id,
+        ))).first()
+        if convlog is not None:
+            await sess.delete(convlog)
+        i_chunk_row = await sess.get(persistent.PlaintextWAL, i_chunk_id)
+        if i_chunk_row is not None:
+            await sess.delete(i_chunk_row)
+        rcw_row = await sess.get(persistent.ReadCapWAL, rcw_id)
+        if rcw_row is not None:
+            await sess.delete(rcw_row)
+        wcw = await sess.get(persistent.WriteCapWAL, agg)
+        if wcw is not None:
+            await sess.delete(wcw)
+        await sess.commit()
+    __mixwal_updated.set()
+    substream_progress_queue.put_nowait(("upload_cancelled", rcw_id))
+    if conv_id is not None:
+        await conversation_update_queue.put((conv_id, False))
+
+
 async def _upload_stream_for_rcw(rcw_id: uuid.UUID) -> "uuid.UUID | None":
     """The agg_bacap_stream of an outbound substream, from its indirection
     ReadCapWAL id; None if the row is missing or is not an upload's.
