@@ -22,6 +22,8 @@ import traceback
 import uuid
 from asyncio import ensure_future
 from pathlib import Path
+from datetime import datetime, timezone
+from typing import NamedTuple
 
 import cbor2
 
@@ -296,6 +298,132 @@ async def on_new_pki_document(event: "Dict[str, Any]") -> None:
     logger.info("PKI epoch advanced to %s (from %s)", epoch, previous)
     old_event, _epoch_event = _epoch_event, asyncio.Event()
     old_event.set()
+
+
+# ---------------------------------------------------------------------------
+# PKI consensus summary (Network consensus dialog)
+# ---------------------------------------------------------------------------
+
+# The katzenpost epoch origin (core/epochtime/time.go). Epoch numbers are
+# floor((now - origin) / Period), so the Period can be recovered from the
+# current epoch and the wall clock. Epoch numbers are in the millions, so
+# clock skew shifts the recovered Period by microseconds.
+KATZENPOST_EPOCH_ORIGIN = datetime(2017, 6, 1, tzinfo=timezone.utc)
+
+
+def derive_epoch_period_seconds(
+    epoch: "int | None", now: "datetime | None" = None,
+) -> "int | None":
+    """Recover the network's epoch duration in seconds from the current epoch.
+
+    ``None`` when the epoch is unknown or non-positive."""
+    if epoch is None or epoch <= 0:
+        return None
+    now = now or datetime.now(timezone.utc)
+    elapsed = (now - KATZENPOST_EPOCH_ORIGIN).total_seconds()
+    return int(round(elapsed / epoch))
+
+
+def format_duration(seconds: "int | None") -> str:
+    """Human-readable duration, e.g. ``3y 5d`` / ``2h 5m`` / ``12s``."""
+    if seconds is None:
+        return "unknown"
+    seconds = max(int(seconds), 0)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        years, days = divmod(days, 365)
+        if years:
+            return f"{years}y {days}d"
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+class ConsensusNode(NamedTuple):
+    name: str
+    addresses: "list[str]"
+
+
+class ConsensusSummary(NamedTuple):
+    """The parts of a PKI document the Network consensus dialog shows.
+
+    ``period_seconds`` is derived from the epoch origin, not carried by the
+    document; ``consensus_seconds`` is ``(epoch - genesis_epoch) * period``.
+    """
+    epoch: int
+    genesis_epoch: int
+    period_seconds: "int | None"
+    mix_layers: "list[list[ConsensusNode]]"
+    gateways: "list[ConsensusNode]"
+    service_nodes: "list[ConsensusNode]"
+    storage_replicas: "list[ConsensusNode]"
+
+    @property
+    def epochs_elapsed(self) -> int:
+        return max(self.epoch - self.genesis_epoch, 0)
+
+    @property
+    def consensus_seconds(self) -> "int | None":
+        if self.period_seconds is None:
+            return None
+        return self.epochs_elapsed * self.period_seconds
+
+
+def _node_from_descriptor(desc: "dict") -> ConsensusNode:
+    addresses = [
+        f"{transport}://{addr}"
+        for transport, addrs in (desc.get("Addresses") or {}).items()
+        for addr in addrs
+    ]
+    return ConsensusNode(name=str(desc.get("Name") or "?"), addresses=addresses)
+
+
+def _decode_nodes(blobs) -> "list[ConsensusNode]":
+    """Decode the CBOR-encoded descriptor blobs the PKI document carries.
+
+    The daemon strips the document's signatures and cert wrapper before
+    forwarding it; each node entry is a CBOR byte string rather than a map
+    (see the thin client's pretty_print_pki_doc)."""
+    nodes = []
+    for blob in blobs or []:
+        try:
+            desc = cbor2.loads(blob)
+        except Exception:
+            continue
+        if isinstance(desc, dict):
+            nodes.append(_node_from_descriptor(desc))
+    return nodes
+
+
+def summarize_pki_document(
+    doc, now: "datetime | None" = None,
+) -> "ConsensusSummary | None":
+    """Summarize a parsed PKI document, or None when none is available."""
+    if not doc:
+        return None
+    epoch = int(doc.get("Epoch") or 0)
+    genesis_epoch = int(doc.get("GenesisEpoch") or 0)
+    return ConsensusSummary(
+        epoch=epoch,
+        genesis_epoch=genesis_epoch,
+        period_seconds=derive_epoch_period_seconds(epoch, now),
+        mix_layers=[
+            _decode_nodes(layer) for layer in (doc.get("Topology") or [])
+        ],
+        gateways=_decode_nodes(doc.get("GatewayNodes") or []),
+        service_nodes=_decode_nodes(doc.get("ServiceNodes") or []),
+        storage_replicas=_decode_nodes(doc.get("StorageReplicas") or []),
+    )
+
+
+async def get_pki_document(connection):
+    """Snapshot the daemon's current parsed PKI document (io loop only)."""
+    return connection.pki_document()
 
 
 def _is_transient_sqlite_busy(exc: OperationalError) -> bool:

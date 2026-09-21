@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialog
                                QFormLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QTableView, QToolButton, QTreeView,
-                               QTreeWidgetItem, QVBoxLayout)
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 from sqlalchemy import func
 from sqlmodel import select
 
@@ -384,6 +384,99 @@ class StatsDialog(QDialog):
                 pct = (100.0 * snapshot[key] / total) if total else 0.0
                 text = f"{text} ({pct:.1f}%)"
             label.setText(text)
+
+    def showEvent(self, event) -> None:
+        self.refresh()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+
+class ConsensusDialog(QDialog):
+    """Modeless view of the daemon's current PKI consensus document.
+
+    ``fetch`` is an async zero-arg callable returning the parsed PKI document
+    (or None); it is invoked on the Qt loop via the caller's run_in_io hop. A
+    timer re-fetches while visible, rebuilding the node tree only when the
+    epoch changes.
+    """
+
+    _FIELD_LABELS = (
+        ("epoch", "Current epoch"),
+        ("genesis", "Genesis epoch"),
+        ("epochs", "Epochs of consensus"),
+        ("period", "Epoch duration"),
+        ("consensus", "Consensus duration"),
+    )
+
+    def __init__(self, parent, fetch) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Network consensus")
+        self._fetch = fetch
+        self._last_epoch = None
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self._fields: "dict[str, QLabel]" = {}
+        for key, label in self._FIELD_LABELS:
+            value = QLabel("—")
+            value.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            form.addRow(label, value)
+            self._fields[key] = value
+        layout.addLayout(form)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Node", "Addresses"])
+        layout.addWidget(self._tree)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._timer = QTimer(self)
+        self._timer.setInterval(5000)
+        self._timer.timeout.connect(self.refresh)
+
+    def refresh(self) -> None:
+        create_task(self._refresh_async())
+
+    async def _refresh_async(self) -> None:
+        summary = network.summarize_pki_document(await self._fetch())
+        if summary is None:
+            self._fields["epoch"].setText("no PKI document yet")
+            return
+        self._fields["epoch"].setText(str(summary.epoch))
+        self._fields["genesis"].setText(str(summary.genesis_epoch))
+        self._fields["epochs"].setText(str(summary.epochs_elapsed))
+        self._fields["period"].setText(
+            network.format_duration(summary.period_seconds)
+        )
+        self._fields["consensus"].setText(
+            network.format_duration(summary.consensus_seconds)
+        )
+        if summary.epoch == self._last_epoch:
+            return
+        self._last_epoch = summary.epoch
+        self._rebuild_tree(summary)
+
+    def _rebuild_tree(self, summary) -> None:
+        self._tree.clear()
+        groups = [
+            (f"Layer {i}", layer)
+            for i, layer in enumerate(summary.mix_layers)
+        ]
+        groups += [
+            ("Gateways", summary.gateways),
+            ("Service nodes", summary.service_nodes),
+            ("Storage replicas", summary.storage_replicas),
+        ]
+        for label, nodes in groups:
+            parent = QTreeWidgetItem([label, ""])
+            self._tree.addTopLevelItem(parent)
+            for node in nodes:
+                QTreeWidgetItem(parent, [node.name, ", ".join(node.addresses)])
+        self._tree.expandAll()
 
     def showEvent(self, event) -> None:
         self.refresh()
@@ -1142,6 +1235,8 @@ class MainWindow(QMainWindow):
         self.ui.menuMixnetStatus.setEnabled(True)
         stats_action = self.ui.menuMixnetStatus.addAction("Stats")
         stats_action.triggered.connect(self.show_stats)
+        consensus_action = self.ui.menuMixnetStatus.addAction("Network consensus")
+        consensus_action.triggered.connect(self.show_consensus)
         # Make the [Quit] toolbar actually quit:
         self.ui.action_quit.triggered.connect(lambda ev: self.close(ev,really_quit=True))
 
@@ -2436,6 +2531,20 @@ class MainWindow(QMainWindow):
         if dialog is None:
             dialog = StatsDialog(self)
             self.stats_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_consensus(self, _checked: bool = False):
+        """Open (or raise) the modeless Network consensus window."""
+        dialog = getattr(self, "consensus_dialog", None)
+        if dialog is None:
+            async def fetch():
+                return await self.iothread.run_in_io(
+                    network.get_pki_document(self.iothread.kp_client)
+                )
+            dialog = ConsensusDialog(self, fetch)
+            self.consensus_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
