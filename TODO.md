@@ -248,9 +248,16 @@ follow-ups that may still be relevant.
 
 ## `conversation_order` / message deletion
 
-- [ ] **ConversationLog: assign `conversation_order` from `MAX(order)+1` instead of
+- [x] **ConversationLog: assign `conversation_order` from `MAX(order)+1` instead of
       `COUNT(*)`, so message deletion doesn't corrupt ordering.**
-      `persistent.next_conversation_order()` (`persistent.py:94`) returns a live
+      Done in `b24b9fb` ("conversation log: order from MAX+1 and render by
+      actual order"): `persistent.next_conversation_order()` now returns
+      `coalesce(func.max(conversation_order), -1) + 1`, and
+      `ConversationLogModel` caches the ordered `conversation_order` values and
+      maps `index.row()` to the actual order, so rows past a deletion gap stay
+      addressable. `test_voucher_guard.py`'s `_append_log_row_async` now routes
+      through the shared helper. The original item text follows.
+      `persistent.next_conversation_order()` (`persistent.py:94`) returned a live
       `select(count())` scalar subquery; every production append site uses it under the
       per-conversation `conversation_log_order_lock`: `append_outbound_chat`
       (`persistent.py:139`), `ConversationLog.append_from` (`persistent.py:954`), the
