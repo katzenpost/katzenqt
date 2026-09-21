@@ -350,6 +350,45 @@ class PendingVouchersDialog(QDialog):
         self.list_widget.takeItem(self.list_widget.row(item))
 
 
+class StatsDialog(QDialog):
+    """Modeless window of process-lifetime pigeonhole read/write counters.
+
+    Refreshes ``network.stats_snapshot()`` on a 1 s timer while visible; the
+    snapshot is plain int reads, safe from the Qt thread under the GIL.
+    """
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Mixnet stats")
+        layout = QFormLayout(self)
+        self._labels: "dict[str, QLabel]" = {}
+        for key, text in network.STATS_FIELDS:
+            value = QLabel("0")
+            value.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            layout.addRow(text, value)
+            self._labels[key] = value
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self) -> None:
+        snapshot = network.stats_snapshot()
+        for key, label in self._labels.items():
+            label.setText(f"{snapshot[key]:,}")
+
+    def showEvent(self, event) -> None:
+        self.refresh()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+
 class MainWindow(QMainWindow):
     def X_keyPressEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
@@ -1092,6 +1131,11 @@ class MainWindow(QMainWindow):
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
         self.ui.action_invite_contact.triggered.connect(self.generate_voucher)
         self.ui.action_pending_vouchers.triggered.connect(self.show_pending_vouchers)
+        # Mixnet status: enable the (otherwise disabled) menu and add the
+        # Stats window action.
+        self.ui.menuMixnetStatus.setEnabled(True)
+        stats_action = self.ui.menuMixnetStatus.addAction("Stats")
+        stats_action.triggered.connect(self.show_stats)
         # Make the [Quit] toolbar actually quit:
         self.ui.action_quit.triggered.connect(lambda ev: self.close(ev,really_quit=True))
 
@@ -2379,6 +2423,16 @@ class MainWindow(QMainWindow):
         await _dialog_finished(dialog)
         for pv_id in dialog.cancelled:
             await self.iothread.run_in_io(cancel_pending_voucher(pv_id))
+
+    def show_stats(self, _checked: bool = False):
+        """Open (or raise) the modeless Mixnet stats window."""
+        dialog = getattr(self, "stats_dialog", None)
+        if dialog is None:
+            dialog = StatsDialog(self)
+            self.stats_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):

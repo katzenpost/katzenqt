@@ -34,6 +34,105 @@ from sqlalchemy.exc import OperationalError
 
 logger = logging.getLogger("katzen.network")
 
+
+class MixnetStats:
+    """Process-lifetime counters for pigeonhole read/write operations.
+
+    Incremented on the io loop by the wrappers installed in
+    ``install_stats_counters`` and read from the Qt loop by the Mixnet-status
+    "Stats" window. Plain ints, so reads under the GIL are safe without a lock.
+    """
+
+    def __init__(self) -> None:
+        # encrypt_read/encrypt_write calls (envelope preparation).
+        self.reads_prepared = 0
+        self.writes_prepared = 0
+        # Actual pigeonhole sends (start_resending_encrypted_message), so a
+        # read re-cast or a write resend counts each time.
+        self.reads_sent = 0
+        self.writes_sent = 0
+        # Read outcomes.
+        self.reads_with_payload = 0
+        self.reads_boxnotfound = 0
+        # Write outcome: the courier acknowledged the envelope.
+        self.writes_acked = 0
+
+
+stats = MixnetStats()
+
+# (attribute, display label) in display order, shared by the Stats window.
+STATS_FIELDS = (
+    ("reads_prepared", "Reads prepared (encrypt_read)"),
+    ("reads_sent", "Reads sent"),
+    ("reads_with_payload", "Reads with payload"),
+    ("reads_boxnotfound", "Reads with BoxIDNotFound"),
+    ("writes_prepared", "Writes prepared (encrypt_write)"),
+    ("writes_sent", "Writes sent (incl. resends)"),
+    ("writes_acked", "Writes acknowledged"),
+)
+
+
+def reset_stats() -> None:
+    """Zero every counter in place (test helper)."""
+    for key, _ in STATS_FIELDS:
+        setattr(stats, key, 0)
+
+
+def stats_snapshot() -> "dict[str, int]":
+    """A copy of the counters, safe to read from the Qt thread."""
+    return {key: getattr(stats, key) for key, _ in STATS_FIELDS}
+
+
+def install_stats_counters(connection) -> None:
+    """Wrap ``connection``'s encrypt_read/encrypt_write/
+    start_resending_encrypted_message so every pigeonhole operation -- on any
+    stream kind (normal, substream, voucher) -- is counted.
+
+    The app uses a single long-lived ThinClient, so wrapping the instance
+    covers every call site (including voucher.py, which shares the connection)
+    without editing them. Idempotent per connection.
+    """
+    if getattr(connection, "_stats_installed", False):
+        return
+    connection._stats_installed = True
+    original_encrypt_read = connection.encrypt_read
+    original_encrypt_write = connection.encrypt_write
+    original_start_resending = connection.start_resending_encrypted_message
+
+    async def encrypt_read(*args, **kwargs):
+        stats.reads_prepared += 1
+        return await original_encrypt_read(*args, **kwargs)
+
+    async def encrypt_write(*args, **kwargs):
+        stats.writes_prepared += 1
+        return await original_encrypt_write(*args, **kwargs)
+
+    async def start_resending_encrypted_message(*args, **kwargs):
+        # Read calls pass read_cap (write_cap=None); write calls pass write_cap.
+        is_read = kwargs.get("read_cap") is not None
+        is_write = kwargs.get("write_cap") is not None
+        if is_read:
+            stats.reads_sent += 1
+        elif is_write:
+            stats.writes_sent += 1
+        try:
+            result = await original_start_resending(*args, **kwargs)
+        except BoxIDNotFoundError:
+            if is_read:
+                stats.reads_boxnotfound += 1
+            raise
+        if is_read:
+            if getattr(result, "plaintext", b""):
+                stats.reads_with_payload += 1
+        elif is_write:
+            stats.writes_acked += 1
+        return result
+
+    connection.encrypt_read = encrypt_read
+    connection.encrypt_write = encrypt_write
+    connection.start_resending_encrypted_message = start_resending_encrypted_message
+
+
 conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
 
 # Tally events consumed off the receive path, as conversation ids. Pushed only
@@ -192,6 +291,8 @@ async def start_background_threads(connection: ThinClient):
     """This should be called on startup, after establishing a connection to the mixnet.
     It runs forever.
     """
+    # Count every pigeonhole operation for the Mixnet-status "Stats" window.
+    install_stats_counters(connection)
     # Loop over our write caps and retrive read caps for them:
     f1 = ensure_future(asyncio.gather(provision_read_caps(connection)))
 
