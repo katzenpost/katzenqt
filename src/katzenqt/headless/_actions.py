@@ -117,7 +117,7 @@ def set_connection_config(path: "str | None") -> None:
     _CONNECTION_CONFIG = path
 
 
-async def _connect_and_start() -> tuple[ThinClient, asyncio.Task[None]]:
+async def _connect_and_start(reconcile_tally: bool = False):
     """Connect to kpclientd and kick the background threads running.
 
     Returns ``(connection, background_task)``. The caller is responsible for
