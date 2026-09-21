@@ -7,12 +7,13 @@ which this module projects into Qt models and widgets.
 
 Two pieces:
 
-* :class:`PollsTabModel`: the flat list behind the Polls sibling tab. (Tally
-  messages are ordinary chat rows; their display is derived in
-  :mod:`katzenqt.qt_models` via :mod:`katzenqt.tally.presenter`.)
-* :class:`TallyPanel` and :class:`TallyCreateDialog`: the embedded poll panel
-  (click-to-cycle voting grid) and the hybrid create dialog (custom options
-  + date picks).
+* :class:`TallyPanel`: a modeless poll window (one instance per open poll)
+  with the click-to-cycle voting grid and per-voter detail.
+* :class:`TallyCreateDialog`: the hybrid create dialog (custom options +
+  date picks).
+
+Tally messages themselves are ordinary chat rows; their display is derived in
+:mod:`katzenqt.qt_models` via :mod:`katzenqt.tally.presenter`.
 
 The panel's voting grid is deliberately dumb: it edits a local selection map
 and emits it as a plain ``dict`` on :attr:`TallyPanel.voteSubmitted`; wiring
@@ -21,10 +22,7 @@ job, in the same `run_in_io` style the chat composer uses.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from PySide6 import QtCore
-from PySide6.QtCore import QModelIndex, Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCalendarWidget,
     QComboBox,
@@ -49,121 +47,6 @@ from .tally.presenter import SurveySummary
 from .tally.sync import load_doc
 
 # ---------------------------------------------------------------------------
-# Polls tab model
-# ---------------------------------------------------------------------------
-
-
-class PollsTabModel(QtCore.QAbstractListModel):
-    """Flat list of every poll (optionally one conversation's) for the Polls
-    sibling tab. Each row carries enough plain data to render a compact card
-    and to open the full :class:`TallyPanel` on click."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._rows: "list[SurveySummary]" = []
-        self._conversation_id: "int | None" = None
-        self._names: "dict[int, str]" = presenter.conversation_names()
-
-    def set_conversation_filter(self, conversation_id: "int | None") -> None:
-        """Limit to one conversation's polls (None shows all conversations)."""
-        self._conversation_id = conversation_id
-        self.refresh()
-
-    def refresh(self) -> None:
-        """Re-read the persisted surveys (call after tally notifications)."""
-        self._names = presenter.conversation_names()
-        ids = (
-            presenter.all_survey_ids()
-            if self._conversation_id is None
-            else [
-                (self._conversation_id, sid)
-                for sid in presenter.survey_ids_for_conversation(self._conversation_id)
-            ]
-        )
-        rows: "list[SurveySummary]" = []
-        names_by_convo: "dict[int, dict[bytes, str]]" = {}
-        for conversation_id, survey_id in ids:
-            blob = presenter.survey_doc(conversation_id, survey_id)
-            if blob is None:
-                continue
-            names = names_by_convo.get(conversation_id)
-            if names is None:
-                names = presenter.voter_names(conversation_id)
-                names_by_convo[conversation_id] = names
-            summary = presenter.summarize(
-                load_doc(blob),
-                conversation_id=conversation_id,
-                my_voter_id=presenter.own_voter_id(conversation_id),
-                voter_names=names,
-            )
-            rows.append(summary)
-        self.beginResetModel()
-        self._rows = rows
-        self.endResetModel()
-
-    def badge_count(self) -> int:
-        """Unread poll-create messages for the current filter, for the tab
-        badge."""
-        if self._conversation_id is not None:
-            return presenter.new_poll_count(self._conversation_id)
-        return sum(
-            presenter.new_poll_count(cid) for cid in presenter.conversation_ids()
-        )
-
-    def summary_at(self, row: int) -> "SurveySummary | None":
-        if 0 <= row < len(self._rows):
-            return self._rows[row]
-        return None
-
-    def rowCount(self, parent: "QModelIndex | None" = None) -> int:
-        if parent is not None and parent.isValid():
-            return 0
-        return len(self._rows)
-
-    def roleNames(self) -> dict:
-        return {
-            0: b"display",
-            0x200: b"poll_id",
-            0x201: b"topic",
-            0x202: b"status",
-            0x203: b"mode",
-            0x204: b"conversation_id",
-            0x205: b"conversation_name",
-            0x206: b"n_voters",
-            0x207: b"n_slots",
-        }
-
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or index.row() >= len(self._rows):
-            return None
-        s = self._rows[index.row()]
-        if role == 0:
-            return f"[Poll] {s.topic} — {s.status}"
-        if role == 0x200:
-            return s.survey_id.hex()
-        if role == 0x201:
-            return s.topic
-        if role == 0x202:
-            return s.status
-        if role == 0x203:
-            return s.mode.value
-        if role == 0x204:
-            return s.conversation_id
-        if role == 0x205:
-            return self._names.get(s.conversation_id, f"#{s.conversation_id}")
-        if role == 0x206:
-            return s.n_voters
-        if role == 0x207:
-            return s.n_slots
-        return None
-
-
-def polls_tab_label(new_count: int) -> str:
-    """The Polls tab title, with an attention badge when anything is new."""
-    return "Polls" if new_count == 0 else f"Polls ({new_count})"
-
-
-# ---------------------------------------------------------------------------
 # Poll panel
 # ---------------------------------------------------------------------------
 
@@ -181,20 +64,23 @@ def outcome_text(outcome: Outcome) -> str:
     return f"Leading: {winner.text or winner.slot_id} ({outcome.top_yes} yes)."
 
 
-class TallyPanel(QWidget):
-    """Embedded poll panel: header, per-slot totals, a click-to-cycle voting
+class TallyPanel(QDialog):
+    """Modeless poll window: header, per-slot totals, a click-to-cycle voting
     grid, the per-voter detail and (for the creator) a Close button.
 
-    The grid edits a local selection and emits it on :attr:`voteSubmitted` as
+    One instance per open poll, created and shown by the MainWindow; the window
+    title names the conversation the poll belongs to. The grid edits a local
+    selection and emits it on :attr:`voteSubmitted` as
     ``{slot_id: availability}`` for the caller to persist on the io loop. It
     never writes the database itself."""
 
     voteSubmitted = Signal(dict)  # slot_id -> availability (only set slots)
     closeRequested = Signal()
-    newPollRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setWindowTitle("Poll")
+        self._conversation_label = ""
         self._summary: "SurveySummary | None" = None
         self._survey_key: "tuple[int, bytes] | None" = None
         self._submit_base: "dict[str, str]" = {}
@@ -225,12 +111,9 @@ class TallyPanel(QWidget):
             lambda on: self._voters_label.setVisible(on)
         )
         self._voters_label.setVisible(False)
-        self._new_poll_button = QPushButton("New poll")
-        self._new_poll_button.clicked.connect(self.newPollRequested)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self._vote_button)
-        buttons.addWidget(self._new_poll_button)
         buttons.addStretch(1)
         buttons.addWidget(self._voter_detail_button)
         buttons.addWidget(self._close_button)
@@ -246,6 +129,17 @@ class TallyPanel(QWidget):
 
     # -- population ----------------------------------------------------------
 
+    def set_conversation_label(self, label: str) -> None:
+        """Name the conversation this poll belongs to (shown in the window
+        title)."""
+        self._conversation_label = label
+        self._update_window_title()
+
+    def _update_window_title(self) -> None:
+        prefix = self._conversation_label or "Poll"
+        topic = self._summary.topic if self._summary is not None else None
+        self.setWindowTitle(f"{prefix} — Poll: {topic}" if topic else f"{prefix} — Poll")
+
     def set_summary(self, summary: SurveySummary) -> None:
         """Render a survey; grid buttons reset to the summary's own vote."""
         self._summary = summary
@@ -256,6 +150,7 @@ class TallyPanel(QWidget):
         self._set_header(summary)
         self._rebuild_grid(summary)
         self._update_vote_enabled()
+        self._update_window_title()
 
         self._voters_label.setText(self._voters_text or "")
         is_open = summary.status == "open"
@@ -310,6 +205,7 @@ class TallyPanel(QWidget):
         self._voters_label.setText("")
         self._vote_button.setEnabled(False)
         self._close_button.hide()
+        self._update_window_title()
 
     # -- rendering helpers -----------------------------------------------------
 

@@ -17,7 +17,8 @@ CLI verbs and the Qt GUI all exist and are covered by unit, property and
 docker-integration tests. Every tally wire message is an ordinary
 `ConversationLog` row, so the chat timeline shows poll creates, votes,
 recasts, closes and syncs inline; the GUI (`katzenqt.qt_tally` plus the
-wiring in `katzenqt.katzen`) also hosts a Polls panel/tab. It reads state
+wiring in `katzenqt.katzen`) opens one modeless poll window per poll and
+offers a New-poll tab in the composer. It reads state
 through `katzenqt.tally.presenter` and performs every write on the io loop
 under the same controller calls the CLI uses. Two pieces of the protocol
 design are deliberately still open; both are called out under [What is not
@@ -53,7 +54,7 @@ The core is Qt-free and network-free, and must stay so.
 | `katzenqt.tally.controller` | persistent, models, all of the above | Owns one in-memory `Doc` per survey, reconciles it with the database, applies inbound events, mutates for local actions. |
 | `katzenqt.tally.send` | persistent, models | Stages an outbound tally message onto the conversation's BACAP write stream. |
 | `katzenqt.tally.presenter` | persistent, engine, schema | Projects a `Doc` plus persisted identity into plain GUI-ready data (summaries, per-voter rows, tally-row text, unread-poll counts). Qt-free. |
-| `katzenqt.qt_tally` | PySide6, presenter | Qt-only models/widgets: the Polls-tab `PollsTabModel`, the vote panel and the create dialog. |
+| `katzenqt.qt_tally` | PySide6, presenter | Qt-only widgets: the modeless vote window and the create dialog. |
 
 `katzenqt.tally`'s package namespace re-exports the protocol core only:
 `Mode`, `Outcome`, `SlotTally`, `TallyResult`, `apply_vote`, `close_survey`,
@@ -350,8 +351,8 @@ places it in the timeline and the chat-log refresh queue
 (`network.conversation_update_queue`) wakes the view. `tally_added` is also
 `True`; after its transaction commits the network receive path pushes the
 `conversation_id` onto **`network.tally_update_queue`**, which the GUI drains
-(via its `tally_listener`) to re-render the Polls tab/badge and any open survey
-panel. That queue carries only the conversation id, so the GUI re-derives
+(via its `tally_listener`) to re-render any open poll windows for that
+conversation. That queue carries only the conversation id, so the GUI re-derives
 everything from committed state and the notification stays race-free with
 send-side commits.
 
@@ -477,6 +478,6 @@ Each of these has a workaround, where one exists, in
 | `tests/test_tally_convergence.py` | Property test: event order never changes the tally. |
 | `tests/test_tally_controller.py` | Votes keyed to the authenticated sender, persistence round-trip, creator-only close, dispatch routing. |
 | `tests/test_tally_presenter.py` | The Qt-free projection: `summarize`, `panel_rows`, `tally_row_text`, `new_poll_count`. |
-| `tests/test_qt_tally.py` | Offscreen Qt: tally rows in `ConversationLogModel`, panel vote cycle + close, create dialog, Polls tab list/badge. |
+| `tests/test_qt_tally.py` | Offscreen Qt: tally rows in `ConversationLogModel`, poll-window vote cycle + close, conversation-titled window, create dialog. |
 | `tests/test_models_tally.py` | CBOR round-trip of every kind, integer `msg_type` on the wire, large CRDT blobs through `SendOperation`. |
 | `tests/integration/test_tally.py` | The whole path over a docker mixnet, two peers, convergent counts. |

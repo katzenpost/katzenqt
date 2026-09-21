@@ -771,6 +771,18 @@ class Ui_MainWindow(object):
 
         icon10 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.MediaRecord))
         self.singlemultitab.addTab(self.ptt_tab, icon10, "")
+        self.poll_tab = QWidget()
+        self.poll_tab.setObjectName(u"poll_tab")
+        self.poll_tab.setEnabled(False)
+        self.gridLayout_8 = QGridLayout(self.poll_tab)
+        self.gridLayout_8.setObjectName(u"gridLayout_8")
+        self.new_poll_button = QPushButton(self.poll_tab)
+        self.new_poll_button.setObjectName(u"new_poll_button")
+        self.new_poll_button.setEnabled(False)
+
+        self.gridLayout_8.addWidget(self.new_poll_button, 0, 0, 1, 1)
+
+        self.singlemultitab.addTab(self.poll_tab, "")
 
         self.gridLayout_3.addWidget(self.singlemultitab, 4, 0, 1, 1)
 
@@ -1074,6 +1086,11 @@ class Ui_MainWindow(object):
         self.singlemultitab.setTabText(self.singlemultitab.indexOf(self.ptt_tab), QCoreApplication.translate("MainWindow", u"&Push to talk (voice)", None))
 #if QT_CONFIG(tooltip)
         self.singlemultitab.setTabToolTip(self.singlemultitab.indexOf(self.ptt_tab), QCoreApplication.translate("MainWindow", u"Send a voice message to the current conversation", None))
+#endif // QT_CONFIG(tooltip)
+        self.new_poll_button.setText(QCoreApplication.translate("MainWindow", u"&New poll", None))
+        self.singlemultitab.setTabText(self.singlemultitab.indexOf(self.poll_tab), QCoreApplication.translate("MainWindow", u"&New poll", None))
+#if QT_CONFIG(tooltip)
+        self.singlemultitab.setTabToolTip(self.singlemultitab.indexOf(self.poll_tab), QCoreApplication.translate("MainWindow", u"Create a poll in the current conversation", None))
 #endif // QT_CONFIG(tooltip)
 #if QT_CONFIG(statustip)
         self.qml_ChatLines.setStatusTip(QCoreApplication.translate("MainWindow", u"chat history lines QML", None))

@@ -1,5 +1,5 @@
-"""Offscreen widget tests for ``katzenqt.qt_tally`` (the Polls tab, the voting
-panel and the create dialog) and for tally rows rendered by
+"""Offscreen widget tests for ``katzenqt.qt_tally`` (the modeless poll window
+and the create dialog) and for tally rows rendered by
 ``katzenqt.qt_models.ConversationLogModel``.
 
 These build QWidgets, so the module-scoped app is a QApplication (see the note
@@ -29,10 +29,8 @@ from katzenqt.qt_models import (  # noqa: E402
     ConversationLogModel,
 )
 from katzenqt.qt_tally import (  # noqa: E402
-    PollsTabModel,
     TallyCreateDialog,
     TallyPanel,
-    polls_tab_label,
 )
 from katzenqt.tally import events, schema, sync  # noqa: E402
 from katzenqt.tally.controller import voter_id_from_read_cap  # noqa: E402
@@ -125,14 +123,6 @@ def _seed_survey(
     return doc
 
 
-def _set_first_unread(convo_id: int, value: int) -> None:
-    with persistent.Session(persistent._engine_sync) as sess:
-        conv = sess.get(persistent.Conversation, convo_id)
-        conv.first_unread = value
-        sess.add(conv)
-        sess.commit()
-
-
 # ---------------------------------------------------------------------------
 # Tally rows in ConversationLogModel
 # ---------------------------------------------------------------------------
@@ -192,47 +182,6 @@ def test_vote_for_an_unknown_survey_renders_invalid():
     m.set_row_count(1)
     assert m.data(m.index(0, 0, QModelIndex()), 0) == f"me: vote for unknown poll {survey_id.hex()}"
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "invalid"
-
-
-# ---------------------------------------------------------------------------
-# Polls tab model
-# ---------------------------------------------------------------------------
-
-
-def test_polls_tab_model_lists_surveys_for_the_conversation():
-    convo_id, peer_id = _make_convo_sync("alpha")
-    other_id, _ = _make_convo_sync("beta")
-    a_sid = uuid.uuid4().bytes
-    b_sid = uuid.uuid4().bytes
-    _seed_survey(convo_id, a_sid, topic="tea?")
-    _seed_survey(other_id, b_sid, topic="beer?")
-
-    model = PollsTabModel()
-    model.set_conversation_filter(convo_id)
-    assert model.rowCount() == 1
-    assert model.data(model.index(0), 0x201) == "tea?"
-    assert model.data(model.index(0), 0x204) == convo_id
-    assert model.data(model.index(0), 0x205) == "alpha"
-    assert model.summary_at(0).topic == "tea?"
-
-
-def test_polls_badge_counts_unread_create_rows():
-    convo_id, peer_id = _make_convo_sync()
-    survey_id = uuid.uuid4().bytes
-    doc = _seed_survey(convo_id, survey_id)
-    _seed_tally_row(convo_id, peer_id, events.build_create(survey_id, sync.full_state(doc)))
-
-    model = PollsTabModel()
-    model.set_conversation_filter(convo_id)
-    _set_first_unread(convo_id, 0)
-    assert model.badge_count() == 1
-    _set_first_unread(convo_id, 5)  # everything read
-    assert model.badge_count() == 0
-
-
-def test_polls_tab_label_attaches_the_badge():
-    assert polls_tab_label(0) == "Polls"
-    assert polls_tab_label(3) == "Polls (3)"
 
 
 # ---------------------------------------------------------------------------
@@ -312,12 +261,19 @@ def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
     assert fired == [True]
 
 
-def test_panel_new_poll_button_emits_new_poll_requested():
+def test_panel_window_title_names_the_conversation_and_topic():
+    convo_id, _ = _make_convo_sync("lobby")
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(convo_id, survey_id, topic="dinner?")
+
     panel = TallyPanel()
-    fired: "list[bool]" = []
-    panel.newPollRequested.connect(lambda: fired.append(True))
-    panel._new_poll_button.click()
-    assert fired == [True]
+    panel.set_conversation_label("lobby")
+    assert panel.windowTitle() == "lobby — Poll"
+    assert panel.show_survey(convo_id, survey_id) is True
+    assert panel.windowTitle() == "lobby — Poll: dinner?"
+
+    panel.clear()
+    assert panel.windowTitle() == "lobby — Poll"
 
 
 def test_panel_clear_drops_the_current_survey():

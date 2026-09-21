@@ -57,10 +57,10 @@ from .models import (GroupChatFileUpload,
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
 from .qt_models import *
-from .qt_tally import (PollsTabModel, TallyCreateDialog, TallyPanel,
-                       polls_tab_label)
+from .qt_tally import TallyCreateDialog, TallyPanel
 from .tally import controller as tally_controller
 from .tally import events as tally_events
+from .tally import presenter as tally_presenter
 from .tally import schema as tally_schema
 from .tally import send as tally_send
 from .tally import sync as tally_sync
@@ -1145,47 +1145,55 @@ class MainWindow(QMainWindow):
         self.transfers_view.setMinimumHeight(80)
         self.ui.gridLayout_2.addWidget(self.transfers_view, 2, 0, 1, 1)
 
-        # Polls panel: a sibling tab in the chat tab bar. It lists the
-        # currently selected conversation's surveys and hosts the
-        # create/vote/close flows; clicking an in-chat placeholder raises it.
-        self.tally_panel = TallyPanel()
-        self.polls_model = PollsTabModel()
-        self.tally_panel.voteSubmitted.connect(self.tally_vote)
-        self.tally_panel.closeRequested.connect(self.tally_close)
-        self.tally_panel.newPollRequested.connect(self.new_poll)
-        self.ui.chatTabs.addTab(self.tally_panel, polls_tab_label(0))
+        # Poll windows: one modeless TallyPanel per open poll, keyed by
+        # (conversation_id, survey_id). Clicking a tally row in the chat log
+        # opens/raises that poll's window; the New-poll composer tab creates one.
+        self._poll_windows: "dict[tuple[int, bytes], TallyPanel]" = {}
+        self.ui.new_poll_button.clicked.connect(lambda: self.new_poll())
 
     # -- tally / polls -------------------------------------------------------
 
-    def _refresh_tally_views(self, conversation_id: int) -> None:
-        """Refresh the polls tab/badge and the open survey after a tally
-        notification. The chat rows themselves are refreshed by
-        ``receive_msg_listener`` (tally messages are ordinary log rows)."""
-        key = self.tally_panel.current_survey()
-        if key is not None and key[0] == conversation_id:
-            # A received vote/close may have changed the panel's survey.
-            self.tally_panel.show_survey(*key)
-        if self._selected_conversation_id() == conversation_id:
-            self._update_polls_tab()
-
-    def _selected_conversation_id(self) -> "int | None":
-        convo_state = self.convo_state_or_none()
-        return convo_state.conversation_id if convo_state is not None else None
-
-    def _update_polls_tab(self) -> None:
-        """Re-list the selected conversation's surveys and refresh the badge."""
-        if not hasattr(self, "polls_model"):
-            return
-        self.polls_model.set_conversation_filter(self._selected_conversation_id())
-        index = self.ui.chatTabs.indexOf(self.tally_panel)
-        if index >= 0:
-            self.ui.chatTabs.setTabText(
-                index, polls_tab_label(self.polls_model.badge_count())
+    def _open_poll_window(self, conversation_id: int, survey_id: bytes) -> None:
+        """Show (or raise) the poll window for one survey, creating it on first
+        open. Windows are independent and modeless, so several polls can be
+        open at once; each title names its conversation."""
+        key = (conversation_id, survey_id)
+        panel = self._poll_windows.get(key)
+        if panel is None:
+            panel = TallyPanel(self)
+            name = tally_presenter.conversation_names().get(
+                conversation_id, f"#{conversation_id}"
             )
+            panel.set_conversation_label(name)
+            panel.voteSubmitted.connect(
+                lambda choice, p=panel: self.tally_vote(p, choice)
+            )
+            panel.closeRequested.connect(lambda p=panel: self.tally_close(p))
+            panel.finished.connect(
+                lambda _result=0, k=key: self._poll_windows.pop(k, None)
+            )
+            panel.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+            if not panel.show_survey(conversation_id, survey_id):
+                panel.deleteLater()
+                return
+            self._poll_windows[key] = panel
+        elif not panel.show_survey(conversation_id, survey_id):
+            return
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+
+    def _refresh_tally_views(self, conversation_id: int) -> None:
+        """Re-render every open poll window belonging to a conversation after a
+        tally notification. The chat rows themselves are refreshed by
+        ``receive_msg_listener`` (tally messages are ordinary log rows)."""
+        for key, panel in list(self._poll_windows.items()):
+            if key[0] == conversation_id:
+                panel.show_survey(*key)
 
     @Slot(str)
     def openPoll(self, survey_id_hex: str) -> None:
-        """Open a survey in the panel (QML placeholder click)."""
+        """Open a survey's poll window (QML placeholder click)."""
         convo_state = self.convo_state_or_none()
         if convo_state is None:
             return
@@ -1193,19 +1201,15 @@ class MainWindow(QMainWindow):
             survey_id = bytes.fromhex(survey_id_hex)
         except ValueError:
             return
-        if self.tally_panel.show_survey(convo_state.conversation_id, survey_id):
-            self.ui.chatTabs.setCurrentWidget(self.tally_panel)
+        self._open_poll_window(convo_state.conversation_id, survey_id)
 
     @async_cb
-    async def tally_vote(self, choice) -> None:
+    async def tally_vote(self, panel: TallyPanel, choice) -> None:
         """Persist the panel's edited selection and broadcast it."""
-        convo_state = self.convo_state_or_none()
-        key = self.tally_panel.current_survey()
-        if convo_state is None or key is None:
+        key = panel.current_survey()
+        if key is None:
             return
         conversation_id, survey_id = key
-        if conversation_id != convo_state.conversation_id:
-            return
         # The vote is staged on the same stream as chat; refuse until joined.
         if await self._refuse_unless_joined(conversation_id):
             return
@@ -1215,15 +1219,12 @@ class MainWindow(QMainWindow):
         self._refresh_tally_views(conversation_id)
 
     @async_cb
-    async def tally_close(self) -> None:
-        """Close the open survey (only the creator may) and broadcast it."""
-        convo_state = self.convo_state_or_none()
-        key = self.tally_panel.current_survey()
-        if convo_state is None or key is None:
+    async def tally_close(self, panel: TallyPanel) -> None:
+        """Close the panel's survey (only the creator may) and broadcast it."""
+        key = panel.current_survey()
+        if key is None:
             return
         conversation_id, survey_id = key
-        if conversation_id != convo_state.conversation_id:
-            return
         # The close is staged on the same stream as chat; refuse until joined.
         if await self._refuse_unless_joined(conversation_id):
             return
@@ -2048,15 +2049,12 @@ class MainWindow(QMainWindow):
         self.ui.attach_file_button.setEnabled(True)
         self.ui.attached_files_QListWidget.setEnabled(True)
 
+        # The new-poll composer tab likewise starts disabled.
+        self.ui.poll_tab.setEnabled(True)
+        self.ui.new_poll_button.setEnabled(True)
+
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
-
-        # Scope the Polls tab to the newly selected conversation and drop a
-        # panel survey that belonged to the previous one.
-        key = self.tally_panel.current_survey()
-        if key is not None and key[0] != convo_state.conversation_id:
-            self.tally_panel.clear()
-        self._update_polls_tab()
 
         self.systray.has_read_messages()
 
@@ -2651,9 +2649,6 @@ async def main(window: MainWindow):
         ) # TODO sometimes this doesn't work when the network asyncio is also just getting started.
         for convo in a:
             await add_conversation(window, convo)
-
-    # Seed the Polls tab from whatever the selection (or lack of one) is now.
-    window._update_polls_tab()
 
     window.show()
     window._supervised_listener(

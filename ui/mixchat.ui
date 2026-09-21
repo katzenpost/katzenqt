@@ -2213,13 +2213,36 @@ QToolButton {
                       <set>Qt::AlignmentFlag::AlignCenter</set>
                      </property>
                     </widget>
-                   </item>
-                  </layout>
+                    </item>
+                   </layout>
+                  </widget>
+                  <widget class="QWidget" name="poll_tab">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
+                   <attribute name="title">
+                    <string>&amp;New poll</string>
+                   </attribute>
+                   <attribute name="toolTip">
+                    <string>Create a poll in the current conversation</string>
+                   </attribute>
+                   <layout class="QGridLayout" name="gridLayout_8">
+                    <item row="0" column="0">
+                     <widget class="QPushButton" name="new_poll_button">
+                      <property name="enabled">
+                       <bool>false</bool>
+                      </property>
+                      <property name="text">
+                       <string>&amp;New poll</string>
+                      </property>
+                     </widget>
+                    </item>
+                   </layout>
+                  </widget>
                  </widget>
-                </widget>
-               </item>
-               <item row="3" column="0">
-                <widget class="QQuickWidget" name="qml_ChatLines">
+                </item>
+                <item row="3" column="0">
+                 <widget class="QQuickWidget" name="qml_ChatLines">
                  <property name="sizePolicy">
                   <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
                    <horstretch>0</horstretch>
