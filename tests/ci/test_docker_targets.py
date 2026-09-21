@@ -20,7 +20,9 @@ def test_mixnet_up_starts_the_katzenpost_docker_mixnet() -> None:
 
 
 def test_mixnet_down_stops_it() -> None:
-    assert "$(MAKE) -C $(KATZENPOST_DIR)/docker stop" in _recipe("mixnet-down")
+    assert "$(MAKE) -C $(KATZENPOST_DIR)/docker stop" in _recipe(
+        "mixnet-down"
+    )
 
 
 def test_run_docker_names_the_instance_and_the_docker_daemon() -> None:
@@ -28,15 +30,25 @@ def test_run_docker_names_the_instance_and_the_docker_daemon() -> None:
     assert "\nINSTANCE ?= alice\n" in text
     recipe = _recipe("run-docker")
     assert "KQT_STATE=$(INSTANCE)" in recipe
-    assert "KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml" in recipe
+    assert (
+        "KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml"
+        in recipe
+    )
     assert recipe.rstrip().endswith("$(MAKE) run")
 
 
-def test_the_docker_daemon_config_dials_the_mixnet_kpclientd_over_tcp() -> None:
+def test_the_docker_daemon_config_dials_the_mixnet_kpclientd_over_tcp() -> (
+    None
+):
     config = tomllib.loads(
-        (ROOT / "config" / "thinclient.docker.toml").read_text(encoding="ascii"),
+        (ROOT / "config" / "thinclient.docker.toml").read_text(
+            encoding="ascii"
+        ),
     )
-    assert config["Dial"]["Tcp"] == {"Network": "tcp", "Address": "127.0.0.1:64331"}
+    assert config["Dial"]["Tcp"] == {
+        "Network": "tcp",
+        "Address": "127.0.0.1:64331",
+    }
     assert "Unix" not in config["Dial"]
 
 
