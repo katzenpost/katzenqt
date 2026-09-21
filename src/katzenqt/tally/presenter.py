@@ -72,11 +72,12 @@ class SurveySummary:
 
 @dataclass(frozen=True)
 class VoterRow:
-    """One line of the per-voter detail view."""
+    """One row of the poll's per-voter view."""
 
     name: str
     choices: "dict[str, str]"
     has_voted: bool
+    voter_id: "bytes | None" = None
 
     def line(self, slots: "tuple[SlotTally, ...]") -> str:
         if not self.has_voted:
@@ -150,18 +151,36 @@ def placeholder_text(summary: SurveySummary) -> str:
 def panel_rows(
     doc,
     names: "dict[bytes, str]",
+    *,
+    my_voter_id: "bytes | None" = None,
 ) -> "tuple[VoterRow, ...]":
-    """Per-voter detail rows from a survey ``Doc`` and a voter-id -> name
-    mapping (see :func:`voter_names`). Pure: every recorded voter appears in
-    the deterministic order the engine derives."""
-    return tuple(
+    """Per-voter rows from a survey ``Doc`` and a voter-id -> name mapping (see
+    :func:`voter_names`). Pure.
+
+    Every recorded voter appears with their ballot. When ``my_voter_id`` is
+    given and has not voted, a ``has_voted=False`` row is added for them so the
+    local user has a row to vote from. The local user sorts first, the rest by
+    name."""
+    rows = [
         VoterRow(
             name=names.get(voter.voter_id, _UNKNOWN_VOTER),
             choices=voter.choices,
             has_voted=True,
+            voter_id=voter.voter_id,
         )
         for voter in engine.per_voter(doc)
-    )
+    ]
+    if my_voter_id is not None and not any(
+        r.voter_id == my_voter_id for r in rows
+    ):
+        rows.append(VoterRow(
+            name=names.get(my_voter_id, "you"),
+            choices={},
+            has_voted=False,
+            voter_id=my_voter_id,
+        ))
+    rows.sort(key=lambda r: (r.voter_id != my_voter_id, r.name.lower(), r.name))
+    return tuple(rows)
 
 
 @dataclass(frozen=True)

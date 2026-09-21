@@ -8,7 +8,8 @@ which this module projects into Qt models and widgets.
 Two pieces:
 
 * :class:`TallyPanel`: a modeless poll window (one instance per open poll)
-  with the click-to-cycle voting grid and per-voter detail.
+  with a grid of every voter's ballot and click-to-cycle editing for the
+  local user.
 * :class:`TallyCreateDialog`: the hybrid create dialog (custom options +
   date picks).
 
@@ -65,8 +66,8 @@ def outcome_text(outcome: Outcome) -> str:
 
 
 class TallyPanel(QDialog):
-    """Modeless poll window: header, per-slot totals, a click-to-cycle voting
-    grid, the per-voter detail and (for the creator) an End button.
+    """Modeless poll window: header, a grid of every voter's ballot, the local
+    user's click-to-cycle editing, and (for the creator) an End button.
 
     One instance per open poll, created and shown by the MainWindow; the window
     title names the conversation the poll belongs to. The grid edits a local
@@ -83,12 +84,14 @@ class TallyPanel(QDialog):
         self._conversation_label = ""
         self._summary: "SurveySummary | None" = None
         self._survey_key: "tuple[int, bytes] | None" = None
+        self._voters: "tuple[presenter.VoterRow, ...]" = ()
         self._submit_base: "dict[str, str]" = {}
         self._selection: "dict[str, str]" = {}
+        self._editing = False
         self._cycle: "list[str]" = []  # availabilities to cycle (no blank)
         self._slot_text: "dict[str, str]" = {}
         self._slot_buttons: "dict[str, QToolButton]" = {}
-        self._voters_text = ""
+        self._edit_button: "QPushButton | None" = None
 
         self._topic_label = QLabel("No poll selected")
         self._topic_label.setStyleSheet("font-weight: bold; font-size: 14px;")
@@ -96,8 +99,6 @@ class TallyPanel(QDialog):
         self._meta_label = QLabel("")
         self._outcome_label = QLabel("")
         self._grid = QGridLayout()
-        self._voters_label = QLabel("")
-        self._voters_label.setWordWrap(True)
 
         self._vote_button = QPushButton("Send vote")
         self._vote_button.setEnabled(False)
@@ -105,17 +106,10 @@ class TallyPanel(QDialog):
         self._close_button = QPushButton("End poll")
         self._close_button.hide()
         self._close_button.clicked.connect(self.closeRequested)
-        self._voter_detail_button = QPushButton("Show who voted")
-        self._voter_detail_button.setCheckable(True)
-        self._voter_detail_button.toggled.connect(
-            lambda on: self._voters_label.setVisible(on)
-        )
-        self._voters_label.setVisible(False)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self._vote_button)
         buttons.addStretch(1)
-        buttons.addWidget(self._voter_detail_button)
         buttons.addWidget(self._close_button)
 
         layout = QVBoxLayout(self)
@@ -125,7 +119,6 @@ class TallyPanel(QDialog):
         layout.addWidget(self._outcome_label)
         layout.addLayout(self._grid)
         layout.addLayout(buttons)
-        layout.addWidget(self._voters_label)
 
     # -- population ----------------------------------------------------------
 
@@ -140,33 +133,48 @@ class TallyPanel(QDialog):
         topic = self._summary.topic if self._summary is not None else None
         self.setWindowTitle(f"{prefix} — Poll: {topic}" if topic else f"{prefix} — Poll")
 
-    def set_summary(self, summary: SurveySummary) -> None:
-        """Render a survey; grid buttons reset to the summary's own vote."""
+    def set_survey(
+        self,
+        summary: SurveySummary,
+        voters: "tuple[presenter.VoterRow, ...]",
+        *,
+        preserve_edits: bool = False,
+    ) -> None:
+        """Render a survey and its per-voter rows.
+
+        Unless ``preserve_edits``, the local edit buffer resets to the persisted
+        ballot and editing starts only when the local user has not voted yet.
+        ``preserve_edits`` keeps an in-progress edit across a refresh of the
+        same survey."""
         self._summary = summary
+        self._voters = voters
         self._cycle = list(schema.domain(summary.mode))
-        self._selection = dict(summary.my_choices)
         self._submit_base = dict(summary.my_choices)
+        if preserve_edits and summary.status == "open":
+            pass  # keep the in-progress selection and edit mode
+        else:
+            self._selection = dict(summary.my_choices)
+            me = next(
+                (v for v in voters if v.voter_id == summary.my_voter_id), None,
+            )
+            self._editing = (
+                summary.status == "open"
+                and (me is None or not me.has_voted)
+            )
 
         self._set_header(summary)
-        self._rebuild_grid(summary)
+        self._rebuild_grid()
         self._update_vote_enabled()
         self._update_window_title()
-
-        self._voters_label.setText(self._voters_text or "")
         is_open = summary.status == "open"
         self._close_button.setVisible(is_open and summary.is_creator())
 
-    def set_voters(self, voters: "tuple[presenter.VoterRow, ...]") -> None:
-        """The per-voter detail lines (caller resolves names via
-        presenter.voter_names + presenter.panel_rows)."""
-        self._voters_text = "\n".join(v.line(self._summary.slots) for v in voters)
-        self._voters_label.setText(self._voters_text)
-
     def show_survey(self, conversation_id: int, survey_id: bytes) -> bool:
-        """Load one survey from persisted state and render it (summary, grid
-        and per-voter detail). Returns False when the survey is unknown;
-        otherwise records it as the current survey so a later refresh (a
-        received vote or close) can re-render the same one."""
+        """Load one survey from persisted state and render it (header and
+        voter grid). Returns False when the survey is unknown; otherwise
+        records it as the current survey so a later refresh (a received vote or
+        close) can re-render the same one. An in-progress local edit survives a
+        refresh of the same survey."""
         blob = presenter.survey_doc(conversation_id, survey_id)
         if blob is None:
             return False
@@ -178,9 +186,12 @@ class TallyPanel(QDialog):
             my_voter_id=presenter.own_voter_id(conversation_id),
             voter_names=names,
         )
+        voters = presenter.panel_rows(
+            doc, names, my_voter_id=summary.my_voter_id,
+        )
+        same = self._survey_key == (conversation_id, survey_id)
         self._survey_key = (conversation_id, survey_id)
-        self.set_summary(summary)
-        self.set_voters(presenter.panel_rows(doc, names))
+        self.set_survey(summary, voters, preserve_edits=same and self._editing)
         return True
 
     def current_survey(self) -> "tuple[int, bytes] | None":
@@ -193,16 +204,16 @@ class TallyPanel(QDialog):
         changes so a poll from another conversation is not left on screen)."""
         self._survey_key = None
         self._summary = None
+        self._voters = ()
         self._submit_base = {}
         self._selection = {}
+        self._editing = False
         self._cycle = []
-        self._voters_text = ""
         self._clear_grid()
         self._topic_label.setText("No poll selected")
         self._status_label.setText("")
         self._meta_label.setText("")
         self._outcome_label.setText("")
-        self._voters_label.setText("")
         self._vote_button.setEnabled(False)
         self._close_button.hide()
         self._update_window_title()
@@ -227,27 +238,62 @@ class TallyPanel(QDialog):
                 widget.deleteLater()
         self._slot_buttons.clear()
         self._slot_text.clear()
+        self._edit_button = None
 
-    def _rebuild_grid(self, summary: SurveySummary) -> None:
+    @staticmethod
+    def _slot_totals(slot) -> str:
+        totals = f"yes {slot.yes}"
+        if slot.maybe:
+            totals += f" · maybe {slot.maybe}"
+        totals += f" · no {slot.no}"
+        return totals
+
+    def _rebuild_grid(self) -> None:
+        """Draw the header row (one column per option) and one row per voter.
+        The local user's row is click-to-cycle while editing, read-only with an
+        Edit button once they have voted."""
         self._clear_grid()
-        for i, slot in enumerate(summary.slots):
+        summary = self._summary
+        if summary is None:
+            return
+        slots = summary.slots
+        actions_col = len(slots) + 1
+        self._grid.addWidget(QLabel("Voter"), 0, 0)
+        for col, slot in enumerate(slots, start=1):
             self._slot_text[slot.slot_id] = slot.text or slot.slot_id
-            totals = f"yes {slot.yes}"
-            if slot.maybe:
-                totals += f" · maybe {slot.maybe}"
-            totals += f" · no {slot.no}"
-            label = QLabel(self._slot_text[slot.slot_id])
-            label.setToolTip(f"{totals}")
-            button = QToolButton()
-            button.setToolTip(totals)
-            self._slot_buttons[slot.slot_id] = button
-            self._refresh_button(slot.slot_id)
-            self._grid.addWidget(label, i, 0)
-            self._grid.addWidget(button, i, 1)
-            button.clicked.connect(
-                lambda _=False, sid=slot.slot_id: self._cycle_slot(sid)
+            header = QLabel(self._slot_text[slot.slot_id])
+            header.setToolTip(self._slot_totals(slot))
+            self._grid.addWidget(header, 0, col)
+
+        is_open = summary.status == "open"
+        for row, voter in enumerate(self._voters, start=1):
+            is_me = (
+                summary.my_voter_id is not None
+                and voter.voter_id == summary.my_voter_id
             )
-            button.setEnabled(summary.status == "open")
+            self._grid.addWidget(QLabel(voter.name), row, 0)
+            editable = is_me and self._editing and is_open
+            for col, slot in enumerate(slots, start=1):
+                if editable:
+                    button = QToolButton()
+                    button.setToolTip(self._slot_totals(slot))
+                    self._slot_buttons[slot.slot_id] = button
+                    self._refresh_button(slot.slot_id)
+                    button.clicked.connect(
+                        lambda _=False, sid=slot.slot_id: self._cycle_slot(sid)
+                    )
+                    self._grid.addWidget(button, row, col)
+                else:
+                    avail = (
+                        self._selection.get(slot.slot_id)
+                        if is_me
+                        else voter.choices.get(slot.slot_id)
+                    )
+                    self._grid.addWidget(QLabel(avail or ""), row, col)
+            if is_me and not self._editing and voter.has_voted and is_open:
+                self._edit_button = QPushButton("Edit vote")
+                self._edit_button.clicked.connect(self._start_editing)
+                self._grid.addWidget(self._edit_button, row, actions_col)
 
     def _refresh_button(self, slot_id: str) -> None:
         avail = self._selection.get(slot_id)
@@ -257,6 +303,15 @@ class TallyPanel(QDialog):
         )
 
     # -- interaction ------------------------------------------------------------
+
+    def _start_editing(self) -> None:
+        """Reveal the local row's toggles, seeded from the current ballot, so
+        the user can change their vote and send it."""
+        if self._summary is None or self._summary.status != "open":
+            return
+        self._editing = True
+        self._rebuild_grid()
+        self._update_vote_enabled()
 
     def _cycle_slot(self, slot_id: str) -> None:
         values = ["", *self._cycle]  # blank first, then yes..no (maybe..)
@@ -280,10 +335,13 @@ class TallyPanel(QDialog):
         self._vote_button.setEnabled(enabled)
 
     def _submit(self) -> None:
-        if self._vote_button.isEnabled():
-            self._submit_base = dict(self._selection)
-            self.voteSubmitted.emit(dict(self._selection))
-            self._update_vote_enabled()
+        if not self._vote_button.isEnabled():
+            return
+        self._submit_base = dict(self._selection)
+        self._editing = False
+        self.voteSubmitted.emit(dict(self._selection))
+        self._rebuild_grid()
+        self._update_vote_enabled()
 
 
 # ---------------------------------------------------------------------------

@@ -150,6 +150,34 @@ def test_panel_rows_map_voter_ids_to_names_and_unknowns():
     assert by_name["alice"].line(doc_slots(doc)) == "alice: a: yes"
 
 
+def test_panel_rows_add_the_unvoted_local_user_first():
+    doc = _doc()
+    engine.apply_vote(doc, voter_id_from_read_cap(ALICE_CAP), {"s0": "yes"})
+    me = voter_id_from_read_cap(OWN_CAP)
+
+    rows = presenter.panel_rows(
+        doc,
+        {voter_id_from_read_cap(ALICE_CAP): "alice", me: "me"},
+        my_voter_id=me,
+    )
+    assert [r.name for r in rows] == ["me", "alice"]
+    assert rows[0].has_voted is False
+    assert rows[0].choices == {}
+    assert rows[1].has_voted is True
+    assert rows[1].choices == {"s0": "yes"}
+
+
+def test_panel_rows_do_not_duplicate_a_local_user_who_voted():
+    doc = _doc()
+    me = voter_id_from_read_cap(OWN_CAP)
+    engine.apply_vote(doc, me, {"s0": "yes"})
+
+    rows = presenter.panel_rows(doc, {me: "me"}, my_voter_id=me)
+    assert len(rows) == 1
+    assert rows[0].has_voted is True
+    assert rows[0].choices == {"s0": "yes"}
+
+
 def doc_slots(doc):
     return tuple(presenter.summarize(doc, conversation_id=1).slots)
 

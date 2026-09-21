@@ -470,10 +470,10 @@ Each of these has a workaround, where one exists, in
    joiner already reads every member stream from box 0, so a sync request only
    repairs offline windows / pruned boxes / dropped messages.
 3. **Closing does not stop voting** (see above).
-4. **No per-voter view in the derived result.** `TallyResult` aggregates;
-   `engine.per_voter(doc)` now exposes per-voter ballots, which the GUI's poll
-   panel renders ("show who voted"), but the CLI's `tally-result` still emits
-   the aggregate only.
+4. **No per-voter view in the CLI result.** `TallyResult` aggregates;
+   `engine.per_voter(doc)` exposes per-voter ballots, which the GUI's poll
+   window renders as a voters-by-options grid (with local editing), but the
+   CLI's `tally-result` still emits the aggregate only.
 5. ~~**A malformed sync request raises out of the receive path.**~~
    **Resolved.** `handle_event` now wraps `diff_since` in `try/except
    ValueError`, logs and drops the request (returning `False`) so a garbage

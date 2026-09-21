@@ -19,7 +19,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QModelIndex  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
@@ -32,7 +32,7 @@ from katzenqt.qt_tally import (  # noqa: E402
     TallyCreateDialog,
     TallyPanel,
 )
-from katzenqt.tally import events, schema, sync  # noqa: E402
+from katzenqt.tally import engine, events, schema, sync  # noqa: E402
 from katzenqt.tally.controller import voter_id_from_read_cap  # noqa: E402
 from katzenqt.tally.schema import Mode  # noqa: E402
 
@@ -109,11 +109,14 @@ def _seed_survey(
     mode: Mode = Mode.APPROVAL,
     slots: "tuple[str, ...]" = ("chicken", "pasta"),
     creator_voter_id: "bytes | None" = None,
+    votes: "list[tuple[bytes, dict[str, str]]] | None" = None,
 ):
     doc = schema.new_survey_doc(
         survey_id, topic, mode, slots,
         creator=creator_voter_id or voter_id_from_read_cap(OWN_CAP),
     )
+    for cap, choice in votes or []:
+        engine.apply_vote(doc, voter_id_from_read_cap(cap), choice)
     blob = sync.full_state(doc)
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.TallyState(
@@ -257,6 +260,56 @@ def test_panel_cycles_slots_and_submits_its_selection():
     panel._vote_button.click()
     assert fired == [{"s1": "no"}]
     assert panel._vote_button.isEnabled() is False  # submitted == current
+
+
+def test_panel_grid_lists_other_voters_choices():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id,
+        votes=[(ALICE_CAP, {"s0": "yes", "s1": "no"})],
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    assert {v.name for v in panel._voters} == {"me", "alice"}
+    texts = {label.text() for label in panel.findChildren(QLabel)}
+    assert {"yes", "no"} <= texts  # alice's ballot is rendered read-only
+
+
+def test_panel_voted_local_row_edits_and_resends():
+    convo_id, _ = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_survey(
+        convo_id, survey_id, slots=("tacos", "sushi"),
+        votes=[(OWN_CAP, {"s0": "yes"})],
+    )
+
+    panel = TallyPanel()
+    assert panel.show_survey(convo_id, survey_id) is True
+
+    # Already voted: read-only cells with an Edit button, no toggles.
+    assert panel._slot_buttons == {}
+    assert panel._edit_button is not None
+    assert panel._vote_button.isEnabled() is False
+
+    panel._edit_button.click()
+    assert set(panel._slot_buttons) == {"s0", "s1"}
+    # Entering edit mode alone changes nothing to send.
+    assert panel._vote_button.isEnabled() is False
+
+    panel._slot_buttons["s1"].click()  # blank -> yes
+    assert panel.selection == {"s0": "yes", "s1": "yes"}
+    assert panel._vote_button.isEnabled() is True  # edit re-activates Send
+
+    fired: "list[dict]" = []
+    panel.voteSubmitted.connect(fired.append)
+    panel._vote_button.click()
+    assert fired == [{"s0": "yes", "s1": "yes"}]
+    assert panel._vote_button.isEnabled() is False
+    assert panel._slot_buttons == {}  # back to read-only
+    assert panel._edit_button is not None
 
 
 def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
