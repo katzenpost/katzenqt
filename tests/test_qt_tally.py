@@ -184,6 +184,26 @@ def test_vote_for_an_unknown_survey_renders_invalid():
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "invalid"
 
 
+def test_unknown_vote_row_rewrites_when_the_survey_arrives():
+    """An early vote for a not-yet-seen survey renders as "unknown poll"; once
+    the survey arrives, a tally-event refresh must re-project the row."""
+    convo_id, peer_id = _make_convo_sync()
+    survey_id = uuid.uuid4().bytes
+    _seed_tally_row(convo_id, peer_id, events.build_vote(survey_id, {"s0": "yes"}))
+
+    m = ConversationLogModel(convo_id)
+    m.set_row_count(1)
+    idx = m.index(0, 0, QModelIndex())
+    assert "vote for unknown poll" in m.data(idx, 0)
+
+    _seed_survey(convo_id, survey_id, topic="lunch?")
+    m.refresh_tally_rows()
+    text = m.data(idx, 0)
+    assert "vote for unknown poll" not in text
+    assert 'voted on "[Poll] lunch?"' in text
+    assert m.data(idx, ROLE_CHAT_TALLY_KIND) == "vote"
+
+
 # ---------------------------------------------------------------------------
 # TallyPanel
 # ---------------------------------------------------------------------------

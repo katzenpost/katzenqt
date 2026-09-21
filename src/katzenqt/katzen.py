@@ -1205,9 +1205,12 @@ class MainWindow(QMainWindow):
         panel.activateWindow()
 
     def _refresh_tally_views(self, conversation_id: int) -> None:
-        """Re-render every open poll window belonging to a conversation after a
-        tally notification. The chat rows themselves are refreshed by
-        ``receive_msg_listener`` (tally messages are ordinary log rows)."""
+        """Re-render the tally-derived views for a conversation after a tally
+        notification: every open poll window, plus the chat log's tally rows
+        (their text depends on the survey state, which just changed)."""
+        convo_state = self.conversation_state_by_id.get(conversation_id)
+        if convo_state is not None:
+            convo_state.conversation_log_model.refresh_tally_rows()
         for key, panel in list(self._poll_windows.items()):
             if key[0] == conversation_id:
                 panel.show_survey(*key)

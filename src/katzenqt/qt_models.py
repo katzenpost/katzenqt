@@ -689,6 +689,23 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             clear()
         _TALLY_ROW_CACHE.clear()
 
+    def refresh_tally_rows(self) -> None:
+        """Re-project every row after a tally event.
+
+        A tally row's text depends on whether the survey it names is known and
+        on that survey's current state: an early vote renders as "unknown poll"
+        until the create arrives, and a create's placeholder gains its vote
+        counts. Both are cached by row id, so drop the caches and repaint all
+        roles."""
+        self._clear_data_caches()
+        if self._view_count == 0:
+            return
+        self.dataChanged.emit(
+            self.index(0, 0, QModelIndex()),
+            self.index(self._view_count - 1, 0, QModelIndex()),
+            [],
+        )
+
     def columnCount(self, parent:QModelIndex|QPersistentModelIndex|None) -> int:
         if parent.isValid():
             return 0
