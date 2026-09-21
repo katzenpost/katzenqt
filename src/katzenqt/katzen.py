@@ -1238,6 +1238,13 @@ class MainWindow(QMainWindow):
             return
         self._open_poll_window(convo_state.conversation_id, survey_id)
 
+    def _show_action_error(self, title: str, error: BaseException) -> None:
+        """Report a failed UI action to the user without nesting a Qt loop."""
+        logger.error("%s: %s", title, error, exc_info=error)
+        QTimer.singleShot(0, lambda: QMessageBox.critical(
+            self, APP_NAME, f"{title}:\n{error}",
+        ))
+
     @async_cb
     async def tally_vote(self, panel: TallyPanel, choice) -> None:
         """Persist the panel's edited selection and broadcast it."""
@@ -1248,9 +1255,13 @@ class MainWindow(QMainWindow):
         # The vote is staged on the same stream as chat; refuse until joined.
         if await self._refuse_unless_joined(conversation_id):
             return
-        await self.iothread.run_in_io(
-            _io_tally_vote(conversation_id, survey_id, dict(choice))
-        )
+        try:
+            await self.iothread.run_in_io(
+                _io_tally_vote(conversation_id, survey_id, dict(choice))
+            )
+        except Exception as e:
+            self._show_action_error("Could not send your vote", e)
+            return
         self._refresh_tally_views(conversation_id)
 
     @async_cb
@@ -1263,14 +1274,27 @@ class MainWindow(QMainWindow):
         # The close is staged on the same stream as chat; refuse until joined.
         if await self._refuse_unless_joined(conversation_id):
             return
-        await self.iothread.run_in_io(
-            _io_tally_close(conversation_id, survey_id)
-        )
+        try:
+            await self.iothread.run_in_io(
+                _io_tally_close(conversation_id, survey_id)
+            )
+        except Exception as e:
+            self._show_action_error("Could not end the poll", e)
+            return
         self._refresh_tally_views(conversation_id)
 
     @async_cb
     async def new_poll(self) -> None:
-        """Open the create dialog and, on accept, create + broadcast a survey."""
+        """Open the create dialog; its accept signal drives the create.
+
+        The create deliberately does not run as this task's continuation. A
+        dialog resumes the awaiting task via its ``finished`` signal, and a
+        task swallowed by a nested Qt loop would silently drop the poll (see
+        the QtAsyncio re-entrancy note in AGENTS.md). Instead the dialog's
+        ``accepted`` signal calls a plain slot that snapshots the fields and
+        schedules the create, so it runs from top-level dispatch whatever
+        happens to this task.
+        """
         convo_state = self.convo_state_or_none()
         if convo_state is None:
             return
@@ -1278,17 +1302,30 @@ class MainWindow(QMainWindow):
         # before opening the dialog so no work is discarded.
         if await self._refuse_unless_joined(convo_state.conversation_id):
             return
+        conversation_id = convo_state.conversation_id
         dialog = TallyCreateDialog(self)
-        await _dialog_finished(dialog)
-        if dialog.result() != QDialog.DialogCode.Accepted:
-            return
-        topic, mode, slots = dialog.topic(), dialog.mode(), dialog.slots()
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Read the fields in the signal handler, before the dialog is deleted.
+        dialog.accepted.connect(lambda: self._create_poll(
+            conversation_id, dialog.topic(), dialog.mode(), dialog.slots(),
+        ))
+        logger.info("poll create: dialog opened for conversation %d", conversation_id)
+        dialog.open()
+
+    @async_cb
+    async def _create_poll(self, conversation_id, topic, mode, slots) -> None:
+        """Create and broadcast a survey; report a failure to the user."""
         if not topic or not slots:
             return
-        survey_id = await self.iothread.run_in_io(
-            _io_tally_create(convo_state.conversation_id, topic, mode, slots)
-        )
-        self._refresh_tally_views(convo_state.conversation_id)
+        logger.info("poll create: accepted %d option(s)", len(slots))
+        try:
+            survey_id = await self.iothread.run_in_io(
+                _io_tally_create(conversation_id, topic, mode, slots)
+            )
+        except Exception as e:
+            self._show_action_error("Could not create the poll", e)
+            return
+        self._refresh_tally_views(conversation_id)
         if survey_id is not None:
             self.openPoll(survey_id.hex())
 
@@ -2505,7 +2542,17 @@ async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes |
         if convo is None:
             logger.error("tally create: conversation %d not found", conversation_id)
             return None
+        waited_from = time.monotonic()
         async with persistent.conversation_log_order_lock(conversation_id):
+            waited = time.monotonic() - waited_from
+            if waited > 1.0:
+                # The io loop serialises every conversation append behind this
+                # lock; a long wait means synchronous work (e.g. serialising a
+                # large upload) is starving the loop.
+                logger.warning(
+                    "tally create: waited %.1fs for the conversation log lock "
+                    "(conversation %d)", waited, conversation_id,
+                )
             doc = await tally_controller.INSTANCE.create_local(
                 sess, convo, survey_id, topic, mode, slots,
             )
@@ -2514,6 +2561,7 @@ async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes |
                 sess, convo, tally_events.build_create(survey_id, blob),
             )
             await sess.commit()
+    logger.info("tally create: staged survey %s", survey_id.hex())
     await network.conversation_update_queue.put((conversation_id, False))
     await network.check_for_new()
     return survey_id
