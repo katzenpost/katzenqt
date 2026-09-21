@@ -117,8 +117,19 @@ class AsyncioThread(threading.Thread):
             print("AsyncioThread exception", exception)
         self.loop.set_exception_handler(report_exception3)
         self.loop.run_until_complete(self.warm_engine())
+        self.loop.run_until_complete(self.reconcile_tally_once())
         self.loop.run_until_complete(self.async_main())
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
+
+    async def reconcile_tally_once(self):
+        """Buffer early tally ballots from the conversation logs before the
+        receive loops start, so a vote consumed ahead of its poll is applied
+        when the poll arrives (see ``TallyController.reconcile_from_log``).
+        Best-effort: a failure must not keep the client from starting."""
+        try:
+            await tally_controller.INSTANCE.reconcile_from_log()
+        except Exception as e:
+            logger.error("startup tally reconcile failed: %s", e, exc_info=e)
 
     async def run_in_io(self, fn):
         """Run (fn) in the io loop, to work around QtAsyncio not providing sock_connect etc.

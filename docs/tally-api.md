@@ -312,10 +312,20 @@ Receive-side behaviour per kind:
 | Kind | Effect |
 |---|---|
 | `TALLY_CREATE` | Load the `Doc` from the blob, or merge into an existing one. Persist. |
-| `TALLY_VOTE` | Record the choice under the authenticated sender's voter id, at the payload's version. An invalid ballot is rejected. A vote for an unknown survey is a no-op (`duplicate`). |
-| `TALLY_CLOSE` | Set status to `closed`, but only if the sender is the recorded creator (or the survey predates the `creator` field); a non-creator's close is rejected. |
+| `TALLY_VOTE` | Record the choice under the authenticated sender's voter id, at the payload's version. An invalid ballot is rejected. A vote for an unknown survey is buffered (`duplicate`) and applied once the survey arrives. |
+| `TALLY_CLOSE` | Set status to `closed`, but only if the sender is the recorded creator (or the survey predates the `creator` field); a non-creator's close is rejected. A close for an unknown survey is buffered like a vote. |
 | `TALLY_SYNC_REQ` | Stage a `TALLY_SYNC_RESP` carrying the diff since the requester's state vector; sets `signal_send`. |
 | `TALLY_SYNC_RESP` | Merge the diff (or load the `Doc` if we had none). Persist. |
+
+A peer reads every member stream, so a ballot can be consumed ahead of the
+create on another stream. Such a vote/close is queued in
+`TallyController._pending` and applied (in the same transaction that first
+persists the `Doc`) the moment the survey arrives, so the poll is never short
+a ballot. `TallyController.reconcile_from_log` rebuilds that buffer at startup
+from the `ConversationLog` rows (whose survey has no `TallyState` row yet); it
+writes nothing and re-buffering is idempotent, so it is safe to run on every
+launch. The GUI runs it before the receive loops start; the connecting tally
+verbs in `katzenqt.headless` do too.
 
 ## `katzenqt.tally.send`
 

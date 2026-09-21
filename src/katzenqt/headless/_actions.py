@@ -116,15 +116,22 @@ def set_connection_config(path: "str | None") -> None:
     _CONNECTION_CONFIG = path
 
 
-async def _connect_and_start():
+async def _connect_and_start(reconcile_tally: bool = False):
     """Connect to kpclientd and kick the background threads running.
 
     Returns ``(connection, background_task)``. The caller is responsible for
     cancelling the background task on exit. The connection is dialled using the
     config recorded by :func:`set_connection_config` (the verb's explicit
     ``--config`` / ``--address``); there is no filesystem search.
+
+    With ``reconcile_tally`` set, each conversation's early tally ballots are
+    buffered from its log before the receive loops start, so a vote consumed
+    ahead of its poll is not lost (see ``TallyController.reconcile_from_log``).
+    Used by the tally verbs that wait for a survey to arrive.
     """
     connection = await network.reconnect(_CONNECTION_CONFIG)
+    if reconcile_tally:
+        await tally_instance.reconcile_from_log()
     bg = asyncio.create_task(network.start_background_threads(connection))
     return connection, bg
 
@@ -912,7 +919,7 @@ async def _action_tally_vote(args):
         logger.error("%s", exc)
         return 2
 
-    connection, bg = await _connect_and_start()
+    connection, bg = await _connect_and_start(reconcile_tally=True)
     try:
         await network.signal_readables_to_mixwal()
         if not await _wait_for_survey(
@@ -955,7 +962,7 @@ async def _action_tally_result(args):
     """Run the loops until the survey has at least ``--expect-voters`` voters,
     then emit the derived tally as ``TALLY=<json>``."""
     survey_id = bytes.fromhex(args.survey)
-    connection, bg = await _connect_and_start()
+    connection, bg = await _connect_and_start(reconcile_tally=True)
     try:
         await network.signal_readables_to_mixwal()
         deadline = asyncio.get_event_loop().time() + args.timeout
@@ -984,7 +991,7 @@ async def _action_tally_close(args):
     """Close the survey and broadcast it. Only the creator may close; a
     non-creator's attempt is refused. Logs ``CLOSED``."""
     survey_id = bytes.fromhex(args.survey)
-    connection, bg = await _connect_and_start()
+    connection, bg = await _connect_and_start(reconcile_tally=True)
     try:
         await network.signal_readables_to_mixwal()
         if not await _wait_for_survey(
