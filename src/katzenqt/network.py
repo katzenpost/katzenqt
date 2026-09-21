@@ -1257,16 +1257,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     added, sig, pa = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
                     signal_send = signal_send or sig
                     peer_added = peer_added or pa
-                    tally_added = tally_added or ta
-                    parent_i = (await sess.exec(
-                        select(persistent.ReceivedPiece).where(
-                            persistent.ReceivedPiece.read_cap == parent_peer.read_cap_id,
-                            persistent.ReceivedPiece.chunk_type == b"I",
-                            persistent.ReceivedPiece.chunk == rcw.read_cap,
-                        )
-                    )).first()
-                    if parent_i is not None:
-                        await sess.delete(parent_i)
+                    await _discard_substream_release(
+                        sess, parent_peer.read_cap_id, rcw.read_cap,
+                    )
                     cp.active = False
                     rcw.substream_failure = None
                     rcw.substream_missing_since = None
