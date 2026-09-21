@@ -28,9 +28,9 @@ from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
                            QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
-                               QFormLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QFormLayout, QHBoxLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QTableView, QToolButton, QTreeView,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
@@ -480,6 +480,67 @@ class ConsensusDialog(QDialog):
 
     def showEvent(self, event) -> None:
         self.refresh()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+
+class PacketsDialog(QDialog):
+    """Modeless table of every packet sent, with live in-flight status.
+
+    "Keep finished" controls how many completed packets the registry retains
+    (0/5/10/100, default 5); "Clear finished" drops them now. Refreshes on a
+    timer while visible.
+    """
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Packets")
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Keep finished:"))
+        self._limit_combo = QComboBox()
+        for option in network.PACKET_FINISHED_LIMIT_OPTIONS:
+            self._limit_combo.addItem(str(option), option)
+        current = network.get_packet_finished_limit()
+        index = self._limit_combo.findData(current)
+        if index >= 0:
+            self._limit_combo.setCurrentIndex(index)
+        self._limit_combo.currentIndexChanged.connect(self._limit_changed)
+        controls.addWidget(self._limit_combo)
+        self._clear_button = QPushButton("Clear finished")
+        self._clear_button.clicked.connect(self._clear_finished)
+        controls.addWidget(self._clear_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+        self._model = PacketsModel()  # noqa: F405
+        self._table = QTableView()
+        self._table.setModel(self._model)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        layout.addWidget(self._table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._model.refresh)
+        self._model.refresh()
+
+    def _limit_changed(self) -> None:
+        network.set_packet_finished_limit(self._limit_combo.currentData())
+        self._model.refresh()
+
+    def _clear_finished(self) -> None:
+        network.clear_finished_packets()
+        self._model.refresh()
+
+    def showEvent(self, event) -> None:
+        self._model.refresh()
         self._timer.start()
         super().showEvent(event)
 
@@ -1237,6 +1298,8 @@ class MainWindow(QMainWindow):
         stats_action.triggered.connect(self.show_stats)
         consensus_action = self.ui.menuMixnetStatus.addAction("Network consensus")
         consensus_action.triggered.connect(self.show_consensus)
+        packets_action = self.ui.menuMixnetStatus.addAction("Packets")
+        packets_action.triggered.connect(self.show_packets)
         # Make the [Quit] toolbar actually quit:
         self.ui.action_quit.triggered.connect(lambda ev: self.close(ev,really_quit=True))
 
@@ -2545,6 +2608,16 @@ class MainWindow(QMainWindow):
                 )
             dialog = ConsensusDialog(self, fetch)
             self.consensus_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_packets(self, _checked: bool = False):
+        """Open (or raise) the modeless Packets window."""
+        dialog = getattr(self, "packets_dialog", None)
+        if dialog is None:
+            dialog = PacketsDialog(self)
+            self.packets_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()

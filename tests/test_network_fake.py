@@ -604,6 +604,7 @@ class TestDrainMixwalWriteSingle:
             envelope_hash: "bytes | None" = None,
             no_retry_on_box_id_not_found: bool = False,
             no_idempotent_box_already_exists: bool = False,
+            **kwargs,
         ):
             resend_started.set()
             return await orig_resend(
@@ -616,6 +617,7 @@ class TestDrainMixwalWriteSingle:
                 envelope_hash=envelope_hash,
                 no_retry_on_box_id_not_found=no_retry_on_box_id_not_found,
                 no_idempotent_box_already_exists=no_idempotent_box_already_exists,
+                **kwargs,
             )
 
         monkeypatch.setattr(

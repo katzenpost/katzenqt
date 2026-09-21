@@ -169,7 +169,7 @@ async def test_lost_race_counts_a_timeout_only_when_asked():
     async def _hang():
         await asyncio.Event().wait()
 
-    async def _run(*, count_timeout: bool) -> None:
+    async def _run(packet_context) -> None:
         with pytest.raises(network.ConnectionLifeInterruptedError):
             await network._rpc_racing_connection_life(
                 bacap_uuid="test",
@@ -178,13 +178,15 @@ async def test_lost_race_counts_a_timeout_only_when_asked():
                 backstop_s=0.01,
                 reconnect_marker=asyncio.Event(),
                 epoch_marker=asyncio.Event(),
-                count_timeout=count_timeout,
+                packet_context=packet_context,
             )
 
     network.reset_stats()
-    await _run(count_timeout=True)
+    context = network.PacketContext("write")
+    await _run(context)
     assert network.stats_snapshot()["packets_timed_out"] == 1
-    await _run(count_timeout=False)
+    assert context.timed_out is True
+    await _run(None)
     assert network.stats_snapshot()["packets_timed_out"] == 1
 
 

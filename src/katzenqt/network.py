@@ -11,6 +11,8 @@ import hashlib
 import importlib.resources
 import os
 import struct
+import threading
+import time
 import types
 import nacl.public
 import secrets
@@ -101,6 +103,177 @@ def stats_snapshot() -> "dict[str, int]":
     return {key: getattr(stats, key) for key, _ in STATS_FIELDS}
 
 
+# ---------------------------------------------------------------------------
+# Per-packet records (Packets window)
+# ---------------------------------------------------------------------------
+
+# How many finished packets the Packets window retains; the combo box offers
+# these values and defaults to the first non-zero one.
+PACKET_FINISHED_LIMIT_OPTIONS = (0, 5, 10, 100)
+DEFAULT_PACKET_FINISHED_LIMIT = 5
+
+# Terminal packet statuses.
+PACKET_STATUS_IN_FLIGHT = "in_flight"
+PACKET_STATUS_PAYLOAD = "payload"
+PACKET_STATUS_EMPTY = "empty"
+PACKET_STATUS_BOXNOTFOUND = "boxnotfound"
+PACKET_STATUS_ACKED = "acked"
+PACKET_STATUS_TIMED_OUT = "timed_out"
+PACKET_STATUS_LINK_DOWN = "link_down"
+PACKET_STATUS_CANCELLED = "cancelled"
+PACKET_STATUS_ERROR = "error"
+
+
+class PacketContext:
+    """Per-send metadata the call site hands to the send wrapper.
+
+    Passed to ``connection.start_resending_encrypted_message`` as the private
+    ``_packet_context`` kwarg (the wrapper pops it before calling the real
+    method) and to ``_rpc_racing_connection_life`` so a lost race can set
+    ``timed_out`` before the wrapper records the terminal status.
+    """
+
+    __slots__ = (
+        "kind", "stream_id", "box_index", "timeout_s", "timed_out", "packet_id",
+        "stage",
+    )
+
+    def __init__(self, kind: str, *, stream_id=None, box_index=None,
+                 timeout_s=None, stage=None):
+        self.kind = kind
+        self.stream_id = stream_id
+        self.box_index = box_index
+        self.timeout_s = timeout_s
+        self.stage = stage
+        self.timed_out = False
+        self.packet_id = None
+
+
+class _PacketRecord:
+    __slots__ = (
+        "id", "kind", "stream_id", "box_index", "ordinal", "sent_at",
+        "sent_wall", "timeout_s", "status", "finished_at", "envelope_hash",
+        "detail", "stage",
+    )
+
+    def __init__(self, packet_id, context, envelope_hash):
+        self.id = packet_id
+        self.kind = context.kind
+        self.stream_id = context.stream_id
+        self.box_index = context.box_index
+        self.ordinal = _next_packet_ordinal(context.stream_id)
+        self.sent_at = time.monotonic()
+        self.sent_wall = time.time()
+        self.timeout_s = context.timeout_s
+        self.status = PACKET_STATUS_IN_FLIGHT
+        self.finished_at = None
+        self.envelope_hash = envelope_hash
+        self.detail = None
+        self.stage = context.stage
+
+
+_packets: "dict[str, _PacketRecord]" = {}
+# Finished packet ids in completion order (oldest first), pruned to the
+# configured retention limit. In-flight packets are always kept.
+_packet_finished_order: "list[str]" = []
+_packet_finished_limit = DEFAULT_PACKET_FINISHED_LIMIT
+_packet_ordinals: "dict[object, int]" = {}
+# Records are written on the io loop and read/cleared from the Qt thread (the
+# Packets dialog), so every registry mutation takes this short lock; it is
+# never held across an await.
+_packets_lock = threading.Lock()
+
+
+def _next_packet_ordinal(stream_id) -> "int | None":
+    if stream_id is None:
+        return None
+    ordinal = _packet_ordinals.get(stream_id, 0) + 1
+    _packet_ordinals[stream_id] = ordinal
+    return ordinal
+
+
+def packet_begin(context: PacketContext, envelope_hash=None) -> str:
+    """Record a send starting; returns its id."""
+    with _packets_lock:
+        packet_id = uuid.uuid4().hex
+        _packets[packet_id] = _PacketRecord(packet_id, context, envelope_hash)
+        context.packet_id = packet_id
+        return packet_id
+
+
+def packet_finish(packet_id: "str | None", status: str, *, detail=None) -> None:
+    """Mark a send finished and retain it subject to the limit."""
+    if packet_id is None:
+        return
+    with _packets_lock:
+        record = _packets.get(packet_id)
+        if record is None:
+            return
+        record.status = status
+        record.detail = detail
+        record.finished_at = time.monotonic()
+        _packet_finished_order.append(packet_id)
+        _prune_finished_packets_locked()
+
+
+def _prune_finished_packets_locked() -> None:
+    while len(_packet_finished_order) > _packet_finished_limit:
+        _packets.pop(_packet_finished_order.pop(0), None)
+
+
+def set_packet_finished_limit(limit: int) -> None:
+    """Set how many finished packets to retain (0 drops them all)."""
+    global _packet_finished_limit
+    with _packets_lock:
+        _packet_finished_limit = max(int(limit), 0)
+        _prune_finished_packets_locked()
+
+
+def get_packet_finished_limit() -> int:
+    return _packet_finished_limit
+
+
+def clear_finished_packets() -> None:
+    """Drop every finished packet now (the in-flight ones stay)."""
+    with _packets_lock:
+        for packet_id in _packet_finished_order:
+            _packets.pop(packet_id, None)
+        _packet_finished_order.clear()
+
+
+def packets_snapshot() -> "list[dict]":
+    """A copy of the live packet records, safe to read from the Qt thread."""
+    with _packets_lock:
+        return [
+            {
+                "id": record.id,
+                "kind": record.kind,
+                "stream_id": record.stream_id,
+                "box_index": record.box_index,
+                "ordinal": record.ordinal,
+                "sent_at": record.sent_at,
+                "sent_wall": record.sent_wall,
+                "timeout_s": record.timeout_s,
+                "status": record.status,
+                "finished_at": record.finished_at,
+                "envelope_hash": record.envelope_hash,
+                "detail": record.detail,
+                "stage": record.stage,
+            }
+            for record in _packets.values()
+        ]
+
+
+def reset_packets() -> None:
+    """Drop every record and reset the retention limit (test helper)."""
+    global _packet_finished_limit
+    with _packets_lock:
+        _packets.clear()
+        _packet_finished_order.clear()
+        _packet_ordinals.clear()
+        _packet_finished_limit = DEFAULT_PACKET_FINISHED_LIMIT
+
+
 def install_stats_counters(connection) -> None:
     """Wrap ``connection``'s encrypt_read/encrypt_write/
     start_resending_encrypted_message so every pigeonhole operation -- on any
@@ -127,6 +300,7 @@ def install_stats_counters(connection) -> None:
 
     async def start_resending_encrypted_message(*args, **kwargs):
         # Read calls pass read_cap (write_cap=None); write calls pass write_cap.
+        context = kwargs.pop("_packet_context", None)
         is_read = kwargs.get("read_cap") is not None
         is_write = kwargs.get("write_cap") is not None
         stats.packets_sent += 1
@@ -135,29 +309,61 @@ def install_stats_counters(connection) -> None:
             stats.reads_sent += 1
         elif is_write:
             stats.writes_sent += 1
+        packet_id = (
+            packet_begin(context, kwargs.get("envelope_hash"))
+            if context is not None else None
+        )
         try:
             result = await original_start_resending(*args, **kwargs)
         except BoxIDNotFoundError:
             if is_read:
                 stats.reads_boxnotfound += 1
+            packet_finish(packet_id, PACKET_STATUS_BOXNOTFOUND)
             raise
         except (ThinClientOfflineError, BrokenPipeError, OSError):
             # Link-down: the send could not be carried. StartResendingCancelled
             # and courier/epoch/decrypt errors are responses, not link loss.
             stats.packets_link_down += 1
+            packet_finish(packet_id, PACKET_STATUS_LINK_DOWN)
+            raise
+        except asyncio.CancelledError:
+            # A race timeout and an external pause both cancel the send; the
+            # race sets context.timed_out before cancelling.
+            timed_out = context is not None and context.timed_out
+            packet_finish(
+                packet_id,
+                PACKET_STATUS_TIMED_OUT if timed_out else PACKET_STATUS_CANCELLED,
+            )
+            raise
+        except BaseException as exc:
+            packet_finish(packet_id, PACKET_STATUS_ERROR, detail=type(exc).__name__)
             raise
         finally:
             stats.packets_in_flight -= 1
         if is_read:
-            if getattr(result, "plaintext", b""):
+            plaintext = getattr(result, "plaintext", b"")
+            if plaintext:
                 stats.reads_with_payload += 1
+                packet_finish(
+                    packet_id, PACKET_STATUS_PAYLOAD,
+                    detail=_packet_payload_detail(plaintext),
+                )
+            else:
+                packet_finish(packet_id, PACKET_STATUS_EMPTY)
         elif is_write:
             stats.writes_acked += 1
+            packet_finish(packet_id, PACKET_STATUS_ACKED)
         return result
 
     connection.encrypt_read = encrypt_read
     connection.encrypt_write = encrypt_write
     connection.start_resending_encrypted_message = start_resending_encrypted_message
+
+
+def _packet_payload_detail(plaintext: bytes) -> str:
+    chunk_type = plaintext[:1]
+    label = chunk_type.decode("ascii", "replace") if chunk_type in b"CFI" else "?"
+    return f"{len(plaintext)} B ({label})"
 
 
 conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
@@ -580,6 +786,12 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         __mixwal_updated.set()
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
+    packet_context = PacketContext(
+        "write",
+        stream_id=mw.bacap_stream,
+        box_index=int.from_bytes(mw.current_message_index[:8], "little"),
+        timeout_s=READ_WATCHDOG_SECONDS,
+    )
     try:
       resp = await _rpc_racing_connection_life(
           bacap_uuid=mw.bacap_stream,
@@ -589,8 +801,9 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
               envelope_descriptor=mw.envelope_descriptor, envelope_hash=mw.envelope_hash,
               message_ciphertext=mw.encrypted_payload,
               read_cap=None, message_box_index=None, reply_index=None,
+              _packet_context=packet_context,
           ),
-          count_timeout=True,
+          packet_context=packet_context,
       )
     except ConnectionLifeInterruptedError as e:
       # A reconnect or epoch rollover interrupted the RPC above; the request
@@ -759,7 +972,7 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                                       backstop_s: float = READ_WATCHDOG_SECONDS,
                                       grace_s: "float | None" = None,
                                       reconnect_marker=None, epoch_marker=None,
-                                      count_timeout: bool = False):
+                                      packet_context=None):
     """Await an RPC, racing it against the daemon-reconnect and PKI-epoch
     signals rather than a flat clock.
 
@@ -769,9 +982,11 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
     re-cast recovery path. ``backstop_s`` bounds the wait when no signal
     ever fires.
 
-    ``count_timeout`` marks the RPC as a pigeonhole packet send so losing the
-    race counts as a timed-out packet for the Mixnet-status Stats window; it
-    must stay False for the encrypt_*/counter/control RPCs that are not sends.
+    ``packet_context`` marks the RPC as a pigeonhole packet send; when the
+    race is lost it sets ``packet_context.timed_out`` (read by the send
+    wrapper) and counts a timed-out packet for the Mixnet-status Stats
+    window. It must stay None for the encrypt_*/counter/control RPCs that are
+    not sends.
 
     Returns the RPC's result unless it raised on its own (that exception
     propagates) or the race was lost.
@@ -833,7 +1048,8 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
             # as a grace-period timeout so the caller's single recovery path
             # handles all three.
             task.cancel()
-        if count_timeout:
+        if packet_context is not None:
+            packet_context.timed_out = True
             stats.packets_timed_out += 1
         raise ConnectionLifeInterruptedError(
             f"{what} for bacap_stream={bacap_uuid} did not answer within "
@@ -847,7 +1063,8 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
 
 async def _await_read_reply(connection, *, read_watchdog_s: float,
                              reconnect_grace_s: float, bacap_uuid,
-                             reconnect_marker=None, epoch_marker=None, **kwargs):
+                             reconnect_marker=None, epoch_marker=None,
+                             packet_context=None, **kwargs):
     """Await start_resending_encrypted_message, racing it against a daemon
     reconnect or a PKI epoch rollover rather than a flat clock.
 
@@ -863,10 +1080,16 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
     retry -- drain_mixwal_read_single re-encrypts a fresh envelope on
     every call, so that retry is never stale.
 
+    ``packet_context`` is forwarded to the send wrapper (as the private
+    ``_packet_context`` kwarg) and to the race, so the Packets window records
+    this read and labels a lost race as a timeout.
+
     Returns the reply, or raises whatever the call itself raised, or raises
     asyncio.TimeoutError (for the caller's existing recovery path) if
     either the grace period or the backstop elapses first.
     """
+    if packet_context is not None:
+        kwargs.setdefault("_packet_context", packet_context)
     try:
         return await _rpc_racing_connection_life(
             bacap_uuid=bacap_uuid,
@@ -876,7 +1099,7 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
             grace_s=reconnect_grace_s,
             reconnect_marker=reconnect_marker,
             epoch_marker=epoch_marker,
-            count_timeout=True,
+            packet_context=packet_context,
         )
     except ConnectionLifeInterruptedError as exc:
         raise asyncio.TimeoutError() from exc
@@ -1176,6 +1399,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         envelope_hash=rcr.envelope_hash,
         message_ciphertext=rcr.message_ciphertext,
         no_retry_on_box_id_not_found=True,
+        packet_context=PacketContext(
+            "substream_read" if is_substream else "contact_read",
+            stream_id=bacap_uuid,
+            box_index=int.from_bytes(mw.current_message_index[:8], "little"),
+            timeout_s=read_watchdog_s,
+        ),
     )
   except ConnectionLifeInterruptedError as e:
     # The fresh encrypt_read was interrupted before dispatching anything, so

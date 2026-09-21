@@ -30,8 +30,10 @@ from sqlmodel import select
 from . import models, persistent
 from .katzen_util import create_task
 from .network import (
-    _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _rpc_racing_connection_life,
+    _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX,
+    _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
     check_for_new, conversation_update_queue, ConnectionLifeInterruptedError,
+    PacketContext,
 )
 
 logger = logging.getLogger("katzen.voucher")
@@ -198,6 +200,11 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                 ),
                 backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
             )
+            publish_context = PacketContext(
+                "voucher_write",
+                box_index=int.from_bytes(message_box_index[:8], "little"),
+                timeout_s=READ_WATCHDOG_SECONDS,
+            )
             await _rpc_racing_connection_life(
                 bacap_uuid=_brief(write_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
@@ -206,8 +213,9 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                     envelope_descriptor=wcr.envelope_descriptor,
                     message_ciphertext=wcr.message_ciphertext,
                     envelope_hash=wcr.envelope_hash,
+                    _packet_context=publish_context,
                 ),
-                count_timeout=True,
+                packet_context=publish_context,
             )
             logger.debug(
                 "publish_box: wrote box %s on write_cap %s; next box index %s",
@@ -278,6 +286,12 @@ async def _read_box(
                 ),
                 backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
             )
+            read_context = PacketContext(
+                "voucher_read",
+                box_index=int.from_bytes(message_box_index[:8], "little"),
+                timeout_s=READ_WATCHDOG_SECONDS,
+                stage=stage,
+            )
             resp = await _rpc_racing_connection_life(
                 bacap_uuid=_brief(read_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
@@ -287,8 +301,9 @@ async def _read_box(
                     message_ciphertext=rcr.message_ciphertext,
                     envelope_hash=rcr.envelope_hash,
                     no_retry_on_box_id_not_found=True,
+                    _packet_context=read_context,
                 ),
-                count_timeout=True,
+                packet_context=read_context,
             )
             logger.debug(
                 "%s: box %s on read_cap %s returned after %.1fs "

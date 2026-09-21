@@ -440,6 +440,185 @@ def _substream_parent_name(sess, cp) -> str:
     return conv.name if conv is not None else cp.name
 
 
+PACKET_COLUMNS = (
+    "Sent", "Dir", "Kind", "Stream", "Pos", "Status", "In flight",
+    "Timeout in", "Detail",
+)
+
+_PACKET_STATUS_LABELS = {
+    "in_flight": "In flight",
+    "payload": "Payload",
+    "empty": "Empty",
+    "boxnotfound": "Box not found",
+    "acked": "ACKed",
+    "timed_out": "Timed out",
+    "link_down": "Link down",
+    "cancelled": "Cancelled",
+    "error": "Error",
+}
+
+
+class PacketsModel(QtCore.QAbstractTableModel):
+    """Table of per-packet records from ``network.packets_snapshot()``.
+
+    Stream labels (contact / substream-of-parent / conversation) are resolved
+    lazily from the sync engine and cached per stream id. The Packets dialog
+    drives ``refresh()`` on a timer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: "list[dict]" = []
+        self._ids: "list[str]" = []
+        self._labels: "dict[object, str]" = {}
+
+    def rowCount(self, parent=None) -> int:  # type: ignore[override]
+        if parent is not None and parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent=None) -> int:  # type: ignore[override]
+        return len(PACKET_COLUMNS)
+
+    def headerData(self, section, orientation, role=0):  # type: ignore[override]
+        if (role == QtCore.Qt.ItemDataRole.DisplayRole
+                and orientation == QtCore.Qt.Orientation.Horizontal):
+            return PACKET_COLUMNS[section]
+        return None
+
+    def data(self, index, role=0):  # type: ignore[override]
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        if role not in (QtCore.Qt.ItemDataRole.DisplayRole,
+                        QtCore.Qt.ItemDataRole.EditRole):
+            return None
+        return self._cell(self._rows[index.row()], index.column())
+
+    def refresh(self) -> None:
+        from . import network
+        snapshot = network.packets_snapshot()
+        in_flight = network.PACKET_STATUS_IN_FLIGHT
+        # In-flight first (oldest first, nearest to timeout), then finished
+        # newest first.
+        snapshot.sort(key=lambda r: (
+            r["status"] != in_flight,
+            r["sent_at"] if r["status"] == in_flight
+            else -(r["finished_at"] or 0.0),
+        ))
+        new_ids = [r["id"] for r in snapshot]
+        self._rows = snapshot
+        if new_ids != self._ids:
+            self._ids = new_ids
+            self.beginResetModel()
+            self.endResetModel()
+        elif self._rows:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._rows) - 1, len(PACKET_COLUMNS) - 1),
+            )
+
+    def _cell(self, row, column):
+        from . import network
+        if column == 0:
+            return time.strftime("%H:%M:%S", time.localtime(row["sent_wall"]))
+        if column == 1:
+            return "Read" if row["kind"].endswith("_read") else "Write"
+        if column == 2:
+            return row["kind"].replace("_", " ")
+        if column == 3:
+            return self._stream_label(row)
+        if column == 4:
+            if row["box_index"] is None:
+                return "—"
+            if row["ordinal"] is None:
+                return str(row["box_index"])
+            return f"{row['box_index']} (#{row['ordinal']})"
+        if column == 5:
+            return _PACKET_STATUS_LABELS.get(row["status"], row["status"])
+        if column == 6:
+            end = row["finished_at"]
+            if end is None:
+                end = time.monotonic()
+            return network.format_duration(end - row["sent_at"])
+        if column == 7:
+            if row["finished_at"] is not None or row["timeout_s"] is None:
+                return "—"
+            remaining = row["sent_at"] + row["timeout_s"] - time.monotonic()
+            if remaining <= 0:
+                return "overdue"
+            return network.format_duration(remaining)
+        if column == 8:
+            detail = row.get("detail")
+            envelope = row.get("envelope_hash")
+            short = (
+                bytes(envelope)[:4].hex()
+                if isinstance(envelope, (bytes, bytearray)) else ""
+            )
+            if detail and short:
+                return f"{detail} · {short}"
+            return detail or short or ""
+        return None
+
+    def _stream_label(self, row) -> str:
+        kind = row["kind"]
+        if kind.startswith("voucher"):
+            return row.get("stage") or "voucher"
+        stream_id = row["stream_id"]
+        if stream_id is None:
+            return "—"
+        if stream_id in self._labels:
+            return self._labels[stream_id]
+        label = self._query_stream_label(stream_id)
+        self._labels[stream_id] = label
+        return label
+
+    def _query_stream_label(self, stream_id) -> str:
+        from .network import _SUBSTREAM_NAME_PREFIX, _substream_parent_id
+        with persistent.Session(persistent._engine_sync) as sess:
+            cp = sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == stream_id,
+                )
+            ).first()
+            if cp is not None:
+                if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+                    parent_id = _substream_parent_id(cp.name)
+                    parent = (
+                        sess.get(persistent.ConversationPeer, parent_id)
+                        if parent_id is not None else None
+                    )
+                    if parent is not None:
+                        return f"substream of {parent.name}"
+                    return "substream"
+                return cp.name
+            rcw = sess.exec(
+                select(persistent.ReadCapWAL).where(
+                    persistent.ReadCapWAL.write_cap_id == stream_id,
+                )
+            ).first()
+            if rcw is not None:
+                pwal = sess.exec(
+                    select(persistent.PlaintextWAL).where(
+                        persistent.PlaintextWAL.bacap_stream == stream_id,
+                    )
+                ).first()
+                if pwal is not None:
+                    conv = sess.get(
+                        persistent.Conversation, pwal.conversation_id,
+                    )
+                    if conv is not None:
+                        return f"substream of {conv.name}"
+                return "substream"
+            conv = sess.exec(
+                select(persistent.Conversation).where(
+                    persistent.Conversation.write_cap == stream_id,
+                )
+            ).first()
+            if conv is not None:
+                return conv.name
+        return str(stream_id)[:8]
+
+
 class AttachmentDisplay(NamedTuple):
     """Renderer-friendly view of a ConversationLog.payload.
 
