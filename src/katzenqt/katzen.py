@@ -377,7 +377,13 @@ class StatsDialog(QDialog):
     def refresh(self) -> None:
         snapshot = network.stats_snapshot()
         for key, label in self._labels.items():
-            label.setText(f"{snapshot[key]:,}")
+            text = f"{snapshot[key]:,}"
+            denominator_key = network.STATS_PERCENTAGES.get(key)
+            if denominator_key is not None:
+                total = snapshot.get(denominator_key, 0)
+                pct = (100.0 * snapshot[key] / total) if total else 0.0
+                text = f"{text} ({pct:.1f}%)"
+            label.setText(text)
 
     def showEvent(self, event) -> None:
         self.refresh()

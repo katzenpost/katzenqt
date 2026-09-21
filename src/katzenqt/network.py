@@ -56,6 +56,12 @@ class MixnetStats:
         self.reads_boxnotfound = 0
         # Write outcome: the courier acknowledged the envelope.
         self.writes_acked = 0
+        # Every send, plus its live in-flight gauge and its abandonment
+        # outcomes. packets_sent == reads_sent + writes_sent.
+        self.packets_sent = 0
+        self.packets_in_flight = 0
+        self.packets_timed_out = 0
+        self.packets_link_down = 0
 
 
 stats = MixnetStats()
@@ -69,7 +75,17 @@ STATS_FIELDS = (
     ("writes_prepared", "Writes prepared (encrypt_write)"),
     ("writes_sent", "Writes sent (incl. resends)"),
     ("writes_acked", "Writes acknowledged"),
+    ("packets_sent", "Packets sent (total)"),
+    ("packets_in_flight", "Packets in flight"),
+    ("packets_timed_out", "Packets timed out"),
+    ("packets_link_down", "Packets link-down"),
 )
+
+# Fields rendered with a percentage of another field, e.g. timed-out packets
+# as a share of all packets sent.
+STATS_PERCENTAGES = {
+    "packets_timed_out": "packets_sent",
+}
 
 
 def reset_stats() -> None:
@@ -111,6 +127,8 @@ def install_stats_counters(connection) -> None:
         # Read calls pass read_cap (write_cap=None); write calls pass write_cap.
         is_read = kwargs.get("read_cap") is not None
         is_write = kwargs.get("write_cap") is not None
+        stats.packets_sent += 1
+        stats.packets_in_flight += 1
         if is_read:
             stats.reads_sent += 1
         elif is_write:
@@ -121,6 +139,13 @@ def install_stats_counters(connection) -> None:
             if is_read:
                 stats.reads_boxnotfound += 1
             raise
+        except (ThinClientOfflineError, BrokenPipeError, OSError):
+            # Link-down: the send could not be carried. StartResendingCancelled
+            # and courier/epoch/decrypt errors are responses, not link loss.
+            stats.packets_link_down += 1
+            raise
+        finally:
+            stats.packets_in_flight -= 1
         if is_read:
             if getattr(result, "plaintext", b""):
                 stats.reads_with_payload += 1
@@ -437,6 +462,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
               message_ciphertext=mw.encrypted_payload,
               read_cap=None, message_box_index=None, reply_index=None,
           ),
+          count_timeout=True,
       )
     except ConnectionLifeInterruptedError as e:
       # A reconnect or epoch rollover interrupted the RPC above; the request
@@ -604,7 +630,8 @@ _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
 async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
                                       backstop_s: float = READ_WATCHDOG_SECONDS,
                                       grace_s: "float | None" = None,
-                                      reconnect_marker=None, epoch_marker=None):
+                                      reconnect_marker=None, epoch_marker=None,
+                                      count_timeout: bool = False):
     """Await an RPC, racing it against the daemon-reconnect and PKI-epoch
     signals rather than a flat clock.
 
@@ -613,6 +640,10 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
     :class:`ConnectionLifeInterruptedError` for the caller's give-up-and-
     re-cast recovery path. ``backstop_s`` bounds the wait when no signal
     ever fires.
+
+    ``count_timeout`` marks the RPC as a pigeonhole packet send so losing the
+    race counts as a timed-out packet for the Mixnet-status Stats window; it
+    must stay False for the encrypt_*/counter/control RPCs that are not sends.
 
     Returns the RPC's result unless it raised on its own (that exception
     propagates) or the race was lost.
@@ -674,6 +705,8 @@ async def _rpc_racing_connection_life(*, bacap_uuid, what: str, rpc_factory,
             # as a grace-period timeout so the caller's single recovery path
             # handles all three.
             task.cancel()
+        if count_timeout:
+            stats.packets_timed_out += 1
         raise ConnectionLifeInterruptedError(
             f"{what} for bacap_stream={bacap_uuid} did not answer within "
             f"{backstop_s} s"
@@ -715,6 +748,7 @@ async def _await_read_reply(connection, *, read_watchdog_s: float,
             grace_s=reconnect_grace_s,
             reconnect_marker=reconnect_marker,
             epoch_marker=epoch_marker,
+            count_timeout=True,
         )
     except ConnectionLifeInterruptedError as exc:
         raise asyncio.TimeoutError() from exc

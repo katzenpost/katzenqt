@@ -207,6 +207,7 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                     message_ciphertext=wcr.message_ciphertext,
                     envelope_hash=wcr.envelope_hash,
                 ),
+                count_timeout=True,
             )
             logger.debug(
                 "publish_box: wrote box %s on write_cap %s; next box index %s",
@@ -287,6 +288,7 @@ async def _read_box(
                     envelope_hash=rcr.envelope_hash,
                     no_retry_on_box_id_not_found=True,
                 ),
+                count_timeout=True,
             )
             logger.debug(
                 "%s: box %s on read_cap %s returned after %.1fs "
