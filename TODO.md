@@ -63,9 +63,12 @@ uploads in the Transfers panel"); Phase 2 (pause/resume) in `42c0125`
 ("transfers: pause and resume in-progress uploads"); Phase 3's ordering
 prerequisite in `b24b9fb` ("conversation log: order from MAX+1 and render by
 actual order") and cancel in `47d90ad` ("transfers: cancel in-progress
-uploads"). The per-phase detail below is retained for reference.
+uploads"). Follow-up: `876f4fb` ("transfers: add a rate column for in-progress
+transfers") adds an effective-payload bytes/sec column, zeroed while paused and
+reset on unpause. The per-phase detail below is retained for reference.
 
-The Transfers panel is receive-only today (`DownloadsModel` seeds from
+Before this item the Transfers panel was receive-only (`DownloadsModel` seeded
+from
 substream `ConversationPeer` rows). An in-progress upload has no row of its
 own; the chat bubble is already visible (pending) but the only way to stop an
 upload is to wait it out.
