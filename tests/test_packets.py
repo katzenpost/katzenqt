@@ -4,6 +4,7 @@ import asyncio
 import os
 import uuid
 
+import cbor2
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -293,12 +294,33 @@ def _seed_conversation_streams():
             id=uuid.uuid4(), bacap_stream=agg, conversation_id=conv.id,
             bacap_payload=b"Cchunk",
         ))
+        i_chunk_id = uuid.uuid4()
         sess.add(persistent.PlaintextWAL(
-            id=uuid.uuid4(), bacap_stream=main, conversation_id=conv.id,
+            id=i_chunk_id, bacap_stream=main, conversation_id=conv.id,
             bacap_payload=b"", indirection=indirection,
+        ))
+        sess.add(persistent.ConversationLog(
+            id=uuid.uuid4(), conversation_id=conv.id,
+            conversation_peer_id=own_peer.id, conversation_order=0,
+            payload=b"F" + cbor2.dumps({
+                "v": 0, "kind": "file_outgoing", "basename": "photo.jpg",
+            }),
+            network_status=1, outgoing_pwal=i_chunk_id,
         ))
         sess.commit()
     return main, contact_rcw, agg
+
+
+def test_file_marker_basename():
+    marker = b"F" + cbor2.dumps({
+        "kind": "file_outgoing", "basename": "x.jpg",
+    })
+    assert network._file_marker_basename(marker) == "x.jpg"
+    assert network._file_marker_basename(
+        b"F" + cbor2.dumps({"kind": "file_marker", "basename": "x.jpg"})
+    ) is None
+    assert network._file_marker_basename(b"Fnotcbor") is None
+    assert network._file_marker_basename(b"hello") is None
 
 
 def test_stream_info_labels_and_substream_total():
@@ -309,8 +331,26 @@ def test_stream_info_labels_and_substream_total():
     assert model._query_stream_info(main) == ("bob in c", None)
     # A contact read: the contact's name.
     assert model._query_stream_info(contact_rcw) == ("alice", None)
-    # An agg substream write: substream of the conversation, with its total.
-    assert model._query_stream_info(agg) == ("substream of c", 25)
+    # An agg substream write: the file's name, and its total chunk count.
+    assert model._query_stream_info(agg) == ("photo.jpg (in c)", 25)
+    _ = app
+
+
+def test_upload_label_captured_at_send_time_wins():
+    app = QApplication.instance() or QApplication([])
+    network.reset_packets()
+    stream = uuid.uuid4()
+    network.set_upload_label(stream, "photo.jpg (in c)")
+    assert network.upload_label(stream) == "photo.jpg (in c)"
+    network.packet_begin(network.PacketContext(
+        "write", stream_id=stream, box_index=1, box_position=1,
+        label=network.upload_label(stream),
+    ))
+    model = PacketsModel()
+    model.refresh()
+    assert model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole) == (
+        "photo.jpg (in c)"
+    )
     _ = app
 
 
@@ -331,7 +371,7 @@ def test_position_over_total_for_substream_packets():
     pos = {model.data(model.index(r, 3), Qt.ItemDataRole.DisplayRole):
            model.data(model.index(r, 4), Qt.ItemDataRole.DisplayRole)
            for r in range(model.rowCount())}
-    assert pos["substream of c"] == "3/25"
+    assert pos["photo.jpg (in c)"] == "3/25"
     assert pos["bob in c"] == "2"
     _ = app
 

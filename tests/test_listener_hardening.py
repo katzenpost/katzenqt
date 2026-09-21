@@ -249,7 +249,7 @@ class TestTransfersListenerDrainsEvents:
             ("paused", rcw),
             ("resumed", rcw),
             ("completed", rcw),
-            ("upload_started", up_rcw, 7, 25, 25000, "bob-conv"),
+            ("upload_started", up_rcw, 7, 25, 25000, "bob-conv", "photo.jpg"),
             ("upload_piece", up_rcw, 6, 30000),
             ("upload_paused", up_rcw),
             ("upload_resumed", up_rcw),
@@ -270,7 +270,7 @@ class TestTransfersListenerDrainsEvents:
             ("paused", rcw, True),
             ("paused", rcw, False),  # resumed event -> set_paused(paused=False)
             ("complete", rcw),
-            ("start", up_rcw, 7, "bob-conv", 25, "upload", 25000),
+            ("start", up_rcw, 7, "photo.jpg (in bob-conv)", 25, "upload", 25000),
             ("piece", up_rcw, 6, 30000),
             ("paused", up_rcw, True),
             ("paused", up_rcw, False),

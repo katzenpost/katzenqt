@@ -3763,10 +3763,11 @@ class TestUploadTransferEvents:
         )
         event = network.substream_progress_queue.get_nowait()
         # chunk payload is b"Cx": one effective payload byte after the
-        # 1-byte chunk-type prefix.
+        # 1-byte chunk-type prefix. The local payload is not a file marker,
+        # so there is no basename.
         assert event == (
             "upload_started", rcw_id, setup["conversation_id"], 3, 1,
-            "carol-conv",
+            "carol-conv", None,
         )
         assert network.substream_progress_queue.empty()
 

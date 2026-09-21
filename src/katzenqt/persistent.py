@@ -159,12 +159,14 @@ async def append_outbound_chat(
 class OutboundUpload(NamedTuple):
     """A substream file transfer opened by an outbound commit.
 
+    ``stream_id`` is the agg_bacap_stream the C/F chunks live on;
     ``total_chunks`` is the substream's C-chunks plus final F (the indirection
     ``ReadCapWAL.substream_total_chunks``); ``total_bytes`` is the effective
     payload byte count (chunk-type prefixes excluded); ``parent_name`` is the
     conversation name, shown as the Transfers-panel "Contact" for an upload.
     """
     rcw_id: uuid.UUID
+    stream_id: uuid.UUID | None
     conversation_id: int
     total_chunks: int | None
     total_bytes: int
@@ -213,6 +215,7 @@ async def _outbound_upload_from_entries(
     )
     return OutboundUpload(
         rcw_id=i_chunk.indirection,
+        stream_id=rcw.write_cap_id if rcw is not None else None,
         conversation_id=conversation_id,
         total_chunks=rcw.substream_total_chunks if rcw is not None else None,
         total_bytes=total_bytes,

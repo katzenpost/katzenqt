@@ -1964,9 +1964,13 @@ class MainWindow(QMainWindow):
                         rcw_id, conv_id, parent_name, total,
                     )
                 elif kind == "upload_started":
-                    _, _, conv_id, total, total_bytes, parent_name = event
+                    _, _, conv_id, total, total_bytes, parent_name, basename = event
+                    label = (
+                        f"{basename} (in {parent_name})"
+                        if basename else parent_name
+                    )
                     self.transfers_model.start_transfer(
-                        rcw_id, conv_id, parent_name, total,
+                        rcw_id, conv_id, label, total,
                         direction="upload", raw_bytes=total_bytes,
                     )
                 elif kind == "piece":

@@ -135,17 +135,18 @@ class PacketContext:
 
     __slots__ = (
         "kind", "stream_id", "box_index", "box_position", "timeout_s",
-        "timed_out", "packet_id", "stage",
+        "timed_out", "packet_id", "stage", "label",
     )
 
     def __init__(self, kind: str, *, stream_id=None, box_index=None,
-                 box_position=None, timeout_s=None, stage=None):
+                 box_position=None, timeout_s=None, stage=None, label=None):
         self.kind = kind
         self.stream_id = stream_id
         self.box_index = box_index
         self.box_position = box_position
         self.timeout_s = timeout_s
         self.stage = stage
+        self.label = label
         self.timed_out = False
         self.packet_id = None
 
@@ -154,7 +155,7 @@ class _PacketRecord:
     __slots__ = (
         "id", "kind", "stream_id", "box_index", "box_position", "attempt",
         "sent_at", "sent_wall", "timeout_s", "status", "finished_at",
-        "envelope_hash", "stage",
+        "envelope_hash", "stage", "label",
     )
 
     def __init__(self, packet_id, context, envelope_hash):
@@ -171,6 +172,7 @@ class _PacketRecord:
         self.finished_at = None
         self.envelope_hash = envelope_hash
         self.stage = context.stage
+        self.label = context.label
 
 
 _packets: "dict[str, _PacketRecord]" = {}
@@ -206,6 +208,44 @@ def _box_position(box_index, cap: "bytes | None") -> "int | None":
     first = int.from_bytes(cap[-104:][:8], "little")
     position = int(box_index) - first + 1
     return position if position >= 1 else None
+
+
+# Upload labels (agg_bacap_stream -> "basename (in conversation)"), captured at
+# send time so a packet retained after the I-chunk is ACK'd (and its DB link
+# deleted) can still show the filename. Capped FIFO; a mid-upload restart is
+# covered by the Packets/Transfers DB fallback while the I-chunk still exists.
+_upload_labels: "dict[object, str]" = {}
+_upload_label_order: "list[object]" = []
+_UPLOAD_LABEL_CAP = 4096
+
+
+def set_upload_label(stream_id, label: "str | None") -> None:
+    if stream_id is None or not label:
+        return
+    with _packets_lock:
+        if stream_id not in _upload_labels:
+            _upload_label_order.append(stream_id)
+        _upload_labels[stream_id] = label
+        while len(_upload_label_order) > _UPLOAD_LABEL_CAP:
+            _upload_labels.pop(_upload_label_order.pop(0), None)
+
+
+def upload_label(stream_id) -> "str | None":
+    with _packets_lock:
+        return _upload_labels.get(stream_id)
+
+
+def _file_marker_basename(payload: bytes) -> "str | None":
+    """The basename of a local ``file_outgoing`` marker payload, if it is one."""
+    if not payload or payload[:1] != b"F":
+        return None
+    try:
+        decoded = cbor2.loads(payload[1:])
+    except Exception:
+        return None
+    if isinstance(decoded, dict) and decoded.get("kind") == "file_outgoing":
+        return decoded.get("basename") or None
+    return None
 
 
 def _next_packet_attempt(context: PacketContext) -> int:
@@ -285,6 +325,7 @@ def packets_snapshot() -> "list[dict]":
                 "finished_at": record.finished_at,
                 "envelope_hash": record.envelope_hash,
                 "stage": record.stage,
+                "label": record.label,
             }
             for record in _packets.values()
         ]
@@ -298,6 +339,8 @@ def reset_packets() -> None:
         _packet_finished_order.clear()
         _packet_attempts.clear()
         _packet_attempt_order.clear()
+        _upload_labels.clear()
+        _upload_label_order.clear()
         _packet_finished_limit = DEFAULT_PACKET_FINISHED_LIMIT
 
 
@@ -467,9 +510,18 @@ async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
     if upload is not None:
         # A substream file transfer is committed; the Transfers panel tracks
         # it until the last C/F chunk is ACK'd (see drain_mixwal_write_single).
+        # Capture the filename label now: once the I-chunk is ACK'd its row is
+        # deleted and nothing links the agg stream to the log row.
+        basename = _file_marker_basename(payload)
+        label = (
+            f"{basename} (in {upload.parent_name})"
+            if basename else upload.parent_name
+        )
+        set_upload_label(upload.stream_id, label)
         substream_progress_queue.put_nowait((
             "upload_started", upload.rcw_id, upload.conversation_id,
             upload.total_chunks, upload.total_bytes, upload.parent_name,
+            basename,
         ))
     await check_for_new()
 
@@ -812,6 +864,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
             wcw.write_cap,
         ),
         timeout_s=READ_WATCHDOG_SECONDS,
+        label=upload_label(mw.bacap_stream),
     )
     try:
       resp = await _rpc_racing_connection_life(

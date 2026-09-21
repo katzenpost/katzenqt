@@ -409,11 +409,16 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 continue
             conv = sess.get(persistent.Conversation, i_chunk.conversation_id)
             total = rcw.substream_total_chunks
+            basename = _upload_basename_for_agg(sess, rcw.id)
+            label = (
+                f"{basename} (in {conv.name})"
+                if basename and conv is not None
+                else (conv.name if conv is not None else "")
+            )
             # Rate counts from the bytes still outstanding at seed, so a
             # transfer resumed across a relaunch starts at zero.
             self.start_transfer(
-                rcw.id, i_chunk.conversation_id,
-                conv.name if conv is not None else "",
+                rcw.id, i_chunk.conversation_id, label,
                 total, direction="upload", raw_bytes=remaining_bytes,
             )
             if total is not None:
@@ -562,11 +567,16 @@ class PacketsModel(QtCore.QAbstractTableModel):
         stream_id = row["stream_id"]
         if stream_id is None:
             return ("—", None)
-        if stream_id in self._stream_info:
-            return self._stream_info[stream_id]
-        info = self._query_stream_info(stream_id)
-        self._stream_info[stream_id] = info
-        return info
+        info = self._stream_info.get(stream_id)
+        if info is None:
+            info = self._query_stream_info(stream_id)
+            self._stream_info[stream_id] = info
+        label, total = info
+        # A label captured at send time survives the I-chunk's deletion, which
+        # breaks the DB link once the upload has been ACK'd.
+        if row.get("label"):
+            label = row["label"]
+        return (label, total)
 
     def _query_stream_info(self, stream_id) -> "tuple[str, int | None]":
         """(label, substream_total_chunks) for a stream id.
@@ -622,9 +632,37 @@ class PacketsModel(QtCore.QAbstractTableModel):
                         persistent.Conversation, pwal.conversation_id,
                     )
                     if conv is not None:
+                        basename = _upload_basename_for_agg(sess, rcw.id)
+                        if basename:
+                            return (f"{basename} (in {conv.name})", total)
                         return (f"substream of {conv.name}", total)
                 return ("substream", total)
         return (str(stream_id)[:8], None)
+
+
+def _upload_basename_for_agg(sess, rcw_id) -> "str | None":
+    """The filename of an outbound substream, from its ConversationLog marker.
+
+    Resolvable only while the upload is in progress: the agg stream links to
+    the log row through the I-chunk (``PlaintextWAL.indirection`` ->
+    ``ConversationLog.outgoing_pwal``), and the I-chunk is deleted once ACK'd.
+    """
+    i_chunk = sess.exec(
+        select(persistent.PlaintextWAL).where(
+            persistent.PlaintextWAL.indirection == rcw_id,
+        )
+    ).first()
+    if i_chunk is None:
+        return None
+    convlog = sess.exec(
+        select(persistent.ConversationLog).where(
+            persistent.ConversationLog.outgoing_pwal == i_chunk.id,
+        )
+    ).first()
+    if convlog is None:
+        return None
+    info = _decode_group_chat_payload(convlog.payload)
+    return info.basename if info.kind == "outgoing" else None
 
 
 class AttachmentDisplay(NamedTuple):
