@@ -379,10 +379,10 @@ class TallyPanel(QDialog):
             self.adjustSize()
 
     def _refresh_button(self, slot_id: str) -> None:
-        avail = self._selection.get(slot_id)
-        label = self._slot_text.get(slot_id, slot_id)
+        # The column header names the option, so the button shows only the
+        # current choice; an en-dash marks the not-yet-chosen state.
         self._slot_buttons[slot_id].setText(
-            label if avail is None else f"{label}: {avail}"
+            self._selection.get(slot_id) or "–"
         )
 
     # -- interaction ------------------------------------------------------------

@@ -246,14 +246,18 @@ def test_panel_cycles_slots_and_submits_its_selection():
     fired: "list[dict]" = []
     panel.voteSubmitted.connect(fired.append)
 
+    assert panel._slot_buttons["s0"].text() == "–"
     panel._slot_buttons["s0"].click()
     assert panel.selection == {"s0": "yes"}
+    assert panel._slot_buttons["s0"].text() == "yes"
     assert panel._vote_button.isEnabled() is True
 
     panel._slot_buttons["s0"].click()  # yes -> no
     assert panel.selection == {"s0": "no"}
+    assert panel._slot_buttons["s0"].text() == "no"
     panel._slot_buttons["s0"].click()  # no -> blank (deselect)
     assert panel.selection == {}
+    assert panel._slot_buttons["s0"].text() == "–"
     assert panel._vote_button.isEnabled() is False
 
     panel._slot_buttons["s1"].click()
@@ -353,12 +357,12 @@ def test_panel_edit_vote_grows_the_window_to_fit():
     assert after != before
 
 
-def test_panel_first_vote_grows_the_window_for_wider_labels():
+def test_panel_first_vote_grows_the_window_for_wider_values():
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(
-        convo_id, survey_id,
-        slots=("a very long option one", "a very long option two"),
+        convo_id, survey_id, mode=Mode.AVAILABILITY,
+        slots=("a", "b", "c", "d", "e", "f"),
     )
 
     panel = TallyPanel()
@@ -366,26 +370,25 @@ def test_panel_first_vote_grows_the_window_for_wider_labels():
     panel.show()
     QApplication.processEvents()
 
-    # Not voted yet: the local row is already in click-to-cycle edit mode.
-    assert set(panel._slot_buttons) == {"s0", "s1"}
+    # Not voted yet: the local row is already in click-to-cycle edit mode, and
+    # each option button starts blank.
+    assert set(panel._slot_buttons) == {f"s{i}" for i in range(6)}
+    assert panel._slot_buttons["s0"].text() == "–"
     before = panel.minimumSize()
 
-    # Cycling an option appends ": <choice>" to the button label, widening the
-    # grid; the window grows to fit instead of showing a scrollbar.
-    panel._slot_buttons["s0"].click()  # blank -> yes
-    QApplication.processEvents()
+    # Cycling replaces the blank "–" with the longer "yes"/"maybe"/"no", so the
+    # grid widens; the window grows to fit instead of showing a scrollbar.
+    for choice in ("yes", "maybe", "no"):
+        panel._slot_buttons["s0"].click()
+        QApplication.processEvents()
+        assert panel._slot_buttons["s0"].text() == choice
+        viewport = panel._grid_scroll.viewport().size()
+        assert viewport.width() >= panel._grid_host.sizeHint().width()
+        assert viewport.height() >= panel._grid_host.sizeHint().height()
+
     after = panel.minimumSize()
-    viewport = panel._grid_scroll.viewport().size()
-    assert viewport.width() >= panel._grid_host.sizeHint().width()
     assert after.width() >= before.width()
     assert after != before
-
-    # Cycling on to another label still fits without scrollbars.
-    panel._slot_buttons["s0"].click()  # yes -> no
-    QApplication.processEvents()
-    viewport = panel._grid_scroll.viewport().size()
-    assert viewport.width() >= panel._grid_host.sizeHint().width()
-    assert viewport.height() >= panel._grid_host.sizeHint().height()
 
 
 def test_panel_voted_local_row_edits_and_resends():
