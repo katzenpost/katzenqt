@@ -1041,7 +1041,18 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     if conv_id:
         # update the UX:
         create_task(conversation_update_queue.put((conv_id, True)))
-    progress = await persistent.upload_progress_after_ack(mw.bacap_stream)
+    try:
+        progress = await persistent.upload_progress_after_ack(mw.bacap_stream)
+    except OperationalError as e:
+        if not _is_transient_sqlite_busy(e):
+            raise
+        # The ACK is already processed; a locked database only costs this
+        # progress event.
+        logger.warning(
+            "drain_mixwal_write_single: sqlite busy reading upload progress "
+            "for bacap_stream=%s; skipping this event", mw.bacap_stream,
+        )
+        progress = None
     if progress is not None:
         # Mirror an outbound substream's chunk progress into the Transfers
         # panel; the row is done when the last C/F chunk is ACK'd, which is
