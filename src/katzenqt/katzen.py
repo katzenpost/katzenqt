@@ -2056,6 +2056,18 @@ class MainWindow(QMainWindow):
                     network.resume_upload(rcw_id=rcw_id),
                 )
             elif chosen is cgm:
+                cancel_box = QMessageBox(
+                    QMessageBox.Icon.Warning, APP_NAME,
+                    "Cancel this upload? Its message is removed from the "
+                    "conversation.",
+                    parent=self,
+                )
+                cancel_box.setStandardButtons(
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                cancel_box.setDefaultButton(QMessageBox.StandardButton.No)
+                if await _dialog_finished(cancel_box) != QMessageBox.StandardButton.Yes:
+                    return
                 await self.iothread.run_in_io(
                     network.cancel_upload(rcw_id=rcw_id),
                 )

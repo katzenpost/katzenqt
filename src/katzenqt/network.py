@@ -2184,7 +2184,10 @@ async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         try:
             await task
         except asyncio.CancelledError:
-            pass
+            # The reader's cancellation is expected; only re-raise when this
+            # caller is itself being cancelled.
+            if asyncio.current_task().cancelling():
+                raise
         except Exception:
             logger.exception("Read failed while pausing %s", bacap_stream)
     _inflight_reads.pop(bacap_stream, None)
