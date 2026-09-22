@@ -890,8 +890,12 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
             persistent.PlaintextWAL, mw.plaintextwal,
         ) is None:
             # The PlaintextWAL row this envelope was built from is gone (a
-            # cancelled upload); drop the orphaned MixWAL row instead of
-            # sending it.
+            # cancelled upload). bacap_stream is unique, so keeping the row
+            # would block every later write on the stream; drop it rather
+            # than send an orphaned I-chunk.
+            logger.critical(
+                "cannot send write for stream %s: PlaintextWAL %s missing; "
+                "dropping the MixWAL row", mw.bacap_stream, mw.plaintextwal)
             row = await sess.get(persistent.MixWAL, mw.id)
             if row is not None:
                 await sess.delete(row)
