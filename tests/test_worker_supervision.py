@@ -129,3 +129,30 @@ async def test_a_slow_but_cancellable_join_still_closes_the_client(
     await _actions._shutdown(bg, client, timeout=0.01)
     assert stopped == [True]
 
+
+
+async def test_a_join_that_ignores_cancellation_still_closes_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from katzenqt.headless import _actions
+
+    stopped: list[bool] = []
+    release = asyncio.Event()
+
+    async def stubborn(tasks: object) -> None:
+        while True:
+            try:
+                await release.wait()
+                return
+            except asyncio.CancelledError:
+                continue
+
+    monkeypatch.setattr(network, "shutdown", lambda: None)
+    monkeypatch.setattr(network, "_cancel_and_join", stubborn)
+    bg = asyncio.create_task(asyncio.sleep(0))
+    await bg
+    client = SimpleNamespace(stop=lambda: stopped.append(True))
+    await _actions._shutdown(bg, client, timeout=0.01)
+    assert stopped == [True], "the deadline must not be able to skip stop()"
+    release.set()
+    await asyncio.sleep(0)

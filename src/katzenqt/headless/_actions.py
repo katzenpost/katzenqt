@@ -157,9 +157,31 @@ async def _shutdown(
             bg.result()
     finally:
         try:
-            await network._cancel_and_join((bg,))
+            joining = asyncio.ensure_future(network._cancel_and_join((bg,)))
+            joining.add_done_callback(
+                lambda t: None if t.cancelled() else t.exception()
+            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            cancelled = False
+            while not joining.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    joining.cancel()
+                    logging.warning(
+                        "background task did not finish cancelling",
+                    )
+                    break
+                try:
+                    await asyncio.wait({joining}, timeout=remaining)
+                except asyncio.CancelledError:
+                    cancelled = True
         finally:
             connection.stop()
+        if joining.done() and not joining.cancelled():
+            joining.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def _action_create_conv(args):
