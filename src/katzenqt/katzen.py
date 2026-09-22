@@ -22,9 +22,9 @@ import cbor2
 import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
-from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
-                            QSettings, QSize, Property, Slot, QThread, QUrl,
-                            Signal, QTimer)
+from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel,
+                            QModelIndex, QSettings, QSize, Property, Slot,
+                            QThread, QUrl, Signal, QTimer)
 from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
                            QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
@@ -628,19 +628,44 @@ class PacketsDialog(QDialog):
         layout.addWidget(buttons)
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
-        self._timer.timeout.connect(self._model.refresh)
+        self._timer.timeout.connect(self._refresh)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Refresh the table, keeping the selected packets and scroll offset.
+
+        In-flight packets churn the id set, so a bare model reset would drop
+        the user's selection and jump the viewport every tick.
+        """
+        selection = self._table.selectionModel()
+        selected = {
+            self._model._rows[index.row()]["id"]
+            for index in selection.selectedRows()
+            if 0 <= index.row() < len(self._model._rows)
+        }
+        scroll = self._table.verticalScrollBar().value()
         self._model.refresh()
+        if selected:
+            selection.clearSelection()
+            for row, packet in enumerate(self._model._rows):
+                if packet["id"] in selected:
+                    selection.select(
+                        self._model.index(row, 0),
+                        QItemSelectionModel.SelectionFlag.Select
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+        self._table.verticalScrollBar().setValue(scroll)
 
     def _limit_changed(self) -> None:
         network.set_packet_finished_limit(self._limit_combo.currentData())
-        self._model.refresh()
+        self._refresh()
 
     def _clear_finished(self) -> None:
         network.clear_finished_packets()
-        self._model.refresh()
+        self._refresh()
 
     def showEvent(self, event) -> None:
-        self._model.refresh()
+        self._refresh()
         self._timer.start()
         super().showEvent(event)
 

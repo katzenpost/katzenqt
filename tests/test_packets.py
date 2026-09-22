@@ -253,6 +253,32 @@ def test_packets_dialog_retention_combo_and_clear():
     _ = app
 
 
+def test_packets_dialog_keeps_the_selected_packet_across_refresh():
+    """In-flight churn resets the model; the dialog reselects by packet id so
+    the user's selection survives the tick."""
+    app = QApplication.instance() or QApplication([])
+    network.reset_packets()
+    network.packet_begin(network.PacketContext("write"))
+    dialog = katzen.PacketsDialog(None)
+    dialog._table.selectRow(0)
+    before = [
+        dialog._model._rows[i.row()]["id"]
+        for i in dialog._table.selectionModel().selectedRows()
+    ]
+    assert before
+
+    # A new in-flight packet changes the id set, forcing a reset.
+    network.packet_begin(network.PacketContext("write"))
+    dialog._refresh()
+    after = [
+        dialog._model._rows[i.row()]["id"]
+        for i in dialog._table.selectionModel().selectedRows()
+    ]
+    assert after == before
+    dialog.deleteLater()
+    _ = app
+
+
 def _seed_conversation_streams():
     """One conversation with a main write stream, a contact peer, and an agg
     substream (25 chunks). Returns (main, contact_rcw_id, agg)."""
