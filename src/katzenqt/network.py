@@ -2524,7 +2524,11 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                         draining_right_now.add(mw.bacap_stream)
                         __resend_queue.add(mw.bacap_stream)
                         rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
-                        if rcw is not None and rcw.read_paused:
+                        if rcw is None:
+                            draining_right_now.discard(mw.bacap_stream)
+                            __resend_queue.discard(mw.bacap_stream)
+                            continue
+                        if rcw.read_paused:
                             draining_right_now.discard(mw.bacap_stream)
                             __resend_queue.discard(mw.bacap_stream)
                             continue
