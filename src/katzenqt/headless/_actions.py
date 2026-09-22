@@ -177,7 +177,7 @@ async def _shutdown(
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     joining.cancel()
-                    logging.warning(
+                    logger.warning(
                         "background task did not finish cancelling",
                     )
                     break
@@ -254,6 +254,7 @@ async def _wait_for_conv_write_cap(conversation_id: int, attempts: int = 120, de
     for _ in range(attempts):
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
+            assert conv is not None
             wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
             if wcw is not None and wcw.write_cap is not None:
                 return True
@@ -837,7 +838,17 @@ async def _action_info(args: _args.Info) -> int:
 
 
 def _parse_slot_votes(items: "list[str]") -> "dict[str, str]":
-    """Turn ``["s0=yes", "s1=no"]`` into ``{"s0": "yes", "s1": "no"}``."""
+    """Turn ``["s0=yes", "s1=no"]`` into ``{"s0": "yes", "s1": "no"}``.
+
+    >>> _parse_slot_votes(["s0=yes", "s1=no"])
+    {'s0': 'yes', 's1': 'no'}
+    >>> _parse_slot_votes([])
+    {}
+    >>> _parse_slot_votes(["s0"])
+    Traceback (most recent call last):
+        ...
+    ValueError: slot vote 's0' must be SLOT_ID=availability
+    """
     choice = {}
     for item in items:
         slot, sep, avail = item.partition("=")
@@ -848,6 +859,19 @@ def _parse_slot_votes(items: "list[str]") -> "dict[str, str]":
 
 
 def _tally_json(result: "tally_engine.TallyResult") -> str:
+    """Serialise a tally, and its derived outcome, as one JSON line.
+
+    >>> result = tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 2,
+    ...     [tally_engine.SlotTally("s0", "Mon", 1, 0, 1),
+    ...      tally_engine.SlotTally("s1", "Tue", 1, 0, 1)],
+    ... )
+    >>> decoded = json.loads(_tally_json(result))
+    >>> decoded["survey_id"], decoded["mode"], decoded["outcome"]
+    ('00000000000000000000000000000000', 'approval', 'tie')
+    >>> [w["slot_id"] for w in decoded["winners"]]
+    ['s0', 's1']
+    """
     out = tally_engine.outcome(result)
     return json.dumps({
         "survey_id": result.survey_id.hex(),
@@ -866,7 +890,20 @@ def _tally_json(result: "tally_engine.TallyResult") -> str:
 
 
 def _declare_outcome(result: "tally_engine.TallyResult") -> str:
-    """A one-line human declaration of the tally's outcome."""
+    """A one-line human declaration of the tally's outcome.
+
+    >>> tied = [tally_engine.SlotTally("s0", "Mon", 1, 0, 1),
+    ...         tally_engine.SlotTally("s1", "Tue", 1, 0, 1)]
+    >>> _declare_outcome(tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 2, tied))
+    'TIE=Mon, Tue (1 yes each)'
+    >>> _declare_outcome(tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 2, tied[:1]))
+    'WINNER=Mon (1 yes)'
+    >>> _declare_outcome(tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 0, []))
+    'WINNER=none (no yes votes)'
+    """
     out = tally_engine.outcome(result)
     if out.kind == "no_winner":
         return "WINNER=none (no yes votes)"
