@@ -472,15 +472,18 @@ substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
 __resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
 
-# in-flight drain_mixwal_read_single tasks keyed by bacap_stream, so an
-# external pause/cancel can stop just one peer's reads
-# instead of quitting the whole drain loop.
+# In-flight drain_mixwal_read_single tasks keyed by bacap_stream, so a pause
+# or cancel can stop one peer's reads without ending the drain loop.
 _inflight_reads: "dict[uuid.UUID, asyncio.Task]" = {}
 
-# in-flight drain_mixwal_write_single tasks keyed by bacap_stream, so an
-# upload pause can cancel the one chunk currently being cast (and its daemon
-# ARQ) without disturbing the conversation's own stream.
+# In-flight drain_mixwal_write_single tasks keyed by bacap_stream; pause and
+# cancel use this to stop the chunk currently being cast.
 _inflight_writes: "dict[uuid.UUID, asyncio.Task]" = {}
+
+# Streams whose current write has been ACK'd by the courier. The ACK
+# bookkeeping that follows must not be interrupted, so pause and cancel leave
+# these writes alone.
+_write_acknowledged: "set[uuid.UUID]" = set()
 
 #__plaintextwal_updated = asyncio.Event()
 #__plaintextwal_updated.set()
@@ -979,15 +982,28 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
           backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
       )
 
+    _write_acknowledged.add(mw.bacap_stream)
+    bookkeeping = asyncio.ensure_future(persistent.SentLog.mark_sent(
+        connection, mw, __resend_queue, resolve_counter=resolve_counter,
+    ))
     try:
-      conv_id = await persistent.SentLog.mark_sent(
-          connection, mw, __resend_queue, resolve_counter=resolve_counter,
-      )
+      conv_id = await asyncio.shield(bookkeeping)
+    except asyncio.CancelledError:
+      # A pause or cancel arrived after the courier ACK. Finish the ACK
+      # bookkeeping before honouring it, so the MixWAL row and PlaintextWAL
+      # rows are left in a consistent state.
+      try:
+          await bookkeeping
+      except Exception:
+          logger.exception(
+              "drain_mixwal_write_single: ACK bookkeeping failed after "
+              "cancellation for bacap_stream=%s", mw.bacap_stream,
+          )
+      raise
     except ConnectionLifeInterruptedError:
-      # The courier ACK for this envelope is already secured; mark_sent only
-      # does local bookkeeping via a thinclient RPC. Leave the MW for the
-      # next drain pass to re-send the already-ACKed envelope and complete
-      # the ACK -- same recovery as the sqlite-busy branch below.
+      # The courier ACK is secured; mark_sent only does local bookkeeping.
+      # Leave the MW for the next drain pass to re-send the already-ACKed
+      # envelope and complete the ACK, as in the sqlite-busy branch below.
       logger.warning(
           "drain_mixwal_write_single: connection-life signal interrupted ACK "
           "bookkeeping for bacap_stream=%s; leaving MW for the next drain pass",
@@ -998,11 +1014,9 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
     except OperationalError as e:
       if not _is_transient_sqlite_busy(e):
           raise
-      # sqlite write lock contention (e.g. a concurrent GUI-send commit on
-      # the same file): the MW was not consumed, only mark_sent failed.
-      # Hand the stream back so the drain loop's sweep re-sends it and
-      # finalizes the ACK; wrapping only OperationalError keeps invariant
-      # bugs (IntegrityError and friends) loud.
+      # sqlite write lock contention: the MW was not consumed, only mark_sent
+      # failed. Hand the stream back so the sweep re-sends it and finalizes
+      # the ACK.
       logger.warning(
           "drain_mixwal_write_single: sqlite busy committing ACK for "
           "bacap_stream=%s; leaving MW for next drain pass", mw.bacap_stream,
@@ -2213,15 +2227,13 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
 
 
 async def pause_upload(*, rcw_id: uuid.UUID) -> None:
-    """Pause an outbound substream: mark its WriteCapWAL paused so
-    find_resendable skips its remaining C/F chunks, cancel the in-flight write
-    drain (which also cancels its ARQ at the daemon), and delete the pending
-    write MixWAL row so the drain sweep cannot re-cast it.
+    """Pause an outbound substream.
 
-    The chunk PlaintextWAL rows are left in place: resume re-encrypts from the
-    stream's saved next_index, and the I-chunk's after_stream gate stays shut
-    while they remain, so the conversation's own stream is unaffected either
-    way. ``rcw_id`` is the indirection ReadCapWAL id (the Transfers row key).
+    Sets WriteCapWAL.paused, which keeps the chunk sweep and the write drain
+    from casting its remaining C/F chunks, and cancels the in-flight write
+    unless its envelope is already ACK'd. The pending MixWAL and PlaintextWAL
+    rows stay in place so resume re-sends them idempotently. ``rcw_id`` is the
+    indirection ReadCapWAL id (the Transfers row key).
     """
     agg = await _upload_stream_for_rcw(rcw_id)
     if agg is None:
@@ -2233,22 +2245,21 @@ async def pause_upload(*, rcw_id: uuid.UUID) -> None:
             sess.add(wcw)
             await sess.commit()
     task = _inflight_writes.get(agg)
-    if task is not None and not task.done():
+    if (
+        task is not None and not task.done()
+        and agg not in _write_acknowledged
+    ):
         task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, Exception):  # cancellation is the point
-            pass
+        except asyncio.CancelledError:
+            # The writer's cancellation is expected; only re-raise when this
+            # caller is itself being cancelled.
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception:
+            logger.exception("write drain failed while pausing %s", agg)
     _inflight_writes.pop(agg, None)
-    __resend_queue.discard(agg)
-    async with persistent.asession() as sess:
-        mw_rows = (await sess.exec(select(persistent.MixWAL).where(
-            persistent.MixWAL.bacap_stream == agg,
-            persistent.MixWAL.is_read == False,  # noqa: E712
-        ))).all()
-        for mw in mw_rows:
-            await sess.delete(mw)
-        await sess.commit()
     resendable_event.set()
     __mixwal_updated.set()
     substream_progress_queue.put_nowait(("upload_paused", rcw_id))
@@ -2477,15 +2488,12 @@ def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
                    draining_right_now):
     """Done-callback for the fire-and-forget write drains in drain_mixwal2.
 
-    The drain loop never awaits write_task, so an exception that escapes
-    drain_mixwal_write_single (anything that is not OperationalError — e.g. a
-    duplicate-ACK IntegrityError escaping mark_sent) would otherwise leave the
-    stream in draining_right_now forever, silently starving every MW on it.
-    Discard the stream (the MixWAL row survives, so get_new picks it up on the
-    next pass), keep the failure loud in the error logs rather than dead, and
-    poke __mixwal_updated so the retry is prompt.
+    Discards the stream from draining_right_now so a crashed write does not
+    starve every later MW on it (the MixWAL row survives for the next pass),
+    logs the failure, and pokes __mixwal_updated so the retry is prompt.
     """
     _inflight_writes.pop(stream, None)
+    _write_acknowledged.discard(stream)
     _done_callback(
         task,
         desc=(
@@ -2614,6 +2622,13 @@ async def drain_mixwal2(connection: ThinClient) -> None:
 
                         read_task.add_done_callback(_on_read_done)
                     elif connected:
+                        wcw = await sess.get(
+                            persistent.WriteCapWAL, mw.bacap_stream,
+                        )
+                        if wcw is None or wcw.paused:
+                            # A paused stream keeps its MixWAL row; resume
+                            # re-sends it.
+                            continue
                         new_write_mws.append(mw)
                     else:
                         # Defer the write dispatch until the daemon reports
@@ -2627,9 +2642,7 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                 __resend_queue.add(mw.bacap_stream)  # ensure readables_to_mixwal() does not serialize new ones for this stream
 
                 write_task = create_task(drain_mixwal_write_single(connection, mw, draining_right_now))
-                # pause_upload and cancel_upload cancel the in-flight write
-                # through this registry; without it a paused transfer keeps
-                # delivering the chunk that was already on the wire.
+                # Registered so pause and cancel can stop this chunk.
                 _inflight_writes[mw.bacap_stream] = write_task
                 requests.add(write_task)
                 write_task.add_done_callback(requests.discard)
