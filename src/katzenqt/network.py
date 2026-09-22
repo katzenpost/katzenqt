@@ -1913,10 +1913,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         if parent_peer is not None:
             notify_conv_id = parent_peer.conversation.id
 
-    # Spill an attachment body before taking the writer lock: hashing and
-    # writing a large payload (plus its image thumbnail) can take a while, and
-    # holding the per-conversation lock across it starves concurrent appends
-    # (a GUI send, a poll create) on the same conversation. The spill is
+    # Spill an attachment body off the io loop and before taking the writer
+    # lock: hashing and writing a large payload (plus its image thumbnail) must
+    # not block other work or starve concurrent appends. The spill is
     # content-hash keyed, so a retried drain reuses the same file.
     spilled_payload = None
     if (
@@ -1930,7 +1929,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
                 else cp.conversation.id
             )
-            spilled_payload = _spill_attachment(
+            spilled_payload = await asyncio.to_thread(
+                _spill_attachment,
                 spill_gcm.file_upload, spill_gcm.membership_hash, spill_conv_id,
             )
 
