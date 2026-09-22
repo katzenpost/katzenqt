@@ -1980,7 +1980,23 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     "ignoring indirection with malformed read cap length %d",
                     len(substream_read_cap),
                 )
-            if len(substream_read_cap) in (136, 140):
+            # The synthetic peer name embeds the parent peer id, so the name
+            # prefix alone scopes this to one announcer.
+            open_substreams = len((await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.active == True,  # noqa: E712
+                    persistent.ConversationPeer.name.startswith(
+                        f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:",
+                    ),
+                )
+            )).all())
+            if (len(substream_read_cap) in (136, 140)
+                    and open_substreams >= _MAX_OPEN_SUBSTREAMS_PER_PEER):
+                logger.warning(
+                    "peer %s already has %d open substreams; ignoring the "
+                    "indirection", cp.id, open_substreams,
+                )
+            elif len(substream_read_cap) in (136, 140):
                 sess.add(new_rcw)
                 substream_peer = persistent.ConversationPeer(
                     name=f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:{secrets.token_hex(2)}",
@@ -2774,6 +2790,12 @@ async def readables_to_mixwal_supervised(connection: ThinClient) -> None:
         readables_to_mixwal, connection, on_restart=readables_to_mixwal_event.set,
     )
 
+
+# A peer announces substreams with I-chunks, and each unresolved one buys a
+# full missing-box budget of mixnet reads before it retires. Cap how many a
+# single parent peer can have open at once so a hostile announcer cannot
+# multiply that cost without bound.
+_MAX_OPEN_SUBSTREAMS_PER_PEER = 8
 
 _SUPERVISOR_RETRY_S = 5.0
 _SUPERVISOR_RETRY_MAX_S = 60.0
