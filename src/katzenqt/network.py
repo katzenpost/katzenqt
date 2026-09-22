@@ -712,7 +712,11 @@ def summarize_pki_document(
 
 
 async def get_pki_document(connection):
-    """Snapshot the daemon's current parsed PKI document (io loop only)."""
+    """Snapshot the daemon's current parsed PKI document (io loop only).
+
+    Returns None before the client has connected."""
+    if connection is None:
+        return None
     return connection.pki_document()
 
 

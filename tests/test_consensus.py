@@ -144,3 +144,23 @@ async def test_consensus_dialog_handles_no_document():
     assert dialog._fields["epoch"].text() == "no PKI document yet"
     dialog.deleteLater()
     _ = app
+
+
+@pytest.mark.asyncio
+async def test_consensus_dialog_survives_a_failing_fetch():
+    """A daemon-down fetch must not raise out of the timer's task."""
+    app = QApplication.instance() or QApplication([])
+
+    async def fetch():
+        raise ConnectionError("daemon down")
+
+    dialog = katzen.ConsensusDialog(None, fetch)
+    await dialog._refresh_async()
+    assert dialog._fields["epoch"].text() == "PKI document unavailable"
+    dialog.deleteLater()
+    _ = app
+
+
+@pytest.mark.asyncio
+async def test_get_pki_document_is_none_before_connect():
+    assert await network.get_pki_document(None) is None

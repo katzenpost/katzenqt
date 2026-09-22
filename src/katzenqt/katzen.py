@@ -108,6 +108,8 @@ class AsyncioThread(threading.Thread):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.engine_warmed = threading.Event()
+        # Set once async_main's reconnect succeeds; None until then.
+        self.kp_client = None
 
     def run(self):
         self.loop = asyncio.new_event_loop()
@@ -517,7 +519,13 @@ class ConsensusDialog(QDialog):
         create_task(self._refresh_async())
 
     async def _refresh_async(self) -> None:
-        summary = network.summarize_pki_document(await self._fetch())
+        try:
+            document = await self._fetch()
+        except Exception:
+            # A fetch can fail while the daemon is down; the timer retries.
+            self._fields["epoch"].setText("PKI document unavailable")
+            return
+        summary = network.summarize_pki_document(document)
         if summary is None:
             self._fields["epoch"].setText("no PKI document yet")
             return
