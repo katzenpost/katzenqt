@@ -300,6 +300,7 @@ class FakeThinClient:
         envelope_hash: "bytes | None" = None,
         no_retry_on_box_id_not_found: bool = False,
         no_idempotent_box_already_exists: bool = False,
+        **kwargs,
     ) -> StartResendingResult:
         self._record(
             "start_resending_encrypted_message",

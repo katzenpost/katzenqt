@@ -4,6 +4,7 @@ APP_NAME = "KatzenQt"
 import argparse
 import asyncio
 import fcntl
+from functools import partial
 import hashlib
 import logging
 import math
@@ -21,20 +22,19 @@ import cbor2
 import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
-from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QModelIndex,
-                            QSettings, QSize, Property, Slot, QThread, QUrl,
-                            Signal, QTimer)
+from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel,
+                            QModelIndex, QSettings, QSize, Property, Slot,
+                            QThread, QUrl, Signal, QTimer)
 from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
                            QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
-                               QFormLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QFormLayout, QHBoxLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QTableView, QToolButton, QTreeView,
-                               QTreeWidgetItem, QVBoxLayout)
-from sqlalchemy import func
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 from sqlmodel import select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
@@ -107,6 +107,8 @@ class AsyncioThread(threading.Thread):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.engine_warmed = threading.Event()
+        # Set once async_main's reconnect succeeds; None until then.
+        self.kp_client = None
 
     def run(self):
         self.loop = asyncio.new_event_loop()
@@ -370,6 +372,20 @@ def duration_time_ns():
         # BSDs use SI seconds by default:
         return time.monotonic_ns()
 
+def _error_detail(exc: BaseException, limit: int = 200) -> str:
+    """A bounded, inert description of exc for a message box.
+
+    The exception can come from parsing a peer's reply, so its text is
+    attacker-chosen and unbounded, and QMessageBox renders AutoText. Keep the
+    type, clamp the rest, drop control characters and angle brackets.
+    """
+    text = "".join(
+        c for c in str(exc)
+        if (c.isprintable() or c == " ") and c not in "<>"
+    )[:limit]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 class PendingVouchersDialog(QDialog):
     """Lists in-flight vouchers and lets the user abandon stale ones, e.g. a
     voucher whose code was lost and whose join never completed."""
@@ -405,6 +421,256 @@ class PendingVouchersDialog(QDialog):
             return
         self.cancelled.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
         self.list_widget.takeItem(self.list_widget.row(item))
+
+
+class StatsDialog(QDialog):
+    """Modeless window of process-lifetime pigeonhole read/write counters.
+
+    Refreshes ``network.stats_snapshot()`` on a 1 s timer while visible; the
+    snapshot is plain int reads, safe from the Qt thread under the GIL.
+    """
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Mixnet stats")
+        layout = QFormLayout(self)
+        self._labels: "dict[str, QLabel]" = {}
+        for key, text in network.STATS_FIELDS:
+            value = QLabel("0")
+            value.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            layout.addRow(text, value)
+            self._labels[key] = value
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self) -> None:
+        snapshot = network.stats_snapshot()
+        for key, label in self._labels.items():
+            text = f"{snapshot[key]:,}"
+            denominator_key = network.STATS_PERCENTAGES.get(key)
+            if denominator_key is not None:
+                total = snapshot.get(denominator_key, 0)
+                pct = (100.0 * snapshot[key] / total) if total else 0.0
+                text = f"{text} ({pct:.1f}%)"
+            label.setText(text)
+
+    def showEvent(self, event) -> None:
+        self.refresh()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+
+class ConsensusDialog(QDialog):
+    """Modeless view of the daemon's current PKI consensus document.
+
+    ``fetch`` is an async zero-arg callable returning the parsed PKI document
+    (or None); it is invoked on the Qt loop via the caller's run_in_io hop. A
+    timer re-fetches while visible, rebuilding the node tree only when the
+    epoch changes.
+    """
+
+    _FIELD_LABELS = (
+        ("epoch", "Current epoch"),
+        ("genesis", "Genesis epoch"),
+        ("epochs", "Epochs of consensus"),
+        ("period", "Epoch duration"),
+        ("consensus", "Consensus duration"),
+    )
+
+    def __init__(self, parent, fetch) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Network consensus")
+        self._fetch = fetch
+        self._last_epoch = None
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self._fields: "dict[str, QLabel]" = {}
+        for key, label in self._FIELD_LABELS:
+            value = QLabel("—")
+            value.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            form.addRow(label, value)
+            self._fields[key] = value
+        layout.addLayout(form)
+        self.resize(760, 520)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Node", "Addresses"])
+        self._tree.header().setStretchLastSection(True)
+        self._apply_selection_style()
+        layout.addWidget(self._tree)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._timer = QTimer(self)
+        self._timer.setInterval(5000)
+        self._timer.timeout.connect(self.refresh)
+
+    def refresh(self) -> None:
+        create_task(self._refresh_async())
+
+    async def _refresh_async(self) -> None:
+        try:
+            document = await self._fetch()
+        except Exception:
+            # A fetch can fail while the daemon is down; the timer retries.
+            self._fields["epoch"].setText("PKI document unavailable")
+            return
+        summary = network.summarize_pki_document(document)
+        if summary is None:
+            self._fields["epoch"].setText("no PKI document yet")
+            return
+        self._fields["epoch"].setText(str(summary.epoch))
+        self._fields["genesis"].setText(str(summary.genesis_epoch))
+        self._fields["epochs"].setText(str(summary.epochs_elapsed))
+        self._fields["period"].setText(
+            network.format_duration(summary.period_seconds)
+        )
+        self._fields["consensus"].setText(
+            network.format_duration(summary.consensus_seconds)
+        )
+        if summary.epoch == self._last_epoch:
+            return
+        self._last_epoch = summary.epoch
+        self._rebuild_tree(summary)
+
+    def _apply_selection_style(self) -> None:
+        """Paint selected rows with the themed highlight.
+
+        The generated MainWindow stylesheet styles ``QTreeView::item:selected``
+        with a border only; that suppresses the highlight fill while Qt still
+        draws the text in the palette's highlighted colour, so a selected cell
+        is illegible. Set both colours explicitly from the live palette."""
+        pal = self._tree.palette()
+        self._tree.setStyleSheet(
+            "QTreeView::item:selected {"
+            f" background-color: {pal.highlight().color().name()};"
+            f" color: {pal.highlightedText().color().name()};"
+            "}"
+        )
+
+    def _rebuild_tree(self, summary) -> None:
+        self._tree.clear()
+        groups = [("Gateways", summary.gateways)]
+        groups += [
+            (f"Layer {i}", layer)
+            for i, layer in enumerate(summary.mix_layers)
+        ]
+        groups += [
+            ("Service nodes", summary.service_nodes),
+            ("Storage replicas", summary.storage_replicas),
+        ]
+        for label, nodes in groups:
+            parent = QTreeWidgetItem([label, ""])
+            self._tree.addTopLevelItem(parent)
+            for node in nodes:
+                QTreeWidgetItem(parent, [node.name, ", ".join(node.addresses)])
+        self._tree.expandAll()
+        self._tree.resizeColumnToContents(0)
+
+    def showEvent(self, event) -> None:
+        self._apply_selection_style()
+        self.refresh()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+
+class PacketsDialog(QDialog):
+    """Modeless table of every packet sent, with live in-flight status.
+
+    "Keep finished" controls how many completed packets the registry retains
+    (0/5/10/100, default 5); "Clear finished" drops them now. Refreshes on a
+    timer while visible.
+    """
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Packets")
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Keep finished:"))
+        self._limit_combo = QComboBox()
+        for option in network.PACKET_FINISHED_LIMIT_OPTIONS:
+            self._limit_combo.addItem(str(option), option)
+        current = network.get_packet_finished_limit()
+        index = self._limit_combo.findData(current)
+        if index >= 0:
+            self._limit_combo.setCurrentIndex(index)
+        self._limit_combo.currentIndexChanged.connect(self._limit_changed)
+        controls.addWidget(self._limit_combo)
+        self._clear_button = QPushButton("Clear finished")
+        self._clear_button.clicked.connect(self._clear_finished)
+        controls.addWidget(self._clear_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+        self._model = PacketsModel()  # noqa: F405
+        self._table = QTableView()
+        self._table.setModel(self._model)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        layout.addWidget(self._table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._refresh)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Refresh the table, keeping the selected packets and scroll offset.
+
+        In-flight packets churn the id set, so a bare model reset would drop
+        the user's selection and jump the viewport every tick.
+        """
+        selection = self._table.selectionModel()
+        selected = {
+            self._model._rows[index.row()]["id"]
+            for index in selection.selectedRows()
+            if 0 <= index.row() < len(self._model._rows)
+        }
+        scroll = self._table.verticalScrollBar().value()
+        self._model.refresh()
+        if selected:
+            selection.clearSelection()
+            for row, packet in enumerate(self._model._rows):
+                if packet["id"] in selected:
+                    selection.select(
+                        self._model.index(row, 0),
+                        QItemSelectionModel.SelectionFlag.Select
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+        self._table.verticalScrollBar().setValue(scroll)
+
+    def _limit_changed(self) -> None:
+        network.set_packet_finished_limit(self._limit_combo.currentData())
+        self._refresh()
+
+    def _clear_finished(self) -> None:
+        network.clear_finished_packets()
+        self._refresh()
+
+    def showEvent(self, event) -> None:
+        self._refresh()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -1149,6 +1415,15 @@ class MainWindow(QMainWindow):
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
         self.ui.action_invite_contact.triggered.connect(self.generate_voucher)
         self.ui.action_pending_vouchers.triggered.connect(self.show_pending_vouchers)
+        # Mixnet status: enable the (otherwise disabled) menu and add the
+        # Stats window action.
+        self.ui.menuMixnetStatus.setEnabled(True)
+        stats_action = self.ui.menuMixnetStatus.addAction("Stats")
+        stats_action.triggered.connect(self.show_stats)
+        consensus_action = self.ui.menuMixnetStatus.addAction("Network consensus")
+        consensus_action.triggered.connect(self.show_consensus)
+        packets_action = self.ui.menuMixnetStatus.addAction("Packets")
+        packets_action.triggered.connect(self.show_packets)
         # Make the [Quit] toolbar actually quit:
         self.ui.action_quit.triggered.connect(lambda ev: self.close(ev,really_quit=True))
 
@@ -1620,8 +1895,7 @@ class MainWindow(QMainWindow):
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
             return
-        convo_state.conversation_log_model.refresh_row_count()
-        # And then we can increment the row count to let the UI register it:
+        reset = convo_state.conversation_log_model.refresh_row_count()
 
         # x) Scrolling - two cases:
         if convo_state is self.convo_state_or_none():
@@ -1629,13 +1903,19 @@ class MainWindow(QMainWindow):
             # TODO make which of these to do configurable:
             convo_state.chat_lines_scroll_idx = 1.0
             root = self.ui.qml_ChatLines.rootObject()
-            new_first_unread = root.property("ctx").value("first_unread")
-            if convo_state.mark_first_unread(new_first_unread):
-                await self.iothread.run_in_io(
-                    network.persist_first_unread(
-                        convo_state.conversation_id, new_first_unread,
-                    ),
-                )
+            ctx = root.property("ctx")
+            # A reset shifts the rows under QML's marker, so its value is
+            # stale; the rebuild below restores it from the stored order.
+            if not reset and ctx is not None:
+                row = ctx.value("first_unread")
+                if row is not None:
+                    order = convo_state.adopt_first_unread_row(int(row))
+                    if order is not None:
+                        await self.iothread.run_in_io(
+                            network.persist_first_unread(
+                                convo_state.conversation_id, order,
+                            ),
+                        )
             root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
         else:
             #   x.2) Scrolling: Conversation is NOT in focus:
@@ -1672,7 +1952,9 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
-    async def _process_peer_added(self, conversation_id, name) -> None:
+    async def _process_peer_added(
+        self, conversation_id: int, name: str,
+    ) -> None:
         # A dynamically-announced peer could be a synthetic substream; never
         # render those into the contacts tree.
         if name.startswith(network._SUBSTREAM_NAME_PREFIX):
@@ -1696,8 +1978,17 @@ class MainWindow(QMainWindow):
         with persistent.Session(persistent._engine_sync) as _sess:
             peer_row = _sess.exec(
                 select(persistent.ConversationPeer)
-                .where(persistent.ConversationPeer.name == name)
+                .join(
+                    persistent.ConversationPeerLink,
+                    persistent.ConversationPeerLink.conversation_peer_id ==
+                    persistent.ConversationPeer.id,
+                )
+                .where(
+                    persistent.ConversationPeerLink.conversation_id == conversation_id,
+                    persistent.ConversationPeer.name == name,
+                )
             ).first()
+
         if peer_row is not None:
             new_item.peer_read_cap_id = peer_row.read_cap_id
             new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
@@ -1738,7 +2029,8 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == read_cap_id,
                 )
             )).first()
-        active = bool(solo.active) if solo is not None else True
+            rcw = sess.get(persistent.ReadCapWAL, read_cap_id)
+            active = bool(solo and solo.active and rcw and not rcw.paused)
         # A throwaway menu so we never clobber the tray's contextMenu().
         api = QMenu(tree)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
@@ -1772,44 +2064,72 @@ class MainWindow(QMainWindow):
         if not rcw_id:
             return
         rcw_id = uuid.UUID(rcw_id)
+        transfers_model = view.model()
+        row_data = transfers_model._rows.get(rcw_id, {})
+        api = QMenu(view)
+        if row_data.get("failed", False):
+            rm = api.addAction("Remove")
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is rm:
+                await self.iothread.run_in_io(
+                    network.dismiss_failed_transfer(bacap_stream=rcw_id),
+                )
+                transfers_model.remove_transfer(rcw_id)
+            return
+        if row_data.get("direction", "download") != "download":
+            active = bool(row_data.get("active", True))
+            pgm = api.addAction("Pause upload")
+            rgm = api.addAction("Resume upload")
+            cgm = api.addAction("Cancel upload")
+            pgm.setEnabled(active)
+            rgm.setEnabled(not active)
+            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+            if chosen is pgm and active:
+                await self.iothread.run_in_io(
+                    network.pause_upload(rcw_id=rcw_id),
+                )
+            elif chosen is rgm and not active:
+                await self.iothread.run_in_io(
+                    network.resume_upload(rcw_id=rcw_id),
+                )
+            elif chosen is cgm:
+                cancel_box = QMessageBox(
+                    QMessageBox.Icon.Warning, APP_NAME,
+                    "Cancel this upload? Its message is removed from the "
+                    "conversation.",
+                    parent=self,
+                )
+                cancel_box.setStandardButtons(
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                cancel_box.setDefaultButton(QMessageBox.StandardButton.No)
+                if await _dialog_finished(cancel_box) != QMessageBox.StandardButton.Yes:
+                    return
+                await self.iothread.run_in_io(
+                    network.cancel_upload(rcw_id=rcw_id),
+                )
+            return
         with persistent.Session(persistent._engine_sync) as sess:
             solo = (sess.exec(
                 select(persistent.ConversationPeer).where(
                     persistent.ConversationPeer.read_cap_id == rcw_id,
                 )
             )).first()
-        # Check if this transfer is marked as failed in the UI model
-        transfers_model = view.model()
-        row = None
-        for i, rid in enumerate(transfers_model._order):
-            if rid == str(rcw_id):
-                row = i
-                break
-        is_failed = (
-            row is not None and
-            transfers_model._rows.get(rcw_id, {}).get("failed", False)
-        )
-        api = QMenu(view)
-        if is_failed:
-            rm = api.addAction("Remove")
-            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-            if chosen is rm:
-                transfers_model.remove_transfer(rcw_id)
-        else:
-            active = bool(solo.active) if solo is not None else True
-            pgm = api.addAction("Pause download")
-            rgm = api.addAction("Resume download")
-            pgm.setEnabled(active)
-            rgm.setEnabled(not active)
-            chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
-            if chosen is pgm and active:
-                await self.iothread.run_in_io(
-                    network.pause_peer_reads(bacap_stream=rcw_id),
-                )
-            elif chosen is rgm and not active:
-                await self.iothread.run_in_io(
-                    network.resume_peer_reads(bacap_stream=rcw_id),
-                )
+            rcw = sess.get(persistent.ReadCapWAL, rcw_id)
+            active = bool(solo and solo.active and rcw and not rcw.paused)
+        pgm = api.addAction("Pause download")
+        rgm = api.addAction("Resume download")
+        pgm.setEnabled(active)
+        rgm.setEnabled(not active)
+        chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
+        if chosen is pgm and active:
+            await self.iothread.run_in_io(
+                network.pause_peer_reads(bacap_stream=rcw_id),
+            )
+        elif chosen is rgm and not active:
+            await self.iothread.run_in_io(
+                network.resume_peer_reads(bacap_stream=rcw_id),
+            )
 
     async def transfers_listener(self) -> None:
         """Drain network.substream_progress_queue into the Transfers model.
@@ -1830,13 +2150,33 @@ class MainWindow(QMainWindow):
                     self.transfers_model.start_transfer(
                         rcw_id, conv_id, parent_name, total,
                     )
+                elif kind == "upload_started":
+                    _, _, conv_id, total, total_bytes, parent_name, basename = event
+                    label = (
+                        f"{basename} (in {parent_name})"
+                        if basename else parent_name
+                    )
+                    self.transfers_model.start_transfer(
+                        rcw_id, conv_id, label, total,
+                        direction="upload", raw_bytes=total_bytes,
+                    )
                 elif kind == "piece":
-                    self.transfers_model.notify_piece(rcw_id, event[2])
+                    self.transfers_model.notify_piece(rcw_id, event[2], event[3])
+                elif kind == "upload_piece":
+                    self.transfers_model.notify_piece(rcw_id, event[2], event[3])
                 elif kind == "completed":
+                    self.transfers_model.complete_transfer(rcw_id)
+                elif kind == "upload_completed":
+                    self.transfers_model.complete_transfer(rcw_id)
+                elif kind == "upload_cancelled":
                     self.transfers_model.complete_transfer(rcw_id)
                 elif kind == "paused":
                     self.transfers_model.set_paused(rcw_id, paused=True)
                 elif kind == "resumed":
+                    self.transfers_model.set_paused(rcw_id, paused=False)
+                elif kind == "upload_paused":
+                    self.transfers_model.set_paused(rcw_id, paused=True)
+                elif kind == "upload_resumed":
                     self.transfers_model.set_paused(rcw_id, paused=False)
                 elif kind == "failed":
                     self.transfers_model.fail_transfer(rcw_id, event[2])
@@ -2084,14 +2424,15 @@ class MainWindow(QMainWindow):
             # Store old line edit buffer and scroll
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
             if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
-                print("old first_unread is", old_ctx.value("first_unread"))
-                old_first_unread = old_ctx.value("first_unread")
-                if old_convo.mark_first_unread(old_first_unread):
-                    await self.iothread.run_in_io(
-                        network.persist_first_unread(
-                            old_convo.conversation_id, old_first_unread,
-                        ),
-                    )
+                old_row = old_ctx.value("first_unread")
+                if old_row is not None:
+                    order = old_convo.adopt_first_unread_row(int(old_row))
+                    if order is not None:
+                        await self.iothread.run_in_io(
+                            network.persist_first_unread(
+                                old_convo.conversation_id, order,
+                            ),
+                        )
             root = self.ui.qml_ChatLines.rootObject()
             if root and (vscrollbar := root.findChild(object, "vscrollbar")):
                 #vrect = vscrollbar.findChild(object, "vscrollbar_rect")
@@ -2342,9 +2683,11 @@ class MainWindow(QMainWindow):
         try:
             added = await self._wait_and_open_with_retries(convo.conversation_id)
         except Exception as e:
-            logging.warning("voucher await failed: %s", e)
+            detail = _error_detail(e)
+            logging.warning("voucher await failed: %s", detail)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
-                self, f"ERROR: {APP_NAME}", f"The voucher join did not complete:\n{e}",
+                self, f"ERROR: {APP_NAME}",
+                f"The voucher join did not complete:\n{detail}",
             ))
             return
         for name in added:
@@ -2353,16 +2696,16 @@ class MainWindow(QMainWindow):
                 continue
             new_item = QStandardItem(name)
             # Tag like add_conversation's peers so the per-peer pause/resume
-            # context menu works on dynamically-announced members too.
-            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            # context menu works on dynamically-announced members too. Sync
+            # engine: the Qt loop must not open the async engine (see
+            # persistent.warm_async_engine).
             with persistent.Session(persistent._engine_sync) as _sess:
-                peer_row = _sess.exec(
-                    select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == name)
-                ).first()
-            if peer_row is not None:
-                new_item.peer_read_cap_id = peer_row.read_cap_id
-                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+                peer_row = persistent.peer_named_in_conversation_sync(
+                    _sess, convo.conversation_id, name,
+                )
+                if peer_row is not None:
+                    new_item.peer_read_cap_id = peer_row.read_cap_id
+                    new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
             convo.contacts_standard_item.appendRow(new_item)
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(
@@ -2429,8 +2772,12 @@ class MainWindow(QMainWindow):
                 )
             )
         except Exception as e:
+            # Bind the text before scheduling the dialog: the except variable
+            # is deleted when the handler exits, so a lambda that read it
+            # would raise NameError when Qt runs it on the next event loop.
+            detail = _error_detail(e)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
-                self, f"ERROR: {APP_NAME}", f"Induction failed:\n{e}",
+                self, f"ERROR: {APP_NAME}", f"Induction failed:\n{detail}",
             ))
             return
 
@@ -2452,8 +2799,17 @@ class MainWindow(QMainWindow):
             with persistent.Session(persistent._engine_sync) as _sess:
                 peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == joiner_name)
+                    .join(
+                        persistent.ConversationPeerLink,
+                        persistent.ConversationPeerLink.conversation_peer_id ==
+                        persistent.ConversationPeer.id,
+                    )
+                    .where(
+                        persistent.ConversationPeerLink.conversation_id == convo.conversation_id,
+                        persistent.ConversationPeer.name == joiner_name,
+                    )
                 ).first()
+
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -2477,6 +2833,40 @@ class MainWindow(QMainWindow):
         await _dialog_finished(dialog)
         for pv_id in dialog.cancelled:
             await self.iothread.run_in_io(cancel_pending_voucher(pv_id))
+
+    def show_stats(self, _checked: bool = False):
+        """Open (or raise) the modeless Mixnet stats window."""
+        dialog = getattr(self, "stats_dialog", None)
+        if dialog is None:
+            dialog = StatsDialog(self)
+            self.stats_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_consensus(self, _checked: bool = False):
+        """Open (or raise) the modeless Network consensus window."""
+        dialog = getattr(self, "consensus_dialog", None)
+        if dialog is None:
+            async def fetch():
+                return await self.iothread.run_in_io(
+                    network.get_pki_document(self.iothread.kp_client)
+                )
+            dialog = ConsensusDialog(self, fetch)
+            self.consensus_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def show_packets(self, _checked: bool = False):
+        """Open (or raise) the modeless Packets window."""
+        dialog = getattr(self, "packets_dialog", None)
+        if dialog is None:
+            dialog = PacketsDialog(self)
+            self.packets_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def close(self, *args, **kwargs):
         if kwargs.get('really_quit', False):
@@ -2694,15 +3084,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         ptwi.peer_is_own = (peer.id == convo.own_peer_id)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
-    # Sync engine: add_conversation runs on the Qt loop, which must not open
-    # the async engine (see persistent.warm_async_engine).
-    with persistent.Session(persistent._engine_sync) as sess:
-        msg_count = sess.exec(
-            select(func.count())
-            .select_from(persistent.ConversationLog)
-            .where(persistent.ConversationLog.conversation_id == convo.id)
-        ).first()
-    convo_state.conversation_log_model.set_row_count(msg_count)
+    convo_state.conversation_log_model.set_row_count()
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
     # Append the new conversation to the "real" model window.all_contacts,
@@ -2807,14 +3189,19 @@ async def main(window: MainWindow):
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
+    await _resume_pending_joins(window)
+
+
+async def _resume_pending_joins(window: MainWindow) -> None:
     for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)
             window._supervised_listener(
                 f"_await_voucher_join:{conv_id}",
-                lambda: window._await_voucher_join(convo_state),
+                partial(window._await_voucher_join, convo_state),
             )
+
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html

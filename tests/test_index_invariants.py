@@ -268,6 +268,32 @@ def test_find_resendable_filter_targets_bacap_stream_not_pwal_id():
         )
 
 
+def test_find_resendable_skips_a_paused_stream():
+    """A paused outbound substream (WriteCapWAL.paused) is withheld from the
+    sweep entirely; an unpaused stream is still returned."""
+    paused_stream = uuid.uuid4()
+    active_stream = uuid.uuid4()
+    with Session(persistent._engine_sync) as sess:
+        for stream, is_paused in ((paused_stream, True), (active_stream, False)):
+            sess.add(persistent.WriteCapWAL(
+                id=stream, write_cap=b"W" * 168, next_index=mbi(1),
+                paused=is_paused,
+            ))
+            sess.add(persistent.ReadCapWAL(
+                id=uuid.uuid4(), write_cap_id=stream,
+                read_cap=b"R" * 136, next_index=mbi(1),
+            ))
+            sess.add(persistent.PlaintextWAL(
+                id=uuid.uuid4(), bacap_stream=stream,
+                conversation_id=1, bacap_payload=b"Fchunk",
+            ))
+        sess.commit()
+        rows = list(sess.exec(persistent.PlaintextWAL.find_resendable(set())))
+        returned = {row.bacap_stream for row in rows}
+    assert paused_stream not in returned, returned
+    assert active_stream in returned, returned
+
+
 # ---------------------------------------------------------------------------
 # Invariant 6: late-binding lambda in send_resendable_plaintexts is fixed.
 # ---------------------------------------------------------------------------

@@ -16,14 +16,16 @@ from PySide6.QtCore import (  # noqa: E402
 )
 from PySide6.QtGui import QGuiApplication  # noqa: E402
 
-from katzenqt import network, persistent  # noqa: E402
+from katzenqt import network, persistent, qt_models  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
     ROLE_TRANSFER_ACTIVE,
     ROLE_TRANSFER_CONV_ID,
+    ROLE_TRANSFER_DIRECTION,
     ROLE_TRANSFER_FAILED,
     ROLE_TRANSFER_FAILURE_REASON,
     ROLE_TRANSFER_PARENT_NAME,
     ROLE_TRANSFER_PIECES,
+    ROLE_TRANSFER_RATE,
     ROLE_TRANSFER_RCW_ID,
     ROLE_TRANSFER_TOTAL,
     DownloadsModel,
@@ -104,6 +106,20 @@ def test_set_paused_toggles_state_column():
     assert model.data(model.index(0, 0), ROLE_TRANSFER_ACTIVE) is True
 
 
+def test_set_paused_announces_display_role():
+    """Pausing changes the State text as well as the active flag, so the
+    dataChanged roles must include DisplayRole or the view keeps the old
+    'Uploading'/'Downloading' label."""
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
+    seen: "list[list[int]]" = []
+    model.dataChanged.connect(lambda _tl, _br, roles: seen.append(list(roles)))
+    model.set_paused(rcw_id, paused=True)
+    assert Qt.ItemDataRole.DisplayRole in seen[-1]
+    assert ROLE_TRANSFER_ACTIVE in seen[-1]
+
+
 def test_fail_transfer_keeps_row_visible_with_reason():
     """A failed transfer stays visible in the model with state
     'Failed: {reason}' so the user can see what went wrong."""
@@ -155,13 +171,15 @@ def test_remove_transfer_unknown_row_is_ignored():
 
 def test_column_and_role_metadata():
     model = DownloadsModel()
-    assert model.columnCount() == 3
+    assert model.columnCount() == 4
     assert model.headerData(0, Qt.Orientation.Horizontal) == "Contact"
     assert model.headerData(1, Qt.Orientation.Horizontal) == "Progress"
     assert model.headerData(2, Qt.Orientation.Horizontal) == "State"
+    assert model.headerData(3, Qt.Orientation.Horizontal) == "Rate"
     names = model.roleNames()
     assert names[ROLE_TRANSFER_RCW_ID] == b"transfer_rcw_id"
     assert names[ROLE_TRANSFER_TOTAL] == b"transfer_total"
+    assert names[ROLE_TRANSFER_RATE] == b"transfer_rate"
     assert model.data(QModelIndex(), Qt.ItemDataRole.DisplayRole) is None
     assert model.data(model.index(5, 0), Qt.ItemDataRole.DisplayRole) is None
 
@@ -284,3 +302,225 @@ def test_seed_from_db_uses_only_the_sync_engine(monkeypatch):
     model = DownloadsModel()
     model.seed_from_db()  # must complete on the sync engine alone
     assert model.rowCount() == 0
+
+
+def test_direction_defaults_to_download_and_drives_state_text():
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "download"
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Downloading"
+    model.set_paused(rcw_id, paused=True)
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Paused"
+
+
+def test_upload_direction_renders_uploading_state():
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(
+        rcw_id, conversation_id=7, parent_name="carol", total=4,
+        direction="upload",
+    )
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "upload"
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Uploading"
+    model.notify_piece(rcw_id, pieces=2)
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == "2/4"
+    model.set_paused(rcw_id, paused=True)
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Paused"
+
+
+async def _make_conversation_with_upload(
+    *, remaining_chunks: int, total_chunks: int = 3, paused: bool = False,
+) -> tuple[int, uuid.UUID]:
+    """Build a conversation plus an in-flight outbound substream.
+
+    Returns ``(conversation_id, indirection_rcw_id)``. The I-chunk on the main
+    stream carries ``indirection``; ``remaining_chunks`` agg-stream C/F PWAL
+    rows are still outstanding.
+    """
+    owner_wcw = persistent.WriteCapWAL(
+        id=uuid.uuid4(), write_cap=b"\x00" * 168, next_index=b"\x00" * 104,
+    )
+    owner_rcw = persistent.ReadCapWAL(
+        id=owner_wcw.id, write_cap_id=owner_wcw.id,
+        read_cap=b"\x00" * 136, next_index=b"\x00" * 104,
+    )
+    agg = uuid.uuid4()
+    indirection_rcw_id = uuid.uuid4()
+    async with persistent.asession() as sess:
+        conv = persistent.Conversation(
+            name="carol-conv", write_cap=owner_wcw.id, first_unread=0,
+        )
+        own_peer = persistent.ConversationPeer(
+            name="me", read_cap_id=owner_rcw.id, active=False,
+            conversation=conv,
+        )
+        conv.own_peer = own_peer
+        sess.add(owner_wcw)
+        sess.add(owner_rcw)
+        sess.add(conv)
+        await sess.flush()
+        conv_id = conv.id
+        sess.add_all((
+            persistent.WriteCapWAL(
+                id=agg, write_cap=b"\x01" * 168, next_index=b"\x00" * 104,
+                paused=paused,
+            ),
+            persistent.ReadCapWAL(
+                id=indirection_rcw_id, write_cap_id=agg,
+                read_cap=b"\x11" * 136, next_index=b"\x22" * 104,
+                substream_total_chunks=total_chunks,
+            ),
+            persistent.PlaintextWAL(
+                id=uuid.uuid4(), bacap_stream=owner_wcw.id,
+                conversation_id=conv_id, bacap_payload=b"",
+                indirection=indirection_rcw_id,
+            ),
+        ))
+        for _ in range(remaining_chunks):
+            sess.add(persistent.PlaintextWAL(
+                id=uuid.uuid4(), bacap_stream=agg,
+                conversation_id=conv_id, bacap_payload=b"Cchunk",
+            ))
+        await sess.commit()
+    return conv_id, indirection_rcw_id
+
+
+@pytest.mark.asyncio
+async def test_seed_from_db_lists_in_flight_upload():
+    conv_id, rcw_id = await _make_conversation_with_upload(
+        remaining_chunks=1, total_chunks=3,
+    )
+    model = DownloadsModel()
+    model.seed_from_db()
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_RCW_ID) == str(rcw_id)
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "upload"
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_PARENT_NAME) == "carol-conv"
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_CONV_ID) == conv_id
+    # 3 total chunks, 1 outstanding -> 2 sent.
+    assert model.data(model.index(0, 1), ROLE_TRANSFER_PIECES) == 2
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Uploading"
+
+
+@pytest.mark.asyncio
+async def test_seed_from_db_skips_completed_upload():
+    """A substream with no remaining C/F PWALs has finished uploading (the
+    gated I-chunk is now dispatchable), so it gets no Transfers row; the chat
+    bubble still shows pending until the I-chunk is ACK'd."""
+    await _make_conversation_with_upload(remaining_chunks=0, total_chunks=3)
+    model = DownloadsModel()
+    model.seed_from_db()
+    assert model.rowCount() == 0
+
+
+@pytest.mark.asyncio
+async def test_seed_from_db_marks_a_paused_upload_paused():
+    await _make_conversation_with_upload(
+        remaining_chunks=2, total_chunks=3, paused=True,
+    )
+    model = DownloadsModel()
+    model.seed_from_db()
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_DIRECTION) == "upload"
+    assert model.data(model.index(0, 0), ROLE_TRANSFER_ACTIVE) is False
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Paused"
+
+class _Clock:
+    """Stand-in for the ``time`` module so rate tests control the clock."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = start
+
+    def monotonic(self) -> float:
+        return self.t
+
+
+def _rate(model: DownloadsModel) -> object:
+    return model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole)
+
+
+def test_rate_is_a_placeholder_before_one_second(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(qt_models, "time", clock)
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=10)
+    assert _rate(model) == "—"
+    clock.t += 0.5
+    model.notify_piece(rcw_id, 1, raw_bytes=100)
+    assert _rate(model) == "—"
+
+
+def test_rate_reports_average_bytes_since_start(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(qt_models, "time", clock)
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=10)
+    clock.t += 2.0
+    model.notify_piece(rcw_id, 4, raw_bytes=4096)
+    assert _rate(model) == "2.0 KiB/s"
+
+
+def test_rate_is_zero_while_paused_and_resets_on_unpause(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(qt_models, "time", clock)
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=10)
+    clock.t += 2.0
+    model.notify_piece(rcw_id, 4, raw_bytes=4096)
+    assert _rate(model) == "2.0 KiB/s"
+
+    model.set_paused(rcw_id, paused=True)
+    assert _rate(model) == "0 B/s"
+
+    # A long pause must not count toward the next average.
+    clock.t += 100.0
+    model.set_paused(rcw_id, paused=False)
+    assert _rate(model) == "—"  # interval reset; no time elapsed yet
+    clock.t += 2.0
+    model.notify_piece(rcw_id, 6, raw_bytes=8192)
+    assert _rate(model) == "2.0 KiB/s"  # (8192-4096)/2
+
+
+def test_upload_rate_counts_sent_bytes_from_the_remaining_total(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(qt_models, "time", clock)
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(
+        rcw_id, conversation_id=7, parent_name="bob", total=10,
+        direction="upload", raw_bytes=10000,
+    )
+    clock.t += 2.0
+    model.notify_piece(rcw_id, 4, raw_bytes=6000)  # 4000 sent
+    assert _rate(model) == "2.0 KiB/s"  # 2000 B/s
+
+
+def test_failed_transfer_rate_is_zero(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(qt_models, "time", clock)
+    model = DownloadsModel()
+    rcw_id = uuid.uuid4()
+    model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=10)
+    clock.t += 2.0
+    model.notify_piece(rcw_id, 4, raw_bytes=4096)
+    model.fail_transfer(rcw_id, "boom")
+    assert _rate(model) == "0 B/s"
+
+
+@pytest.mark.asyncio
+async def test_seed_from_db_upload_rate_starts_at_zero(monkeypatch):
+    """Seeding sets the rate baseline to the bytes still on disk, so a resumed
+    transfer's rate counts only bytes sent after the relaunch."""
+    clock = _Clock()
+    monkeypatch.setattr(qt_models, "time", clock)
+    await _make_conversation_with_upload(remaining_chunks=2, total_chunks=3)
+    model = DownloadsModel()
+    model.seed_from_db()
+    assert model.rowCount() == 1
+    clock.t += 2.0
+    # No chunk ACK'd since seed, so no bytes transferred in the interval.
+    assert model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole) == "0 B/s"

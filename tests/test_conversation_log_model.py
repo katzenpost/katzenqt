@@ -144,7 +144,7 @@ def test_seed_then_append_inserts_exactly_the_new_row() -> None:
     for order in range(4):
         _append_row(convo_id, order)
     model = ConversationLogModel(convo_id=convo_id)
-    model.set_row_count(4)  # startup seed, no transition
+    model.set_row_count()  # startup seed, no transition
 
     grown: "list[tuple[int, int]]" = []
     model.rowsInserted.connect(lambda _p, first, last: grown.append((first, last)))
@@ -175,3 +175,115 @@ def test_equal_count_emits_no_insert_or_reset() -> None:
     assert inserts == []
     assert resets == []
     assert changed == [True]
+
+
+def _append_row_with_id(convo_id: int, order: int) -> uuid.UUID:
+    mid = uuid.uuid4()
+    with persistent.Session(persistent._engine_sync) as sess:
+        sess.add(persistent.ConversationLog(
+            id=mid, conversation_id=convo_id, conversation_peer_id=1,
+            conversation_order=order,
+            payload=b"F" + cbor2.dumps({"v": 0, "text": "x"}),
+        ))
+        sess.commit()
+    return mid
+
+
+def test_rows_after_a_middle_deletion_stay_addressable() -> None:
+    """A deleted (cancelled) message leaves a gap in conversation_order; the
+    model enumerates the actual orders, so the rows after the gap still map to
+    their own messages instead of shifting onto the deleted row's order."""
+    convo_id = 1239
+    ids = [_append_row_with_id(convo_id, order) for order in range(4)]
+    model = ConversationLogModel(convo_id=convo_id)
+    model.refresh_row_count()
+    assert model.rowCount(None) == 4
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.exec(
+            persistent.select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == convo_id,
+                persistent.ConversationLog.conversation_order == 1,
+            )
+        ).one()
+        sess.delete(row)
+        sess.commit()
+
+    model.refresh_row_count()
+    assert model.rowCount(None) == 3
+    got = [
+        model.data(model.index(r, 0, None), ROLE_CHAT_MESSAGE_ID)
+        for r in range(3)
+    ]
+    assert got == [str(ids[0]), str(ids[2]), str(ids[3])]
+
+
+def test_next_order_after_a_middle_delete_is_max_plus_one() -> None:
+    """Appending after a middle deletion must use MAX(order)+1, not COUNT(*),
+    or the new row would reuse a surviving order and trip the unique
+    constraint."""
+    convo_id = 1240
+    for order in range(3):
+        _append_row(convo_id, order)
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.exec(
+            persistent.select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == convo_id,
+                persistent.ConversationLog.conversation_order == 1,
+            )
+        ).one()
+        sess.delete(row)
+        sess.commit()
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        sess.add(persistent.ConversationLog(
+            conversation_id=convo_id, conversation_peer_id=1,
+            conversation_order=persistent.next_conversation_order(convo_id),
+            payload=b"F" + cbor2.dumps({"v": 0, "text": "new"}),
+        ))
+        sess.commit()  # must not raise IntegrityError
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        orders = sorted(sess.exec(
+            persistent.select(persistent.ConversationLog.conversation_order)
+            .where(persistent.ConversationLog.conversation_id == convo_id)
+        ))
+    assert orders == [0, 2, 3]
+
+
+def test_order_row_mapping_tolerates_gaps() -> None:
+    """first_unread is stored as a conversation_order, so the model maps it to
+    a row; a gap must not shift the mapped row."""
+    convo_id = 1241
+    for order in (0, 2, 5):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+    model.refresh_row_count()
+
+    assert [model.order_for_row(r) for r in range(3)] == [0, 2, 5]
+    assert model.order_for_row(3) == 6  # past the end: all rows read
+    assert [model.row_for_order(o) for o in (0, 2, 5)] == [0, 1, 2]
+    assert model.row_for_order(3) == 2  # a gap maps to the next row
+    assert model.row_for_order(99) == 3
+
+
+def test_refresh_row_count_reports_a_reset_on_deletion() -> None:
+    """Callers skip adopting QML's row marker when the rows shifted."""
+    convo_id = 1242
+    for order in range(3):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+    assert model.refresh_row_count() is False
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.exec(
+            persistent.select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == convo_id,
+                persistent.ConversationLog.conversation_order == 1,
+            )
+        ).one()
+        sess.delete(row)
+        sess.commit()
+
+    assert model.refresh_row_count() is True

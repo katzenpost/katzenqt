@@ -7,6 +7,7 @@ from PySide6.QtQuick import QQuickImageProvider
 
 from pydantic import BaseModel, Field
 from sqlmodel import select
+import time
 import uuid
 from typing import Any, NamedTuple
 
@@ -15,6 +16,7 @@ import cbor2
 from . import attachment_images, persistent
 
 import functools
+from bisect import bisect_left
 from functools import lru_cache
 
 # should probably look into paginating some SQL here so we don't do one query per line
@@ -69,6 +71,8 @@ ROLE_TRANSFER_TOTAL = 0x204
 ROLE_TRANSFER_ACTIVE = 0x205  # True = downloading, False = paused
 ROLE_TRANSFER_FAILED = 0x206  # True = failed, False/missing = active or paused
 ROLE_TRANSFER_FAILURE_REASON = 0x207  # reason string for failed transfers
+ROLE_TRANSFER_DIRECTION = 0x208  # "upload" or "download"
+ROLE_TRANSFER_RATE = 0x209  # bytes/sec over active transfer time
 
 _TRANSFER_ROLES = {
     ROLE_TRANSFER_RCW_ID: QByteArray(b"transfer_rcw_id"),
@@ -79,7 +83,21 @@ _TRANSFER_ROLES = {
     ROLE_TRANSFER_ACTIVE: QByteArray(b"transfer_active"),
     ROLE_TRANSFER_FAILED: QByteArray(b"transfer_failed"),
     ROLE_TRANSFER_FAILURE_REASON: QByteArray(b"transfer_failure_reason"),
+    ROLE_TRANSFER_DIRECTION: QByteArray(b"transfer_direction"),
+    ROLE_TRANSFER_RATE: QByteArray(b"transfer_rate"),
 }
+
+
+def format_rate(bytes_per_second: float) -> str:
+    """Human-readable transfer rate, e.g. ``1.2 MiB/s``."""
+    value = max(bytes_per_second, 0.0)
+    for unit in ("B/s", "KiB/s", "MiB/s"):
+        if value < 1024:
+            if unit == "B/s":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB/s"
 
 
 class DownloadsModel(QtCore.QAbstractTableModel):
@@ -87,10 +105,12 @@ class DownloadsModel(QtCore.QAbstractTableModel):
 
     Backs the Transfers QTableView. Columns: Contact, Progress, State, with
     the substream's ReadCapWAL id carried as ROLE_TRANSFER_RCW_ID for the
-    Pause/Resume/Remove actions. Rows are added/updated by MainWindow's
-    transfers_listener (network.substream_progress_queue) and seeded from
-    the database at startup by seed_from_db(). Failed transfers stay visible
-    until dismissed by the user.
+    Pause/Resume/Cancel actions, and ROLE_TRANSFER_DIRECTION distinguishing an
+    upload ("upload", keyed by the indirection ReadCapWAL) from a download
+    ("download", keyed by the substream ReadCapWAL). Rows are added/updated by
+    MainWindow's transfers_listener (network.substream_progress_queue) and
+    seeded from the database at startup by seed_from_db(). Failed transfers
+    stay visible until dismissed by the user.
     """
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -107,14 +127,14 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         return len(self._order)
 
     def columnCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:  # type: ignore[override]
-        return 3
+        return 4
 
     def headerData(self, section: int, orientation: "QtCore.Qt.Orientation", role: int = 0) -> object:  # type: ignore[override]
         if role != QtCore.Qt.ItemDataRole.DisplayRole:
             return None
         if orientation != QtCore.Qt.Orientation.Horizontal:
             return None
-        return ("Contact", "Progress", "State")[section]
+        return ("Contact", "Progress", "State", "Rate")[section]
 
     def data(self, index: "QtCore.QModelIndex", role: int = 0) -> object:  # type: ignore[override]
         if not index.isValid() or not (0 <= index.row() < len(self._order)):
@@ -133,7 +153,11 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             if index.column() == 2:
                 if row.get("failed", False):
                     return f"Failed: {row.get('failure_reason', 'unknown')}"
-                return "Paused" if not row.get("active", True) else "Downloading"
+                if not row.get("active", True):
+                    return "Paused"
+                return "Uploading" if row.get("direction") == "upload" else "Downloading"
+            if index.column() == 3:
+                return self._rate_text(row)
             return None
         if role == ROLE_TRANSFER_RCW_ID:
             return str(rcw_id)
@@ -151,11 +175,36 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             return row.get("failed", False)
         if role == ROLE_TRANSFER_FAILURE_REASON:
             return row.get("failure_reason")
+        if role == ROLE_TRANSFER_DIRECTION:
+            return row.get("direction", "download")
+        if role == ROLE_TRANSFER_RATE:
+            return self._rate_text(row)
         return None
+
+    def _rate_text(self, row: dict) -> str:
+        """Average effective-payload rate over the row's active transfer time.
+
+        Paused or failed rows show zero. The baseline is reset when the row
+        first appears and again on each unpause, so the rate is "since the
+        transfer (re)started", not since the row was created.
+        """
+        if row.get("failed", False) or not row.get("active", True):
+            return "0 B/s"
+        elapsed = time.monotonic() - float(row.get("rate_started_at", 0.0))
+        if elapsed < 1.0:
+            return "—"
+        raw = int(row.get("raw_bytes", 0))
+        base = int(row.get("rate_base", 0))
+        if row.get("direction") == "upload":
+            transferred = base - raw
+        else:
+            transferred = raw - base
+        return format_rate(max(transferred, 0) / elapsed)
 
     # -- mutations (Qt-listener thread) ------------------------------------
 
-    def start_transfer(self, rcw_id: uuid.UUID, conversation_id, parent_name, total) -> None:
+    def start_transfer(self, rcw_id: uuid.UUID, conversation_id, parent_name, total,
+                       direction: str = "download", raw_bytes: int = 0) -> None:
         if rcw_id in self._rows:
             # Already tracked; refresh the denominator if it became known.
             if total is not None:
@@ -171,17 +220,32 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             "pieces": 0,
             "total": total,
             "active": True,
+            "direction": direction,
+            # Rate state: raw_bytes is the latest absolute metric (bytes
+            # received for a download, bytes still to send for an upload);
+            # rate_base is the value the current rate interval started from.
+            "raw_bytes": int(raw_bytes),
+            "rate_base": int(raw_bytes),
+            "rate_started_at": time.monotonic(),
         }
         self._order.append(rcw_id)
         self.endInsertRows()
 
-    def notify_piece(self, rcw_id: uuid.UUID, pieces) -> None:
+    def notify_piece(self, rcw_id: uuid.UUID, pieces, raw_bytes=None) -> None:
         if rcw_id not in self._rows:
             return
         self._rows[rcw_id]["pieces"] = pieces
+        if raw_bytes is not None:
+            self._rows[rcw_id]["raw_bytes"] = int(raw_bytes)
         row = self._idx(rcw_id)
+        # Progress and Rate both derive from the new piece, so repaint both.
         idx0 = self.index(row, 1)
-        self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_PIECES])
+        idx1 = self.index(row, 3)
+        self.dataChanged.emit(
+            idx0, idx1,
+            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_PIECES,
+             ROLE_TRANSFER_RATE],
+        )
 
     def complete_transfer(self, rcw_id: uuid.UUID) -> None:
         if rcw_id not in self._rows:
@@ -196,9 +260,28 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         if rcw_id not in self._rows:
             return
         self._rows[rcw_id]["active"] = not paused
+        if not paused:
+            # Unpause resets the rate interval: the next rate is measured from
+            # the byte count at resume, not since the transfer first appeared.
+            self._rows[rcw_id]["rate_base"] = int(
+                self._rows[rcw_id].get("raw_bytes", 0)
+            )
+            self._rows[rcw_id]["rate_started_at"] = time.monotonic()
+            self._rows[rcw_id]["failed"] = False
+            self._rows[rcw_id].pop("failure_reason", None)
         row = self._idx(rcw_id)
         idx0 = self.index(row, 2)
-        self.dataChanged.emit(idx0, idx0, [ROLE_TRANSFER_ACTIVE])
+        idx1 = self.index(row, 3)
+        self.dataChanged.emit(
+            idx0, idx1,
+            [
+                QtCore.Qt.ItemDataRole.DisplayRole,
+                ROLE_TRANSFER_ACTIVE,
+                ROLE_TRANSFER_FAILED,
+                ROLE_TRANSFER_FAILURE_REASON,
+                ROLE_TRANSFER_RATE,
+            ],
+        )
 
     def fail_transfer(self, rcw_id: uuid.UUID, reason: str) -> None:
         """Mark a transfer as failed with a reason string.
@@ -206,8 +289,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         The row stays visible in the Transfers panel so the user can see
         what failed and why. Use remove_transfer() to dismiss it.
 
-        TODO: When removing a failed transfer, also purge any partial
-        ReceivedPiece rows from the database to free disk space.
+        The caller removes persisted transfer state before dismissing it.
         """
         if rcw_id not in self._rows:
             return
@@ -216,7 +298,17 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         self._rows[rcw_id]["active"] = False  # no longer downloading
         row = self._idx(rcw_id)
         idx2 = self.index(row, 2)  # State column
-        self.dataChanged.emit(idx2, idx2, [ROLE_TRANSFER_FAILED, ROLE_TRANSFER_FAILURE_REASON])
+        idx3 = self.index(row, 3)  # Rate column (forced to 0 B/s)
+        self.dataChanged.emit(
+            idx2, idx3,
+            [
+                QtCore.Qt.ItemDataRole.DisplayRole,
+                ROLE_TRANSFER_ACTIVE,
+                ROLE_TRANSFER_FAILED,
+                ROLE_TRANSFER_FAILURE_REASON,
+                ROLE_TRANSFER_RATE,
+            ],
+        )
 
     def remove_transfer(self, rcw_id: uuid.UUID) -> None:
         """Remove a transfer row from the model (user-dismissal of failed/complete)."""
@@ -236,10 +328,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
     def seed_from_db(self) -> None:
         """Populate rows for resumable substream transfers already on disk.
 
-        A substream is resumable when its peer is still active (currently
-        reading) *or* it has ReceivedPiece rows (paused mid-transfer). The
-        Transfers panel is where substream transfers are paused/resumed, so
-        this seeding keeps the panel populated across a GUI restart.
+        A substream is resumable when its peer is active, paused, failed, or
+        has ReceivedPiece rows. The Transfers panel keeps those transfers
+        visible across a GUI restart.
 
         Sync engine: this runs on the Qt loop and builds Qt model rows, so it
         neither opens the async engine (see persistent.warm_async_engine) nor
@@ -257,22 +348,98 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 rcw = sess.get(persistent.ReadCapWAL, cp.read_cap_id)
                 if rcw is None:
                     continue
-                recv_count = sess.exec(
-                    select(persistent.sa.func.count()).select_from(persistent.ReceivedPiece)
+                recv_count, recv_bytes = sess.exec(
+                    select(
+                        persistent.sa.func.count(),
+                        persistent.sa.func.coalesce(
+                            persistent.sa.func.sum(
+                                persistent.sa.func.length(
+                                    persistent.ReceivedPiece.chunk,
+                                ),
+                            ),
+                            0,
+                        ),
+                    ).select_from(persistent.ReceivedPiece)
                     .where(persistent.ReceivedPiece.read_cap == rcw.id)
                 ).one()
                 parent = _substream_parent_name(sess, cp)
-                # Resumable = active, or received something but not yet
-                # assembled to the terminal F (still has pieces outstanding).
-                if cp.active or int(recv_count):
+                # Resumable = active, paused, failed, or received something
+                # but not yet assembled to the terminal F.
+                if (cp.active or rcw.paused or rcw.substream_failure
+                        or int(recv_count)):
+                    # Rate counts from the on-disk byte count at seed, so a
+                    # transfer resumed across a relaunch starts at zero.
                     self.start_transfer(
                         rcw.id, cp.conversation.id, parent,
-                        rcw.substream_total_chunks,
+                        rcw.substream_total_chunks, raw_bytes=int(recv_bytes),
                     )
                     if int(recv_count):
-                        self.notify_piece(rcw.id, int(recv_count))
-                    if not cp.active:
+                        self.notify_piece(
+                            rcw.id, int(recv_count), int(recv_bytes),
+                        )
+                    if rcw.paused or not cp.active:
                         self.set_paused(rcw.id, paused=True)
+                    if rcw.substream_failure is not None:
+                        self.fail_transfer(rcw.id, rcw.substream_failure)
+
+            self._seed_uploads(sess)
+
+    def _seed_uploads(self, sess) -> None:
+        """Seed Transfers rows for outbound substreams still in flight.
+
+        An in-flight upload is a gated I-chunk: a PlaintextWAL with a non-null
+        ``indirection`` whose target ReadCapWAL carries the chunk total. It has
+        no ConversationPeer row, so it is seeded separately. A substream with
+        no remaining C/F PWALs has already finished (the I-chunk is now
+        dispatchable), so it gets no row; the chat bubble covers the wait for
+        the I-chunk's own ACK.
+        """
+        i_chunks = sess.exec(
+            select(persistent.PlaintextWAL).where(
+                persistent.PlaintextWAL.indirection != None,  # noqa: E711
+            )
+        ).all()
+        for i_chunk in i_chunks:
+            rcw = sess.get(persistent.ReadCapWAL, i_chunk.indirection)
+            if rcw is None or rcw.write_cap_id is None:
+                continue
+            remaining, remaining_bytes = sess.exec(
+                select(
+                    persistent.sa.func.count(),
+                    persistent.sa.func.coalesce(
+                        persistent.sa.func.sum(
+                            persistent.sa.func.length(
+                                persistent.PlaintextWAL.bacap_payload,
+                            ) - 1,
+                        ),
+                        0,
+                    ),
+                ).select_from(persistent.PlaintextWAL)
+                .where(persistent.PlaintextWAL.bacap_stream == rcw.write_cap_id)
+            ).one()
+            remaining = int(remaining)
+            remaining_bytes = int(remaining_bytes)
+            if remaining <= 0:
+                continue
+            conv = sess.get(persistent.Conversation, i_chunk.conversation_id)
+            total = rcw.substream_total_chunks
+            basename = _upload_basename_for_agg(sess, rcw.id)
+            label = (
+                f"{basename} (in {conv.name})"
+                if basename and conv is not None
+                else (conv.name if conv is not None else "")
+            )
+            # Rate counts from the bytes still outstanding at seed, so a
+            # transfer resumed across a relaunch starts at zero.
+            self.start_transfer(
+                rcw.id, i_chunk.conversation_id, label,
+                total, direction="upload", raw_bytes=remaining_bytes,
+            )
+            if total is not None:
+                self.notify_piece(rcw.id, total - remaining, remaining_bytes)
+            agg_wcw = sess.get(persistent.WriteCapWAL, rcw.write_cap_id)
+            if agg_wcw is not None and agg_wcw.paused:
+                self.set_paused(rcw.id, paused=True)
 
 
 def _substream_parent_name(sess, cp) -> str:
@@ -290,6 +457,226 @@ def _substream_parent_name(sess, cp) -> str:
     # synthetic and must never surface.
     conv = sess.get(persistent.Conversation, cp.conversation.id)
     return conv.name if conv is not None else cp.name
+
+
+PACKET_COLUMNS = (
+    "Sent", "Dir", "Kind", "Stream", "Pos", "Status", "Retry", "In flight",
+    "Timeout in",
+)
+
+_PACKET_STATUS_LABELS = {
+    "in_flight": "In flight",
+    "payload": "Payload",
+    "empty": "Empty",
+    "boxnotfound": "Box not found",
+    "acked": "ACKed",
+    "timed_out": "Timed out",
+    "link_down": "Link down",
+    "cancelled": "Cancelled",
+    "error": "Error",
+}
+
+
+class PacketsModel(QtCore.QAbstractTableModel):
+    """Table of per-packet records from ``network.packets_snapshot()``.
+
+    Stream labels and substream totals are resolved lazily from the sync
+    engine and cached per stream id. The Packets dialog drives ``refresh()`` on
+    a timer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: "list[dict]" = []
+        self._ids: "list[str]" = []
+        self._stream_info: "dict[object, tuple[str, int | None]]" = {}
+
+    def rowCount(self, parent=None) -> int:  # type: ignore[override]
+        if parent is not None and parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent=None) -> int:  # type: ignore[override]
+        return len(PACKET_COLUMNS)
+
+    def headerData(self, section, orientation, role=0):  # type: ignore[override]
+        if (role == QtCore.Qt.ItemDataRole.DisplayRole
+                and orientation == QtCore.Qt.Orientation.Horizontal):
+            return PACKET_COLUMNS[section]
+        return None
+
+    def data(self, index, role=0):  # type: ignore[override]
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        if role not in (QtCore.Qt.ItemDataRole.DisplayRole,
+                        QtCore.Qt.ItemDataRole.EditRole):
+            return None
+        return self._cell(self._rows[index.row()], index.column())
+
+    def refresh(self) -> None:
+        from . import network
+        snapshot = network.packets_snapshot()
+        in_flight = network.PACKET_STATUS_IN_FLIGHT
+        # In-flight first (oldest first, nearest to timeout), then finished
+        # newest first.
+        snapshot.sort(key=lambda r: (
+            r["status"] != in_flight,
+            r["sent_at"] if r["status"] == in_flight
+            else -(r["finished_at"] or 0.0),
+        ))
+        new_ids = [r["id"] for r in snapshot]
+        self._rows = snapshot
+        if new_ids != self._ids:
+            self._ids = new_ids
+            self.beginResetModel()
+            self.endResetModel()
+        elif self._rows:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._rows) - 1, len(PACKET_COLUMNS) - 1),
+            )
+
+    def _cell(self, row, column):
+        from . import network
+        if column == 0:
+            return time.strftime("%H:%M:%S", time.localtime(row["sent_wall"]))
+        if column == 1:
+            return "Read" if row["kind"].endswith("_read") else "Write"
+        if column == 2:
+            return row["kind"].replace("_", " ")
+        if column == 3:
+            return self._stream_info_for(row)[0]
+        if column == 4:
+            position = row["box_position"]
+            if position is None:
+                position = row["box_index"]
+            if position is None:
+                return "—"
+            total = self._stream_info_for(row)[1]
+            if total:
+                return f"{position}/{total}"
+            return str(position)
+        if column == 5:
+            return _PACKET_STATUS_LABELS.get(row["status"], row["status"])
+        if column == 6:
+            return str(max(int(row.get("attempt", 1)) - 1, 0))
+        if column == 7:
+            end = row["finished_at"]
+            if end is None:
+                end = time.monotonic()
+            return network.format_duration(end - row["sent_at"])
+        if column == 8:
+            if row["finished_at"] is not None or row["timeout_s"] is None:
+                return "—"
+            remaining = row["sent_at"] + row["timeout_s"] - time.monotonic()
+            if remaining <= 0:
+                return "overdue"
+            return network.format_duration(remaining)
+        return None
+
+    def _stream_info_for(self, row) -> "tuple[str, int | None]":
+        kind = row["kind"]
+        if kind.startswith("voucher"):
+            return (row.get("stage") or "voucher", None)
+        stream_id = row["stream_id"]
+        if stream_id is None:
+            return ("—", None)
+        info = self._stream_info.get(stream_id)
+        if info is None:
+            info = self._query_stream_info(stream_id)
+            self._stream_info[stream_id] = info
+        label, total = info
+        # A label captured at send time survives the I-chunk's deletion, which
+        # breaks the DB link once the upload has been ACK'd.
+        if row.get("label"):
+            label = row["label"]
+        return (label, total)
+
+    def _query_stream_info(self, stream_id) -> "tuple[str, int | None]":
+        """(label, substream_total_chunks) for a stream id.
+
+        The total is set only for file-transfer substreams, on the substream's
+        own ReadCapWAL (a read) or its indirection ReadCapWAL (an agg write).
+        """
+        from .network import _SUBSTREAM_NAME_PREFIX, _substream_parent_id
+        with persistent.Session(persistent._engine_sync) as sess:
+            cp = sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == stream_id,
+                )
+            ).first()
+            if cp is not None:
+                if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+                    rcw = sess.get(persistent.ReadCapWAL, stream_id)
+                    total = rcw.substream_total_chunks if rcw is not None else None
+                    parent_id = _substream_parent_id(cp.name)
+                    parent = (
+                        sess.get(persistent.ConversationPeer, parent_id)
+                        if parent_id is not None else None
+                    )
+                    if parent is not None:
+                        return (f"substream of {parent.name}", total)
+                    return ("substream", total)
+                return (cp.name, None)
+            conv = sess.exec(
+                select(persistent.Conversation).where(
+                    persistent.Conversation.write_cap == stream_id,
+                )
+            ).first()
+            if conv is not None:
+                own = (
+                    sess.get(persistent.ConversationPeer, conv.own_peer_id)
+                    if conv.own_peer_id is not None else None
+                )
+                return (f"{own.name if own is not None else 'you'} in {conv.name}", None)
+            rcw = sess.exec(
+                select(persistent.ReadCapWAL).where(
+                    persistent.ReadCapWAL.write_cap_id == stream_id,
+                )
+            ).first()
+            if rcw is not None:
+                total = rcw.substream_total_chunks
+                pwal = sess.exec(
+                    select(persistent.PlaintextWAL).where(
+                        persistent.PlaintextWAL.bacap_stream == stream_id,
+                    )
+                ).first()
+                if pwal is not None:
+                    conv = sess.get(
+                        persistent.Conversation, pwal.conversation_id,
+                    )
+                    if conv is not None:
+                        basename = _upload_basename_for_agg(sess, rcw.id)
+                        if basename:
+                            return (f"{basename} (in {conv.name})", total)
+                        return (f"substream of {conv.name}", total)
+                return ("substream", total)
+        return (str(stream_id)[:8], None)
+
+
+def _upload_basename_for_agg(sess, rcw_id) -> "str | None":
+    """The filename of an outbound substream, from its ConversationLog marker.
+
+    Resolvable only while the upload is in progress: the agg stream links to
+    the log row through the I-chunk (``PlaintextWAL.indirection`` ->
+    ``ConversationLog.outgoing_pwal``), and the I-chunk is deleted once ACK'd.
+    """
+    i_chunk = sess.exec(
+        select(persistent.PlaintextWAL).where(
+            persistent.PlaintextWAL.indirection == rcw_id,
+        )
+    ).first()
+    if i_chunk is None:
+        return None
+    convlog = sess.exec(
+        select(persistent.ConversationLog).where(
+            persistent.ConversationLog.outgoing_pwal == i_chunk.id,
+        )
+    ).first()
+    if convlog is None:
+        return None
+    info = _decode_group_chat_payload(convlog.payload)
+    return info.basename if info.kind == "outgoing" else None
 
 
 class AttachmentDisplay(NamedTuple):
@@ -556,14 +943,13 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
-        # The row count is cached and re-read from the database by
-        # refresh_row_count() (called on a conversation-update notification).
-        # Deriving it from the log, rather than incrementing a counter at each
-        # writer, means a writer that forgets to notify cannot desync the view
-        # permanently: the next notification re-reads the truth. ``_row_count``
-        # is the DB truth (what rowCount() returns); ``_view_count`` is how many
-        # rows Qt has actually been told about, which drives insert/reset
-        # transitions.
+        # Cached conversation_order values, ascending, re-read by
+        # refresh_row_count(). Row ``r`` renders the log row with
+        # ``conversation_order == _orders[r]``, which tolerates gaps left by a
+        # deleted (cancelled) message. ``_row_count`` is what rowCount()
+        # returns; ``_view_count`` is how many rows Qt has been told about,
+        # which drives insert/reset transitions.
+        self._orders: list[int] = []
         self._row_count = 0
         self._view_count = 0
 
@@ -617,57 +1003,86 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             return self._row_count
         return 0
 
-    def _query_row_count(self) -> int:
+    def _query_orders(self) -> list[int]:
+        """The conversation's conversation_order values, ascending.
+
+        Enumerating the actual orders (rather than assuming
+        ``index_row == conversation_order``) keeps rows addressable after a
+        deletion leaves a gap."""
         with persistent.Session(persistent._engine_sync) as sess:
-            return int(sess.exec(
-                select(persistent.sa.func.count())
-                .select_from(persistent.ConversationLog)
+            return list(sess.exec(
+                select(persistent.ConversationLog.conversation_order)
                 .where(
                     persistent.ConversationLog.conversation_id == self.convo_id
                 )
-            ).one())
+                .order_by(persistent.ConversationLog.conversation_order)
+            ))
 
-    def set_row_count(self, count: int) -> None:
-        """Seed the cached count without emitting signals (startup, when the
-        view has no rows yet). Both the DB-truth count and the count Qt has
-        been told about start equal, so the first later insert uses a range the
-        view can accept."""
-        self._row_count = int(count)
-        self._view_count = int(count)
+    def order_for_row(self, row: int) -> int:
+        """The conversation_order at ``row``; a row past the end maps to the
+        order after the last row."""
+        if not self._orders:
+            return 0
+        if row <= 0:
+            return self._orders[0]
+        if row >= len(self._orders):
+            return self._orders[-1] + 1
+        return self._orders[row]
+
+    def row_for_order(self, order: int) -> int:
+        """The row holding ``order``, or where it would be inserted."""
+        return bisect_left(self._orders, order)
+
+    def set_row_count(self) -> None:
+        """Seed the cached orders without emitting signals (startup, when the
+        view has no rows yet). The row count and the count Qt has been told
+        about start equal, so the first later insert uses a range the view can
+        accept."""
+        self._orders = self._query_orders()
+        self._row_count = len(self._orders)
+        self._view_count = len(self._orders)
         self._clear_data_caches()
 
-    def refresh_row_count(self) -> None:
-        """Re-read the log's row count and reconcile the view.
+    def refresh_row_count(self) -> bool:
+        """Re-read the log's orders and reconcile the view.
 
-        Transitions are driven by ``_view_count`` (rows Qt has actually been
-        told about), never by the raw DB count: seeding the count at startup
-        without an insert means the view's bookkeeping can lag the model's, and
-        emitting a range computed from the DB count then crashes the view.
-        Growth inserts the missing tail, a shrink resets the model, and no
-        change repaints in place. Because the count comes from the log, a
-        writer that appends a row without notifying this model self-heals on
-        the next notification instead of desyncing the view permanently.
+        Returns True when the row set reset (a deletion left a gap, or a
+        reorder), False otherwise. Transitions are driven by ``_view_count``
+        (rows Qt has actually been told about), never by the raw DB count, so
+        emitting a range computed from the DB count cannot crash the view.
+        Growth whose existing prefix is unchanged inserts the missing tail;
+        any other change resets the model, because a shifted index invalidates
+        cached cells.
         """
-        new_count = self._query_row_count()
-        if new_count > self._view_count:
+        new_orders = self._query_orders()
+        if new_orders == self._orders:
+            # No change: repaint in place (no transition).
+            self.redraw_network_status()
+            return False
+        new_count = len(new_orders)
+        prefix_unchanged = (
+            new_count > self._view_count
+            and new_orders[:self._view_count] == self._orders[:self._view_count]
+        )
+        if prefix_unchanged:
+            first = self._view_count
             qmi = QModelIndex()
-            self.beginInsertRows(qmi, self._view_count, new_count - 1)
+            self.beginInsertRows(qmi, first, new_count - 1)
+            self._orders = new_orders
             self._row_count = new_count
             self._view_count = new_count
             self.endInsertRows()
-            return
-        if new_count < self._view_count:
-            # Shrink: rows were removed. Reset rather than compute a delta, so
-            # any shifted indices and stale cached cells are dropped wholesale.
-            # Clear the caches before the transition, not between begin/end.
-            self._clear_data_caches()
-            self.beginResetModel()
-            self._row_count = new_count
-            self._view_count = new_count
-            self.endResetModel()
-            return
-        # Count unchanged: repaint in place (no transition).
-        self.redraw_network_status()
+            return False
+        # Shrink, gap, or reorder: reset rather than compute a delta, so any
+        # shifted indices and stale cached cells are dropped wholesale. Clear
+        # the caches before the transition, not between begin/end.
+        self._clear_data_caches()
+        self.beginResetModel()
+        self._orders = new_orders
+        self._row_count = new_count
+        self._view_count = new_count
+        self.endResetModel()
+        return True
 
     def redraw_network_status(self):
         """Repaint the network-status column without changing the row set."""
@@ -733,6 +1148,13 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         ):
             return None
         index_row : int = index.row()
+        # Render the log row whose conversation_order is at this position. The
+        # cached order list is authoritative after a refresh; before the first
+        # refresh (a bare createIndex in tests) fall back to identity.
+        order = (
+            self._orders[index_row]
+            if index_row < len(self._orders) else index_row
+        )
         #print("DATA: INDEX ROW IS", index_row, repr(index))
         # TODO we definitely want to paginate this stuff for performance reasons,
         # and when we do we want order by:
@@ -748,14 +1170,16 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         #     every conversation notification, making the view re-ask roles for
         #     every row. Narrow it to the row whose status actually changed (the
         #     ACK path) instead.
-        #   - refresh_row_count() runs one COUNT(*) per conversation event (not
-        #     per scroll/mouse); that cadence is fine, keep it tied to events.
+        #   - refresh_row_count() reads the conversation's full order list per
+        #     conversation event (not per scroll/mouse); that cadence is fine,
+        #     keep it tied to events. A tail-only query would be cheaper on the
+        #     common append path but cannot detect a middle deletion.
 
         with persistent.Session(persistent._engine_sync) as sess:
                 cl = sess.exec(
                     select(persistent.ConversationLog).where(
                         persistent.ConversationLog.conversation_id == self.convo_id,
-                        persistent.ConversationLog.conversation_order == index_row,
+                        persistent.ConversationLog.conversation_order == order,
                     )
                 ).first()
                 if cl is None:
@@ -883,10 +1307,9 @@ class ConversationUIState(BaseModel):
     attached_files : set[str] = Field(default_factory=set)
 
     first_unread : int = 0
-    # ConversationLog.conversation_order of the first message the user hasn't
-    # "read" yet. QML's marker walks visible rows and the timeline is exactly
-    # the conversation log (tally messages are ordinary rows), so this is both
-    # the row index and the order.
+    # ConversationLog.conversation_order of the first message the user has not
+    # "read" yet. The QML marker walks visible rows, so qml_ctx() translates
+    # this order to the current row.
 
     def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
         props = QQmlPropertyMap(rootObject)
@@ -894,14 +1317,16 @@ class ConversationUIState(BaseModel):
             **settings,
             "chatTreeViewModel": self.conversation_log_model,
             "conversation_scroll": self.chat_lines_scroll_idx,
-            "first_unread": self.first_unread,
+            "first_unread": self.conversation_log_model.row_for_order(
+                self.first_unread,
+            ),
             "chat_text_size": 11, # governs text size of chat messages
             "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
         })
         return props
 
     def mark_first_unread(self, new_first_unread:int) -> bool:
-        """Set the in-memory first_unread cursor; return True if it changed.
+        """Set the first_unread order; return True if it changed.
 
         The persistent write is kept single-writer on the io loop: callers
         follow up with network.persist_first_unread() only when this returns
@@ -911,3 +1336,10 @@ class ConversationUIState(BaseModel):
         print("UPDATED FIRST_UNREAD", self.first_unread, new_first_unread)
         self.first_unread = new_first_unread
         return True
+
+    def adopt_first_unread_row(self, row: int) -> "int | None":
+        """Adopt the QML marker's row as an order; the new order if it changed."""
+        order = self.conversation_log_model.order_for_row(row)
+        if self.mark_first_unread(order):
+            return order
+        return None

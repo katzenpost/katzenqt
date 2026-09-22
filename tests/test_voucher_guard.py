@@ -224,26 +224,24 @@ async def test_intro_announcement_emits_increment(monkeypatch):
 
 
 async def _append_log_row_async(conversation_id: int, tag: bytes) -> int:
-    """Append one ConversationLog row the way a GUI send does (order via a
-    count subquery at commit), inside the per-conversation writer lock.
-    Mirrors the Qt send loop contending with the io thread's receive/voucher
-    appends -- one event loop per OS thread, as in production."""
+    """Append one ConversationLog row the way a GUI send does (order via the
+    shared next_conversation_order subquery at commit), inside the
+    per-conversation writer lock. Mirrors the Qt send loop contending with the
+    io thread's receive/voucher appends -- one event loop per OS thread, as in
+    production."""
     with Session(persistent._engine_sync) as sess:
         async with persistent.conversation_log_order_lock(conversation_id):
-            order = sess.exec(
-                select(persistent.count())
-                .select_from(persistent.ConversationLog)
-                .where(persistent.ConversationLog.conversation_id == conversation_id)
-            ).first()
             conv = sess.get(persistent.Conversation, conversation_id)
-            sess.add(persistent.ConversationLog(
+            row = persistent.ConversationLog(
                 conversation_id=conversation_id,
                 conversation_peer_id=conv.own_peer_id,
-                conversation_order=order,
+                conversation_order=persistent.next_conversation_order(conversation_id),
                 payload=b"F" + tag,
-            ))
+            )
+            sess.add(row)
             sess.commit()
-            return order
+            sess.refresh(row)
+            return row.conversation_order
 
 
 @pytest.mark.asyncio
@@ -252,10 +250,10 @@ async def test_concurrent_append_orders_are_unique():
     appending to the same conversation must never stamp the same
     conversation_order.
 
-    conversation_order is a count() subquery evaluated by each transaction at
+    conversation_order is a max+1 subquery evaluated by each transaction at
     INSERT time, and GUI sends run on the Qt event loop while receive/voucher
     rows are appended on the io loop. Without the per-conversation writer lock
-    both transactions can read the same count and trip
+    both transactions can read the same max and trip
     UniqueConstraint(conversation_id, conversation_order), dropping a message
     (or failing an induction that already succeeded on the wire).
     """

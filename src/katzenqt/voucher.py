@@ -30,8 +30,11 @@ from sqlmodel import select
 from . import models, persistent
 from .katzen_util import create_task
 from .network import (
-    _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _rpc_racing_connection_life,
+    _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _box_position,
+    _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
     check_for_new, conversation_update_queue, ConnectionLifeInterruptedError,
+    PacketContext,
+    _delivery_racing_connection_life,
 )
 
 logger = logging.getLogger("katzen.voucher")
@@ -198,7 +201,15 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                 ),
                 backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
             )
-            await _rpc_racing_connection_life(
+            publish_context = PacketContext(
+                "voucher_write",
+                box_index=int.from_bytes(message_box_index[:8], "little"),
+                box_position=_box_position(
+                    int.from_bytes(message_box_index[:8], "little"), write_cap,
+                ),
+                timeout_s=READ_WATCHDOG_SECONDS,
+            )
+            await _delivery_racing_connection_life(
                 bacap_uuid=_brief(write_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
                     read_cap=None, write_cap=write_cap, message_box_index=None,
@@ -206,7 +217,9 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                     envelope_descriptor=wcr.envelope_descriptor,
                     message_ciphertext=wcr.message_ciphertext,
                     envelope_hash=wcr.envelope_hash,
+                    _packet_context=publish_context,
                 ),
+                packet_context=publish_context,
             )
             logger.debug(
                 "publish_box: wrote box %s on write_cap %s; next box index %s",
@@ -277,7 +290,16 @@ async def _read_box(
                 ),
                 backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
             )
-            resp = await _rpc_racing_connection_life(
+            read_context = PacketContext(
+                "voucher_read",
+                box_index=int.from_bytes(message_box_index[:8], "little"),
+                box_position=_box_position(
+                    int.from_bytes(message_box_index[:8], "little"), read_cap,
+                ),
+                timeout_s=READ_WATCHDOG_SECONDS,
+                stage=stage,
+            )
+            resp = await _delivery_racing_connection_life(
                 bacap_uuid=_brief(read_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
                     read_cap=read_cap, write_cap=None,
@@ -286,7 +308,9 @@ async def _read_box(
                     message_ciphertext=rcr.message_ciphertext,
                     envelope_hash=rcr.envelope_hash,
                     no_retry_on_box_id_not_found=True,
+                    _packet_context=read_context,
                 ),
+                packet_context=read_context,
             )
             logger.debug(
                 "%s: box %s on read_cap %s returned after %.1fs "
@@ -617,6 +641,7 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
         logger.error(
             "send_introduction_message: failed to write INTRODUCTION for "
             "%r in conversation %d: %s", display_name, conversation_id, e,
+            exc_info=True,
         )
         return
 
