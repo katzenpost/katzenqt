@@ -943,16 +943,12 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     def __init__(self, convo_id) -> None:
         super().__init__()
         self.convo_id = convo_id
-        # The ordered list of conversation_order values is cached and re-read
-        # from the database by refresh_row_count() (called on a
-        # conversation-update notification). Deriving it from the log, rather
-        # than incrementing a counter at each writer, means a writer that
-        # forgets to notify cannot desync the view permanently: the next
-        # notification re-reads the truth. Row ``r`` renders the log row with
+        # Cached conversation_order values, ascending, re-read by
+        # refresh_row_count(). Row ``r`` renders the log row with
         # ``conversation_order == _orders[r]``, which tolerates gaps left by a
-        # deleted (cancelled) message; ``_row_count`` is the DB truth (what
-        # rowCount() returns); ``_view_count`` is how many rows Qt has actually
-        # been told about, which drives insert/reset transitions.
+        # deleted (cancelled) message. ``_row_count`` is what rowCount()
+        # returns; ``_view_count`` is how many rows Qt has been told about,
+        # which drives insert/reset transitions.
         self._orders: list[int] = []
         self._row_count = 0
         self._view_count = 0

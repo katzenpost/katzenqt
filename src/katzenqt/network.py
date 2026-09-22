@@ -111,10 +111,6 @@ def stats_snapshot() -> "dict[str, int]":
     return {key: getattr(stats, key) for key, _ in STATS_FIELDS}
 
 
-# ---------------------------------------------------------------------------
-# Per-packet records (Packets window)
-# ---------------------------------------------------------------------------
-
 # How many finished packets the Packets window retains; the combo box offers
 # these values and defaults to the first non-zero one.
 PACKET_FINISHED_LIMIT_OPTIONS = (0, 5, 10, 100)
@@ -188,15 +184,13 @@ _packets: "dict[str, _PacketRecord]" = {}
 # configured retention limit. In-flight packets are always kept.
 _packet_finished_order: "list[str]" = []
 _packet_finished_limit = DEFAULT_PACKET_FINISHED_LIMIT
-# Send attempts per (stream, box) -- or (kind, box) for streamless vouchers --
-# so the Packets window can show how many times a box has been retried. Capped
-# FIFO, since a long session touches many distinct boxes.
+# Send attempts per (stream, box), or (kind, box) for streamless vouchers;
+# a capped FIFO.
 _packet_attempts: "dict[object, int]" = {}
 _packet_attempt_order: "list[object]" = []
 _PACKET_ATTEMPT_CAP = 8192
-# Records are written on the io loop and read/cleared from the Qt thread (the
-# Packets dialog), so every registry mutation takes this short lock; it is
-# never held across an await.
+# Guards every packet registry; written on the io loop, read from the Qt
+# thread, and never held across an await.
 _packets_lock = threading.Lock()
 
 
@@ -219,9 +213,8 @@ def _box_position(box_index, cap: "bytes | None") -> "int | None":
 
 
 # Upload labels (agg_bacap_stream -> "basename (in conversation)"), captured at
-# send time so a packet retained after the I-chunk is ACK'd (and its DB link
-# deleted) can still show the filename. Capped FIFO; a mid-upload restart is
-# covered by the Packets/Transfers DB fallback while the I-chunk still exists.
+# send time because the I-chunk row linking the stream to the log is deleted
+# once it is ACK'd. Capped FIFO.
 _upload_labels: "dict[object, str]" = {}
 _upload_label_order: "list[object]" = []
 _UPLOAD_LABEL_CAP = 4096
@@ -519,10 +512,8 @@ async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
     )
     await conversation_update_queue.put((conversation_id, False))
     if upload is not None:
-        # A substream file transfer is committed; the Transfers panel tracks
-        # it until the last C/F chunk is ACK'd (see drain_mixwal_write_single).
-        # Capture the filename label now: once the I-chunk is ACK'd its row is
-        # deleted and nothing links the agg stream to the log row.
+        # Capture the filename label now: the I-chunk row linking the agg
+        # stream to the log is deleted once it is ACK'd.
         basename = _file_marker_basename(payload)
         label = (
             f"{basename} (in {upload.parent_name})"
@@ -586,14 +577,9 @@ async def on_new_pki_document(event: "Dict[str, Any]") -> None:
     old_event.set()
 
 
-# ---------------------------------------------------------------------------
-# PKI consensus summary (Network consensus dialog)
-# ---------------------------------------------------------------------------
-
-# The katzenpost epoch origin (core/epochtime/time.go). Epoch numbers are
-# floor((now - origin) / Period), so the Period can be recovered from the
-# current epoch and the wall clock. Epoch numbers are in the millions, so
-# clock skew shifts the recovered Period by microseconds.
+# The katzenpost epoch origin (core/epochtime/time.go); epochs are
+# floor((now - origin) / Period), so Period is recovered from the current
+# epoch and the wall clock.
 KATZENPOST_EPOCH_ORIGIN = datetime(2017, 6, 1, tzinfo=timezone.utc)
 
 
@@ -786,10 +772,8 @@ async def start_background_threads(connection: ThinClient) -> None:
         for task in done:
             task.result()
         if stopping not in done:
-            # A worker returning while we are not shutting down is a bug, not
-            # a shutdown. Surfacing it here beats tearing the stack down
-            # silently: the caller owns the io loop, and in the GUI that loop
-            # stopping wedges every later run_in_io forever.
+            # A worker returned without a shutdown request; stopping the stack
+            # is fatal to the caller's io loop, so make it loud.
             logger.critical(
                 "network worker returned without a shutdown request; "
                 "stopping the stack",
@@ -798,13 +782,11 @@ async def start_background_threads(connection: ThinClient) -> None:
         await _cancel_and_join((*workers, stopping))
 
 def _failure_reason(exc: BaseException) -> str:
-    """A bounded, printable reason for a failed received transfer.
+    """The exception type name, used as the reason for a failed received
+    transfer.
 
-    The exception is raised while parsing second-party content, so its text
-    can embed peer-chosen bytes of any length. The reason is persisted and
-    rendered in the transfers panel, so keep only the exception type. The
-    full exception is already logged with a traceback.
-    """
+    The reason is persisted and rendered in the transfers panel; the full
+    exception is logged with a traceback elsewhere."""
     return type(exc).__name__
 
 
@@ -2043,10 +2025,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             if len(substream_read_cap) in (136, 140):
                 over_cap = open_substreams >= _MAX_OPEN_SUBSTREAMS_PER_PEER
                 if over_cap:
-                    # Record it as a failed transfer rather than discarding
-                    # it. The peer is never armed, so it costs no mixnet
-                    # reads, but the user can see that a transfer arrived and
-                    # was refused instead of it vanishing with a log line.
+                    # Surface the refusal as a failed transfer; the peer is
+                    # not armed, so it costs no reads.
                     logger.warning(
                         "peer %s already has %d open substreams; refusing the "
                         "indirection", cp.id, open_substreams,
@@ -2435,9 +2415,8 @@ async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
         if rcw is None:
             return
         if rcw.substream_failure is None:
-            # Already cleared, e.g. a resume landed between the row being
-            # marked failed and the user dismissing it. Dismissal is
-            # idempotent so the row never becomes unremovable.
+            # A resume can clear the failure before the user dismisses it;
+            # dismissal is idempotent.
             return
         peers = (await sess.exec(select(persistent.ConversationPeer).where(
             persistent.ConversationPeer.read_cap_id == bacap_stream,
@@ -2874,10 +2853,8 @@ async def readables_to_mixwal_supervised(connection: ThinClient) -> None:
     )
 
 
-# A peer announces substreams with I-chunks, and each unresolved one buys a
-# full missing-box budget of mixnet reads before it retires. Cap how many a
-# single parent peer can have open at once so a hostile announcer cannot
-# multiply that cost without bound.
+# Cap on concurrent substreams a single parent peer can have open; further
+# I-chunk announcements are refused.
 _MAX_OPEN_SUBSTREAMS_PER_PEER = 8
 _OVER_CAP_FAILURE = "Too many transfers at once from this peer"
 
@@ -2888,12 +2865,8 @@ _SUPERVISOR_HEALTHY_S = 300.0
 
 async def _supervised(worker, connection: ThinClient, *, on_restart=None) -> None:
     """Run ``worker`` forever, restarting it after a failure or an early
-    return, paced so a deterministic failure cannot spin.
-
-    The pause is unconditional. _wait_for_connection_or_shutdown returns at
-    once while the daemon is connected, so it paces nothing on its own: a
-    non-transient error (a malformed database, a full disk) would otherwise
-    restart at the speed the error returns, logging a traceback each time.
+    return with a backoff that doubles to _SUPERVISOR_RETRY_MAX_S and resets
+    after a healthy run.
     """
     delay = _SUPERVISOR_RETRY_S
     while not __should_quit.is_set():
