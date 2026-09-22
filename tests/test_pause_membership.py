@@ -23,13 +23,13 @@ async def test_read_pause_preserves_membership_and_voucher_members() -> None:
         assert conv is not None
         assert await conversation_handlers.local_membership_hash(sess, conv) == before_hash
         rcw = await sess.get(persistent.ReadCapWAL, stream)
-        assert rcw is not None and rcw.read_paused
+        assert rcw is not None and rcw.paused
         assert all(p.active for p in conv.peers)
     assert await voucher._build_who_reply(conv_id) == before_reply
     await network.resume_peer_reads(bacap_stream=stream)
     async with persistent.asession() as sess:
         rcw = await sess.get(persistent.ReadCapWAL, stream)
-        assert rcw is not None and not rcw.read_paused
+        assert rcw is not None and not rcw.paused
     assert await voucher._build_who_reply(conv_id) == before_reply
 
 
@@ -52,7 +52,7 @@ async def test_pause_is_persisted_before_inflight_cancellation() -> None:
         finally:
             async with persistent.asession() as sess:
                 rcw = await sess.get(persistent.ReadCapWAL, stream)
-                assert rcw is not None and rcw.read_paused
+                assert rcw is not None and rcw.paused
                 peer = (await sess.exec(select(persistent.ConversationPeer))).one()
                 assert peer.active
                 checked.set()
@@ -77,5 +77,5 @@ async def test_pause_does_not_resurrect_a_finished_transfer() -> None:
     await network.pause_peer_reads(bacap_stream=stream)
     async with persistent.asession() as sess:
         rcw = await sess.get(persistent.ReadCapWAL, stream)
-        assert rcw is not None and not rcw.read_paused
+        assert rcw is not None and not rcw.paused
     assert network.substream_progress_queue.empty()

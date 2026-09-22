@@ -456,7 +456,7 @@ class ReadCapWAL(SQLModel, table=True):
     substream_total_chunks: int | None = Field(None)
     substream_missing_since: float | None = Field(default=None)
     substream_failure: str | None = Field(default=None)
-    read_paused: bool = Field(
+    paused: bool = Field(
         default=False, nullable=False,
         sa_column_kwargs={"server_default": sa.text("0")},
     )

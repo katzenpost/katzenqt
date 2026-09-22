@@ -21,7 +21,7 @@ def _migration(name: str) -> ModuleType:
 
 def test_existing_cursors_survive_transfer_state_migrations() -> None:
     missing = _migration("9e62c30a8b14_substream_failure.py")
-    pause = _migration("31a0f3b426c8_read_pause.py")
+    pause = _migration("31a0f3b426c8_pause.py")
     engine = sa.create_engine("sqlite://")
     with engine.begin() as conn:
         conn.exec_driver_sql(
@@ -35,11 +35,11 @@ def test_existing_cursors_survive_transfer_state_migrations() -> None:
             missing.upgrade()
             pause.upgrade()
         row = conn.exec_driver_sql(
-            "SELECT next_index, read_paused, substream_missing_since, "
+            "SELECT next_index, paused, substream_missing_since, "
             "substream_failure FROM readcapwal"
         ).one()
         assert row == (b"i" * 104, 0, None, None)
-        conn.exec_driver_sql("UPDATE readcapwal SET read_paused = 1")
+        conn.exec_driver_sql("UPDATE readcapwal SET paused = 1")
         with Operations.context(context):
             pause.downgrade()
             missing.downgrade()

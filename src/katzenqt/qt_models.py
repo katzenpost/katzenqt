@@ -364,7 +364,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 parent = _substream_parent_name(sess, cp)
                 # Resumable = active, paused, failed, or received something
                 # but not yet assembled to the terminal F.
-                if (cp.active or rcw.read_paused or rcw.substream_failure
+                if (cp.active or rcw.paused or rcw.substream_failure
                         or int(recv_count)):
                     # Rate counts from the on-disk byte count at seed, so a
                     # transfer resumed across a relaunch starts at zero.
@@ -376,7 +376,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                         self.notify_piece(
                             rcw.id, int(recv_count), int(recv_bytes),
                         )
-                    if rcw.read_paused or not cp.active:
+                    if rcw.paused or not cp.active:
                         self.set_paused(rcw.id, paused=True)
                     if rcw.substream_failure is not None:
                         self.fail_transfer(rcw.id, rcw.substream_failure)

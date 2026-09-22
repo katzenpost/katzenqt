@@ -147,7 +147,7 @@ def _install_loop(
     monkeypatch.setattr(network, "persistent", SimpleNamespace(
         asession=Session, MixWAL=_MixWAL,
         ConversationPeer=SimpleNamespace(active=True, read_cap_id=field),
-        ReadCapWAL=SimpleNamespace(id=field, read_paused=False),
+        ReadCapWAL=SimpleNamespace(id=field, paused=False),
     ))
     reply = SimpleNamespace(
         envelope_hash=b"h", message_ciphertext=b"c",

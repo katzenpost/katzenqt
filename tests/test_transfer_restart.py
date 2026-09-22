@@ -21,14 +21,14 @@ async def test_restart_keeps_zero_piece_pauses_and_failures() -> None:
         await sess.refresh(parent)
         await sess.refresh(conv)
         parent_id = parent.id
-        for stream, active, read_paused, failure in (
+        for stream, active, is_paused, failure in (
             (paused, True, True, None),
             (failed, False, False, "bad frame"),
             (done, False, False, None),
         ):
             sess.add(persistent.ReadCapWAL(
                 id=stream, read_cap=b"r" * 136, next_index=b"i" * 104,
-                read_paused=read_paused, substream_failure=failure,
+                paused=is_paused, substream_failure=failure,
             ))
             sess.add(persistent.ConversationPeer(
                 name=f":substream:{parent_id}:{stream.int}",
@@ -49,7 +49,7 @@ async def test_restart_keeps_zero_piece_pauses_and_failures() -> None:
     async with persistent.asession() as sess:
         rcw = await sess.get(persistent.ReadCapWAL, paused)
         assert rcw is not None
-        assert not rcw.read_paused
+        assert not rcw.paused
         assert rcw.next_index == b"i" * 104
     await network.dismiss_failed_transfer(bacap_stream=failed)
     model = qt_models.DownloadsModel()

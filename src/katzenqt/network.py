@@ -1571,7 +1571,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
           )
       )).one_or_none()
       _pre_rcw = await _pre_sess.get(persistent.ReadCapWAL, bacap_uuid)
-      if _pre_rcw is not None and _pre_rcw.read_paused:
+      if _pre_rcw is not None and _pre_rcw.paused:
           draining_right_now.discard(bacap_uuid)
           return
   is_substream = _cp_row is not None and _cp_row.name.startswith(_SUBSTREAM_NAME_PREFIX)
@@ -1935,7 +1935,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     cp.active = False
                     rcw.substream_failure = None
                     rcw.substream_missing_since = None
-                    rcw.read_paused = False
+                    rcw.paused = False
                     sess.add(cp)
                     sess.add(rcw)
                     convlog_added = added
@@ -2131,7 +2131,7 @@ async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         ))).all()
         if not any(peer.active for peer in peers):
             return
-        rcw.read_paused = True
+        rcw.paused = True
         sess.add(rcw)
         await sess.commit()
     task = _inflight_reads.get(bacap_stream)
@@ -2175,7 +2175,7 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
         if rcw is None:
             return
-        rcw.read_paused = False
+        rcw.paused = False
         rcw.substream_missing_since = None
         rcw.substream_failure = None
         sess.add(rcw)
@@ -2383,7 +2383,7 @@ async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
             await sess.delete(row)
         rcw.substream_failure = None
         rcw.substream_missing_since = None
-        rcw.read_paused = False
+        rcw.paused = False
         sess.add(rcw)
         await sess.commit()
 
@@ -2544,7 +2544,7 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                             draining_right_now.discard(mw.bacap_stream)
                             __resend_queue.discard(mw.bacap_stream)
                             continue
-                        if rcw.read_paused:
+                        if rcw.paused:
                             draining_right_now.discard(mw.bacap_stream)
                             __resend_queue.discard(mw.bacap_stream)
                             continue
@@ -2717,7 +2717,7 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
                 # TODO are these guaranteed to be distinct?
                 readable_peers = (await sess.exec(select(
                     persistent.ConversationPeer, persistent.ReadCapWAL
-                ).where(persistent.ReadCapWAL.read_paused == False
+                ).where(persistent.ReadCapWAL.paused == False
                         ).where(persistent.ConversationPeer.active==True
                         ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
                                 ).where(

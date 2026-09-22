@@ -1993,7 +1993,7 @@ class MainWindow(QMainWindow):
                 )
             )).first()
             rcw = sess.get(persistent.ReadCapWAL, read_cap_id)
-            active = bool(solo and solo.active and rcw and not rcw.read_paused)
+            active = bool(solo and solo.active and rcw and not rcw.paused)
         # A throwaway menu so we never clobber the tray's contextMenu().
         api = QMenu(tree)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
@@ -2067,7 +2067,7 @@ class MainWindow(QMainWindow):
                 )
             )).first()
             rcw = sess.get(persistent.ReadCapWAL, rcw_id)
-            active = bool(solo and solo.active and rcw and not rcw.read_paused)
+            active = bool(solo and solo.active and rcw and not rcw.paused)
         pgm = api.addAction("Pause download")
         rgm = api.addAction("Resume download")
         pgm.setEnabled(active)

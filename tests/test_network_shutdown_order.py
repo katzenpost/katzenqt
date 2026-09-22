@@ -60,7 +60,7 @@ def _dispatch_state(
             return _Rows([row] if query == selected else [])
 
         async def get(self, model: object, key: object) -> SimpleNamespace:
-            return SimpleNamespace(read_cap=b"r" * 136, read_paused=False)
+            return SimpleNamespace(read_cap=b"r" * 136, paused=False)
 
         async def commit(self) -> None:
             pass

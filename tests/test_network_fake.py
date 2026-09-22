@@ -2116,7 +2116,7 @@ class TestPauseResumePeerReads:
             ))).one()
             assert cp.active is True
             rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
-            assert rcw.read_paused is True
+            assert rcw.paused is True
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
         # The done-callback released the stream from draining_right_now.
         assert setup["bacap_stream"] not in draining
@@ -2148,7 +2148,7 @@ class TestPauseResumePeerReads:
             ))).one()
             assert cp.active is True
             rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
-            assert rcw.read_paused is True
+            assert rcw.paused is True
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
         # The pause announces itself to the Transfers panel.
         event = network.substream_progress_queue.get_nowait()
