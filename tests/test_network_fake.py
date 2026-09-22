@@ -3870,7 +3870,7 @@ class TestUploadTransferEvents:
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
-    async def test_pause_upload_marks_stream_and_clears_pending_write(
+    async def test_pause_upload_marks_stream_and_keeps_pending_write(
         self, fake_thinclient,
     ):
         _drain_progress_queue()
@@ -3881,8 +3881,9 @@ class TestUploadTransferEvents:
         async with persistent.asession() as sess:
             wcw = await sess.get(persistent.WriteCapWAL, setup["agg"])
             assert wcw.paused is True
-            # The pending write MixWAL was deleted so the sweep cannot re-cast.
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            # The pending write MixWAL survives so resume re-sends it; the
+            # write drain skips it while the stream is paused.
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
             # Chunk PlaintextWAL rows survive so resume can re-encrypt.
             remaining = (await sess.exec(
                 select(persistent.PlaintextWAL).where(

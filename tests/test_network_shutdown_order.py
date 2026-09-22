@@ -75,7 +75,7 @@ def _dispatch_state(
         return "plaintext"
 
     monkeypatch.setattr(network, "persistent", SimpleNamespace(
-        asession=Session, ReadCapWAL=object,
+        asession=Session, ReadCapWAL=object, WriteCapWAL=object,
         MixWAL=SimpleNamespace(
             get_new=mixwal_query, resend_queue_from_disk=empty_queue,
         ),
