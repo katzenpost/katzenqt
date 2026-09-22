@@ -1342,6 +1342,43 @@ class TestDrainMixwalReadSingle:
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
+    async def test_over_cap_substream_is_surfaced_not_silently_dropped(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """Past the per-peer cap the announcement must not vanish: the peer is
+        created inert (never armed, so no mixnet reads) and the transfer shows
+        as failed so the user can see and dismiss it."""
+        monkeypatch.setattr(network, "_MAX_OPEN_SUBSTREAMS_PER_PEER", 0)
+        stub_read_cap = b"\xd2" * 136
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=b"I" + stub_read_cap,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            rows = (await sess.exec(
+                select(persistent.ReadCapWAL).where(
+                    persistent.ReadCapWAL.read_cap == stub_read_cap,
+                )
+            )).all()
+            assert len(rows) == 1, "the over-cap announcement was dropped"
+            assert rows[0].substream_failure == network._OVER_CAP_FAILURE
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == rows[0].id,
+                )
+            )).all()
+            assert peers and not peers[0].active, "over-cap peer must be inert"
+        events = []
+        while not network.substream_progress_queue.empty():
+            events.append(network.substream_progress_queue.get_nowait())
+        assert any(e[0] == "failed" for e in events), events
+
+    @pytest.mark.asyncio
     async def test_substream_piece_read_fires_piece_event(
         self, fake_thinclient,
     ):

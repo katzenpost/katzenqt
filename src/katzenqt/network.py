@@ -1990,18 +1990,23 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     ),
                 )
             )).all())
-            if (len(substream_read_cap) in (136, 140)
-                    and open_substreams >= _MAX_OPEN_SUBSTREAMS_PER_PEER):
-                logger.warning(
-                    "peer %s already has %d open substreams; ignoring the "
-                    "indirection", cp.id, open_substreams,
-                )
-            elif len(substream_read_cap) in (136, 140):
+            if len(substream_read_cap) in (136, 140):
+                over_cap = open_substreams >= _MAX_OPEN_SUBSTREAMS_PER_PEER
+                if over_cap:
+                    # Record it as a failed transfer rather than discarding
+                    # it. The peer is never armed, so it costs no mixnet
+                    # reads, but the user can see that a transfer arrived and
+                    # was refused instead of it vanishing with a log line.
+                    logger.warning(
+                        "peer %s already has %d open substreams; refusing the "
+                        "indirection", cp.id, open_substreams,
+                    )
+                    new_rcw.substream_failure = _OVER_CAP_FAILURE
                 sess.add(new_rcw)
                 substream_peer = persistent.ConversationPeer(
                     name=f"{_SUBSTREAM_NAME_PREFIX}{cp.id}:{secrets.token_hex(2)}",
                     read_cap_id=new_rcw.id,
-                    active=True,
+                    active=not over_cap,
                     conversation=cp.conversation,
                 )
                 sess.add(substream_peer)
@@ -2011,6 +2016,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     new_rcw.substream_total_chunks,
                     cp.name,
                 ))
+                if over_cap:
+                    substream_progress.append((
+                        "failed", new_rcw.id, _OVER_CAP_FAILURE,
+                    ))
 
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
@@ -2796,9 +2805,11 @@ async def readables_to_mixwal_supervised(connection: ThinClient) -> None:
 # single parent peer can have open at once so a hostile announcer cannot
 # multiply that cost without bound.
 _MAX_OPEN_SUBSTREAMS_PER_PEER = 8
+_OVER_CAP_FAILURE = "Too many transfers at once from this peer"
 
 _SUPERVISOR_RETRY_S = 5.0
 _SUPERVISOR_RETRY_MAX_S = 60.0
+_SUPERVISOR_HEALTHY_S = 300.0
 
 
 async def _supervised(worker, connection: ThinClient, *, on_restart=None) -> None:
@@ -2812,6 +2823,7 @@ async def _supervised(worker, connection: ThinClient, *, on_restart=None) -> Non
     """
     delay = _SUPERVISOR_RETRY_S
     while not __should_quit.is_set():
+        started = time.monotonic()
         try:
             await worker(connection)
         except asyncio.CancelledError:
@@ -2828,6 +2840,11 @@ async def _supervised(worker, connection: ThinClient, *, on_restart=None) -> Non
                 "%s returned early; restarting it",
                 getattr(worker, "__name__", worker),
             )
+        # A worker that ran healthily for a long stretch before dying is not
+        # in a failure loop, so start its next backoff from the floor rather
+        # than keeping a ratchet from hours ago.
+        if time.monotonic() - started >= _SUPERVISOR_HEALTHY_S:
+            delay = _SUPERVISOR_RETRY_S
         await asyncio.sleep(delay)
         delay = min(_SUPERVISOR_RETRY_MAX_S, delay * 2.0)
         if await _wait_for_connection_or_shutdown(
