@@ -92,6 +92,13 @@ async def test_dismissing_an_already_cleared_transfer_is_idempotent(
 ) -> None:
     from katzenqt import persistent
 
+    peer = SimpleNamespace(
+        name=f"{network._SUBSTREAM_NAME_PREFIX}parent:00ff", active=True,
+    )
+    added: list[object] = []
+    deleted: list[object] = []
+    commits: list[int] = []
+
     class Sess:
         async def __aenter__(self) -> "Sess":
             return self
@@ -100,10 +107,33 @@ async def test_dismissing_an_already_cleared_transfer_is_idempotent(
             return None
 
         async def get(self, model: object, key: object) -> object:
-            return SimpleNamespace(substream_failure=None)
+            return SimpleNamespace(substream_failure=None, read_cap=None)
+
+        async def exec(self, query: object) -> "Sess":
+            return self
+
+        def all(self) -> list[object]:
+            return [peer]
+
+        def add(self, row: object) -> None:
+            added.append(row)
+
+        async def delete(self, row: object) -> None:
+            deleted.append(row)
+
+        async def commit(self) -> None:
+            commits.append(1)
+
+    async def no_parent(sess: object, name: str) -> None:
+        return None
 
     monkeypatch.setattr(persistent, "asession", Sess)
+    monkeypatch.setattr(network, "_substream_parent", no_parent)
     await network.dismiss_failed_transfer(bacap_stream=uuid.uuid4())
+    assert peer.active is True
+    assert added == []
+    assert deleted == []
+    assert commits == []
 
 
 @pytest.mark.asyncio
