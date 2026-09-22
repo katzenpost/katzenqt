@@ -42,7 +42,7 @@ from ._thinclient import ThinClient
 from pydantic.dataclasses import dataclass
 from . import attachment_images, conversation_handlers, models, persistent
 from sqlmodel import select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 logger = logging.getLogger("katzen.network")
 
@@ -720,6 +720,15 @@ def _is_transient_sqlite_busy(exc: OperationalError) -> bool:
     be treated as "retry later"; the latter is an invariant bug and ought to
     stay loud instead of retrying forever."""
     return "database is locked" in str(exc.orig).lower()
+
+def _is_duplicate_arming(exc: "OperationalError | IntegrityError") -> bool:
+    """True when a pass tried to arm a read whose stream already has a MixWAL
+    row. The row is already there, so the pass has nothing to add and the next
+    sweep re-selects whatever still needs arming."""
+    return "unique constraint failed: mixwal.bacap_stream" in str(
+        exc.orig
+    ).lower()
+
 
 __on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
 
@@ -2764,14 +2773,13 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
                     logger.debug("finished one peer: %s", cpeer.name)
                 logger.debug("readables_to_mixwal: committing")
                 await sess.commit()
-        except OperationalError as e:
-            # Retry SQLite lock contention without publishing a failed pass.
-            # Other database errors must retain their traceback.
-            if not _is_transient_sqlite_busy(e):
+        except (IntegrityError, OperationalError) as e:
+            # Retry lock contention and a duplicate arming without publishing
+            # a failed pass. Other database errors keep their traceback.
+            if not _is_transient_sqlite_busy(e) and not _is_duplicate_arming(e):
                 raise
             logger.warning(
-                "readables_to_mixwal: sqlite busy; retrying next sweep: %s",
-                e,
+                "readables_to_mixwal: retrying next sweep: %s", e,
             )
             await asyncio.sleep(5)
             readables_to_mixwal_event.set()

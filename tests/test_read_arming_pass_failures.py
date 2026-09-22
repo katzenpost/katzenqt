@@ -214,3 +214,20 @@ async def test_supervisor_restarts_after_an_unexpected_pass_failure(
     )
     await network.readables_to_mixwal_supervised(object())
     assert len(calls) == 2
+
+
+
+@pytest.mark.parametrize("stage", ["query", "commit"])
+async def test_duplicate_arming_retries_instead_of_killing_the_loop(
+    monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    failure = IntegrityError(
+        "INSERT INTO mixwal", {},
+        Exception("UNIQUE constraint failed: mixwal.bacap_stream"),
+    )
+    state, connection = _install_loop(
+        monkeypatch, failure=failure, stage=stage,
+    )
+    await network.readables_to_mixwal(connection)
+    assert state.pass_no == 2
+    assert 5 in state.sleeps
