@@ -900,6 +900,18 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         __mixwal_updated.set()
     async with persistent.asession() as sess:
         wcw = (await sess.exec(select(persistent.WriteCapWAL).where(persistent.WriteCapWAL.id==mw.bacap_stream))).one()
+        if mw.plaintextwal is not None and await sess.get(
+            persistent.PlaintextWAL, mw.plaintextwal,
+        ) is None:
+            # The PlaintextWAL row this envelope was built from is gone (a
+            # cancelled upload); drop the orphaned MixWAL row instead of
+            # sending it.
+            row = await sess.get(persistent.MixWAL, mw.id)
+            if row is not None:
+                await sess.delete(row)
+                await sess.commit()
+            give_up()
+            return
     packet_context = PacketContext(
         "write",
         stream_id=mw.bacap_stream,
@@ -2286,13 +2298,13 @@ async def resume_upload(*, rcw_id: uuid.UUID) -> None:
 async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
     """Cancel an in-flight outbound substream before it is announced.
 
-    An upload is only cancellable while its substream is still draining (the
-    gated I-chunk has not been dispatched); once the I-chunk can dispatch, the
-    data is already on couriers and there is nothing left to cancel. Cancels
-    the in-flight write, then deletes the substream's WAL rows and the
-    optimistic ConversationLog bubble in one transaction. Boxes already ACK'd
-    are orphaned but unreachable: without the I-chunk no reader learns the
-    substream's read cap, and they expire.
+    Cancellable only while the substream is still draining: once every C/F
+    chunk is ACK'd the gated I-chunk can dispatch, and there is nothing left to
+    cancel. Stops the in-flight write, then in one transaction deletes the
+    substream's MixWAL and PlaintextWAL rows, the I-chunk (and its MixWAL row),
+    the indirection ReadCapWAL and the agg WriteCapWAL, and the optimistic
+    ConversationLog bubble. Boxes already ACK'd are orphaned but unreachable:
+    without the I-chunk no reader learns the substream's read cap.
 
     ``rcw_id`` is the indirection ReadCapWAL id (the Transfers row key).
     """
@@ -2308,6 +2320,37 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
         agg = rcw.write_cap_id if rcw is not None else None
         if agg is None:
             return
+        i_chunk_id = i_chunk.id
+        conv_id = i_chunk.conversation_id
+    task = _inflight_writes.get(agg)
+    if task is not None and not task.done():
+        if agg in _write_acknowledged:
+            # The envelope is ACK'd; let the ACK bookkeeping finish so the
+            # outstanding-chunk count below is accurate.
+            try:
+                await task
+            except Exception:
+                logger.exception("write drain failed during cancel of %s", agg)
+        else:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # The writer's cancellation is expected; only re-raise when
+                # this caller is itself being cancelled.
+                if asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                logger.exception("write drain failed during cancel of %s", agg)
+    _inflight_writes.pop(agg, None)
+    __resend_queue.discard(agg)
+    async with persistent.asession() as sess:
+        # Re-check in the same transaction as the deletes: a chunk ACK that
+        # landed while the write task was winding down can complete the
+        # upload, which makes it uncancellable.
+        i_chunk_row = await sess.get(persistent.PlaintextWAL, i_chunk_id)
+        if i_chunk_row is None:
+            return
         remaining = int((await sess.exec(
             select(persistent.sa.func.count())
             .select_from(persistent.PlaintextWAL)
@@ -2315,20 +2358,14 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
         )).one())
         if remaining <= 0:
             return
-        i_chunk_id = i_chunk.id
-        conv_id = i_chunk.conversation_id
-    task = _inflight_writes.get(agg)
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):  # cancellation is the point
-            pass
-    _inflight_writes.pop(agg, None)
-    __resend_queue.discard(agg)
-    async with persistent.asession() as sess:
         for mw in (await sess.exec(select(persistent.MixWAL).where(
             persistent.MixWAL.bacap_stream == agg,
+        ))).all():
+            await sess.delete(mw)
+        # The I-chunk lives on the main stream, so its MixWAL row is keyed by
+        # the PlaintextWAL id, not the agg stream.
+        for mw in (await sess.exec(select(persistent.MixWAL).where(
+            persistent.MixWAL.plaintextwal == i_chunk_id,
         ))).all():
             await sess.delete(mw)
         for pwal in (await sess.exec(select(persistent.PlaintextWAL).where(
@@ -2342,9 +2379,7 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
         ))).first()
         if convlog is not None:
             await sess.delete(convlog)
-        i_chunk_row = await sess.get(persistent.PlaintextWAL, i_chunk_id)
-        if i_chunk_row is not None:
-            await sess.delete(i_chunk_row)
+        await sess.delete(i_chunk_row)
         rcw_row = await sess.get(persistent.ReadCapWAL, rcw_id)
         if rcw_row is not None:
             await sess.delete(rcw_row)
