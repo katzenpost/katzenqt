@@ -156,3 +156,39 @@ async def test_a_join_that_ignores_cancellation_still_closes_the_client(
     assert stopped == [True], "the deadline must not be able to skip stop()"
     release.set()
     await asyncio.sleep(0)
+
+
+async def test_backoff_resets_after_a_healthy_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quit_event = asyncio.Event()
+    slept: list[float] = []
+    calls: list[int] = []
+    clock = {"t": 0.0}
+
+    async def worker(connection: object) -> None:
+        calls.append(1)
+        if len(calls) in (1, 2):
+            raise RuntimeError("early crash")
+        if len(calls) == 3:
+            clock["t"] += 3600.0
+            raise RuntimeError("crash after a long healthy run")
+        quit_event.set()
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    async def immediate(*, idle_retry_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(network, "__should_quit", quit_event)
+    monkeypatch.setattr(network.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(network.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        network, "_wait_for_connection_or_shutdown", immediate,
+    )
+    await network._supervised(worker, object())
+    assert slept[1] > slept[0], "consecutive failures must back off"
+    assert slept[2] == network._SUPERVISOR_RETRY_S, (
+        "a long healthy run must reset the delay, not keep the ratchet"
+    )
