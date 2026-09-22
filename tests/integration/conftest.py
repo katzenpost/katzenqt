@@ -9,9 +9,12 @@ masquerade as a green session.
 """
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import pytest
+
+from tests.integration._bounce_helpers import epoch_duration_s
 
 
 _KPCLIENTD_HOST = os.environ.get("KATZENQT_KPCLIENTD_HOST", "127.0.0.1")
@@ -38,8 +41,14 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(scope="session")
-def kpclientd_endpoint():
-    """Assert the docker mixnet's kpclientd is reachable before running."""
+def kpclientd_endpoint() -> tuple[str, int]:
+    """Validate epoch metadata before probing the endpoint."""
+    epoch = epoch_duration_s()
+    logging.getLogger(__name__).info(
+        "integration target=%s epoch=%gs endpoint=%s:%s",
+        os.environ.get("KQT_INTEGRATION_TARGET", "docker"),
+        epoch, _KPCLIENTD_HOST, _KPCLIENTD_PORT,
+    )
     if not _kpclientd_reachable(_KPCLIENTD_HOST, _KPCLIENTD_PORT):
         pytest.fail(
             f"KATZENQT_DOCKER_INTEGRATION=1 is set but kpclientd is not "

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import uuid
 
 import cbor2
@@ -38,6 +39,7 @@ from katzenpost_thinclient import (
 from katzenpost_thinclient.core import MKEMDecryptionFailedError
 
 from katzenqt import models, network, persistent
+from tests.fakes.thinclient import FakeThinClient
 
 
 def _make_F_payload(text: str = "hello") -> bytes:
@@ -1340,6 +1342,43 @@ class TestDrainMixwalReadSingle:
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
+    async def test_over_cap_substream_is_surfaced_not_silently_dropped(
+        self, fake_thinclient, monkeypatch,
+    ):
+        """Past the per-peer cap the announcement must not vanish: the peer is
+        created inert (never armed, so no mixnet reads) and the transfer shows
+        as failed so the user can see and dismiss it."""
+        monkeypatch.setattr(network, "_MAX_OPEN_SUBSTREAMS_PER_PEER", 0)
+        stub_read_cap = b"\xd2" * 136
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=b"I" + stub_read_cap,
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now={setup["bacap_stream"]},
+        )
+        async with persistent.asession() as sess:
+            rows = (await sess.exec(
+                select(persistent.ReadCapWAL).where(
+                    persistent.ReadCapWAL.read_cap == stub_read_cap,
+                )
+            )).all()
+            assert len(rows) == 1, "the over-cap announcement was dropped"
+            assert rows[0].substream_failure == network._OVER_CAP_FAILURE
+            peers = (await sess.exec(
+                select(persistent.ConversationPeer).where(
+                    persistent.ConversationPeer.read_cap_id == rows[0].id,
+                )
+            )).all()
+            assert peers and not peers[0].active, "over-cap peer must be inert"
+        events = []
+        while not network.substream_progress_queue.empty():
+            events.append(network.substream_progress_queue.get_nowait())
+        assert any(e[0] == "failed" for e in events), events
+
+    @pytest.mark.asyncio
     async def test_substream_piece_read_fires_piece_event(
         self, fake_thinclient,
     ):
@@ -1364,9 +1403,10 @@ class TestDrainMixwalReadSingle:
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("extended", [False, True])
     async def test_substream_terminal_f_fires_completed_event(
-        self, fake_thinclient,
-    ):
+        self, fake_thinclient: FakeThinClient, extended: bool,
+    ) -> None:
         """Assembling the substream's terminal F (through a
         parent peer that resolves from the substream name) retires the
         substream and queues a single ``completed`` event so the Transfers
@@ -1414,6 +1454,14 @@ class TestDrainMixwalReadSingle:
             plaintext=_make_F_payload("finalised"),
         )
         async with persistent.asession() as sess:
+            release = setup["read_cap"]
+            if extended:
+                release = struct.pack(">I", 1) + release
+            sess.add(persistent.ReceivedPiece(
+                read_cap=wcw_id, bacap_index=bytes(8),
+                chunk_type=b"I", chunk=release,
+            ))
+            await sess.commit()
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         await network.drain_mixwal_read_single(
             connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
@@ -1427,6 +1475,11 @@ class TestDrainMixwalReadSingle:
         assert event[0] == "completed"
         assert event[1] == setup["bacap_stream"]
         assert network.substream_progress_queue.empty()
+
+        async with persistent.asession() as sess:
+            assert await sess.get(
+                persistent.ReceivedPiece, (wcw_id, bytes(8)),
+            ) is None
 
     @pytest.mark.asyncio
     async def test_invalid_prefix_deactivates_peer(self, fake_thinclient):
@@ -1644,14 +1697,12 @@ class TestDrainMixwalReadSingle:
         TombstoneError("tombstone"),
     ])
     @pytest.mark.asyncio
-    async def test_substream_not_found_deactivates_peer(self, fake_thinclient, monkeypatch, benign):
-        """A substream read that hits BoxIDNotFound/Tombstone on its FIRST
-        attempt must fail fast (no_retry_on_box_id_not_found=True) and
-        deactivate the peer: the I-chunk is gated by after_stream so the
-        reader only learns of the substream after every box was written;
-        a not-found means the courier's async replica dispatch failed and
-        nothing will resurrect the box. Deactivating + deleting the MixWAL
-        stops the drain loop re-casting the dead read forever."""
+    async def test_substream_tombstone_is_terminal_but_not_found_retries(
+        self, fake_thinclient: FakeThinClient,
+        monkeypatch: pytest.MonkeyPatch, benign: Exception,
+    ) -> None:
+        """A missing box retries at the same index; a tombstone retires
+        the transfer and publishes its failure after the commit."""
         setup = await _set_up_read_flow(
             fake_thinclient, peer_name=":substream:2:abc",
         )
@@ -1681,13 +1732,13 @@ class TestDrainMixwalReadSingle:
         )
         assert recorded["no_retry_on_box_id_not_found"] is True
         async with persistent.asession() as sess:
-            # Peer deactivated AND its MixWAL row gone, so the drain loop
-            # can never re-cast this dead read.
+            # Only a tombstone retires the transfer on its first attempt.
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
                 persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
             ))).one()
-            assert cp.active is False
-            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
+            assert cp.active is (not isinstance(benign, TombstoneError))
+            remaining = await sess.get(persistent.MixWAL, setup["mw_id"])
+            assert (remaining is None) is isinstance(benign, TombstoneError)
         assert setup["bacap_stream"] not in draining
 
     @pytest.mark.asyncio
@@ -1805,7 +1856,8 @@ class TestDrainMixwalReadSingle:
         event = network.substream_progress_queue.get_nowait()
         assert event[0] == "failed"
         assert event[1] == str(setup["bacap_stream"])
-        assert "ValueError: malformed chunk data" in event[2]
+        assert event[2] == "ValueError"
+        assert "malformed chunk data" not in event[2]
         assert network.substream_progress_queue.empty()
         
         # Verify peer deactivated
@@ -2030,9 +2082,8 @@ class TestPauseResumePeerReads:
     """Per-peer pause/resume. A user-initiated pause on a
     peer must cancel the in-flight read ARQ (so the daemon stops
     retransmitting), delete the is_read MixWAL row (so the drain sweep
-    cannot re-cast it), and deactivate the peer so readables_to_mixwal
-    never re-arms it. Resume must flip active back on and poke the re-arm
-    event."""
+    cannot re-cast it), and pause the read cap so readables_to_mixwal
+    never re-arms it. Resume must clear the pause and poke the re-arm event."""
 
     @pytest.mark.asyncio
     async def test_pause_cancels_inflight_read(self, fake_thinclient, monkeypatch):
@@ -2100,7 +2151,9 @@ class TestPauseResumePeerReads:
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
                 persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
             ))).one()
-            assert cp.active is False
+            assert cp.active is True
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.paused is True
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
         # The done-callback released the stream from draining_right_now.
         assert setup["bacap_stream"] not in draining
@@ -2108,13 +2161,14 @@ class TestPauseResumePeerReads:
         assert network._inflight_reads.get(setup["bacap_stream"]) is None
 
     @pytest.mark.asyncio
-    async def test_pause_with_no_inflight_read_still_deactivates(
-        self, fake_thinclient, monkeypatch,
-    ):
+    async def test_pause_with_no_inflight_read_keeps_membership(
+        self, fake_thinclient: FakeThinClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """A pause on a stream with no registered in-flight task (the read
         completed on its own, or we are pausing before the loop ever armed
-        it) must still drop the MW row and deactivate the peer -- the two
-        things that keep the sweep from re-casting the dead read forever."""
+        it) must still drop the MW row and pause the read cap without
+        changing membership."""
         setup = await _set_up_read_flow(fake_thinclient, peer_name=":substream:2:abc")
         async with persistent.asession() as sess:
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
@@ -2129,7 +2183,9 @@ class TestPauseResumePeerReads:
             cp = (await sess.exec(select(persistent.ConversationPeer).where(
                 persistent.ConversationPeer.read_cap_id == setup["bacap_stream"],
             ))).one()
-            assert cp.active is False
+            assert cp.active is True
+            rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+            assert rcw.paused is True
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
         # The pause announces itself to the Transfers panel.
         event = network.substream_progress_queue.get_nowait()

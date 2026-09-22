@@ -454,6 +454,12 @@ class ReadCapWAL(SQLModel, table=True):
     # a legacy (136-byte) I-chunk, so the denominator is unknown and progress
     # renders as an indeterminate count.
     substream_total_chunks: int | None = Field(None)
+    substream_missing_since: float | None = Field(default=None)
+    substream_failure: str | None = Field(default=None)
+    paused: bool = Field(
+        default=False, nullable=False,
+        sa_column_kwargs={"server_default": sa.text("0")},
+    )
     @classmethod
     async def get_by_bacap_stream(cls, stream: uuid.UUID):
         return (await sess.exec(select(cls).where(id=stream))).one()
@@ -1033,6 +1039,32 @@ class Conversation(SQLModel, table=True):
         sa_column_kwargs={"server_default": sa.text("0")},
         description="a Contact Voucher handshake completed successfully for this conversation",
     )
+
+def peer_named_in_conversation_sync(
+    sess: "Session", conversation_id: int, name: str,
+) -> "ConversationPeer | None":
+    peers = sess.exec(
+        select(ConversationPeer)
+        .join(ConversationPeerLink,
+              ConversationPeerLink.conversation_peer_id == ConversationPeer.id)
+        .where(ConversationPeerLink.conversation_id == conversation_id,
+               ConversationPeer.name == name)
+    ).all()
+    return peers[0] if len(peers) == 1 else None
+
+
+async def peer_named_in_conversation(
+    sess: AsyncSession, conversation_id: int, name: str,
+) -> ConversationPeer | None:
+    peers = (await sess.exec(
+        select(ConversationPeer)
+        .join(ConversationPeerLink,
+              ConversationPeerLink.conversation_peer_id == ConversationPeer.id)
+        .where(ConversationPeerLink.conversation_id == conversation_id,
+               ConversationPeer.name == name)
+    )).all()
+    return peers[0] if len(peers) == 1 else None
+
 
 class ConversationLog(SQLModel, table=True):
     """CBOR messages in a conversation.

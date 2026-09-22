@@ -4,6 +4,7 @@ APP_NAME = "KatzenQt"
 import argparse
 import asyncio
 import fcntl
+from functools import partial
 import hashlib
 import logging
 import math
@@ -369,6 +370,20 @@ def duration_time_ns():
     except AttributeError:
         # BSDs use SI seconds by default:
         return time.monotonic_ns()
+
+def _error_detail(exc: BaseException, limit: int = 200) -> str:
+    """A bounded, inert description of exc for a message box.
+
+    The exception can come from parsing a peer's reply, so its text is
+    attacker-chosen and unbounded, and QMessageBox renders AutoText. Keep the
+    type, clamp the rest, drop control characters and angle brackets.
+    """
+    text = "".join(
+        c for c in str(exc)
+        if (c.isprintable() or c == " ") and c not in "<>"
+    )[:limit]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
 
 class PendingVouchersDialog(QDialog):
     """Lists in-flight vouchers and lets the user abandon stale ones, e.g. a
@@ -1900,7 +1915,9 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
-    async def _process_peer_added(self, conversation_id, name) -> None:
+    async def _process_peer_added(
+        self, conversation_id: int, name: str,
+    ) -> None:
         # A dynamically-announced peer could be a synthetic substream; never
         # render those into the contacts tree.
         if name.startswith(network._SUBSTREAM_NAME_PREFIX):
@@ -1924,8 +1941,17 @@ class MainWindow(QMainWindow):
         with persistent.Session(persistent._engine_sync) as _sess:
             peer_row = _sess.exec(
                 select(persistent.ConversationPeer)
-                .where(persistent.ConversationPeer.name == name)
+                .join(
+                    persistent.ConversationPeerLink,
+                    persistent.ConversationPeerLink.conversation_peer_id ==
+                    persistent.ConversationPeer.id,
+                )
+                .where(
+                    persistent.ConversationPeerLink.conversation_id == conversation_id,
+                    persistent.ConversationPeer.name == name,
+                )
             ).first()
+
         if peer_row is not None:
             new_item.peer_read_cap_id = peer_row.read_cap_id
             new_item.peer_is_own = (peer_row.id == convo_state.own_peer_id)
@@ -1966,7 +1992,8 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == read_cap_id,
                 )
             )).first()
-        active = bool(solo.active) if solo is not None else True
+            rcw = sess.get(persistent.ReadCapWAL, read_cap_id)
+            active = bool(solo and solo.active and rcw and not rcw.paused)
         # A throwaway menu so we never clobber the tray's contextMenu().
         api = QMenu(tree)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
@@ -2007,6 +2034,9 @@ class MainWindow(QMainWindow):
             rm = api.addAction("Remove")
             chosen = await _menu_chosen(api, view.viewport().mapToGlobal(pos))
             if chosen is rm:
+                await self.iothread.run_in_io(
+                    network.dismiss_failed_transfer(bacap_stream=rcw_id),
+                )
                 transfers_model.remove_transfer(rcw_id)
             return
         if row_data.get("direction", "download") != "download":
@@ -2036,7 +2066,8 @@ class MainWindow(QMainWindow):
                     persistent.ConversationPeer.read_cap_id == rcw_id,
                 )
             )).first()
-        active = bool(solo.active) if solo is not None else True
+            rcw = sess.get(persistent.ReadCapWAL, rcw_id)
+            active = bool(solo and solo.active and rcw and not rcw.paused)
         pgm = api.addAction("Pause download")
         rgm = api.addAction("Resume download")
         pgm.setEnabled(active)
@@ -2602,9 +2633,11 @@ class MainWindow(QMainWindow):
         try:
             added = await self._wait_and_open_with_retries(convo.conversation_id)
         except Exception as e:
-            logging.warning("voucher await failed: %s", e)
+            detail = _error_detail(e)
+            logging.warning("voucher await failed: %s", detail)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
-                self, f"ERROR: {APP_NAME}", f"The voucher join did not complete:\n{e}",
+                self, f"ERROR: {APP_NAME}",
+                f"The voucher join did not complete:\n{detail}",
             ))
             return
         for name in added:
@@ -2613,16 +2646,16 @@ class MainWindow(QMainWindow):
                 continue
             new_item = QStandardItem(name)
             # Tag like add_conversation's peers so the per-peer pause/resume
-            # context menu works on dynamically-announced members too.
-            # Sync engine (Qt loop; see persistent.warm_async_engine).
+            # context menu works on dynamically-announced members too. Sync
+            # engine: the Qt loop must not open the async engine (see
+            # persistent.warm_async_engine).
             with persistent.Session(persistent._engine_sync) as _sess:
-                peer_row = _sess.exec(
-                    select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == name)
-                ).first()
-            if peer_row is not None:
-                new_item.peer_read_cap_id = peer_row.read_cap_id
-                new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
+                peer_row = persistent.peer_named_in_conversation_sync(
+                    _sess, convo.conversation_id, name,
+                )
+                if peer_row is not None:
+                    new_item.peer_read_cap_id = peer_row.read_cap_id
+                    new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
             convo.contacts_standard_item.appendRow(new_item)
         await self.iothread.run_in_io(network.signal_readables_to_mixwal())
         joined = ", ".join(
@@ -2689,8 +2722,12 @@ class MainWindow(QMainWindow):
                 )
             )
         except Exception as e:
+            # Bind the text before scheduling the dialog: the except variable
+            # is deleted when the handler exits, so a lambda that read it
+            # would raise NameError when Qt runs it on the next event loop.
+            detail = _error_detail(e)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
-                self, f"ERROR: {APP_NAME}", f"Induction failed:\n{e}",
+                self, f"ERROR: {APP_NAME}", f"Induction failed:\n{detail}",
             ))
             return
 
@@ -2712,8 +2749,17 @@ class MainWindow(QMainWindow):
             with persistent.Session(persistent._engine_sync) as _sess:
                 peer_row = _sess.exec(
                     select(persistent.ConversationPeer)
-                    .where(persistent.ConversationPeer.name == joiner_name)
+                    .join(
+                        persistent.ConversationPeerLink,
+                        persistent.ConversationPeerLink.conversation_peer_id ==
+                        persistent.ConversationPeer.id,
+                    )
+                    .where(
+                        persistent.ConversationPeerLink.conversation_id == convo.conversation_id,
+                        persistent.ConversationPeer.name == joiner_name,
+                    )
                 ).first()
+
             if peer_row is not None:
                 new_item.peer_read_cap_id = peer_row.read_cap_id
                 new_item.peer_is_own = (peer_row.id == convo.own_peer_id)
@@ -3101,14 +3147,19 @@ async def main(window: MainWindow):
     # Resume any joiner handshake a previous run left in flight: the inductor
     # may reply over the rendezvous stream while this app is down, and the
     # pending voucher rows persist exactly so a restart can pick them up again.
+    await _resume_pending_joins(window)
+
+
+async def _resume_pending_joins(window: MainWindow) -> None:
     for conv_id in pending_joiner_join_conversation_ids():
         convo_state = window.conversation_state_by_id.get(conv_id)
         if convo_state is not None:
             logger.warning("resuming pending voucher join for conversation %d", conv_id)
             window._supervised_listener(
                 f"_await_voucher_join:{conv_id}",
-                lambda: window._await_voucher_join(convo_state),
+                partial(window._await_voucher_join, convo_state),
             )
+
 
 def todo_settings():
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -28,10 +29,12 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Select the Rust toolchain
+        run: timeout --kill-after=10s 300s bash tools/ci-rust.sh
+
       - name: Install dependencies
         run: |
-          make deps
-          uv sync --all-extras --dev --locked
+          bash tools/ci-deps.sh
 
       - name: Verify the rust audio extension built
         run: uv run python -c "import rustic_audio_tool as r; assert hasattr(r, 'PttAudioEngine')"

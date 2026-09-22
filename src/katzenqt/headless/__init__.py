@@ -55,7 +55,7 @@ async def connect(config_path: "str | Path | None" = None) -> ThinClient:
     return await network.reconnect(config_path)
 
 
-async def start(connection: ThinClient) -> asyncio.Task:
+async def start(connection: ThinClient) -> asyncio.Task[None]:
     """Spawn the background worker task for ``connection``.
 
     The returned task runs ``network.start_background_threads`` until
@@ -67,16 +67,16 @@ async def start(connection: ThinClient) -> asyncio.Task:
 
 
 async def stop(
-    bg: asyncio.Task,
+    bg: asyncio.Task[None],
     connection: ThinClient,
     timeout: float = 5.0,
 ) -> None:
     """Signal the background worker to wind down, wait for it, and
     close the ``ThinClient``.
 
-    On timeout the background task is cancelled. Cancellation and
-    timeout are swallowed; callers that need to know the cause should
-    inspect ``bg`` after ``stop`` returns.
+    On timeout unfinished requests are cancelled and joined before
+    closing. Worker failures and caller cancellation propagate after
+    cleanup.
 
     Calling :meth:`ThinClient.stop` is mandatory: it sends a
     ``thin_close`` message to kpclientd so the daemon reaps the ARQ
@@ -84,12 +84,7 @@ async def stop(
     entries linger and crowd out new requests, which manifests as
     rapidly increasing latency across repeated subprocess invocations.
     """
-    network.shutdown()
-    try:
-        await asyncio.wait_for(bg, timeout=timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        bg.cancel()
-    connection.stop()
+    await _actions._shutdown(bg, connection, timeout=timeout)
 
 
 @asynccontextmanager

@@ -25,6 +25,8 @@ import time
 
 import pytest
 
+from tests.integration._outcomes import check_roles
+
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role,
     find_kpclientd_container, find_same_network_container, podman,
@@ -117,6 +119,7 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
         "on_connection_status never reported the mixnet reconnect within 90s "
         f"of unpausing the gateway\n{alice_err.read_text()[-6000:]}"
     )
+    check_roles([(alice_proc.returncode, alice_err)])
     assert alice_proc.returncode == 0, (
         f"alice chat-session failed rc={alice_proc.returncode}\n{alice_err.read_text()[-4000:]}"
     )

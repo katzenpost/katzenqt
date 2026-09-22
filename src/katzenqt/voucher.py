@@ -34,6 +34,7 @@ from .network import (
     _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
     check_for_new, conversation_update_queue, ConnectionLifeInterruptedError,
     PacketContext,
+    _delivery_racing_connection_life,
 )
 
 logger = logging.getLogger("katzen.voucher")
@@ -208,7 +209,7 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                 ),
                 timeout_s=READ_WATCHDOG_SECONDS,
             )
-            await _rpc_racing_connection_life(
+            await _delivery_racing_connection_life(
                 bacap_uuid=_brief(write_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
                     read_cap=None, write_cap=write_cap, message_box_index=None,
@@ -298,7 +299,7 @@ async def _read_box(
                 timeout_s=READ_WATCHDOG_SECONDS,
                 stage=stage,
             )
-            resp = await _rpc_racing_connection_life(
+            resp = await _delivery_racing_connection_life(
                 bacap_uuid=_brief(read_cap), what="start_resending_encrypted_message",
                 rpc_factory=lambda: connection.start_resending_encrypted_message(
                     read_cap=read_cap, write_cap=None,
@@ -640,6 +641,7 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
         logger.error(
             "send_introduction_message: failed to write INTRODUCTION for "
             "%r in conversation %d: %s", display_name, conversation_id, e,
+            exc_info=True,
         )
         return
 

@@ -18,7 +18,7 @@ triggers the outage entirely client-side:
 Deterministic shape:
 
 - Alice runs a long-lived chat-session that READs ``m1`` with the standard
-  1500 s budget, which keeps her alive across the bounce AND polls through
+  scenario budget (at least 1500 s), which spans the bounce AND polls through
   it: she starts reading before the outage and her read simply stays
   pending until the leftover write lands.
 - Bob runs three short incarnations from ONE state dir:
@@ -43,11 +43,15 @@ Skipped unless ``KATZENQT_DOCKER_INTEGRATION=1`` (see conftest.py).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
+
+from tests.integration._outcomes import check_roles
 
 from tests.integration._bounce_helpers import (
     run_role as _run_role,
@@ -58,12 +62,43 @@ from tests.integration._bounce_helpers import (
 )
 
 
+
+@dataclass(frozen=True, slots=True)
+class _ReconnectBudgets:
+    commit_s: float
+    writer_sleep_s: float
+    writer_process_s: float
+    reader_s: float
+    reader_process_s: float
+
+
+def _reconnect_budgets(epoch_s: float) -> _ReconnectBudgets:
+    if not math.isfinite(epoch_s) or epoch_s <= 0:
+        raise ValueError("epoch must be positive finite seconds")
+    commit_s = 300.0
+    terminate_s = 15.0 + 5.0
+    process_margin_s = 120.0
+    writer_sleep_s = math.ceil(epoch_s + 100.0)
+    writer_process_s = writer_sleep_s + process_margin_s
+    reader_s = max(
+        1500.0,
+        commit_s + terminate_s + writer_process_s + process_margin_s,
+    )
+    if reader_s > 7200:
+        raise ValueError("reconnect scenario exceeds the 7200-second cap")
+    return _ReconnectBudgets(
+        commit_s=commit_s, writer_sleep_s=writer_sleep_s,
+        writer_process_s=writer_process_s, reader_s=reader_s,
+        reader_process_s=reader_s + process_margin_s,
+    )
+
+
 def _wait_for_token(out_path: Path, token: str, deadline_s: float, what: str) -> None:
     """Poll a spawned role's stderr file until a line containing token is
     written, mirroring the old test's STEP_OK polling. Deadlines are seconds.
     """
-    deadline = time.time() + deadline_s
-    while time.time() < deadline:
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
         if token in out_path.read_text():
             return
         time.sleep(0.5)
@@ -95,7 +130,11 @@ def _terminate(proc: subprocess.Popen, what: str, *, expect_signal: bool = True)
 
 
 @pytest.mark.integration
-def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
+def test_write_survives_client_reconnect(
+    kpclientd_endpoint: tuple[str, int],
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    budgets = _reconnect_budgets(epoch_duration_s())
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
     log_dir = tmp_path_factory.mktemp("reconnect_logs")
@@ -114,8 +153,10 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
     bob2_out = log_dir / "bob2.out"
     bob2_err = log_dir / "bob2.err"
 
+    reader_deadline = time.monotonic() + budgets.reader_process_s
     alice_proc = _spawn_role(
-        alice_state, "chat-session", "demo", "READ:m1:1500",
+        alice_state, "chat-session", "demo",
+        f"READ:m1:{budgets.reader_s:.0f}",
         stdout_path=alice_out, stderr_path=alice_err,
     )
 
@@ -131,7 +172,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         # wait_for_sent: at that instant the row is committed but unsent, or
         # sent-but-unacked. Either way it must ride out a reconnect.
         _wait_for_token(
-            bob2_err, "STEP_WAITING_ACK:0:SEND:m1", 300.0,
+            bob2_err, "STEP_WAITING_ACK:0:SEND:m1", budgets.commit_s,
             what="bob2 never committed SEND:m1 to MixWAL",
         )
         tw.mark("bob2_commit")
@@ -156,13 +197,12 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         # stay alive that long -- an earlier exit would leave no live writer
         # to ride m1 across the boundary. "~one epoch" is a measurement, not
         # a guarantee, so a +100s margin is added on top (matching the
-        # margin test_watchdog_epoch_rollover.py uses for its own
-        # measured-epoch-boundary poll); the subprocess timeout keeps the
-        # same 5x margin over the sleep.
-        bob3_sleep_s = epoch_duration_s() + 100.0
+        # margin test_watchdog_epoch_rollover.py uses). The parent covers
+        # startup/shutdown explicitly, rather than an unrelated 5x factor.
         bob3 = _run_role(
-            bob_state, "chat-session", "demo", f"SLEEP:{bob3_sleep_s:.0f}",
-            timeout=bob3_sleep_s * 5.0,
+            bob_state, "chat-session", "demo",
+            f"SLEEP:{budgets.writer_sleep_s:.0f}",
+            timeout=budgets.writer_process_s,
         )
         bob3_all = bob3.stdout + bob3.stderr
         for line in bob3_all.splitlines():
@@ -178,7 +218,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         )
         tw.mark("bob3_done")
 
-        alice_proc.wait(timeout=2100.0)
+        alice_proc.wait(timeout=max(0.0, reader_deadline - time.monotonic()))
         tw.mark("alice_done")
     except Exception:
         alice_proc.kill()
@@ -191,6 +231,7 @@ def test_write_survives_client_reconnect(kpclientd_endpoint, tmp_path_factory):
         if any(t in line for t in ("STEP_OK", "STEP_FAIL", "STEP_POLL", "SESSION_DONE")):
             print(f"[reconnect][alice] {line}")
 
+    check_roles([(alice_proc.returncode, alice_err)])
     assert alice_proc.returncode == 0, (
         f"alice chat-session failed rc={alice_proc.returncode}\n"
         f"stderr:\n{alice_err.read_text()[-3000:]}"

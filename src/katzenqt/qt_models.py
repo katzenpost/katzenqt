@@ -266,13 +266,20 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 self._rows[rcw_id].get("raw_bytes", 0)
             )
             self._rows[rcw_id]["rate_started_at"] = time.monotonic()
+            self._rows[rcw_id]["failed"] = False
+            self._rows[rcw_id].pop("failure_reason", None)
         row = self._idx(rcw_id)
         idx0 = self.index(row, 2)
         idx1 = self.index(row, 3)
         self.dataChanged.emit(
             idx0, idx1,
-            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_ACTIVE,
-             ROLE_TRANSFER_RATE],
+            [
+                QtCore.Qt.ItemDataRole.DisplayRole,
+                ROLE_TRANSFER_ACTIVE,
+                ROLE_TRANSFER_FAILED,
+                ROLE_TRANSFER_FAILURE_REASON,
+                ROLE_TRANSFER_RATE,
+            ],
         )
 
     def fail_transfer(self, rcw_id: uuid.UUID, reason: str) -> None:
@@ -281,8 +288,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         The row stays visible in the Transfers panel so the user can see
         what failed and why. Use remove_transfer() to dismiss it.
 
-        TODO: When removing a failed transfer, also purge any partial
-        ReceivedPiece rows from the database to free disk space.
+        The caller removes persisted transfer state before dismissing it.
         """
         if rcw_id not in self._rows:
             return
@@ -294,8 +300,13 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         idx3 = self.index(row, 3)  # Rate column (forced to 0 B/s)
         self.dataChanged.emit(
             idx2, idx3,
-            [QtCore.Qt.ItemDataRole.DisplayRole, ROLE_TRANSFER_FAILED,
-             ROLE_TRANSFER_FAILURE_REASON, ROLE_TRANSFER_RATE],
+            [
+                QtCore.Qt.ItemDataRole.DisplayRole,
+                ROLE_TRANSFER_ACTIVE,
+                ROLE_TRANSFER_FAILED,
+                ROLE_TRANSFER_FAILURE_REASON,
+                ROLE_TRANSFER_RATE,
+            ],
         )
 
     def remove_transfer(self, rcw_id: uuid.UUID) -> None:
@@ -316,10 +327,9 @@ class DownloadsModel(QtCore.QAbstractTableModel):
     def seed_from_db(self) -> None:
         """Populate rows for resumable substream transfers already on disk.
 
-        A substream is resumable when its peer is still active (currently
-        reading) *or* it has ReceivedPiece rows (paused mid-transfer). The
-        Transfers panel is where substream transfers are paused/resumed, so
-        this seeding keeps the panel populated across a GUI restart.
+        A substream is resumable when its peer is active, paused, failed, or
+        has ReceivedPiece rows. The Transfers panel keeps those transfers
+        visible across a GUI restart.
 
         Sync engine: this runs on the Qt loop and builds Qt model rows, so it
         neither opens the async engine (see persistent.warm_async_engine) nor
@@ -352,9 +362,10 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                     .where(persistent.ReceivedPiece.read_cap == rcw.id)
                 ).one()
                 parent = _substream_parent_name(sess, cp)
-                # Resumable = active, or received something but not yet
-                # assembled to the terminal F (still has pieces outstanding).
-                if cp.active or int(recv_count):
+                # Resumable = active, paused, failed, or received something
+                # but not yet assembled to the terminal F.
+                if (cp.active or rcw.paused or rcw.substream_failure
+                        or int(recv_count)):
                     # Rate counts from the on-disk byte count at seed, so a
                     # transfer resumed across a relaunch starts at zero.
                     self.start_transfer(
@@ -365,8 +376,10 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                         self.notify_piece(
                             rcw.id, int(recv_count), int(recv_bytes),
                         )
-                    if not cp.active:
+                    if rcw.paused or not cp.active:
                         self.set_paused(rcw.id, paused=True)
+                    if rcw.substream_failure is not None:
+                        self.fail_transfer(rcw.id, rcw.substream_failure)
 
             self._seed_uploads(sess)
 

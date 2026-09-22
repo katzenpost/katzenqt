@@ -16,3 +16,5 @@ katzenpost/
 
 # Local demo/test state (resumable chat); filterable by this path
 .demo-state/
+
+.ci-local/

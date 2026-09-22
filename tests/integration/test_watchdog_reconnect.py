@@ -5,6 +5,8 @@ import time
 
 import pytest
 
+from tests.integration._outcomes import check_roles
+
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role,
     kpclientd_reachable, find_kpclientd_container, podman, wait_reachable,
@@ -78,6 +80,7 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         if any(t in line for t in ("STEP_OK", "STEP_FAIL", "SESSION_DONE", "reconnected mid-wait")):
             print(f"[watchdog] {line}")
 
+    check_roles([(alice_proc.returncode, alice_err)])
     assert alice_proc.returncode == 0, (
         f"alice chat-session failed rc={alice_proc.returncode}\n{alice_err.read_text()[-4000:]}"
     )

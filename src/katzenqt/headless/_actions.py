@@ -89,6 +89,7 @@ from pathlib import Path
 
 import cbor2
 import sqlalchemy as sa
+from katzenpost_thinclient import ThinClient
 from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
@@ -116,7 +117,9 @@ def set_connection_config(path: "str | None") -> None:
     _CONNECTION_CONFIG = path
 
 
-async def _connect_and_start(reconcile_tally: bool = False):
+async def _connect_and_start(
+    reconcile_tally: bool = False,
+) -> tuple[ThinClient, asyncio.Task[None]]:
     """Connect to kpclientd and kick the background threads running.
 
     Returns ``(connection, background_task)``. The caller is responsible for
@@ -136,7 +139,9 @@ async def _connect_and_start(reconcile_tally: bool = False):
     return connection, bg
 
 
-async def _shutdown(bg, connection):
+async def _shutdown(
+    bg: asyncio.Task[None], connection: ThinClient, timeout: float = 5.0,
+) -> None:
     """Tear down a session opened by :func:`_connect_and_start`.
 
     Sets the network's shutdown event, waits for the background task
@@ -147,10 +152,36 @@ async def _shutdown(bg, connection):
     """
     network.shutdown()
     try:
-        await asyncio.wait_for(bg, timeout=5)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        bg.cancel()
-    connection.stop()
+        done, _ = await asyncio.wait({bg}, timeout=timeout)
+        if bg in done and not bg.cancelled():
+            bg.result()
+    finally:
+        try:
+            joining = asyncio.ensure_future(network._cancel_and_join((bg,)))
+            joining.add_done_callback(
+                lambda t: None if t.cancelled() else t.exception()
+            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            cancelled = False
+            while not joining.done():
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    joining.cancel()
+                    logging.warning(
+                        "background task did not finish cancelling",
+                    )
+                    break
+                try:
+                    await asyncio.wait({joining}, timeout=remaining)
+                except asyncio.CancelledError:
+                    cancelled = True
+        finally:
+            connection.stop()
+        if joining.done() and not joining.cancelled():
+            joining.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def _action_create_conv(args):
@@ -338,7 +369,6 @@ async def _send_one_gcm(
 
     budget_floor_s = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0"))
     budget_s = max(budget_floor_s, num_pwals * 60.0) if timeout is None else timeout
-    connection, bg = await _connect_and_start()
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
