@@ -25,13 +25,20 @@ def _imports_pyside6(snippet: str) -> bool:
           "loaded = sorted(m for m in sys.modules if m.startswith('PySide6'))\n"
           "print('PYSIDE_LOADED', bool(loaded), loaded)\n"
     )
-    out = subprocess.run(
-        [_PYTHON, "-c", code], capture_output=True, text=True, check=True
-    ).stdout
-    for line in out.splitlines():
+    res = subprocess.run(
+        [_PYTHON, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert res.returncode == 0, (
+        f"probe interpreter exited {res.returncode}\n"
+        f"stdout:\n{res.stdout[-2000:]}\nstderr:\n{res.stderr[-2000:]}"
+    )
+    for line in res.stdout.splitlines():
         if line.startswith("PYSIDE_LOADED"):
             return line.split()[1] == "True"
-    raise AssertionError(f"sentinel not found in subprocess stdout:\n{out}")
+    raise AssertionError(
+        f"sentinel not found in subprocess stdout:\n{res.stdout}\n"
+        f"stderr:\n{res.stderr}"
+    )
 
 
 def test_plain_import_katzenqt_does_not_load_pyside6() -> None:
