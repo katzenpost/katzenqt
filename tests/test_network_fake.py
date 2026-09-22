@@ -1819,7 +1819,8 @@ class TestDrainMixwalReadSingle:
         event = network.substream_progress_queue.get_nowait()
         assert event[0] == "failed"
         assert event[1] == str(setup["bacap_stream"])
-        assert "ValueError: malformed chunk data" in event[2]
+        assert event[2] == "ValueError"
+        assert "malformed chunk data" not in event[2]
         assert network.substream_progress_queue.empty()
         
         # Verify peer deactivated

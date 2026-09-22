@@ -102,9 +102,18 @@ async def test_dismissing_an_already_cleared_transfer_is_idempotent(
     await network.dismiss_failed_transfer(bacap_stream=uuid.uuid4())
 
 
-async def test_a_stuck_join_still_closes_the_client(
+async def test_a_slow_but_cancellable_join_still_closes_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Covers a join that responds to cancellation.
+
+    It does NOT cover a join stuck forever: the real _cancel_and_join shields
+    its gather and swallows cancellation until its children finish, so
+    wait_for cannot bound it and connection.stop() would never run. Bounding
+    it conflicts with test_repeated_cancellation_waits_for_cleanup, which
+    requires the client stay open until cleanup ends, so the limitation
+    stands rather than being papered over here.
+    """
     from katzenqt.headless import _actions
 
     stopped: list[bool] = []
@@ -119,3 +128,4 @@ async def test_a_stuck_join_still_closes_the_client(
     client = SimpleNamespace(stop=lambda: stopped.append(True))
     await _actions._shutdown(bg, client, timeout=0.01)
     assert stopped == [True]
+

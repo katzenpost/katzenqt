@@ -789,7 +789,7 @@ def _failure_reason(exc: BaseException) -> str:
     rendered in the transfers panel, so keep only the exception type. The
     full exception is already logged with a traceback.
     """
-    return f"{type(exc).__name__}: {exc}"
+    return type(exc).__name__
 
 
 async def drain_mixwal(connection: ThinClient):

@@ -371,6 +371,20 @@ def duration_time_ns():
         # BSDs use SI seconds by default:
         return time.monotonic_ns()
 
+def _error_detail(exc: BaseException, limit: int = 200) -> str:
+    """A bounded, inert description of exc for a message box.
+
+    The exception can come from parsing a peer's reply, so its text is
+    attacker-chosen and unbounded, and QMessageBox renders AutoText. Keep the
+    type, clamp the rest, drop control characters and angle brackets.
+    """
+    text = "".join(
+        c for c in str(exc)
+        if (c.isprintable() or c == " ") and c not in "<>"
+    )[:limit]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 class PendingVouchersDialog(QDialog):
     """Lists in-flight vouchers and lets the user abandon stale ones, e.g. a
     voucher whose code was lost and whose join never completed."""
@@ -2619,7 +2633,7 @@ class MainWindow(QMainWindow):
         try:
             added = await self._wait_and_open_with_retries(convo.conversation_id)
         except Exception as e:
-            detail = str(e)
+            detail = _error_detail(e)
             logging.warning("voucher await failed: %s", detail)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
                 self, f"ERROR: {APP_NAME}",
@@ -2711,7 +2725,7 @@ class MainWindow(QMainWindow):
             # Bind the text before scheduling the dialog: the except variable
             # is deleted when the handler exits, so a lambda that read it
             # would raise NameError when Qt runs it on the next event loop.
-            detail = str(e)
+            detail = _error_detail(e)
             QTimer.singleShot(0, lambda: QMessageBox.critical(
                 self, f"ERROR: {APP_NAME}", f"Induction failed:\n{detail}",
             ))
