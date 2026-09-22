@@ -1030,7 +1030,7 @@ class Conversation(SQLModel, table=True):
     log: list["ConversationLog"] = Relationship(back_populates="conversation", sa_relationship_kwargs={"lazy":"selectin"})
     #sa_relationship=RelationshipProperty("ConversationLog", foreign_keys=["fk_conversationlog_id_conversation_id"])
 
-    first_unread: int = Field(nullable=True, default=None, description="pointer to latest read ConversationLog entry")
+    first_unread: int = Field(nullable=True, default=None, description="conversation_order of the first unread ConversationLog entry")
     #first_unread: uuid.UUID = Field(foreign_key="conversationlog.id", nullable=True, index=False, description="pointer to latest read ConversationLog entry")
     # to keep track of the read state "split buffer"
 

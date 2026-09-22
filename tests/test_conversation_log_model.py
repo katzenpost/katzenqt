@@ -144,7 +144,7 @@ def test_seed_then_append_inserts_exactly_the_new_row() -> None:
     for order in range(4):
         _append_row(convo_id, order)
     model = ConversationLogModel(convo_id=convo_id)
-    model.set_row_count(4)  # startup seed, no transition
+    model.set_row_count()  # startup seed, no transition
 
     grown: "list[tuple[int, int]]" = []
     model.rowsInserted.connect(lambda _p, first, last: grown.append((first, last)))
@@ -250,3 +250,40 @@ def test_next_order_after_a_middle_delete_is_max_plus_one() -> None:
             .where(persistent.ConversationLog.conversation_id == convo_id)
         ))
     assert orders == [0, 2, 3]
+
+
+def test_order_row_mapping_tolerates_gaps() -> None:
+    """first_unread is stored as a conversation_order, so the model maps it to
+    a row; a gap must not shift the mapped row."""
+    convo_id = 1241
+    for order in (0, 2, 5):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+    model.refresh_row_count()
+
+    assert [model.order_for_row(r) for r in range(3)] == [0, 2, 5]
+    assert model.order_for_row(3) == 6  # past the end: all rows read
+    assert [model.row_for_order(o) for o in (0, 2, 5)] == [0, 1, 2]
+    assert model.row_for_order(3) == 2  # a gap maps to the next row
+    assert model.row_for_order(99) == 3
+
+
+def test_refresh_row_count_reports_a_reset_on_deletion() -> None:
+    """Callers skip adopting QML's row marker when the rows shifted."""
+    convo_id = 1242
+    for order in range(3):
+        _append_row(convo_id, order)
+    model = ConversationLogModel(convo_id=convo_id)
+    assert model.refresh_row_count() is False
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.exec(
+            persistent.select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == convo_id,
+                persistent.ConversationLog.conversation_order == 1,
+            )
+        ).one()
+        sess.delete(row)
+        sess.commit()
+
+    assert model.refresh_row_count() is True

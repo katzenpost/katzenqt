@@ -16,6 +16,7 @@ import cbor2
 from . import attachment_images, persistent
 
 import functools
+from bisect import bisect_left
 from functools import lru_cache
 
 # should probably look into paginating some SQL here so we don't do one query per line
@@ -1021,35 +1022,47 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 .order_by(persistent.ConversationLog.conversation_order)
             ))
 
-    def set_row_count(self, count: int) -> None:
-        """Seed the cached count without emitting signals (startup, when the
-        view has no rows yet). Both the DB-truth count and the count Qt has
-        been told about start equal, so the first later insert uses a range the
-        view can accept."""
+    def order_for_row(self, row: int) -> int:
+        """The conversation_order at ``row``; a row past the end maps to the
+        order after the last row."""
+        if not self._orders:
+            return 0
+        if row <= 0:
+            return self._orders[0]
+        if row >= len(self._orders):
+            return self._orders[-1] + 1
+        return self._orders[row]
+
+    def row_for_order(self, order: int) -> int:
+        """The row holding ``order``, or where it would be inserted."""
+        return bisect_left(self._orders, order)
+
+    def set_row_count(self) -> None:
+        """Seed the cached orders without emitting signals (startup, when the
+        view has no rows yet). The row count and the count Qt has been told
+        about start equal, so the first later insert uses a range the view can
+        accept."""
         self._orders = self._query_orders()
-        self._row_count = int(count)
-        self._view_count = int(count)
+        self._row_count = len(self._orders)
+        self._view_count = len(self._orders)
         self._clear_data_caches()
 
-    def refresh_row_count(self) -> None:
+    def refresh_row_count(self) -> bool:
         """Re-read the log's orders and reconcile the view.
 
-        Transitions are driven by ``_view_count`` (rows Qt has actually been
-        told about), never by the raw DB count: seeding the count at startup
-        without an insert means the view's bookkeeping can lag the model's, and
-        emitting a range computed from the DB count then crashes the view.
-        Growth whose existing prefix is unchanged inserts the missing tail; any
-        other change (a deletion left a gap, or a reorder) resets the model,
-        because a shifted index invalidates cached cells. Because the orders
-        come from the log, a writer that appends a row without notifying this
-        model self-heals on the next notification instead of desyncing the view
-        permanently.
+        Returns True when the row set reset (a deletion left a gap, or a
+        reorder), False otherwise. Transitions are driven by ``_view_count``
+        (rows Qt has actually been told about), never by the raw DB count, so
+        emitting a range computed from the DB count cannot crash the view.
+        Growth whose existing prefix is unchanged inserts the missing tail;
+        any other change resets the model, because a shifted index invalidates
+        cached cells.
         """
         new_orders = self._query_orders()
         if new_orders == self._orders:
             # No change: repaint in place (no transition).
             self.redraw_network_status()
-            return
+            return False
         new_count = len(new_orders)
         prefix_unchanged = (
             new_count > self._view_count
@@ -1063,7 +1076,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             self._row_count = new_count
             self._view_count = new_count
             self.endInsertRows()
-            return
+            return False
         # Shrink, gap, or reorder: reset rather than compute a delta, so any
         # shifted indices and stale cached cells are dropped wholesale. Clear
         # the caches before the transition, not between begin/end.
@@ -1073,6 +1086,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self._row_count = new_count
         self._view_count = new_count
         self.endResetModel()
+        return True
 
     def redraw_network_status(self):
         """Repaint the network-status column without changing the row set."""
@@ -1297,10 +1311,9 @@ class ConversationUIState(BaseModel):
     attached_files : set[str] = Field(default_factory=set)
 
     first_unread : int = 0
-    # ConversationLog.conversation_order of the first message the user hasn't
-    # "read" yet. QML's marker walks visible rows and the timeline is exactly
-    # the conversation log (tally messages are ordinary rows), so this is both
-    # the row index and the order.
+    # ConversationLog.conversation_order of the first message the user has not
+    # "read" yet. The QML marker walks visible rows, so qml_ctx() translates
+    # this order to the current row.
 
     def qml_ctx(self, rootObject:QObject|None, settings:dict[str,str|int|None]) -> QQmlPropertyMap:
         props = QQmlPropertyMap(rootObject)
@@ -1308,14 +1321,16 @@ class ConversationUIState(BaseModel):
             **settings,
             "chatTreeViewModel": self.conversation_log_model,
             "conversation_scroll": self.chat_lines_scroll_idx,
-            "first_unread": self.first_unread,
+            "first_unread": self.conversation_log_model.row_for_order(
+                self.first_unread,
+            ),
             "chat_text_size": 11, # governs text size of chat messages
             "contact_name_text_size": settings.get("contactName.font.pointSize", 11), # governs text size of contact names
         })
         return props
 
     def mark_first_unread(self, new_first_unread:int) -> bool:
-        """Set the in-memory first_unread cursor; return True if it changed.
+        """Set the first_unread order; return True if it changed.
 
         The persistent write is kept single-writer on the io loop: callers
         follow up with network.persist_first_unread() only when this returns
@@ -1325,3 +1340,10 @@ class ConversationUIState(BaseModel):
         print("UPDATED FIRST_UNREAD", self.first_unread, new_first_unread)
         self.first_unread = new_first_unread
         return True
+
+    def adopt_first_unread_row(self, row: int) -> "int | None":
+        """Adopt the QML marker's row as an order; the new order if it changed."""
+        order = self.conversation_log_model.order_for_row(row)
+        if self.mark_first_unread(order):
+            return order
+        return None

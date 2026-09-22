@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QTableView, QToolButton, QTreeView,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
-from sqlalchemy import func
 from sqlmodel import select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
@@ -1896,8 +1895,7 @@ class MainWindow(QMainWindow):
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
             return
-        convo_state.conversation_log_model.refresh_row_count()
-        # And then we can increment the row count to let the UI register it:
+        reset = convo_state.conversation_log_model.refresh_row_count()
 
         # x) Scrolling - two cases:
         if convo_state is self.convo_state_or_none():
@@ -1905,13 +1903,19 @@ class MainWindow(QMainWindow):
             # TODO make which of these to do configurable:
             convo_state.chat_lines_scroll_idx = 1.0
             root = self.ui.qml_ChatLines.rootObject()
-            new_first_unread = root.property("ctx").value("first_unread")
-            if convo_state.mark_first_unread(new_first_unread):
-                await self.iothread.run_in_io(
-                    network.persist_first_unread(
-                        convo_state.conversation_id, new_first_unread,
-                    ),
-                )
+            ctx = root.property("ctx")
+            # A reset shifts the rows under QML's marker, so its value is
+            # stale; the rebuild below restores it from the stored order.
+            if not reset and ctx is not None:
+                row = ctx.value("first_unread")
+                if row is not None:
+                    order = convo_state.adopt_first_unread_row(int(row))
+                    if order is not None:
+                        await self.iothread.run_in_io(
+                            network.persist_first_unread(
+                                convo_state.conversation_id, order,
+                            ),
+                        )
             root.setProperty("ctx", convo_state.qml_ctx(root, settings=self.settings))
         else:
             #   x.2) Scrolling: Conversation is NOT in focus:
@@ -2420,14 +2424,15 @@ class MainWindow(QMainWindow):
             # Store old line edit buffer and scroll
             old_convo.chat_lineEdit_buffer = self.ui.chat_lineEdit.text()
             if old_ctx := self.ui.qml_ChatLines.rootObject().property("ctx"):
-                print("old first_unread is", old_ctx.value("first_unread"))
-                old_first_unread = old_ctx.value("first_unread")
-                if old_convo.mark_first_unread(old_first_unread):
-                    await self.iothread.run_in_io(
-                        network.persist_first_unread(
-                            old_convo.conversation_id, old_first_unread,
-                        ),
-                    )
+                old_row = old_ctx.value("first_unread")
+                if old_row is not None:
+                    order = old_convo.adopt_first_unread_row(int(old_row))
+                    if order is not None:
+                        await self.iothread.run_in_io(
+                            network.persist_first_unread(
+                                old_convo.conversation_id, order,
+                            ),
+                        )
             root = self.ui.qml_ChatLines.rootObject()
             if root and (vscrollbar := root.findChild(object, "vscrollbar")):
                 #vrect = vscrollbar.findChild(object, "vscrollbar_rect")
@@ -3079,15 +3084,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         ptwi.peer_is_own = (peer.id == convo.own_peer_id)
         qtwi.setChild(qtwi.rowCount(), ptwi)  # can we use qtwi.appendRow(ptwi) here?
 
-    # Sync engine: add_conversation runs on the Qt loop, which must not open
-    # the async engine (see persistent.warm_async_engine).
-    with persistent.Session(persistent._engine_sync) as sess:
-        msg_count = sess.exec(
-            select(func.count())
-            .select_from(persistent.ConversationLog)
-            .where(persistent.ConversationLog.conversation_id == convo.id)
-        ).first()
-    convo_state.conversation_log_model.set_row_count(msg_count)
+    convo_state.conversation_log_model.set_row_count()
     convo_state.chat_lines_scroll_idx = 1.0  # initially we scroll to bottom
 
     # Append the new conversation to the "real" model window.all_contacts,
