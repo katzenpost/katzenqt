@@ -190,3 +190,21 @@ class LiveNetwork:
             if asyncio.get_event_loop().time() >= deadline:
                 raise AssertionError(f"predicate not satisfied within {timeout}s")
             await asyncio.sleep(0.02)
+
+
+@pytest.fixture
+def recorded_sleeps(fast_asyncio_sleep, monkeypatch):
+    """Every delay the code under test asks `asyncio.sleep` for, in order.
+
+    Depends on `fast_asyncio_sleep` so this patch is applied on top of it and
+    the recorded sleeps still return instantly.
+    """
+    delays: "list[float]" = []
+    real = asyncio.sleep
+
+    async def recording(delay, result=None):
+        delays.append(delay)
+        return await real(0, result)
+
+    monkeypatch.setattr(asyncio, "sleep", recording)
+    return delays

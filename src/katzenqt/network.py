@@ -960,10 +960,10 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       give_up()
       return
     except CourierError as e:
+      # The round trip is the pacing.
       logger.warning(
           "drain_mixwal_write_single: courier rejected envelope (%s); will retry", e,
       )
-      await asyncio.sleep(5)
       give_up()
       return
 
@@ -1782,14 +1782,12 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # momentarily closed DB, see replica/handlers.go handleReplicaRead). This
     # is NOT katzenqt's local SQLite, and (since the daemon now remaps courier
     # errors out of the replica code range) NOT a courier rejection either. The
-    # daemon does not retry it, so we back off and reschedule the same read
-    # rather than advancing the stream or disabling the conversation.
+    # The round trip is the pacing.
     logger.warning(
         "drain_mixwal_read_single: a storage replica reported a database error "
         "from its own backend store (not katzenqt's local SQLite); "
         "treating as transient and will retry"
     )
-    await asyncio.sleep(5)
     give_up()
     return
   except CourierError as e:
@@ -1799,11 +1797,11 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # range precisely so we can tell them apart. Treat as transient and retry.
     # Nothing to re-mint here: every pass re-encrypts a fresh envelope at the
     # top of drain_mixwal_read_single and resends that, never the stored blob.
+    # The round trip is the pacing.
     logger.warning(
         "drain_mixwal_read_single: the courier rejected the read envelope (%s); "
         "will retry", e,
     )
-    await asyncio.sleep(5)
     give_up()
     return
 

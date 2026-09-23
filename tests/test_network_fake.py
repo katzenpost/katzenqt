@@ -3984,3 +3984,65 @@ class TestUploadTransferEvents:
             )).all()
             assert len(remaining) == 2
         assert network.substream_progress_queue.empty()
+
+
+# ---------------------------------------------------------------------------
+# Retry pacing
+# ---------------------------------------------------------------------------
+
+
+class TestRoundTripPacedRetriesDoNotSleep:
+    """Every retry below costs a mixnet round trip, so the round trip is
+    already the pacing and a fixed sleep on top of it only adds latency."""
+
+    @pytest.mark.asyncio
+    async def test_write_courier_rejection_does_not_sleep(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", CourierError("boom"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0] == []
+
+    @pytest.mark.asyncio
+    async def test_read_courier_rejection_does_not_sleep(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", CourierError("rejected"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0] == []
+
+    @pytest.mark.asyncio
+    async def test_replica_database_failure_does_not_sleep(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            DatabaseFailureError("database failure"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0] == []
