@@ -3048,16 +3048,25 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # - encrypt the message
     # - persist that to MixWAL
 
-    wcr : "EncryptWriteResult" = await _rpc_racing_connection_life(
-        bacap_uuid=pwal.bacap_stream,
-        what="encrypt_write",
-        rpc_factory=lambda: connection.encrypt_write(
-            write_cap=wc.write_cap,
-            message_box_index=wc.next_index,
-            plaintext=pwal.bacap_payload,
-        ),
-        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
-    )
+    try:
+        wcr : "EncryptWriteResult" = await _rpc_racing_connection_life(
+            bacap_uuid=pwal.bacap_stream,
+            what="encrypt_write",
+            rpc_factory=lambda: connection.encrypt_write(
+                write_cap=wc.write_cap,
+                message_box_index=wc.next_index,
+                plaintext=pwal.bacap_payload,
+            ),
+            backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+        )
+    except ConnectionLifeInterruptedError as e:
+        # A reconnect or epoch rollover interrupted encrypt_write before any
+        # MixWAL row existed, so nothing was dispatched and the PlaintextWAL
+        # row is untouched: the next sweep re-encrypts it. The other three
+        # ConnectionLifeInterruptedError sites already defer this way; this
+        # was the only write path that let the task die instead.
+        logger.warning("start_resending: link interrupted; will retry: %s", e)
+        return
 
     next_message_index = wcr.next_message_box_index
 
