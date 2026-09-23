@@ -482,11 +482,11 @@ _write_acknowledged: "set[uuid.UUID]" = set()
 #__plaintextwal_updated.set()
 readables_to_mixwal_event = asyncio.Event()
 readables_to_mixwal_event.set()
-async def signal_readables_to_mixwal():
+async def signal_readables_to_mixwal() -> None:
     readables_to_mixwal_event.set()
 resendable_event = asyncio.Event()  # signals send_resendable_plaintexts to check if it can do something
 resendable_event.set()
-async def check_for_new():
+async def check_for_new() -> None:
     resendable_event.set()
 
 
@@ -726,7 +726,7 @@ def _is_duplicate_arming(exc: "OperationalError | IntegrityError") -> bool:
 __on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
 
 __should_quit = asyncio.Event()
-def shutdown():
+def shutdown() -> None:
     __should_quit.set()
 
 async def _cancel_and_join(

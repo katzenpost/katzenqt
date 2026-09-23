@@ -90,6 +90,7 @@ import sqlalchemy as sa
 from katzenpost_thinclient import ThinClient
 from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import _args
 from .. import conversation_handlers, models, network, persistent
@@ -496,7 +497,7 @@ async def _action_multi_send(args: _args.MultiSend) -> int:
         own_bacap_stream = convo.write_cap
 
     texts = args.texts.split("|")
-    final_pwal_ids: list = []
+    final_pwal_ids: "list[uuid.UUID]" = []
     for text in texts:
         # Recompute per send: membership can change mid-session (an
         # INTRODUCTION between sends), so the hash is fetched here, not once
@@ -723,7 +724,7 @@ async def _action_read(args: _args.Read) -> int:
     try:
         await network.signal_readables_to_mixwal()
         deadline = asyncio.get_event_loop().time() + args.timeout_s
-        surfaced: set = set()
+        surfaced: "set[uuid.UUID]" = set()
         while asyncio.get_event_loop().time() < deadline:
             async with persistent.asession() as sess:
                 rows = (await sess.exec(
@@ -866,7 +867,9 @@ def _declare_outcome(result: "tally_engine.TallyResult") -> str:
     return f"WINNER={names} ({out.top_yes} yes)"
 
 
-async def _conversation_by_name(sess, conv_name: str):
+async def _conversation_by_name(
+    sess: AsyncSession, conv_name: str,
+) -> "persistent.Conversation | None":
     return (await sess.exec(
         select(persistent.Conversation).where(persistent.Conversation.name == conv_name)
     )).first()
@@ -910,7 +913,7 @@ async def _wait_for_survey(survey_id: bytes, deadline: float) -> bool:
     return False
 
 
-async def _wait_for_sent(final_pwal_id, deadline: float) -> bool:
+async def _wait_for_sent(final_pwal_id: uuid.UUID, deadline: float) -> bool:
     while asyncio.get_event_loop().time() < deadline:
         async with persistent.asession() as sess:
             hit = (await sess.exec(
