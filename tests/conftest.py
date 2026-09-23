@@ -18,6 +18,7 @@ import pytest_asyncio
 from sqlmodel import SQLModel
 
 from katzenqt import network, persistent
+from katzenqt.tally import controller as tally_controller
 
 from tests.fakes.thinclient import FakeThinClient
 
@@ -89,12 +90,17 @@ def _reset_network_module_state() -> Iterator[None]:
         # Transfers-panel events must not leak across tests.
         while not network.substream_progress_queue.empty():
             network.substream_progress_queue.get_nowait()
+        for _q in (network.conversation_update_queue, network.peer_added_queue):
+            while not _q.empty():
+                _q.get_nowait()
         network._inflight_reads.clear()
         network._inflight_writes.clear()
         network._EPOCH_LOSS_STREAK.clear()
         # Retry ceilings are keyed per stream but the pacer is module-level, so
         # one test's backed-off stream would otherwise pace the next test's.
         network._pacer = network.RetryPacer()
+        tally_controller.INSTANCE._docs.clear()
+        tally_controller.INSTANCE._pending.clear()
         # Per-conversation log-order locks are plain threading.Locks keyed
         # by conversation_id, and the test session's conversation ids
         # restart at 1 after each `_fresh_tables` wipe. Without this reset,
