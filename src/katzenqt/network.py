@@ -9,6 +9,7 @@ CourierError, CourierInvalidEpochError, ReplicaError,
 from katzenpost_thinclient import Config as ThinClientConfig
 import dataclasses
 import hashlib
+import math
 import errno
 import importlib.resources
 import os
@@ -569,6 +570,13 @@ async def on_new_pki_document(event: "Dict[str, Any]") -> None:
     except Exception as e:
         logger.debug("on_new_pki_document: could not parse event payload: %s", e)
         return
+    lambda_p = doc.get("LambdaP")
+    if (isinstance(lambda_p, (int, float)) and math.isfinite(lambda_p)
+            and lambda_p > 0.0 and _pacer.follow_lambda_p(float(lambda_p))):
+        logger.info(
+            "retry pacing follows LambdaP=%s: first %.2fs, cap %.2fs",
+            lambda_p, _pacer.bounds.first_s, _pacer.bounds.cap_s,
+        )
     epoch = doc.get("Epoch")
     if epoch is None or epoch == _last_epoch:
         return
@@ -1105,6 +1113,34 @@ class PacingBounds:
 
 DEFAULT_PACING = PacingBounds(first_s=0.5, cap_s=30.0)
 
+_FIRST_LIMITS_S = (0.1, 30.0)
+_CAP_LIMITS_S = (1.0, 300.0)
+# The quantile common.SafetyCap uses.
+_SAFETY_CAP_LN_EPS = -math.log(1e-12)
+
+
+def _ms_to_s(ms: float) -> float:
+    # The PKI lambdas are events per MILLISECOND; per-second is a 1000x error.
+    return ms / 1000.0
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(max(value, low), high)
+
+
+def pacing_bounds_for(lambda_p: "float | None") -> PacingBounds:
+    """Retry bounds for a network whose mean egress rate is ``lambda_p``.
+
+    The first ceiling is the mean egress interval and the cap is the
+    quantile common.SafetyCap uses, so the client's own retries are paced
+    by the mixnet the PKI describes rather than by a constant picked here.
+    """
+    if lambda_p is None or not lambda_p > 0.0 or math.isinf(lambda_p):
+        return DEFAULT_PACING
+    first = _clamp(_ms_to_s(1.0 / lambda_p), *_FIRST_LIMITS_S)
+    cap = _clamp(_ms_to_s(_SAFETY_CAP_LN_EPS / lambda_p), *_CAP_LIMITS_S)
+    return PacingBounds(first_s=first, cap_s=max(cap, first))
+
 
 def next_ceiling_s(previous_s: float, bounds: PacingBounds) -> float:
     if previous_s <= 0.0:
@@ -1131,6 +1167,14 @@ class RetryPacer:
 
     def reset(self, key: Hashable) -> None:
         self.ceilings.pop(key, None)
+
+    def follow_lambda_p(self, lambda_p: "float | None") -> bool:
+        """Adopt the bounds ``lambda_p`` implies. True if they changed."""
+        bounds = pacing_bounds_for(lambda_p)
+        if bounds == self.bounds:
+            return False
+        self.bounds = bounds
+        return True
 
 
 _pacer = RetryPacer()

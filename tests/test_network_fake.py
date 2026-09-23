@@ -4209,3 +4209,28 @@ class TestUnhandledReplicaError:
                 "%s is a ReplicaError subclass and must be caught before the "
                 "bare ReplicaError clause" % name
             )
+
+
+class TestPacingFollowsThePkiDocument:
+    @pytest.mark.asyncio
+    async def test_a_slower_network_waits_longer(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        """LambdaP is the mean egress rate in events per millisecond, so
+        LambdaP=0.0005 means one egress packet every two seconds and the
+        first retry ceiling is two seconds rather than the static default."""
+        await network.on_new_pki_document(
+            {"payload": cbor2.dumps({"LambdaP": 0.0005, "Epoch": 7})},
+        )
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", ThinClientOfflineError(),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["bacap_stream"]},
+        )
+        waits = [d for d in recorded_sleeps if d > 0]
+        assert len(waits) == 1
+        assert 1.0 <= waits[0] <= 2.0
