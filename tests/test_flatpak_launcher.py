@@ -1,13 +1,19 @@
+from __future__ import annotations
+
 import importlib
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 
 @pytest.fixture
-def launcher(monkeypatch, tmp_path):
+def launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> Iterator[ModuleType]:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     sys.modules.pop("katzenqt.launcher", None)
@@ -16,7 +22,7 @@ def launcher(monkeypatch, tmp_path):
     sys.modules.pop("katzenqt.launcher", None)
 
 
-def test_thin_configs(launcher):
+def test_thin_configs(launcher: ModuleType) -> None:
     unix = launcher.thin("/run/test.sock")
     assert (
         unix.read_text()
@@ -31,7 +37,9 @@ def test_thin_configs(launcher):
     )
 
 
-def test_endpoint_prefers_host(launcher, monkeypatch):
+def test_endpoint_prefers_host(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         Path, "exists", lambda path: path in (launcher.HOST, launcher.SOCKET)
     )
@@ -39,13 +47,19 @@ def test_endpoint_prefers_host(launcher, monkeypatch):
     assert launcher.endpoint() == launcher.HOST
 
 
-def test_endpoint_uses_private_fallback(launcher, monkeypatch):
+def test_endpoint_uses_private_fallback(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(Path, "exists", lambda path: path == launcher.SOCKET)
     monkeypatch.setattr(launcher, "alive", lambda path: True)
     assert launcher.endpoint() == launcher.SOCKET
 
 
-def test_status_reports_all_endpoints(launcher, monkeypatch, capsys):
+def test_status_reports_all_endpoints(
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     for endpoint, expected in (
         (launcher.HOST, "native"),
         (launcher.SOCKET, "bundled"),
@@ -59,7 +73,9 @@ def test_status_reports_all_endpoints(launcher, monkeypatch, capsys):
         assert capsys.readouterr().out.strip() == expected
 
 
-def test_unavailable_daemon_never_starts_gui(launcher, monkeypatch):
+def test_unavailable_daemon_never_starts_gui(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(launcher, "endpoint", lambda: None)
     monkeypatch.setattr(
         launcher.subprocess, "call", lambda *_: pytest.fail("GUI started")
@@ -69,25 +85,34 @@ def test_unavailable_daemon_never_starts_gui(launcher, monkeypatch):
         launcher.main()
 
 
-def test_running_daemon_launches_gui(launcher, monkeypatch):
-    launched = []
+def test_running_daemon_launches_gui(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[tuple[object, ...]] = []
+
+    def call(*args: object) -> int:
+        launched.append(args)
+        return 0
+
     monkeypatch.setattr(launcher, "endpoint", lambda: launcher.HOST)
-    monkeypatch.setattr(
-        launcher.subprocess, "call", lambda *a: launched.append(a) or 0
-    )
+    monkeypatch.setattr(launcher.subprocess, "call", call)
     monkeypatch.setattr(sys, "argv", ["launcher"])
     with pytest.raises(SystemExit):
         launcher.main()
     assert launched
 
 
-def test_generated_configs_live_in_runtime_dir(launcher, tmp_path):
+def test_generated_configs_live_in_runtime_dir(
+    launcher: ModuleType, tmp_path: Path,
+) -> None:
     thin = launcher.thin("/run/test.sock")
     assert launcher.ROOT in thin.parents
     assert str(tmp_path / "config") not in str(thin)
 
 
-def test_endpoint_reaches_default_abstract_socket(launcher, monkeypatch):
+def test_endpoint_reaches_default_abstract_socket(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(Path, "exists", lambda _: False)
     monkeypatch.setattr(
         launcher, "alive", lambda address: address == "@katzenpost"

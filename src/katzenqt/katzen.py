@@ -1678,7 +1678,7 @@ class MainWindow(QMainWindow):
                 logger.error(
                     "tally_listener: dropping an item after %s", e, exc_info=e,
                 )
-        self.mixnet_status_label = QLabel()
+        self.mixnet_status_label: QLabel = QLabel()
         self.ui.statusbar.addPermanentWidget(self.mixnet_status_label)
         self.mixnet_status_changed.connect(self.render_mixnet_status)
         status_listener = self.mixnet_status_changed.emit
