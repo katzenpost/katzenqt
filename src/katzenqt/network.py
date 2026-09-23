@@ -1846,6 +1846,15 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     )
     give_up()
     return
+  except ReplicaError as e:
+    # Must stay below the benign outcomes and DatabaseFailure, which are
+    # ReplicaError subclasses this clause would otherwise shadow.
+    logger.warning(
+        "drain_mixwal_read_single: replica error (%s); backing off", e,
+    )
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
+    give_up()
+    return
 
   logger.debug(f"got reply for outbound read mw {resp}")
   assert resp is not None, "outbound read reply is None, but ought to be retrying"

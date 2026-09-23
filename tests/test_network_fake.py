@@ -32,6 +32,7 @@ from katzenpost_thinclient import (
     CourierError,
     CourierInvalidEpochError,
     DatabaseFailureError,
+    ReplicaError,
     StartResendingCancelledError,
     ThinClientOfflineError,
     TombstoneError,
@@ -4160,3 +4161,51 @@ class TestSpinCapableRetriesBackOff:
             )
         await self._drain_write(fake_thinclient, setup, 4)
         assert setup["bacap_stream"] not in network._pacer.ceilings
+
+
+class TestUnhandledReplicaError:
+    @pytest.mark.asyncio
+    async def test_an_unknown_replica_error_does_not_escape(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        """A replica error that is neither benign nor a database failure used
+        to escape the read. The drain loop's done-callback releases the
+        stream, so the next sweep re-casts at once and the crash repeats in a
+        loop. Back off and reschedule instead."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", ReplicaError("unknown code"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0]
+
+    def test_the_replica_subclasses_are_caught_before_the_base(self):
+        """BoxIDNotFound, Tombstone and DatabaseFailure are all ReplicaError
+        subclasses, so a bare ReplicaError clause above any of them would
+        make it unreachable."""
+        import inspect
+        import re
+        src = inspect.getsource(network.drain_mixwal_read_single)
+        clauses = [m.group(1) for m in
+                   re.finditer(r"except \(?([^)\n]*?)\)?(?: as \w+)?:", src)]
+        base = next(i for i, c in enumerate(clauses)
+                    if c.strip() == "ReplicaError")
+        for name in ("BoxIDNotFoundError", "TombstoneError",
+                     "DatabaseFailureError"):
+            assert issubclass(getattr(
+                __import__("katzenpost_thinclient", fromlist=[name]), name,
+            ), ReplicaError)
+            specific = next(i for i, c in enumerate(clauses) if name in c)
+            assert specific < base, (
+                "%s is a ReplicaError subclass and must be caught before the "
+                "bare ReplicaError clause" % name
+            )
