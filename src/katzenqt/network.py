@@ -1867,7 +1867,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # (the replica's RocksDB; ErrFailedDBRead, a deserialise failure, or a
     # momentarily closed DB, see replica/handlers.go handleReplicaRead). This
     # is NOT katzenqt's local SQLite, and (since the daemon now remaps courier
-    # errors out of the replica code range) NOT a courier rejection either. The
+    # errors out of the replica code range) NOT a courier rejection either.
     # The round trip is the pacing.
     logger.warning(
         "drain_mixwal_read_single: a storage replica reported a database error "
