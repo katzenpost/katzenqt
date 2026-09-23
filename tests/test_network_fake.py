@@ -4046,3 +4046,117 @@ class TestRoundTripPacedRetriesDoNotSleep:
         )
         assert setup["bacap_stream"] not in draining
         assert [d for d in recorded_sleeps if d > 0] == []
+
+
+class TestSpinCapableRetriesBackOff:
+    """These retries can come back without a round trip, so removing the
+    wait entirely would make a hot loop. They get a per-stream backoff
+    instead of a flat five seconds."""
+
+    @staticmethod
+    async def _drain_write(fake, setup, times):
+        for _ in range(times):
+            async with persistent.asession() as sess:
+                mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            await network.drain_mixwal_write_single(
+                fake, mw, {setup["bacap_stream"]},
+            )
+
+    @staticmethod
+    async def _drain_read(fake, setup, times):
+        for _ in range(times):
+            async with persistent.asession() as sess:
+                mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            await network.drain_mixwal_read_single(
+                connection=fake, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now={setup["bacap_stream"]},
+            )
+
+    @staticmethod
+    def _assert_climbs(waits, expected, below=5):
+        assert len(waits) == expected
+        assert waits[0] < below
+        assert waits == sorted(waits)
+        assert waits[-1] > waits[0]
+
+    @pytest.mark.asyncio
+    async def test_offline_write_backs_off(self, fake_thinclient, recorded_sleeps):
+        setup = await _set_up_write_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message", ThinClientOfflineError(),
+            )
+        await self._drain_write(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_stale_replica_epoch_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_write_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message",
+                CourierInvalidEpochError("stale"),
+            )
+        await self._drain_write(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_read_setup_failure_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error("encrypt_read", ThinClientOfflineError())
+        await self._drain_read(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_terminal_read_failure_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message",
+                BACAPDecryptionFailedError("undecryptable"),
+            )
+        await self._drain_read(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_a_lost_read_reply_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        """The watchdog fires when no reply comes back, so the next attempt
+        is not paced by a reply that never arrived."""
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("hang"),
+        )
+        fake_thinclient.hold_ack_for_box(
+            setup["read_cap"], setup["first_message_index"],
+        )
+        for _ in range(3):
+            async with persistent.asession() as sess:
+                mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            await network.drain_mixwal_read_single(
+                connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now={setup["bacap_stream"]},
+                read_watchdog_s=0.05,
+            )
+        self._assert_climbs(
+            [d for d in recorded_sleeps if d > 0], 3, below=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_write_resets_its_stream(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_write_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message", ThinClientOfflineError(),
+            )
+        await self._drain_write(fake_thinclient, setup, 4)
+        assert setup["bacap_stream"] not in network._pacer.ceilings

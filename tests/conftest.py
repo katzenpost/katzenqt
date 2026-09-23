@@ -89,6 +89,9 @@ def _reset_network_module_state():
         network._inflight_reads.clear()
         network._inflight_writes.clear()
         network._EPOCH_LOSS_STREAK.clear()
+        # Retry ceilings are keyed per stream but the pacer is module-level, so
+        # one test's backed-off stream would otherwise pace the next test's.
+        network._pacer = network.RetryPacer()
         # Per-conversation log-order locks are plain threading.Locks keyed
         # by conversation_id, and the test session's conversation ids
         # restart at 1 after each `_fresh_tables` wipe. Without this reset,

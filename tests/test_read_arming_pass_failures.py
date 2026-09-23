@@ -231,3 +231,85 @@ async def test_duplicate_arming_retries_instead_of_killing_the_loop(
     await network.readables_to_mixwal(connection)
     assert state.pass_no == 2
     assert 5 in state.sleeps
+
+
+def _install_arming_rpc_failure(
+    monkeypatch: pytest.MonkeyPatch, *, waits: int,
+) -> tuple[_LoopState, "ThinClient"]:
+    """A loop whose per-peer arming RPC always fails, so every pass ends in
+    the retry_needed wait. Quits once ``waits`` waits have been recorded."""
+    quit_event = asyncio.Event()
+    populated = asyncio.Event()
+    populated.set()
+    arming = asyncio.Event()
+    arming.set()
+    state = _LoopState()
+
+    class Session:
+        async def __aenter__(self) -> Self:
+            state.pass_no += 1
+            return self
+
+        async def __aexit__(
+            self, exc_type: type[BaseException] | None,
+            exc: BaseException | None, traceback: TracebackType | None,
+        ) -> bool:
+            return False
+
+        async def exec(self, statement: object) -> _Rows:
+            return _Rows([(_Peer(), _ReadCap())])
+
+        def add(self, row: _MixWAL) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+    async def sleep(seconds: float) -> None:
+        state.sleeps.append(seconds)
+        if len(state.sleeps) >= waits:
+            quit_event.set()
+        await asyncio.sleep(0)
+
+    def select(*entities: object) -> _Query:
+        return _Query()
+
+    monkeypatch.setattr(network, "asyncio", SimpleNamespace(
+        sleep=sleep, wait_for=asyncio.wait_for,
+    ))
+    monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.001)
+    monkeypatch.setattr(network, "__should_quit", quit_event)
+    monkeypatch.setattr(network, "__resend_queue_populated", populated)
+    monkeypatch.setattr(
+        network, "__mixwal_updated", SimpleNamespace(set=state.publish),
+    )
+    monkeypatch.setattr(network, "readables_to_mixwal_event", arming)
+    monkeypatch.setattr(
+        network, "_wait_for_connection_or_shutdown",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(network, "select", select)
+    field = _Field()
+    monkeypatch.setattr(network, "persistent", SimpleNamespace(
+        asession=Session, MixWAL=_MixWAL,
+        ConversationPeer=SimpleNamespace(active=True, read_cap_id=field),
+        ReadCapWAL=SimpleNamespace(id=field, paused=False),
+    ))
+    connection = SimpleNamespace(
+        encrypt_read=AsyncMock(side_effect=RuntimeError("daemon said no")),
+    )
+    return state, cast("ThinClient", connection)
+
+
+async def test_a_failing_arming_pass_backs_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The arming RPC is local to the daemon, so a pass that fails on every
+    peer can come straight back. Waiting a flat five seconds each time is
+    both too long after one hiccup and too short under a lasting failure."""
+    state, connection = _install_arming_rpc_failure(monkeypatch, waits=3)
+    await network.readables_to_mixwal(connection)
+    assert len(state.sleeps) == 3
+    assert max(state.sleeps) < 5
+    assert state.sleeps == sorted(state.sleeps)
+    assert state.sleeps[-1] > state.sleeps[0]

@@ -7,6 +7,7 @@ from katzenpost_thinclient import (
 CourierError, CourierInvalidEpochError, ReplicaError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
+import dataclasses
 import hashlib
 import errno
 import importlib.resources
@@ -945,7 +946,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       # persistent (non-transient) failure of this kind backs off instead of
       # retrying in a tight loop.
       logger.warning("thin client is offline or resend cancelled, can't drain mixwal: %s", e)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_pacer.delay_s(mw.bacap_stream))
       give_up()
       return
     except CourierInvalidEpochError as e:
@@ -956,7 +957,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
           "drain_mixwal_write_single: stale replica epoch (%s); re-minting envelope", e,
       )
       await _remint_write_envelope(connection, mw, wcw)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_pacer.delay_s(mw.bacap_stream))
       give_up()
       return
     except CourierError as e:
@@ -985,6 +986,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       )
 
     _write_acknowledged.add(mw.bacap_stream)
+    _pacer.reset(mw.bacap_stream)
     bookkeeping = asyncio.ensure_future(persistent.SentLog.mark_sent(
         connection, mw, __resend_queue, resolve_counter=resolve_counter,
     ))
@@ -1092,6 +1094,46 @@ _CONNECTION_IDLE_RETRY_S = 60.0
 # Cadence at which readables_to_mixwal() runs an arming pass when
 # readables_to_mixwal_event is never re-set (e.g. while the daemon is down).
 _ARMING_SWEEP_S = 60.0
+
+
+@dataclasses.dataclass(frozen=True)
+class PacingBounds:
+    """How long a retry may wait: the first ceiling and the highest one."""
+    first_s: float
+    cap_s: float
+
+
+DEFAULT_PACING = PacingBounds(first_s=0.5, cap_s=30.0)
+
+
+def next_ceiling_s(previous_s: float, bounds: PacingBounds) -> float:
+    if previous_s <= 0.0:
+        return bounds.first_s
+    return min(bounds.cap_s, previous_s * 2.0)
+
+
+@dataclasses.dataclass
+class RetryPacer:
+    """Per-stream retry delays for the paths that can come back without a
+    round trip, where removing the wait would make a hot loop.
+
+    The ceiling doubles per consecutive failure and the delay is drawn from
+    the lower half of it, so streams that failed together do not retry in
+    lockstep. A stream that makes progress resets.
+    """
+    bounds: PacingBounds = DEFAULT_PACING
+    ceilings: "dict[Hashable, float]" = dataclasses.field(default_factory=dict)
+
+    def delay_s(self, key: Hashable) -> float:
+        ceiling = next_ceiling_s(self.ceilings.get(key, 0.0), self.bounds)
+        self.ceilings[key] = ceiling
+        return random.uniform(ceiling / 2.0, ceiling)
+
+    def reset(self, key: Hashable) -> None:
+        self.ceilings.pop(key, None)
+
+
+_pacer = RetryPacer()
 
 
 _EPOCH_LOSS_STREAK: dict[Hashable, int] = {}
@@ -1657,7 +1699,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         "Read setup failed for %s; retrying: %s", bacap_uuid, exc,
         exc_info=not _retryable_rpc_error(exc),
     )
-    await asyncio.sleep(5)
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
 
@@ -1729,7 +1771,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         logger.warning("drain_mixwal_read_single: cancel ARQ did not answer for %s", bacap_uuid)
     except Exception as _cancele:  # pragma: no cover - defensive best-effort
         logger.debug("drain_mixwal_read_single: cancel ARQ best-effort: %s", _cancele)
-    await asyncio.sleep(1)
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
   except asyncio.CancelledError:
@@ -1761,7 +1803,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         "drain_mixwal_read_single giving up: %s", e,
         exc_info=not _retryable_rpc_error(e),
     )
-    await asyncio.sleep(5)
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
   except (BoxIDNotFoundError, TombstoneError) as e:
@@ -1832,6 +1874,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
     logger.info(f"advancing read to idx {idx_new}")
+    _pacer.reset(bacap_uuid)
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = rcr.next_message_box_index
     rcw.substream_missing_since = None
@@ -2836,8 +2879,10 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
             __mixwal_updated.set()
             logger.debug("__mixwal_updated.set() from readables_to_mixwal")
         if retry_needed:
-            await asyncio.sleep(5)
+            await asyncio.sleep(_pacer.delay_s(readables_to_mixwal))
             readables_to_mixwal_event.set()
+        else:
+            _pacer.reset(readables_to_mixwal)
 
 
 async def readables_to_mixwal_supervised(connection: ThinClient) -> None:
