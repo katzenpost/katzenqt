@@ -40,7 +40,7 @@ from typing import AsyncIterator
 
 from katzenpost_thinclient import ThinClient
 
-from . import _actions, _cli
+from . import _actions, _args, _cli
 from .. import network, persistent
 from ..network import resolve_thinclient_config
 
@@ -190,7 +190,7 @@ def cli(argv: "list[str] | None" = None) -> int:
     # to a thinclient.toml path now and hand it to the actions. `info` has no
     # such arguments and needs no daemon.
     temp_config = None
-    if hasattr(args, "config"):
+    if isinstance(args, _args.Connected):
         config_path, temp_config = _actions.resolve_connection_config(args)
         _actions.set_connection_config(config_path)
 
@@ -200,7 +200,7 @@ def cli(argv: "list[str] | None" = None) -> int:
     except NotImplementedError:
         pass  # Windows or sandboxed envs
     try:
-        return loop.run_until_complete(chosen.func(args))
+        return loop.run_until_complete(chosen.run())
     finally:
         # Cancel any stragglers (fire-and-forget read/send loops) and let them
         # unwind while the loop is still running, so we do not close it under an

@@ -84,7 +84,6 @@ import time
 import uuid
 from base64 import b64decode, b64encode
 from pathlib import Path
-from types import SimpleNamespace
 
 import cbor2
 import sqlalchemy as sa
@@ -92,6 +91,7 @@ from katzenpost_thinclient import ThinClient
 from alembic.runtime.migration import MigrationContext
 from sqlmodel import select
 
+from . import _args
 from .. import conversation_handlers, models, network, persistent
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
@@ -183,7 +183,7 @@ async def _shutdown(
             raise asyncio.CancelledError
 
 
-async def _action_create_conv(args):
+async def _action_create_conv(args: _args.CreateConv) -> int:
     # Build the conversation + own_peer skeleton; provision_read_caps will
     # fill in the WriteCap/ReadCap asynchronously once the daemon is up.
     wcapwal = persistent.WriteCapWAL(id=uuid.uuid4())
@@ -251,7 +251,7 @@ async def _wait_for_conv_write_cap(conversation_id: int, attempts: int = 120, de
     return False
 
 
-async def _action_voucher_mint(args):
+async def _action_voucher_mint(args: _args.VoucherMint) -> int:
     conv_id = await _conv_id_by_name(args.conv_name)
     if conv_id is None:
         logger.error("conversation %r not found", args.conv_name)
@@ -268,7 +268,7 @@ async def _action_voucher_mint(args):
         await _shutdown(bg, connection)
 
 
-async def _action_voucher_induct(args):
+async def _action_voucher_induct(args: _args.VoucherInduct) -> int:
     conv_id = await _conv_id_by_name(args.conv_name)
     if conv_id is None:
         logger.error("conversation %r not found", args.conv_name)
@@ -289,7 +289,7 @@ async def _action_voucher_induct(args):
         await _shutdown(bg, connection)
 
 
-async def _action_voucher_await(args):
+async def _action_voucher_await(args: _args.VoucherAwait) -> int:
     conv_id = await _conv_id_by_name(args.conv_name)
     if conv_id is None:
         logger.error("conversation %r not found", args.conv_name)
@@ -379,14 +379,14 @@ async def _send_one_gcm(
         await _shutdown(bg, connection)
 
 
-async def _action_send(args):
+async def _action_send(args: _args.Send) -> int:
     gcm = models.GroupChatMessage(
         version=0, membership_hash=b"TODO" * 8, text=args.text,
     )
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
-async def _action_send_file(args):
+async def _action_send_file(args: _args.SendFile) -> int:
     path = Path(args.path)
     if not path.is_file():
         logger.error("file not found: %s", path)
@@ -409,7 +409,7 @@ async def _action_send_file(args):
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
-async def _action_read_file(args):
+async def _action_read_file(args: _args.ReadFile) -> int:
     async with persistent.asession() as sess:
         convo = (await sess.exec(
             select(persistent.Conversation).where(
@@ -478,7 +478,7 @@ async def _action_read_file(args):
         await _shutdown(bg, connection)
 
 
-async def _action_multi_send(args):
+async def _action_multi_send(args: _args.MultiSend) -> int:
     """Queue N messages on the PWAL all at once, then wait for the LAST of
     them to land in SentLog. Approximates a user that typed and pressed
     Enter several times in quick succession before quitting.
@@ -575,7 +575,7 @@ def _parse_read_step(payload: str, *, step_idx: int) -> "tuple[str, float]":
     return target, deadline_s
 
 
-async def _action_chat_session(args):
+async def _action_chat_session(args: _args.ChatSession) -> int:
     """Long-lived session that runs multiple SEND / READ / SLEEP steps in
     ONE subprocess against a shared background-thread ThinClient, then
     cleanly shuts down. The whole point is to exercise multiple in-process
@@ -705,7 +705,7 @@ async def _action_chat_session(args):
         await _shutdown(bg, connection)
 
 
-async def _action_read(args):
+async def _action_read(args: _args.Read) -> int:
     async with persistent.asession() as sess:
         convo = (await sess.exec(
             select(persistent.Conversation).where(
@@ -768,7 +768,7 @@ async def _action_read(args):
         await _shutdown(bg, connection)
 
 
-async def _action_info(args) -> int:
+async def _action_info(args: _args.Info) -> int:
     """Print one line of JSON describing this state file's schema,
     conversations, and outstanding WAL counts.
 
@@ -872,7 +872,7 @@ async def _conversation_by_name(sess, conv_name: str):
     )).first()
 
 
-async def _action_tally_create(args):
+async def _action_tally_create(args: _args.TallyCreate) -> int:
     """Create a survey, persist its initial state, and broadcast it. Logs
     ``TALLY_CREATED=<survey_id hex>``."""
     try:
@@ -922,7 +922,7 @@ async def _wait_for_sent(final_pwal_id, deadline: float) -> bool:
     return False
 
 
-async def _action_tally_vote(args):
+async def _action_tally_vote(args: _args.TallyVote) -> int:
     """Wait for the survey to arrive, record our own vote, and broadcast it,
     all on a single connection. Logs ``VOTED``.
 
@@ -977,7 +977,7 @@ async def _action_tally_vote(args):
         await _shutdown(bg, connection)
 
 
-async def _action_tally_result(args):
+async def _action_tally_result(args: _args.TallyResult) -> int:
     """Run the loops until the survey has at least ``--expect-voters`` voters,
     then emit the derived tally as ``TALLY=<json>``."""
     survey_id = bytes.fromhex(args.survey)
@@ -1006,7 +1006,7 @@ async def _action_tally_result(args):
         await _shutdown(bg, connection)
 
 
-async def _action_tally_close(args):
+async def _action_tally_close(args: _args.TallyClose) -> int:
     """Close the survey and broadcast it. Only the creator may close; a
     non-creator's attempt is refused. Logs ``CLOSED``."""
     survey_id = bytes.fromhex(args.survey)
@@ -1044,7 +1044,7 @@ async def _action_tally_close(args):
         await _shutdown(bg, connection)
 
 
-async def _action_tally_list(args):
+async def _action_tally_list(args: _args.TallyList) -> int:
     """List the surveys a conversation holds. Offline; needs no daemon. Prints
     one ``SURVEY=`` line per survey."""
     async with persistent.asession() as sess:
@@ -1067,7 +1067,7 @@ async def _action_tally_list(args):
     return 0
 
 
-def resolve_connection_config(args) -> "tuple[str, str | None]":
+def resolve_connection_config(args: _args.Connected) -> "tuple[str, str | None]":
     """Turn the parsed connection args into a thinclient.toml path.
 
     Returns ``(config_path, temp_path)``. When ``--address`` was given the
@@ -1086,7 +1086,7 @@ def resolve_connection_config(args) -> "tuple[str, str | None]":
     return path, path
 
 
-async def _action_membership_hash(args: SimpleNamespace) -> int:
+async def _action_membership_hash(args: _args.MembershipHash) -> int:
     """Print the conversation's locally computed membership hash. Offline;
     needs no daemon. Prints one ``MEMBERSHIP_HASH=<hex>`` line."""
     conv_id = await _conv_id_by_name(args.conv_name)
