@@ -1,9 +1,9 @@
 """Action dispatch table for the headless CLI.
 
-Each subparser registered by :func:`_build_parser` binds one async
-action function via ``set_defaults(func=...)``. The unified
-:func:`katzenqt.headless.cli` entry point looks the action up and
-runs it inside its own event loop after ``persistent.init_and_migrate``.
+Each verb in :mod:`katzenqt.headless._cli` names one async action
+function here. The unified :func:`katzenqt.headless.cli` entry point
+looks the action up and runs it inside its own event loop after
+``persistent.init_and_migrate``.
 
 Actions emit their results and diagnostics through the logging
 framework; the headless CLI routes logs to stderr, and subprocess
@@ -73,12 +73,10 @@ https://katzenpost.network/docs/specs/contact_voucher/ .
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
 import hashlib
 import json
 import logging
-import math
 import os
 import shutil
 import tempfile
@@ -86,6 +84,7 @@ import time
 import uuid
 from base64 import b64decode, b64encode
 from pathlib import Path
+from types import SimpleNamespace
 
 import cbor2
 import sqlalchemy as sa
@@ -302,16 +301,6 @@ async def _action_voucher_await(args):
         return 0
     finally:
         await _shutdown(bg, connection)
-
-
-def _positive_timeout(value: str) -> float:
-    try:
-        timeout = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("timeout must be a finite positive number") from exc
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise argparse.ArgumentTypeError("timeout must be a finite positive number")
-    return timeout
 
 
 async def _send_one_gcm(
@@ -1078,30 +1067,6 @@ async def _action_tally_list(args):
     return 0
 
 
-def _connection_parser() -> argparse.ArgumentParser:
-    """A shared parent parser carrying the explicit kpclientd connection.
-
-    Every verb that talks to the daemon requires exactly one of a
-    ``thinclient.toml`` (``--config``) or a dial address (``--address``, with an
-    optional ``--network``). There is no implicit search of the filesystem.
-    """
-    p = argparse.ArgumentParser(add_help=False)
-    g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument(
-        "--config", metavar="THINCLIENT_TOML",
-        help="path to a thinclient.toml describing the kpclientd connection",
-    )
-    g.add_argument(
-        "--address", metavar="ADDR",
-        help="kpclientd dial address, e.g. 127.0.0.1:64331 (tcp) or @katzenpost (unix)",
-    )
-    p.add_argument(
-        "--network", choices=["tcp", "unix"], default="tcp",
-        help="dial transport for --address (default: tcp)",
-    )
-    return p
-
-
 def resolve_connection_config(args) -> "tuple[str, str | None]":
     """Turn the parsed connection args into a thinclient.toml path.
 
@@ -1121,7 +1086,7 @@ def resolve_connection_config(args) -> "tuple[str, str | None]":
     return path, path
 
 
-async def _action_membership_hash(args: argparse.Namespace) -> int:
+async def _action_membership_hash(args: SimpleNamespace) -> int:
     """Print the conversation's locally computed membership hash. Offline;
     needs no daemon. Prints one ``MEMBERSHIP_HASH=<hex>`` line."""
     conv_id = await _conv_id_by_name(args.conv_name)
@@ -1131,145 +1096,3 @@ async def _action_membership_hash(args: argparse.Namespace) -> int:
     digest = await conversation_handlers.membership_hash_for(conv_id)
     logger.info("MEMBERSHIP_HASH=%s", digest.hex())
     return 0
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="katzenqt-headless",
-        description="Headless driver for katzenqt: send/receive over kpclientd.",
-    )
-    sub = parser.add_subparsers(dest="action", required=True)
-
-    # Every verb except `info` dials kpclientd and so inherits the explicit
-    # connection arguments via this parent parser.
-    conn = _connection_parser()
-
-    p_create = sub.add_parser("create-conv", parents=[conn])
-    p_create.add_argument("conv_name")
-    p_create.add_argument("own_display")
-    p_create.set_defaults(func=_action_create_conv)
-
-    p_mint = sub.add_parser("voucher-mint", parents=[conn])
-    p_mint.add_argument("conv_name")
-    p_mint.add_argument("display_name")
-    p_mint.set_defaults(func=_action_voucher_mint)
-
-    p_induct = sub.add_parser("voucher-induct", parents=[conn])
-    p_induct.add_argument("conv_name")
-    p_induct.add_argument("peer_name")
-    p_induct.add_argument("voucher_b64")
-    p_induct.set_defaults(func=_action_voucher_induct)
-
-    p_await = sub.add_parser("voucher-await", parents=[conn])
-    p_await.add_argument("conv_name")
-    p_await.set_defaults(func=_action_voucher_await)
-
-    p_send = sub.add_parser("send", parents=[conn])
-    p_send.add_argument("conv_name")
-    p_send.add_argument("text")
-    p_send.add_argument(
-        "--timeout", type=_positive_timeout, default=None,
-        help="seconds to wait for delivery; default scales with message size",
-    )
-    p_send.set_defaults(func=_action_send)
-
-    p_multi = sub.add_parser("multi-send", parents=[conn])
-    p_multi.add_argument("conv_name")
-    p_multi.add_argument("texts", help="pipe-separated list of texts to queue")
-    p_multi.set_defaults(func=_action_multi_send)
-
-    p_read = sub.add_parser("read", parents=[conn])
-    p_read.add_argument("conv_name")
-    p_read.add_argument("timeout_s", type=float)
-    p_read.add_argument("expected_text", nargs="?", default=None)
-    p_read.set_defaults(func=_action_read)
-
-    p_sess = sub.add_parser("chat-session", parents=[conn])
-    p_sess.add_argument("conv_name")
-    p_sess.add_argument(
-        "steps", nargs="+",
-        help="steps like SEND:text, READ:text, SLEEP:seconds",
-    )
-    p_sess.set_defaults(func=_action_chat_session)
-
-    p_send_file = sub.add_parser("send-file", parents=[conn])
-    p_send_file.add_argument("conv_name")
-    p_send_file.add_argument("path", help="path to the file to send")
-    p_send_file.add_argument("--basename", default=None)
-    p_send_file.add_argument("--filetype", default=None)
-    p_send_file.add_argument(
-        "--timeout", type=_positive_timeout, default=None,
-        help="seconds to wait for delivery; default scales with message size",
-    )
-    p_send_file.set_defaults(func=_action_send_file)
-
-    p_read_file = sub.add_parser("read-file", parents=[conn])
-    p_read_file.add_argument("conv_name")
-    p_read_file.add_argument(
-        "--to-dir", dest="to_dir", required=True,
-        help="directory where the received attachment is written",
-    )
-    p_read_file.add_argument(
-        "--timeout", type=float, default=600.0,
-        help="seconds to wait for a file_marker to arrive",
-    )
-    p_read_file.add_argument(
-        "--basename", default=None,
-        help="restrict to attachments whose basename matches",
-    )
-    p_read_file.set_defaults(func=_action_read_file)
-
-    p_info = sub.add_parser(
-        "info",
-        help="emit one line of JSON describing the state file's "
-             "schema, conversations, and outstanding WAL counts",
-    )
-    p_info.set_defaults(func=_action_info)
-
-    p_tally_create = sub.add_parser("tally-create", parents=[conn])
-    p_tally_create.add_argument("conv_name")
-    p_tally_create.add_argument("topic")
-    p_tally_create.add_argument(
-        "--mode", choices=["availability", "approval"], default="approval",
-    )
-    p_tally_create.add_argument(
-        "--slot", action="append", required=True,
-        help="descriptive text for one slot; repeat for each slot",
-    )
-    p_tally_create.add_argument("--timeout", type=float, default=600.0)
-    p_tally_create.set_defaults(func=_action_tally_create)
-
-    p_tally_vote = sub.add_parser("tally-vote", parents=[conn])
-    p_tally_vote.add_argument("conv_name")
-    p_tally_vote.add_argument("--survey", required=True, help="survey id in hex")
-    p_tally_vote.add_argument(
-        "--slot", action="append", required=True,
-        help="a per-slot vote SLOT_ID=availability; repeat per slot",
-    )
-    p_tally_vote.add_argument("--timeout", type=float, default=600.0)
-    p_tally_vote.set_defaults(func=_action_tally_vote)
-
-    p_tally_result = sub.add_parser("tally-result", parents=[conn])
-    p_tally_result.add_argument("conv_name")
-    p_tally_result.add_argument("--survey", required=True, help="survey id in hex")
-    p_tally_result.add_argument("--expect-voters", type=int, default=None, dest="expect_voters")
-    p_tally_result.add_argument("--timeout", type=float, default=600.0)
-    p_tally_result.set_defaults(func=_action_tally_result)
-
-    p_tally_close = sub.add_parser("tally-close", parents=[conn])
-    p_tally_close.add_argument("conv_name")
-    p_tally_close.add_argument("--survey", required=True, help="survey id in hex")
-    p_tally_close.add_argument("--timeout", type=float, default=600.0)
-    p_tally_close.set_defaults(func=_action_tally_close)
-
-    # tally-list reads only the local state file, so (like info) it takes no
-    # connection argument.
-    p_tally_list = sub.add_parser("tally-list")
-    p_tally_list.add_argument("conv_name")
-    p_tally_list.set_defaults(func=_action_tally_list)
-
-    p_mhash = sub.add_parser("membership-hash")
-    p_mhash.add_argument("conv_name")
-    p_mhash.set_defaults(func=_action_membership_hash)
-
-    return parser

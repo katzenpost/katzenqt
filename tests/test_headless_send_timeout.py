@@ -8,22 +8,21 @@ import pytest
 from sqlmodel import select
 
 from katzenqt import persistent
-from katzenqt.headless import _actions
+from katzenqt.headless import _actions, _cli
 
 
 @pytest.mark.parametrize("command", ["send", "send-file"])
 def test_send_timeout_default_and_override(command):
-    parser = _actions._build_parser()
     argv = [command, "demo", "payload", "--address", "127.0.0.1:64331"]
-    assert parser.parse_args(argv).timeout is None
-    assert parser.parse_args([*argv, "--timeout", "600"]).timeout == 600
+    assert _cli.parse(argv).args.timeout is None
+    assert _cli.parse([*argv, "--timeout", "600"]).args.timeout == 600
 
 
 @pytest.mark.parametrize("command", ["send", "send-file"])
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "1e999", "bad"])
 def test_send_timeout_rejects_invalid_values(command, value):
     with pytest.raises(SystemExit) as exc:
-        _actions._build_parser().parse_args([
+        _cli.parse([
             command, "demo", "payload", "--address", "127.0.0.1:64331", f"--timeout={value}",
         ])
     assert exc.value.code == 2
@@ -84,9 +83,9 @@ async def test_unacknowledged_send_expires_and_preserves_pending(
     argv = [command, "demo", payload, "--address", "127.0.0.1:64331"]
     if timeout is not None:
         argv.extend(["--timeout", str(timeout)])
-    args = _actions._build_parser().parse_args(argv)
+    chosen = _cli.parse(argv)
 
-    assert await args.func(args) == 3
+    assert await chosen.func(chosen.args) == 3
     start.assert_awaited_once_with()
     assert clock.now == expected_seconds
     assert "send timed out waiting for SentLog" in caplog.text

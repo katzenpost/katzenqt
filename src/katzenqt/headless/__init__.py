@@ -40,7 +40,7 @@ from typing import AsyncIterator
 
 from katzenpost_thinclient import ThinClient
 
-from . import _actions
+from . import _actions, _cli
 from .. import network, persistent
 from ..network import resolve_thinclient_config
 
@@ -164,7 +164,8 @@ def cli(argv: "list[str] | None" = None) -> int:
     before we instantiate our own event loop), then dispatches the
     chosen action.
     """
-    args = _actions._build_parser().parse_args(argv)
+    chosen = _cli.parse(argv)
+    args = chosen.args
     if os.environ.get("KQT_LOG_LEVEL"):
         # Verbose mode: echo every SQL statement through the engines' own
         # logger, which ignores our logging.basicConfig level, so it has to
@@ -199,7 +200,7 @@ def cli(argv: "list[str] | None" = None) -> int:
     except NotImplementedError:
         pass  # Windows or sandboxed envs
     try:
-        return loop.run_until_complete(args.func(args))
+        return loop.run_until_complete(chosen.func(args))
     finally:
         # Cancel any stragglers (fire-and-forget read/send loops) and let them
         # unwind while the loop is still running, so we do not close it under an
