@@ -68,7 +68,6 @@ async def pending_voucher_token(conversation_id: int) -> "bytes | None":
 STEP_MINTED = "minted"
 STEP_AWAITING = "awaiting"
 STEP_INDUCTING = "inducting"
-STEP_DONE = "done"
 
 _INDEX_LEN = 104
 _READ_RETRY_GAP_S = 15.0  # bounded round gap, well inside a ~60s PKI epoch window
