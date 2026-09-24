@@ -32,6 +32,7 @@ from katzenpost_thinclient import (
     CourierError,
     CourierInvalidEpochError,
     DatabaseFailureError,
+    ReplicaError,
     StartResendingCancelledError,
     ThinClientOfflineError,
     TombstoneError,
@@ -3984,3 +3985,290 @@ class TestUploadTransferEvents:
             )).all()
             assert len(remaining) == 2
         assert network.substream_progress_queue.empty()
+
+
+# ---------------------------------------------------------------------------
+# Retry pacing
+# ---------------------------------------------------------------------------
+
+
+class TestRoundTripPacedRetriesDoNotSleep:
+    """Every retry below costs a mixnet round trip, so the round trip is
+    already the pacing and a fixed sleep on top of it only adds latency."""
+
+    @pytest.mark.asyncio
+    async def test_write_courier_rejection_does_not_sleep(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", CourierError("boom"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_write_single(fake_thinclient, mw, draining)
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0] == []
+
+    @pytest.mark.asyncio
+    async def test_read_courier_rejection_does_not_sleep(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", CourierError("rejected"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0] == []
+
+    @pytest.mark.asyncio
+    async def test_replica_database_failure_does_not_sleep(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            DatabaseFailureError("database failure"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0] == []
+
+
+class TestSpinCapableRetriesBackOff:
+    """These retries can come back without a round trip, so removing the
+    wait entirely would make a hot loop. They get a per-stream backoff
+    instead of a flat five seconds."""
+
+    @staticmethod
+    async def _drain_write(fake, setup, times):
+        for _ in range(times):
+            async with persistent.asession() as sess:
+                mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            await network.drain_mixwal_write_single(
+                fake, mw, {setup["bacap_stream"]},
+            )
+
+    @staticmethod
+    async def _drain_read(fake, setup, times):
+        for _ in range(times):
+            async with persistent.asession() as sess:
+                mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            await network.drain_mixwal_read_single(
+                connection=fake, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now={setup["bacap_stream"]},
+            )
+
+    @staticmethod
+    def _assert_climbs(waits, expected, below=5):
+        assert len(waits) == expected
+        assert waits[0] < below
+        assert waits == sorted(waits)
+        assert waits[-1] > waits[0]
+
+    @pytest.mark.asyncio
+    async def test_offline_write_backs_off(self, fake_thinclient, recorded_sleeps):
+        setup = await _set_up_write_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message", ThinClientOfflineError(),
+            )
+        await self._drain_write(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_stale_replica_epoch_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_write_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message",
+                CourierInvalidEpochError("stale"),
+            )
+        await self._drain_write(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_read_setup_failure_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error("encrypt_read", ThinClientOfflineError())
+        await self._drain_read(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_terminal_read_failure_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_read_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message",
+                BACAPDecryptionFailedError("undecryptable"),
+            )
+        await self._drain_read(fake_thinclient, setup, 3)
+        self._assert_climbs([d for d in recorded_sleeps if d > 0], 3)
+
+    @pytest.mark.asyncio
+    async def test_a_lost_read_reply_backs_off(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        """The watchdog fires when no reply comes back, so the next attempt
+        is not paced by a reply that never arrived."""
+        setup = await _set_up_read_flow(
+            fake_thinclient, plaintext=_make_F_payload("hang"),
+        )
+        fake_thinclient.hold_ack_for_box(
+            setup["read_cap"], setup["first_message_index"],
+        )
+        for _ in range(3):
+            async with persistent.asession() as sess:
+                mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+            await network.drain_mixwal_read_single(
+                connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now={setup["bacap_stream"]},
+                read_watchdog_s=0.05,
+            )
+        self._assert_climbs(
+            [d for d in recorded_sleeps if d > 0], 3, below=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_write_resets_its_stream(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        setup = await _set_up_write_flow(fake_thinclient)
+        for _ in range(3):
+            fake_thinclient.inject_error(
+                "start_resending_encrypted_message", ThinClientOfflineError(),
+            )
+        await self._drain_write(fake_thinclient, setup, 4)
+        assert setup["bacap_stream"] not in network._pacer.ceilings
+
+
+class TestUnhandledReplicaError:
+    @pytest.mark.asyncio
+    async def test_an_unknown_replica_error_does_not_escape(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        """A replica error that is neither benign nor a database failure used
+        to escape the read. The drain loop's done-callback releases the
+        stream, so the next sweep re-casts at once and the crash repeats in a
+        loop. Back off and reschedule instead."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", ReplicaError("unknown code"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0]
+
+    def test_the_specific_errors_are_replica_error_subclasses(self) -> None:
+        """A bare ReplicaError clause above any of these would shadow it."""
+        for subclass in (BoxIDNotFoundError, TombstoneError,
+                         DatabaseFailureError):
+            assert issubclass(subclass, ReplicaError)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [BoxIDNotFoundError, TombstoneError])
+    async def test_an_unavailable_box_takes_its_own_clause(
+        self, fake_thinclient: FakeThinClient,
+        recorded_sleeps: "list[float]", error: "type[ReplicaError]",
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Its own clause logs the retry at debug, so the bare ReplicaError
+        clause below it must not have run."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", error("unavailable"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        with caplog.at_level(logging.DEBUG, logger="katzen.network"):
+            await network.drain_mixwal_read_single(
+                connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now=draining,
+            )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+        assert "read box unavailable" in caplog.text
+        assert "replica error" not in caplog.text
+        assert len([d for d in recorded_sleeps if d > 0]) == 1
+        assert setup["bacap_stream"] in network._pacer.ceilings
+
+    @pytest.mark.asyncio
+    async def test_a_replica_database_failure_is_paced_by_the_round_trip(
+        self, fake_thinclient: FakeThinClient,
+        recorded_sleeps: "list[float]",
+    ) -> None:
+        """Its own clause sleeps not at all, unlike the bare ReplicaError
+        clause below it."""
+        setup = await _set_up_read_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message",
+            DatabaseFailureError("replica store"),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        draining: set = {setup["bacap_stream"]}
+        await network.drain_mixwal_read_single(
+            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+            mw=mw, draining_right_now=draining,
+        )
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
+        assert setup["bacap_stream"] not in draining
+        assert [d for d in recorded_sleeps if d > 0] == []
+        assert setup["bacap_stream"] not in network._pacer.ceilings
+
+
+class TestPacingFollowsThePkiDocument:
+    @pytest.mark.asyncio
+    async def test_a_slower_network_waits_longer(
+        self, fake_thinclient, recorded_sleeps,
+    ):
+        """LambdaP is the mean egress rate in events per millisecond, so
+        LambdaP=0.0005 means one egress packet every two seconds and the
+        first retry ceiling is two seconds rather than the static default."""
+        await network.on_new_pki_document(
+            {"payload": cbor2.dumps({"LambdaP": 0.0005, "Epoch": 7})},
+        )
+        setup = await _set_up_write_flow(fake_thinclient)
+        fake_thinclient.inject_error(
+            "start_resending_encrypted_message", ThinClientOfflineError(),
+        )
+        async with persistent.asession() as sess:
+            mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        await network.drain_mixwal_write_single(
+            fake_thinclient, mw, {setup["bacap_stream"]},
+        )
+        waits = [d for d in recorded_sleeps if d > 0]
+        assert len(waits) == 1
+        assert 1.0 <= waits[0] <= 2.0

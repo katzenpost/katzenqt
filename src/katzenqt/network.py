@@ -7,7 +7,9 @@ from katzenpost_thinclient import (
 CourierError, CourierInvalidEpochError, ReplicaError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
+import dataclasses
 import hashlib
+import math
 import errno
 import importlib.resources
 import os
@@ -568,6 +570,13 @@ async def on_new_pki_document(event: "Dict[str, Any]") -> None:
     except Exception as e:
         logger.debug("on_new_pki_document: could not parse event payload: %s", e)
         return
+    lambda_p = doc.get("LambdaP")
+    if (isinstance(lambda_p, (int, float)) and math.isfinite(lambda_p)
+            and lambda_p > 0.0 and _pacer.follow_lambda_p(float(lambda_p))):
+        logger.info(
+            "retry pacing follows LambdaP=%s: first %.2fs, cap %.2fs",
+            lambda_p, _pacer.bounds.first_s, _pacer.bounds.cap_s,
+        )
     epoch = doc.get("Epoch")
     if epoch is None or epoch == _last_epoch:
         return
@@ -945,7 +954,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       # persistent (non-transient) failure of this kind backs off instead of
       # retrying in a tight loop.
       logger.warning("thin client is offline or resend cancelled, can't drain mixwal: %s", e)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_pacer.delay_s(mw.bacap_stream))
       give_up()
       return
     except CourierInvalidEpochError as e:
@@ -956,14 +965,14 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
           "drain_mixwal_write_single: stale replica epoch (%s); re-minting envelope", e,
       )
       await _remint_write_envelope(connection, mw, wcw)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_pacer.delay_s(mw.bacap_stream))
       give_up()
       return
     except CourierError as e:
+      # The round trip is the pacing.
       logger.warning(
           "drain_mixwal_write_single: courier rejected envelope (%s); will retry", e,
       )
-      await asyncio.sleep(5)
       give_up()
       return
 
@@ -985,6 +994,7 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
       )
 
     _write_acknowledged.add(mw.bacap_stream)
+    _pacer.reset(mw.bacap_stream)
     bookkeeping = asyncio.ensure_future(persistent.SentLog.mark_sent(
         connection, mw, __resend_queue, resolve_counter=resolve_counter,
     ))
@@ -1092,6 +1102,84 @@ _CONNECTION_IDLE_RETRY_S = 60.0
 # Cadence at which readables_to_mixwal() runs an arming pass when
 # readables_to_mixwal_event is never re-set (e.g. while the daemon is down).
 _ARMING_SWEEP_S = 60.0
+
+
+@dataclasses.dataclass(frozen=True)
+class PacingBounds:
+    """How long a retry may wait: the first ceiling and the highest one."""
+    first_s: float
+    cap_s: float
+
+
+DEFAULT_PACING = PacingBounds(first_s=0.5, cap_s=30.0)
+
+_FIRST_LIMITS_S = (0.1, 30.0)
+_CAP_LIMITS_S = (1.0, 300.0)
+# The quantile common.SafetyCap uses.
+_SAFETY_CAP_LN_EPS = -math.log(1e-12)
+
+
+def _ms_to_s(ms: float) -> float:
+    # The PKI lambdas are events per MILLISECOND; per-second is a 1000x error.
+    return ms / 1000.0
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(max(value, low), high)
+
+
+def pacing_bounds_for(lambda_p: "float | None") -> PacingBounds:
+    """Retry bounds for a network whose LambdaP is ``lambda_p``.
+
+    LambdaP is the client's message-emission rate, not a retry or
+    connection-recovery timescale, so reading it as one is a heuristic:
+    the first ceiling is its mean interval and the cap is the quantile
+    common.SafetyCap uses. At the default LambdaP=0.001 that lands near
+    the hand-picked 0.5s/30s it replaces.
+    """
+    if lambda_p is None or not lambda_p > 0.0 or math.isinf(lambda_p):
+        return DEFAULT_PACING
+    first = _clamp(_ms_to_s(1.0 / lambda_p), *_FIRST_LIMITS_S)
+    cap = _clamp(_ms_to_s(_SAFETY_CAP_LN_EPS / lambda_p), *_CAP_LIMITS_S)
+    return PacingBounds(first_s=first, cap_s=max(cap, first))
+
+
+def next_ceiling_s(previous_s: float, bounds: PacingBounds) -> float:
+    if previous_s <= 0.0:
+        return bounds.first_s
+    return min(bounds.cap_s, previous_s * 2.0)
+
+
+@dataclasses.dataclass
+class RetryPacer:
+    """Per-stream retry delays for the paths that can come back without a
+    round trip, where removing the wait would make a hot loop.
+
+    The ceiling doubles per consecutive failure and the delay is drawn from
+    the lower half of it, so streams that failed together do not retry in
+    lockstep. A stream that makes progress resets.
+    """
+    bounds: PacingBounds = DEFAULT_PACING
+    ceilings: "dict[Hashable, float]" = dataclasses.field(default_factory=dict)
+
+    def delay_s(self, key: Hashable) -> float:
+        ceiling = next_ceiling_s(self.ceilings.get(key, 0.0), self.bounds)
+        self.ceilings[key] = ceiling
+        return random.uniform(ceiling / 2.0, ceiling)
+
+    def reset(self, key: Hashable) -> None:
+        self.ceilings.pop(key, None)
+
+    def follow_lambda_p(self, lambda_p: "float | None") -> bool:
+        """Adopt the bounds ``lambda_p`` implies. True if they changed."""
+        bounds = pacing_bounds_for(lambda_p)
+        if bounds == self.bounds:
+            return False
+        self.bounds = bounds
+        return True
+
+
+_pacer = RetryPacer()
 
 
 _EPOCH_LOSS_STREAK: dict[Hashable, int] = {}
@@ -1657,7 +1745,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         "Read setup failed for %s; retrying: %s", bacap_uuid, exc,
         exc_info=not _retryable_rpc_error(exc),
     )
-    await asyncio.sleep(5)
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
 
@@ -1729,7 +1817,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         logger.warning("drain_mixwal_read_single: cancel ARQ did not answer for %s", bacap_uuid)
     except Exception as _cancele:  # pragma: no cover - defensive best-effort
         logger.debug("drain_mixwal_read_single: cancel ARQ best-effort: %s", _cancele)
-    await asyncio.sleep(1)
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
   except asyncio.CancelledError:
@@ -1761,7 +1849,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         "drain_mixwal_read_single giving up: %s", e,
         exc_info=not _retryable_rpc_error(e),
     )
-    await asyncio.sleep(5)
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
   except (BoxIDNotFoundError, TombstoneError) as e:
@@ -1773,7 +1861,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       )
     if not failed:
       logger.debug("read box unavailable; retrying %s: %s", bacap_uuid, e)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
   except DatabaseFailureError:
@@ -1781,15 +1869,13 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # (the replica's RocksDB; ErrFailedDBRead, a deserialise failure, or a
     # momentarily closed DB, see replica/handlers.go handleReplicaRead). This
     # is NOT katzenqt's local SQLite, and (since the daemon now remaps courier
-    # errors out of the replica code range) NOT a courier rejection either. The
-    # daemon does not retry it, so we back off and reschedule the same read
-    # rather than advancing the stream or disabling the conversation.
+    # errors out of the replica code range) NOT a courier rejection either.
+    # The round trip is the pacing.
     logger.warning(
         "drain_mixwal_read_single: a storage replica reported a database error "
         "from its own backend store (not katzenqt's local SQLite); "
         "treating as transient and will retry"
     )
-    await asyncio.sleep(5)
     give_up()
     return
   except CourierError as e:
@@ -1799,11 +1885,20 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # range precisely so we can tell them apart. Treat as transient and retry.
     # Nothing to re-mint here: every pass re-encrypts a fresh envelope at the
     # top of drain_mixwal_read_single and resends that, never the stored blob.
+    # The round trip is the pacing.
     logger.warning(
         "drain_mixwal_read_single: the courier rejected the read envelope (%s); "
         "will retry", e,
     )
-    await asyncio.sleep(5)
+    give_up()
+    return
+  except ReplicaError as e:
+    # Must stay below the benign outcomes and DatabaseFailure, which are
+    # ReplicaError subclasses this clause would otherwise shadow.
+    logger.warning(
+        "drain_mixwal_read_single: replica error (%s); backing off", e,
+    )
+    await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
 
@@ -1834,6 +1929,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
     logger.info(f"advancing read to idx {idx_new}")
+    _pacer.reset(bacap_uuid)
     assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = rcr.next_message_box_index
     rcw.substream_missing_since = None
@@ -2830,7 +2926,7 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
             logger.warning(
                 "readables_to_mixwal: retrying next sweep: %s", e,
             )
-            await asyncio.sleep(5)
+            await asyncio.sleep(_pacer.delay_s(readables_to_mixwal))
             readables_to_mixwal_event.set()
             continue
         logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))
@@ -2838,8 +2934,10 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
             __mixwal_updated.set()
             logger.debug("__mixwal_updated.set() from readables_to_mixwal")
         if retry_needed:
-            await asyncio.sleep(5)
+            await asyncio.sleep(_pacer.delay_s(readables_to_mixwal))
             readables_to_mixwal_event.set()
+        else:
+            _pacer.reset(readables_to_mixwal)
 
 
 async def readables_to_mixwal_supervised(connection: ThinClient) -> None:

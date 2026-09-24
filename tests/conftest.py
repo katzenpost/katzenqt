@@ -89,6 +89,9 @@ def _reset_network_module_state():
         network._inflight_reads.clear()
         network._inflight_writes.clear()
         network._EPOCH_LOSS_STREAK.clear()
+        # Retry ceilings are keyed per stream but the pacer is module-level, so
+        # one test's backed-off stream would otherwise pace the next test's.
+        network._pacer = network.RetryPacer()
         # Per-conversation log-order locks are plain threading.Locks keyed
         # by conversation_id, and the test session's conversation ids
         # restart at 1 after each `_fresh_tables` wipe. Without this reset,
@@ -190,3 +193,21 @@ class LiveNetwork:
             if asyncio.get_event_loop().time() >= deadline:
                 raise AssertionError(f"predicate not satisfied within {timeout}s")
             await asyncio.sleep(0.02)
+
+
+@pytest.fixture
+def recorded_sleeps(fast_asyncio_sleep, monkeypatch):
+    """Every delay the code under test asks `asyncio.sleep` for, in order.
+
+    Depends on `fast_asyncio_sleep` so this patch is applied on top of it and
+    the recorded sleeps still return instantly.
+    """
+    delays: "list[float]" = []
+    real = asyncio.sleep
+
+    async def recording(delay, result=None):
+        delays.append(delay)
+        return await real(0, result)
+
+    monkeypatch.setattr(asyncio, "sleep", recording)
+    return delays
