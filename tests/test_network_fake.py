@@ -4196,12 +4196,13 @@ class TestUnhandledReplicaError:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("error", [BoxIDNotFoundError, TombstoneError])
-    async def test_an_unavailable_box_waits_out_the_poll_delay(
+    async def test_an_unavailable_box_takes_its_own_clause(
         self, fake_thinclient: FakeThinClient,
         recorded_sleeps: "list[float]", error: "type[ReplicaError]",
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The benign outcomes retry on the flat poll delay, so the paced
-        backoff the bare ReplicaError clause applies must not have run."""
+        """Its own clause logs the retry at debug, so the bare ReplicaError
+        clause below it must not have run."""
         setup = await _set_up_read_flow(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message", error("unavailable"),
@@ -4209,15 +4210,18 @@ class TestUnhandledReplicaError:
         async with persistent.asession() as sess:
             mw = await sess.get(persistent.MixWAL, setup["mw_id"])
         draining: set = {setup["bacap_stream"]}
-        await network.drain_mixwal_read_single(
-            connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
-            mw=mw, draining_right_now=draining,
-        )
+        with caplog.at_level(logging.DEBUG, logger="katzen.network"):
+            await network.drain_mixwal_read_single(
+                connection=fake_thinclient, rcw_read_cap=setup["read_cap"],
+                mw=mw, draining_right_now=draining,
+            )
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is not None
         assert setup["bacap_stream"] not in draining
-        assert [d for d in recorded_sleeps if d > 0] == [5]
-        assert setup["bacap_stream"] not in network._pacer.ceilings
+        assert "read box unavailable" in caplog.text
+        assert "replica error" not in caplog.text
+        assert len([d for d in recorded_sleeps if d > 0]) == 1
+        assert setup["bacap_stream"] in network._pacer.ceilings
 
     @pytest.mark.asyncio
     async def test_a_replica_database_failure_is_paced_by_the_round_trip(

@@ -1861,7 +1861,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       )
     if not failed:
       logger.debug("read box unavailable; retrying %s: %s", bacap_uuid, e)
-      await asyncio.sleep(5)
+      await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
   except DatabaseFailureError:
