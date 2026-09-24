@@ -626,6 +626,22 @@ def test_light_mode_uses_the_untinted_toolbar_icons(
     assert harness.ui.invite_contact_toolButton.icon().isNull() is False
 
 
+def test_sync_does_not_enumerate_every_widget_in_the_process(
+    make_theme: MakeTheme, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = make_theme("full")
+
+    def unsafe() -> "list[QWidget]":
+        raise AssertionError("the sweep must not call allWidgets()")
+
+    monkeypatch.setattr(harness.app, "allWidgets", unsafe)
+    harness.manager.apply("dark", persist=False)
+    harness.manager._sync_theme()
+
+    base = QColor(0x23, 0x23, 0x23)
+    assert harness.witness.palette().color(QPalette.ColorRole.Base) == base
+
+
 def test_sync_ignores_a_window_without_a_ui(make_theme: MakeTheme) -> None:
     harness = make_theme("none")
     before = harness.witness.palette().color(QPalette.ColorRole.Window)
