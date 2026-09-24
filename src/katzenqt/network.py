@@ -1129,11 +1129,13 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 def pacing_bounds_for(lambda_p: "float | None") -> PacingBounds:
-    """Retry bounds for a network whose mean egress rate is ``lambda_p``.
+    """Retry bounds for a network whose LambdaP is ``lambda_p``.
 
-    The first ceiling is the mean egress interval and the cap is the
-    quantile common.SafetyCap uses, so the client's own retries are paced
-    by the mixnet the PKI describes rather than by a constant picked here.
+    LambdaP is the client's message-emission rate, not a retry or
+    connection-recovery timescale, so reading it as one is a heuristic:
+    the first ceiling is its mean interval and the cap is the quantile
+    common.SafetyCap uses. At the default LambdaP=0.001 that lands near
+    the hand-picked 0.5s/30s it replaces.
     """
     if lambda_p is None or not lambda_p > 0.0 or math.isinf(lambda_p):
         return DEFAULT_PACING
