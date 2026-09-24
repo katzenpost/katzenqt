@@ -228,12 +228,15 @@ def _resolve_alembic_ini() -> Path:
     Resolved through ``importlib.resources`` so it works the same for
     editable and copy installs, independent of the repository location.
     """
-    return Path(str(importlib.resources.files("katzenqt") / "data" / "alembic.ini"))
+    package = importlib.resources.files("katzenqt")
+    return Path(str(package / "data" / "alembic.ini"))
 
 
 _alembic_cfg = alembic.config.Config(_resolve_alembic_ini())
 
-xdg_data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home()/".local"/"share")
+xdg_data_home = Path(
+    os.environ.get("XDG_DATA_HOME") or Path.home()/".local"/"share"
+)
 xdg_data_home.mkdir(parents=True,exist_ok=True)
 app_data = xdg_data_home / "katzenqt"
 app_data.mkdir(exist_ok=True, mode=0o700)
@@ -356,12 +359,19 @@ def _restrict_state_file_perms(path: Path) -> None:
     sidecars, not just the main file, so all three need clamping. Best-
     effort: a missing file or a filesystem that does not honour chmod is not
     fatal to startup."""
-    for candidate in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+    sidecars = (
+        path,
+        path.with_name(path.name + "-wal"),
+        path.with_name(path.name + "-shm"),
+    )
+    for candidate in sidecars:
         try:
             if candidate.is_file():
                 os.chmod(candidate, 0o600)
-        except OSError as exc:  # pragma: no cover - platform/filesystem dependent
-            logger.warning("could not restrict permissions on %s: %s", candidate, exc)
+        except OSError as exc:  # pragma: no cover - filesystem dependent
+            logger.warning(
+                "could not restrict permissions on %s: %s", candidate, exc,
+            )
 
 
 def init_and_migrate() -> None:

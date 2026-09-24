@@ -3345,7 +3345,8 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
         candidates.append(Path(env))
     xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     candidates.append(Path(xdg) / "katzenqt" / "thinclient.toml")
-    bundled = importlib.resources.files("katzenqt") / "data" / "thinclient.toml"
+    package = importlib.resources.files("katzenqt")
+    bundled = package / "data" / "thinclient.toml"
     candidates.append(Path(str(bundled)))
 
     for c in candidates:

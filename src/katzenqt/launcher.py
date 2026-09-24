@@ -55,7 +55,8 @@ def thin(
         raise ValueError("network must be Unix or Tcp")
     path = ROOT / "thinclient.toml"
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
-    data = f"[Dial]\n  [Dial.{network}]\n    Address = {json.dumps(str(address))}\n"
+    dialled = json.dumps(str(address))
+    data = f"[Dial]\n  [Dial.{network}]\n    Address = {dialled}\n"
     if network == "Tcp":
         data += '    Network = "tcp"\n'
     path.write_text(data, encoding="utf-8")

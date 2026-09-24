@@ -33,6 +33,7 @@ PYPROJECT := pyproject.toml
 UV_LOCK := $(wildcard uv.lock)
 
 # make alembic-revision-uv ALEMBIC_MSG='some changeset details'
+ALEMBIC_INI := src/katzenqt/data/alembic.ini
 ALEMBIC_MSG ?=
 ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 
@@ -75,7 +76,7 @@ help:
 		'Backend auto selection:' \
 		'  make setup                 Ensure setup is complete for the chosen backend and print status' \
 		'  make run                   Run katzenqt using the chosen backend' \
-		'  make run-launcher          Run katzenqt via the launcher (reaches a running kpclientd)' \
+		'  make run-launcher          Run katzenqt via the launcher' \
 		'  make test                  Run pytest using the chosen backend' \
 		'  make status                Show backend, venv, and kpclientd status' \
 		'' \
@@ -218,7 +219,8 @@ run-pip: $(STAMP_PIP) code-generator
 .PHONY: run-launcher
 
 run-launcher: setup code-generator
-	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt $(VENV)/bin/python -m katzenqt.launcher
+	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt \
+		$(VENV)/bin/python -m katzenqt.launcher
 
 test: setup
 	@if [[ -e "$(BACKEND_UV)" ]]; then \
@@ -319,40 +321,46 @@ install-kpclient: $(KPCLIENTD_BIN)
 	@sed "s|[$$]XDG_RUNTIME_DIR|$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}|g" \
 		src/katzenqt/data/client.toml > ~/.local/katzenpost/client.toml
 	@chmod 0600 ~/.local/katzenpost/client.toml
-	@install -m 0600 src/katzenqt/data/thinclient.toml ~/.local/katzenpost/thinclient.toml
+	@install -m 0600 src/katzenqt/data/thinclient.toml \
+		~/.local/katzenpost/thinclient.toml
 	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
 	@install -d -m 0700 ~/.config/systemd/user
-	@install -m 0644 src/katzenqt/data/kpclientd.service ~/.config/systemd/user/kpclientd.service
+	@install -m 0644 src/katzenqt/data/kpclientd.service \
+		~/.config/systemd/user/kpclientd.service
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now kpclientd >/dev/null 2>&1
 
 alembic-check-uv:
 	@state=$$(mktemp -d); \
 	trap 'rm -rf "$$state"' EXIT; \
-	XDG_DATA_HOME=$$state $(UV) run alembic -c src/katzenqt/data/alembic.ini upgrade head; \
-	XDG_DATA_HOME=$$state $(UV) run alembic -c src/katzenqt/data/alembic.ini check
+	XDG_DATA_HOME=$$state $(UV) run alembic -c $(ALEMBIC_INI) \
+		upgrade head; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c $(ALEMBIC_INI) check
 
 alembic-check-pip:
 	@state=$$(mktemp -d); \
 	trap 'rm -rf "$$state"' EXIT; \
-	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini upgrade head; \
-	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini check
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c $(ALEMBIC_INI) \
+		upgrade head; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c $(ALEMBIC_INI) check
 
 alembic-revision-uv:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(UV) run alembic -c src/katzenqt/data/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(UV) run alembic -c $(ALEMBIC_INI) revision --autogenerate \
+		-m $(ALEMBIC_MSG_Q)
 
 alembic-revision-pip:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(VENV)/bin/alembic -c src/katzenqt/data/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(VENV)/bin/alembic -c $(ALEMBIC_INI) revision --autogenerate \
+		-m $(ALEMBIC_MSG_Q)
 
 clean-venv:
 	@rm -r $(VENV)
