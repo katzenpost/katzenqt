@@ -2926,7 +2926,7 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
             logger.warning(
                 "readables_to_mixwal: retrying next sweep: %s", e,
             )
-            await asyncio.sleep(5)
+            await asyncio.sleep(_pacer.delay_s(readables_to_mixwal))
             readables_to_mixwal_event.set()
             continue
         logger.debug("done readables_to_mixwal: %d peers", len(readable_peers))

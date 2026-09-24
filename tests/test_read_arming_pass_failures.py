@@ -171,7 +171,8 @@ async def test_busy_pass_retries_without_unbound_or_stale_rows(
     await network.readables_to_mixwal(connection)
     assert state.pass_no == (3 if prior_success else 2)
     assert state.published == ([1] if prior_success else [])
-    assert 5 in state.sleeps
+    paced = [d for d in state.sleeps if d > 0]
+    assert paced and max(paced) <= network._pacer.bounds.cap_s
 
 
 @pytest.mark.parametrize("failure", [
@@ -230,7 +231,8 @@ async def test_duplicate_arming_retries_instead_of_killing_the_loop(
     )
     await network.readables_to_mixwal(connection)
     assert state.pass_no == 2
-    assert 5 in state.sleeps
+    paced = [d for d in state.sleeps if d > 0]
+    assert paced and max(paced) <= network._pacer.bounds.cap_s
 
 
 def _install_arming_rpc_failure(
