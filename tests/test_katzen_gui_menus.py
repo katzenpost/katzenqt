@@ -144,6 +144,7 @@ async def test_a_click_on_a_conversation_row_offers_no_peer_menu(
     window.resize(900, 600)
     state = window.convo_state()
     pos = peer_position(window, state.contacts_standard_item)
+    chosen(nothing)
     await window.peer_context_menu(pos)
     assert pauses["pause_read"] == []
 

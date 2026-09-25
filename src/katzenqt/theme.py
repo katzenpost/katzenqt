@@ -305,6 +305,7 @@ class ThemeManager(QObject):
         # wrapper for every widget in the process, and this sync is deferred
         # into the middle of a palette change, where that enumeration walks
         # widgets Qt is already destroying and segfaults.
+        from PySide6.QtWidgets import QWidget
         window = self._window
         if isinstance(window, QWidget):
             for widget in [window, *window.findChildren(QWidget)]:
