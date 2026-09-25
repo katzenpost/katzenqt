@@ -10,12 +10,18 @@ from katzenqt.tally import controller as tally_controller
 from tests.test_membership_hash import _make_conversation
 
 
-def _mixwal(stream: uuid.UUID, *, is_read: bool, plaintextwal=None) -> persistent.MixWAL:
+def _mixwal(
+    stream: uuid.UUID, *, is_read: bool, plaintextwal=None
+) -> persistent.MixWAL:
     return persistent.MixWAL(
-        bacap_stream=stream, plaintextwal=plaintextwal,
-        envelope_hash=uuid.uuid4().bytes, encrypted_payload=b"x",
-        envelope_descriptor=b"x", current_message_index=b"\x00" * 104,
-        next_message_index=b"\x00" * 104, is_read=is_read,
+        bacap_stream=stream,
+        plaintextwal=plaintextwal,
+        envelope_hash=uuid.uuid4().bytes,
+        encrypted_payload=b"x",
+        envelope_descriptor=b"x",
+        current_message_index=b"\x00" * 104,
+        next_message_index=b"\x00" * 104,
+        is_read=is_read,
     )
 
 
@@ -40,26 +46,43 @@ async def _alice(conv_id: int) -> persistent.ConversationPeer:
         return next(p for p in conv.peers if p.name == "alice")
 
 
-async def _log(conv_id: int, peer_id: int, order: int, payload: bytes = b"hi") -> None:
+async def _log(
+    conv_id: int, peer_id: int, order: int, payload: bytes = b"hi"
+) -> None:
     async with persistent.asession() as sess:
-        sess.add(persistent.ConversationLog(
-            conversation_id=conv_id, conversation_peer_id=peer_id,
-            conversation_order=order, payload=payload,
-        ))
+        sess.add(
+            persistent.ConversationLog(
+                conversation_id=conv_id,
+                conversation_peer_id=peer_id,
+                conversation_order=order,
+                payload=payload,
+            )
+        )
         await sess.commit()
 
 
-async def _add_substream(conv_id: int, parent: persistent.ConversationPeer) -> uuid.UUID:
+async def _add_substream(
+    conv_id: int, parent: persistent.ConversationPeer
+) -> uuid.UUID:
     rcw_id = uuid.uuid4()
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
         sess.add(persistent.ReadCapWAL(id=rcw_id, read_cap=b"\x05" * 136))
-        sess.add(persistent.ConversationPeer(
-            name=f":substream:{parent.id}:ab12", read_cap_id=rcw_id, conversation=conv,
-        ))
-        sess.add(persistent.ReceivedPiece(
-            read_cap=rcw_id, bacap_index=b"\x00" * 8, chunk_type=b"C", chunk=b"c",
-        ))
+        sess.add(
+            persistent.ConversationPeer(
+                name=f":substream:{parent.id}:ab12",
+                read_cap_id=rcw_id,
+                conversation=conv,
+            )
+        )
+        sess.add(
+            persistent.ReceivedPiece(
+                read_cap=rcw_id,
+                bacap_index=b"\x00" * 8,
+                chunk_type=b"C",
+                chunk=b"c",
+            )
+        )
         await sess.commit()
     return rcw_id
 
@@ -81,7 +104,11 @@ async def test_remove_peer_drops_everything_about_them():
         assert [p.name for p in conv.peers] == ["me"]
         for stream in (alice.read_cap_id, sub):
             assert await sess.get(persistent.ReadCapWAL, stream) is None
-    for model in (persistent.MixWAL, persistent.ReceivedPiece, persistent.ConversationLog):
+    for model in (
+        persistent.MixWAL,
+        persistent.ReceivedPiece,
+        persistent.ConversationLog,
+    ):
         assert await _count(model) == 0
     assert await _count(persistent.ConversationPeerLink) == 1
 
@@ -115,7 +142,9 @@ async def test_remove_peer_refuses_self_and_strangers():
         await removal.remove_peer(conversation_id=conv_id, peer_id=own)
     stranger = await _alice(other)
     with pytest.raises(removal.RemovalError):
-        await removal.remove_peer(conversation_id=conv_id, peer_id=stranger.id)
+        await removal.remove_peer(
+            conversation_id=conv_id, peer_id=stranger.id
+        )
     assert await _count(persistent.ConversationPeer) == 4
 
 
@@ -181,24 +210,47 @@ async def _populate_conversation(conv_id: int) -> uuid.UUID:
         conv = await sess.get(persistent.Conversation, conv_id)
         ind = uuid.uuid4()
         sess.add(persistent.WriteCapWAL(id=agg, write_cap=b"\x03" * 168))
-        sess.add(persistent.ReadCapWAL(id=ind, write_cap_id=agg, substream_total_chunks=2))
-        sess.add(persistent.PlaintextWAL(
-            id=pwal, bacap_stream=conv.write_cap, conversation_id=conv_id,
-            bacap_payload=b"I", indirection=ind,
-        ))
-        sess.add(persistent.PlaintextWAL(
-            id=uuid.uuid4(), bacap_stream=agg, conversation_id=conv_id, bacap_payload=b"C",
-        ))
+        sess.add(
+            persistent.ReadCapWAL(
+                id=ind, write_cap_id=agg, substream_total_chunks=2
+            )
+        )
+        sess.add(
+            persistent.PlaintextWAL(
+                id=pwal,
+                bacap_stream=conv.write_cap,
+                conversation_id=conv_id,
+                bacap_payload=b"I",
+                indirection=ind,
+            )
+        )
+        sess.add(
+            persistent.PlaintextWAL(
+                id=uuid.uuid4(),
+                bacap_stream=agg,
+                conversation_id=conv_id,
+                bacap_payload=b"C",
+            )
+        )
         sess.add(_mixwal(conv.write_cap, is_read=False, plaintextwal=pwal))
         sess.add(_mixwal(alice.read_cap_id, is_read=True))
         sess.add(persistent.SentLog(id=uuid.uuid4(), conversation_id=conv_id))
         sess.add(persistent.SentLog(id=uuid.uuid4()))
-        sess.add(persistent.TallyState(
-            survey_id=uuid.uuid4().bytes, conversation_id=conv_id, doc_state=b"d",
-        ))
-        sess.add(persistent.PendingVoucher(
-            conversation_id=conv_id, role="joiner", step="minted", voucher=b"v",
-        ))
+        sess.add(
+            persistent.TallyState(
+                survey_id=uuid.uuid4().bytes,
+                conversation_id=conv_id,
+                doc_state=b"d",
+            )
+        )
+        sess.add(
+            persistent.PendingVoucher(
+                conversation_id=conv_id,
+                role="joiner",
+                step="minted",
+                voucher=b"v",
+            )
+        )
         await sess.commit()
     await _add_substream(conv_id, alice)
     await _log(conv_id, alice.id, 1, _marker(f"attachments/{conv_id}/f.bin"))
@@ -207,10 +259,17 @@ async def _populate_conversation(conv_id: int) -> uuid.UUID:
 
 
 ALL_TABLES = (
-    persistent.Conversation, persistent.ConversationPeer, persistent.ConversationPeerLink,
-    persistent.ConversationLog, persistent.ReadCapWAL, persistent.WriteCapWAL,
-    persistent.PlaintextWAL, persistent.MixWAL, persistent.ReceivedPiece,
-    persistent.TallyState, persistent.PendingVoucher,
+    persistent.Conversation,
+    persistent.ConversationPeer,
+    persistent.ConversationPeerLink,
+    persistent.ConversationLog,
+    persistent.ReadCapWAL,
+    persistent.WriteCapWAL,
+    persistent.PlaintextWAL,
+    persistent.MixWAL,
+    persistent.ReceivedPiece,
+    persistent.TallyState,
+    persistent.PendingVoucher,
 )
 
 
@@ -226,7 +285,9 @@ async def test_remove_conversation_leaves_nothing_behind():
     async with persistent.asession() as sess:
         left = (await sess.exec(select(persistent.SentLog))).all()
     assert [row.conversation_id for row in left] == [None]
-    assert not (persistent.state_file.parent / "attachments" / str(conv_id)).exists()
+    assert not (
+        persistent.state_file.parent / "attachments" / str(conv_id)
+    ).exists()
 
 
 @pytest.mark.asyncio
@@ -248,9 +309,14 @@ async def test_remove_conversation_leaves_other_conversations_alone():
         assert await sess.get(persistent.Conversation, gone) is None
     for model in ALL_TABLES:
         assert await _count(model) * 2 == counts[model], model.__name__
-    assert (persistent.state_file.parent / "attachments" / str(kept) / "f.bin").exists()
+    assert (
+        persistent.state_file.parent / "attachments" / str(kept) / "f.bin"
+    ).exists()
     async with persistent.asession() as sess:
-        owners = [row.conversation_id for row in (await sess.exec(select(persistent.SentLog))).all()]
+        owners = [
+            row.conversation_id
+            for row in (await sess.exec(select(persistent.SentLog))).all()
+        ]
     assert sorted(owners, key=lambda c: (c is None, c)) == [kept, None, None]
 
 
@@ -279,7 +345,7 @@ async def test_remove_conversation_announces_transfer_removal():
     events = []
     while not network.substream_progress_queue.empty():
         events.append(network.substream_progress_queue.get_nowait())
-    assert ("removed", sub) in events
+    assert network.TransferRemoved(sub) in events
 
 
 @pytest.mark.asyncio
@@ -290,7 +356,9 @@ async def test_remove_conversation_unknown_id():
 
 def test_sent_log_records_the_conversation_it_was_sent_in():
     pwal = persistent.PlaintextWAL(
-        id=uuid.uuid4(), bacap_stream=uuid.uuid4(), conversation_id=7,
+        id=uuid.uuid4(),
+        bacap_stream=uuid.uuid4(),
+        conversation_id=7,
         bacap_payload=b"Chello",
     )
     with persistent.Session(persistent._engine_sync) as sess:
@@ -298,3 +366,35 @@ def test_sent_log_records_the_conversation_it_was_sent_in():
         sess.commit()
         row = sess.get(persistent.SentLog, pwal.id)
         assert row is not None and row.conversation_id == 7
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"F\xff\xff not cbor",
+        b"F" + cbor2.dumps([1, 2, 3]),
+        b"F" + cbor2.dumps("rel_path"),
+        b"F" + cbor2.dumps({"rel_path": 5, "thumb_rel_path": None}),
+        b"Xnot a file marker",
+        b"",
+    ],
+)
+def test_attachment_paths_ignores_hostile_payloads(payload):
+    assert removal._attachment_paths(payload) == set()
+
+
+@pytest.mark.asyncio
+async def test_remove_peer_unknown_conversation():
+    with pytest.raises(removal.RemovalError, match="no conversation"):
+        await removal.remove_peer(conversation_id=12345, peer_id=1)
+
+
+@pytest.mark.asyncio
+async def test_remove_peer_leaves_the_membership_hash_until_deleted():
+    conv_id = await _make_conversation()
+    alice = await _alice(conv_id)
+    await removal._silence_peers(conv_id, alice.id)
+    async with persistent.asession() as sess:
+        peer = await sess.get(persistent.ConversationPeer, alice.id)
+        rcw = await sess.get(persistent.ReadCapWAL, alice.read_cap_id)
+        assert peer.active and rcw.paused

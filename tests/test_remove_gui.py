@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import asyncio
 import pytest
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from sqlmodel import select
@@ -54,6 +55,7 @@ def _window(model: QStandardItemModel, states: dict, current=None, answer=True) 
         all_contacts=model,
         conversation_state_by_id=states,
         _poll_windows={},
+        _voucher_join_tasks={},
         iothread=_Loop(),
         settings={},
         cleared=0,
@@ -124,6 +126,22 @@ def test_drop_conversation_ui_forgets_state_and_closes_its_polls():
     assert list(states) == [2]
     assert mine.closed and not theirs.closed
     assert window.cleared == 0
+
+
+@pytest.mark.asyncio
+async def test_drop_conversation_ui_cancels_its_voucher_join():
+    model = QStandardItemModel()
+    gone = _conversation_item(1, "gone")
+    model.appendRow(gone)
+    window = _window(model, {1: _state(_Model())}, current=None)
+    task = asyncio.create_task(asyncio.Event().wait())
+    window._voucher_join_tasks = {1: task}
+
+    katzen.MainWindow._drop_conversation_ui(window, gone)
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert task.cancelled()
+    assert window._voucher_join_tasks == {}
 
 
 def test_drop_last_conversation_clears_the_chat_view():

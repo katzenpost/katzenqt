@@ -23,7 +23,7 @@ import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel,
-                            QModelIndex, QSettings, QSize, Property, Slot,
+                            QModelIndex, QPoint, QSettings, QSize, Property, Slot,
                             QThread, QUrl, Signal, QTimer)
 from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
                            QPixmap, QShortcut, QStandardItem, QStandardItemModel)
@@ -1482,6 +1482,7 @@ class MainWindow(QMainWindow):
         # (conversation_id, survey_id). Clicking a tally row in the chat log
         # opens/raises that poll's window; the New-poll composer tab creates one.
         self._poll_windows: "dict[tuple[int, bytes], TallyPanel]" = {}
+        self._voucher_join_tasks: "dict[int, asyncio.Task[None]]" = {}
         self.ui.new_poll_button.clicked.connect(lambda: self.new_poll())
 
         # Keep the composer as short as its current tab needs. QTabWidget's
@@ -1996,7 +1997,7 @@ class MainWindow(QMainWindow):
         item.appendRow(new_item)
         logger.debug("added announced contact %r to conversation %d", name, conversation_id)
 
-    def _contact_item_at(self, pos) -> "QStandardItem | None":
+    def _contact_item_at(self, pos: QPoint) -> "QStandardItem | None":
         tree = self.ui.contacts_treeWidget
         idx = tree.indexAt(pos)
         if not idx.isValid():
@@ -2008,7 +2009,7 @@ class MainWindow(QMainWindow):
         return self.all_contacts.itemFromIndex(src_idx)
 
     @async_cb
-    async def peer_context_menu(self, pos) -> None:
+    async def peer_context_menu(self, pos: QPoint) -> None:
         """Right-click in the contacts tree. A conversation row offers to
         remove the group chat; a peer row offers pause/resume of that peer's
         read stream and removal of the peer. Our own row gets no menu."""
@@ -2021,13 +2022,13 @@ class MainWindow(QMainWindow):
         else:
             await self._peer_menu(item, global_pos)
 
-    async def _conversation_menu(self, item: QStandardItem, global_pos) -> None:
+    async def _conversation_menu(self, item: QStandardItem, global_pos: QPoint) -> None:
         api = QMenu(self.ui.contacts_treeWidget)
         remove = api.addAction("Remove group chat...")
         if await _menu_chosen(api, global_pos) is remove:
             await self._remove_conversation(item)
 
-    async def _peer_menu(self, item: QStandardItem, global_pos) -> None:
+    async def _peer_menu(self, item: QStandardItem, global_pos: QPoint) -> None:
         # Skip rows tagged as our own (or untagged, e.g. an own row).
         if getattr(item, "peer_is_own", True):
             return
@@ -2074,8 +2075,9 @@ class MainWindow(QMainWindow):
         return await _dialog_finished(box) == QMessageBox.StandardButton.Yes
 
     def _report_removal_failure(self, exc: BaseException) -> None:
-        QTimer.singleShot(0, lambda: QMessageBox.critical(
-            self, APP_NAME, f"Removal failed: {_error_detail(exc)}",
+        QTimer.singleShot(0, partial(
+            QMessageBox.critical, self, APP_NAME,
+            f"Removal failed: {_error_detail(exc)}",
         ))
 
     async def _remove_conversation(self, item: QStandardItem) -> None:
@@ -2098,6 +2100,9 @@ class MainWindow(QMainWindow):
 
     def _drop_conversation_ui(self, item: QStandardItem) -> None:
         conversation_id = item.conversation_id
+        join = self._voucher_join_tasks.pop(conversation_id, None)
+        if join is not None:
+            join.cancel()
         for key, panel in list(self._poll_windows.items()):
             if key[0] == conversation_id:
                 panel.close()
@@ -2262,6 +2267,9 @@ class MainWindow(QMainWindow):
                 event = await self.iothread.run_in_io(
                     network.substream_progress_queue.get(),
                 )
+                if isinstance(event, network.TransferRemoved):
+                    self.transfers_model.remove_transfer(event.rcw_id)
+                    continue
                 kind = event[0]
                 rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]
                 if kind == "started":
@@ -2289,8 +2297,6 @@ class MainWindow(QMainWindow):
                     self.transfers_model.complete_transfer(rcw_id)
                 elif kind == "upload_cancelled":
                     self.transfers_model.complete_transfer(rcw_id)
-                elif kind == "removed":
-                    self.transfers_model.remove_transfer(rcw_id)
                 elif kind == "paused":
                     self.transfers_model.set_paused(rcw_id, paused=True)
                 elif kind == "resumed":
@@ -2798,6 +2804,16 @@ class MainWindow(QMainWindow):
         )
 
     async def _await_voucher_join(self, convo):
+        task = asyncio.current_task()
+        if task is not None:
+            self._voucher_join_tasks[convo.conversation_id] = task
+        try:
+            await self._run_voucher_join(convo)
+        finally:
+            if self._voucher_join_tasks.get(convo.conversation_id) is task:
+                del self._voucher_join_tasks[convo.conversation_id]
+
+    async def _run_voucher_join(self, convo):
         # A fresh GUI start may still be dialling the daemon on the io thread
         # (kp_client only becomes set once reconnect() returns), and transient
         # daemon dropouts mid-wait ride out the _read_box rounds in voucher.py.

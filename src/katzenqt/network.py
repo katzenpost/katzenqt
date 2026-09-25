@@ -443,6 +443,13 @@ tally_update_queue: "Tuple[int]" = asyncio.Queue()
 # path; the GUI appends the name to the contacts tree in its own listener.
 peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 
+
+
+@dataclasses.dataclass(frozen=True)
+class TransferRemoved:
+    rcw_id: uuid.UUID
+
+
 # Substream file-transfer progress for the GUI Transfers panel.
 # Download events are ``(kind, rcw_id, *extra)``:
 #   ("started", rcw_id, conversation_id, total_or_None, parent_name)
@@ -458,11 +465,12 @@ peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 #   ("upload_completed", rcw_id)             # last C/F chunk ACK'd
 #   ("upload_paused",    rcw_id)
 #   ("upload_resumed",   rcw_id)
+# A removed transfer is a TransferRemoved(rcw_id) instance instead of a tuple.
 # Byte counts are effective payload bytes (the chunk-type prefix and any
 # wire/framing overhead excluded).
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
-substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
+substream_progress_queue: "asyncio.Queue[Any]" = asyncio.Queue()
 
 __resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
@@ -2268,6 +2276,7 @@ async def stop_stream(stream: uuid.UUID) -> None:
         except asyncio.CancelledError:
             if asyncio.current_task().cancelling():
                 raise
+            logger.debug("Stopped %s", stream)
         except Exception:
             logger.exception("Task failed while stopping %s", stream)
     __resend_queue.discard(stream)

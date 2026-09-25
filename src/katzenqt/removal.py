@@ -3,7 +3,16 @@
 Removal is local: nothing is sent to the other members. It stops reading the
 removed streams and deletes every row that names them, so the state file keeps
 no trace of the chat or the member. This module is free of Qt.
+
+Removing a member changes the membership hash: ``local_membership_hash`` covers
+every active non-substream peer, so once a member is deleted this client hashes
+one peer fewer than the members who kept them. Every message this client sends
+afterwards carries a hash the others do not compute, and theirs mismatch our
+view, for the life of the conversation. This is accepted on purpose: keeping
+removed members in the hash would leave a trace of them. Receivers currently
+only log the mismatch in ``_verify_membership_advisory``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,7 +23,7 @@ from typing import NamedTuple
 
 import cbor2
 import sqlalchemy as sa
-from sqlmodel import select
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import conversation_handlers, models, network, persistent
@@ -60,97 +69,145 @@ def _unlink_attachments(rel_paths: "set[str]") -> None:
     for rel_path in rel_paths:
         path = _attachment_file(rel_path)
         if path is None:
-            logger.warning("not deleting attachment outside the state dir: %r", rel_path)
+            logger.warning(
+                "not deleting attachment outside the state dir: %r", rel_path
+            )
             continue
         path.unlink(missing_ok=True)
 
 
 async def _remaining_attachment_paths(
-    sess: AsyncSession, conversation_id: int,
+    sess: AsyncSession,
+    conversation_id: int,
 ) -> "set[str]":
-    payloads = (await sess.exec(
-        select(persistent.ConversationLog.payload).where(
-            persistent.ConversationLog.conversation_id == conversation_id,
+    payloads = (
+        await sess.exec(
+            select(persistent.ConversationLog.payload).where(
+                col(persistent.ConversationLog.conversation_id)
+                == conversation_id,
+            )
         )
-    )).all()
+    ).all()
     return set().union(*(_attachment_paths(p) for p in payloads))
 
 
 async def _silence_peers(conversation_id: int, peer_id: int) -> _Doomed:
-    """Mark the peer and its download substreams inactive and paused, and
-    commit, so the arming sweep stops re-arming them while they are torn down."""
+    """Pause the peer's and its download substreams' read caps, and commit, so
+    the arming sweep stops re-arming them while they are torn down. ``active``
+    is left alone: it feeds the membership hash, and a crash before the delete
+    must not leave a half-removed member with a shifted hash."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if conv is None:
             raise RemovalError(f"no conversation {conversation_id}")
         if peer_id == conv.own_peer_id:
-            raise RemovalError("cannot remove yourself; remove the conversation")
-        peers = await conversation_handlers._conversation_peers(sess, conversation_id)
+            raise RemovalError(
+                "cannot remove yourself; remove the conversation"
+            )
+        peers = await conversation_handlers._conversation_peers(
+            sess, conversation_id
+        )
         target = next((p for p in peers if p.id == peer_id), None)
         if target is None:
-            raise RemovalError(f"peer {peer_id} is not in conversation {conversation_id}")
+            raise RemovalError(
+                f"peer {peer_id} is not in conversation {conversation_id}"
+            )
         prefix = f"{models.SUBSTREAM_NAME_PREFIX}{peer_id}:"
         doomed = [target] + [p for p in peers if p.name.startswith(prefix)]
         for peer in doomed:
-            peer.active = False
-            sess.add(peer)
             rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id)
             if rcw is not None:
                 rcw.paused = True
                 sess.add(rcw)
-        result = _Doomed([p.id for p in doomed], [p.read_cap_id for p in doomed], [])
+        result = _Doomed(
+            [p.id for p in doomed], [p.read_cap_id for p in doomed], []
+        )
         await sess.commit()
         return result
 
 
-async def _delete_read_state(sess: AsyncSession, streams: "list[uuid.UUID]") -> None:
-    await sess.exec(sa.delete(persistent.MixWAL).where(
-        persistent.MixWAL.bacap_stream.in_(streams),
-    ))
-    await sess.exec(sa.delete(persistent.ReceivedPiece).where(
-        persistent.ReceivedPiece.read_cap.in_(streams),
-    ))
+async def _delete_read_state(
+    sess: AsyncSession, streams: "list[uuid.UUID]"
+) -> None:
+    await sess.exec(
+        sa.delete(persistent.MixWAL).where(
+            col(persistent.MixWAL.bacap_stream).in_(streams),
+        )
+    )
+    await sess.exec(
+        sa.delete(persistent.ReceivedPiece).where(
+            col(persistent.ReceivedPiece.read_cap).in_(streams),
+        )
+    )
 
 
 async def _delete_unshared_read_caps(
-    sess: AsyncSession, streams: "list[uuid.UUID]",
+    sess: AsyncSession,
+    streams: "list[uuid.UUID]",
 ) -> None:
-    shared = set((await sess.exec(
-        select(persistent.ConversationPeer.read_cap_id).where(
-            persistent.ConversationPeer.read_cap_id.in_(streams),
-        )
-    )).all())
+    shared = set(
+        (
+            await sess.exec(
+                select(persistent.ConversationPeer.read_cap_id).where(
+                    col(persistent.ConversationPeer.read_cap_id).in_(streams),
+                )
+            )
+        ).all()
+    )
     gone = [s for s in streams if s not in shared]
-    await sess.exec(sa.delete(persistent.ReadCapWAL).where(
-        persistent.ReadCapWAL.id.in_(gone),
-    ))
+    await sess.exec(
+        sa.delete(persistent.ReadCapWAL).where(
+            col(persistent.ReadCapWAL.id).in_(gone),
+        )
+    )
 
 
 async def _delete_peer_rows(
-    sess: AsyncSession, conversation_id: int, doomed: _Doomed,
+    sess: AsyncSession,
+    conversation_id: int,
+    doomed: _Doomed,
 ) -> "set[str]":
-    logs = (await sess.exec(select(persistent.ConversationLog).where(
-        persistent.ConversationLog.conversation_id == conversation_id,
-        persistent.ConversationLog.conversation_peer_id.in_(doomed.peer_ids),
-    ))).all()
-    candidates = set().union(*(_attachment_paths(row.payload) for row in logs))
+    logs = (
+        await sess.exec(
+            select(persistent.ConversationLog).where(
+                col(persistent.ConversationLog.conversation_id)
+                == conversation_id,
+                col(persistent.ConversationLog.conversation_peer_id).in_(
+                    doomed.peer_ids
+                ),
+            )
+        )
+    ).all()
+    candidates = set().union(
+        *(_attachment_paths(row.payload) for row in logs)
+    )
     for row in logs:
         await sess.delete(row)
     await sess.flush()
     await _delete_read_state(sess, doomed.read_streams)
-    await sess.exec(sa.delete(persistent.ConversationPeerLink).where(
-        persistent.ConversationPeerLink.conversation_peer_id.in_(doomed.peer_ids),
-    ))
-    await sess.exec(sa.delete(persistent.ConversationPeer).where(
-        persistent.ConversationPeer.id.in_(doomed.peer_ids),
-    ))
+    await sess.exec(
+        sa.delete(persistent.ConversationPeerLink).where(
+            col(persistent.ConversationPeerLink.conversation_peer_id).in_(
+                doomed.peer_ids
+            ),
+        )
+    )
+    await sess.exec(
+        sa.delete(persistent.ConversationPeer).where(
+            col(persistent.ConversationPeer.id).in_(doomed.peer_ids),
+        )
+    )
     await _delete_unshared_read_caps(sess, doomed.read_streams)
-    return candidates - await _remaining_attachment_paths(sess, conversation_id)
+    return candidates - await _remaining_attachment_paths(
+        sess, conversation_id
+    )
 
 
 def _announce_removed(streams: "list[uuid.UUID]") -> None:
     for stream in streams:
-        network.substream_progress_queue.put_nowait(("removed", stream))
+        network.substream_progress_queue.put_nowait(
+            network.TransferRemoved(stream)
+        )
 
 
 async def remove_peer(*, conversation_id: int, peer_id: int) -> None:
@@ -168,22 +225,27 @@ async def remove_peer(*, conversation_id: int, peer_id: int) -> None:
 
 
 async def _silence_conversation(conversation_id: int) -> _Doomed:
-    """Mark every peer inactive and every stream paused, and commit, so the
-    read arming and write sweeps stop touching them while they are torn down."""
+    """Pause every read and write stream, and commit, so the read arming and
+    write sweeps stop touching them while they are torn down."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if conv is None:
             raise RemovalError(f"no conversation {conversation_id}")
-        peers = await conversation_handlers._conversation_peers(sess, conversation_id)
-        pwal_streams = (await sess.exec(
-            select(persistent.PlaintextWAL.bacap_stream).where(
-                persistent.PlaintextWAL.conversation_id == conversation_id,
-            ).distinct()
-        )).all()
+        peers = await conversation_handlers._conversation_peers(
+            sess, conversation_id
+        )
+        pwal_streams = (
+            await sess.exec(
+                select(persistent.PlaintextWAL.bacap_stream)
+                .where(
+                    persistent.PlaintextWAL.conversation_id
+                    == conversation_id,
+                )
+                .distinct()
+            )
+        ).all()
         write_streams = list({conv.write_cap, *pwal_streams})
         for peer in peers:
-            peer.active = False
-            sess.add(peer)
             rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id)
             if rcw is not None:
                 rcw.paused = True
@@ -194,63 +256,105 @@ async def _silence_conversation(conversation_id: int) -> _Doomed:
                 wcw.paused = True
                 sess.add(wcw)
         result = _Doomed(
-            [p.id for p in peers], [p.read_cap_id for p in peers], write_streams,
+            [p.id for p in peers],
+            [p.read_cap_id for p in peers],
+            write_streams,
         )
         await sess.commit()
         return result
 
 
 async def _delete_outbound_state(
-    sess: AsyncSession, conversation_id: int, doomed: _Doomed,
+    sess: AsyncSession,
+    conversation_id: int,
+    doomed: _Doomed,
 ) -> "list[uuid.UUID]":
     """Delete the conversation's send queue, sent-log entries and log; returns
     the upload indirection read caps that now have no owner."""
-    pwals = (await sess.exec(select(persistent.PlaintextWAL).where(
-        persistent.PlaintextWAL.conversation_id == conversation_id,
-    ))).all()
+    pwals = (
+        await sess.exec(
+            select(persistent.PlaintextWAL).where(
+                col(persistent.PlaintextWAL.conversation_id)
+                == conversation_id,
+            )
+        )
+    ).all()
     pwal_ids = [p.id for p in pwals]
     indirections = [p.indirection for p in pwals if p.indirection is not None]
-    sent_ids = (await sess.exec(select(persistent.ConversationLog.outgoing_pwal).where(
-        persistent.ConversationLog.conversation_id == conversation_id,
-        persistent.ConversationLog.outgoing_pwal.is_not(None),
-    ))).all()
-    await sess.exec(sa.delete(persistent.ConversationLog).where(
-        persistent.ConversationLog.conversation_id == conversation_id,
-    ))
-    await sess.exec(sa.delete(persistent.SentLog).where(sa.or_(
-        persistent.SentLog.conversation_id == conversation_id,
-        persistent.SentLog.id.in_([*sent_ids, *pwal_ids]),
-    )))
-    await sess.exec(sa.delete(persistent.MixWAL).where(sa.or_(
-        persistent.MixWAL.plaintextwal.in_(pwal_ids),
-        persistent.MixWAL.bacap_stream.in_(doomed.write_streams),
-    )))
-    await sess.exec(sa.delete(persistent.PlaintextWAL).where(
-        persistent.PlaintextWAL.conversation_id == conversation_id,
-    ))
+    sent_ids = (
+        await sess.exec(
+            select(persistent.ConversationLog.outgoing_pwal).where(
+                col(persistent.ConversationLog.conversation_id)
+                == conversation_id,
+                col(persistent.ConversationLog.outgoing_pwal).is_not(None),
+            )
+        )
+    ).all()
+    await sess.exec(
+        sa.delete(persistent.ConversationLog).where(
+            col(persistent.ConversationLog.conversation_id)
+            == conversation_id,
+        )
+    )
+    await sess.exec(
+        sa.delete(persistent.SentLog).where(
+            sa.or_(
+                col(persistent.SentLog.conversation_id) == conversation_id,
+                col(persistent.SentLog.id).in_([*sent_ids, *pwal_ids]),
+            )
+        )
+    )
+    await sess.exec(
+        sa.delete(persistent.MixWAL).where(
+            sa.or_(
+                col(persistent.MixWAL.plaintextwal).in_(pwal_ids),
+                col(persistent.MixWAL.bacap_stream).in_(doomed.write_streams),
+            )
+        )
+    )
+    await sess.exec(
+        sa.delete(persistent.PlaintextWAL).where(
+            col(persistent.PlaintextWAL.conversation_id) == conversation_id,
+        )
+    )
     return indirections
 
 
 async def _delete_conversation_rows(
-    sess: AsyncSession, conversation_id: int, doomed: _Doomed,
+    sess: AsyncSession,
+    conversation_id: int,
+    doomed: _Doomed,
 ) -> "list[uuid.UUID]":
     indirections = await _delete_outbound_state(sess, conversation_id, doomed)
     await _delete_read_state(sess, doomed.read_streams)
     for model in (persistent.TallyState, persistent.PendingVoucher):
-        await sess.exec(sa.delete(model).where(model.conversation_id == conversation_id))
-    await sess.exec(sa.delete(persistent.ConversationPeerLink).where(
-        persistent.ConversationPeerLink.conversation_id == conversation_id,
-    ))
-    await sess.exec(sa.delete(persistent.Conversation).where(
-        persistent.Conversation.id == conversation_id,
-    ))
-    await sess.exec(sa.delete(persistent.ConversationPeer).where(
-        persistent.ConversationPeer.id.in_(doomed.peer_ids),
-    ))
+        await sess.exec(
+            sa.delete(model).where(
+                col(model.conversation_id) == conversation_id
+            )
+        )
+    await sess.exec(
+        sa.delete(persistent.ConversationPeerLink).where(
+            col(persistent.ConversationPeerLink.conversation_id)
+            == conversation_id,
+        )
+    )
+    await sess.exec(
+        sa.delete(persistent.Conversation).where(
+            col(persistent.Conversation.id) == conversation_id,
+        )
+    )
+    await sess.exec(
+        sa.delete(persistent.ConversationPeer).where(
+            col(persistent.ConversationPeer.id).in_(doomed.peer_ids),
+        )
+    )
     await _delete_unshared_read_caps(sess, doomed.read_streams + indirections)
-    await sess.exec(sa.delete(persistent.WriteCapWAL).where(
-        persistent.WriteCapWAL.id.in_(doomed.write_streams),
-    ))
+    await sess.exec(
+        sa.delete(persistent.WriteCapWAL).where(
+            col(persistent.WriteCapWAL.id).in_(doomed.write_streams),
+        )
+    )
     return indirections
 
 
@@ -261,7 +365,9 @@ async def remove_conversation(*, conversation_id: int) -> None:
     for stream in doomed.streams:
         await network.stop_stream(stream)
     async with persistent.asession() as sess:
-        indirections = await _delete_conversation_rows(sess, conversation_id, doomed)
+        indirections = await _delete_conversation_rows(
+            sess, conversation_id, doomed
+        )
         await sess.commit()
     shutil.rmtree(
         persistent.state_file.parent / "attachments" / str(conversation_id),
