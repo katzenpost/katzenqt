@@ -207,16 +207,23 @@ CASES: list[tuple[list[str], dict[str, object]]] = [
         ["membership-hash", "room"],
         {"action": "membership-hash", "conv_name": "room"},
     ),
+    (["remove-conv", "room"], {"action": "remove-conv", "conv_name": "room"}),
+    (
+        ["remove-peer", "room", "bob"],
+        {"action": "remove-peer", "conv_name": "room", "peer_name": "bob"},
+    ),
 ]
 
 VERBS = [
     "create-conv", "voucher-mint", "voucher-induct", "voucher-await",
     "send", "multi-send", "read", "chat-session", "send-file", "read-file",
     "info", "tally-create", "tally-vote", "tally-result", "tally-close",
-    "tally-list", "membership-hash",
+    "tally-list", "membership-hash", "remove-conv", "remove-peer",
 ]
 
-OFFLINE_VERBS = ["info", "tally-list", "membership-hash"]
+OFFLINE_VERBS = [
+    "info", "tally-list", "membership-hash", "remove-conv", "remove-peer",
+]
 
 DISPATCH = {
     "create-conv": "_action_create_conv",
@@ -236,6 +243,8 @@ DISPATCH = {
     "tally-close": "_action_tally_close",
     "tally-list": "_action_tally_list",
     "membership-hash": "_action_membership_hash",
+    "remove-conv": "_action_remove_conv",
+    "remove-peer": "_action_remove_peer",
 }
 
 TOKENS_AND_CODES: dict[
@@ -344,6 +353,18 @@ TOKENS_AND_CODES: dict[
          ("info", "MEMBERSHIP_HASH=%s")),
         (0, 2),
     ),
+    "_action_remove_conv": (
+        (("error", "conversation %r not found"),
+         ("info", "REMOVED_CONV")),
+        (0, 2),
+    ),
+    "_action_remove_peer": (
+        (("error", "%s"),
+         ("error", "conversation %r not found"),
+         ("error", "peer %r not found in conversation %r"),
+         ("info", "REMOVED_PEER=%s")),
+        (0, 2),
+    ),
 }
 
 EXIT_CODES = {
@@ -411,7 +432,7 @@ def test_every_verb_is_covered():
 
 @pytest.mark.parametrize("verb", OFFLINE_VERBS)
 def test_offline_verbs_take_no_connection(run, verb):
-    argv = [verb] if verb == "info" else [verb, "room"]
+    argv = {"info": [verb], "remove-peer": [verb, "room", "bob"]}.get(verb, [verb, "room"])
     _, namespace = run(argv)
     assert "config" not in namespace
     assert "address" not in namespace

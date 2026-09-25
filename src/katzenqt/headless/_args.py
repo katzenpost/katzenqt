@@ -127,3 +127,14 @@ class TallyList(Offline):
 @dataclass(frozen=True)
 class MembershipHash(Offline):
     conv_name: str
+
+
+@dataclass(frozen=True)
+class RemoveConv(Offline):
+    conv_name: str
+
+
+@dataclass(frozen=True)
+class RemovePeer(Offline):
+    conv_name: str
+    peer_name: str
