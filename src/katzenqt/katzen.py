@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import NamedTuple, Optional, TYPE_CHECKING
+from typing import NamedTuple, Optional, TYPE_CHECKING, cast
 
 import cbor2
 import click
@@ -23,8 +23,9 @@ import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel,
-                            QModelIndex, QPoint, QSettings, QSize, Property, Slot,
-                            QThread, QUrl, Signal, QTimer)
+                            QModelIndex, QObject, QPoint, QSettings,
+                            QSize, Property, Slot, QThread, QUrl,
+                            Signal, QTimer)
 from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
                            QPixmap, QShortcut, QStandardItem, QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
                                QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
                                QTextBrowser, QTableView, QToolButton, QTreeView,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
-from sqlmodel import select
+from sqlmodel import col, select
 
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
 from . import attachment_images
@@ -70,19 +71,34 @@ from .ui_mixchat import Ui_MainWindow  # ui_mixchat.py
 
 if TYPE_CHECKING:
     import typing
-    from typing import Dict, List
+    from typing import (Awaitable, Callable, Coroutine, Dict, Iterable, List,
+                        Mapping, ParamSpec, TypeVar)
+    from ._thinclient import ThinClient
+    from PySide6.QtCore import QPoint
+    from PySide6.QtQuickWidgets import QQuickWidget
+    from PySide6.QtGui import QCloseEvent, QHideEvent, QKeyEvent, QShowEvent
+    from PySide6.QtWidgets import QTabWidget, QWidget
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
+    _T = TypeVar("_T")
+    _P = ParamSpec("_P")
 
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
 
 
-def _peer_is_displayable(peer) -> bool:
+def _peer_is_displayable(peer: persistent.ConversationPeer) -> bool:
     """Whether a ConversationPeer belongs in the contacts tree.
 
     Synthetic substream peers (``:substream:<parent>:<nonce>``; created on
     I-chunk receive in network.py) are internal download machinery and must
     not leak into the user-visible contact list; their download progress
     lives in the Transfers panel instead.
+
+    >>> _peer_is_displayable(persistent.ConversationPeer(name="alice"))
+    True
+    >>> _peer_is_displayable(persistent.ConversationPeer(name=":substream:3:ab"))
+    False
     """
     return not peer.name.startswith(network._SUBSTREAM_NAME_PREFIX)
 
@@ -104,16 +120,35 @@ class _ResolvedAttachment(NamedTuple):
 # stale or deleted conversation_id must not starve every later item forever.
 _CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
 
+class ContactsItem(QStandardItem):
+    conversation_id: int
+    peer_read_cap_id: uuid.UUID
+    peer_is_own: bool
+
+
 class AsyncioThread(threading.Thread):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    kp_client: "ThinClient | None"
+
+    def __init__(
+        self,
+        group: None = None,
+        target: "Callable[..., object] | None" = None,
+        name: "str | None" = None,
+        args: "Iterable[object]" = (),
+        kwargs: "Mapping[str, object] | None" = None,
+        *,
+        daemon: "bool | None" = None,
+    ) -> None:
+        super().__init__(group, target, name, args, kwargs, daemon=daemon)
         self.engine_warmed = threading.Event()
         # Set once async_main's reconnect succeeds; None until then.
         self.kp_client = None
 
-    def run(self):
+    def run(self) -> None:
         self.loop = asyncio.new_event_loop()
-        def report_exception3(loop, exception):
+        def report_exception3(
+            loop: "asyncio.AbstractEventLoop", exception: "dict[str, object]",
+        ) -> None:
             if 'exception' in exception:
                 if isinstance(exception['exception'], asyncio.CancelledError):
                     return
@@ -122,9 +157,10 @@ class AsyncioThread(threading.Thread):
         self.loop.run_until_complete(self.warm_engine())
         self.loop.run_until_complete(self.reconcile_tally_once())
         self.loop.run_until_complete(self.async_main())
+        assert self.kp_client is not None
         self.loop.run_until_complete(network.start_background_threads(self.kp_client))
 
-    async def reconcile_tally_once(self):
+    async def reconcile_tally_once(self) -> None:
         """Buffer early tally ballots from the conversation logs before the
         receive loops start, so a vote consumed ahead of its poll is applied
         when the poll arrives (see ``TallyController.reconcile_from_log``).
@@ -134,7 +170,7 @@ class AsyncioThread(threading.Thread):
         except Exception as e:
             logger.error("startup tally reconcile failed: %s", e, exc_info=e)
 
-    async def run_in_io(self, fn):
+    async def run_in_io(self, fn: "Awaitable[_T]") -> "_T":
         """Run (fn) in the io loop, to work around QtAsyncio not providing sock_connect etc.
 
         Would be nice to have a "with" context handler I guess.
@@ -142,7 +178,7 @@ class AsyncioThread(threading.Thread):
         """
         scheduled = time.monotonic()
 
-        async def _run():
+        async def _run() -> "_T":
             # How long the io loop took to pick this up. A large delay means the
             # loop is blocked by a synchronous stretch (e.g. serialising an
             # attachment) rather than by this coroutine's own work.
@@ -160,7 +196,7 @@ class AsyncioThread(threading.Thread):
         assert ffff.result() == res
         return res
 
-    async def warm_engine(self):
+    async def warm_engine(self) -> None:
         """Establish the async engine's first DB connection on this loop,
         before anything else here or on the Qt loop uses the engine. The pool's
         run-once connect guard is an asyncio.Lock bound to the loop that first
@@ -171,7 +207,7 @@ class AsyncioThread(threading.Thread):
         finally:
             self.engine_warmed.set()
 
-    async def async_main(self):
+    async def async_main(self) -> None:
         self.kp_client = None
         while self.kp_client is None:
             try:
@@ -188,15 +224,17 @@ class AsyncioThread(threading.Thread):
 # offlineStoragePath - The directory for storing offline user data
 # clearComponentCache()
 
-def todo_unicode():
+def todo_unicode() -> None:
     # for unicode entry:
-    qks = QKeySequence(tr("Ctrl-Shift-u"))
+    qks = QKeySequence(
+        QCoreApplication.translate("MainWindow", "Ctrl+Shift+U")
+    )
     # if we bind an event for this, and then push a mode that recognizes
     # [0-9a-fA-F]
     # and pops that state when encountering another one, we can do
     # poor man's IME unicode input
 
-def todo_keys_push_to_talk():
+def todo_keys_push_to_talk() -> None:
     # probably a listener on main window
     # that checks if the input tab open is push to talk
     # QEvent::KeyPress, QEvent::KeyRelease
@@ -204,12 +242,12 @@ def todo_keys_push_to_talk():
     # The event handlers QWidget::keyPressEvent(), QWidget::keyReleaseEvent(), QGraphicsItem::keyPressEvent() and QGraphicsItem::keyReleaseEvent() receive key events.
     pass
 
-def todo_keys():
+def todo_keys() -> None:
     # QWidgetLineControl::processShortcutOverrideEvent(QKeyEvent *ke) - maybe for shift-enter in single-line chat?
     # for searching in chats:
     find = QKeySequence(QKeySequence.StandardKey.Find)
     findNext = QKeySequence(QKeySequence.StandardKey.FindNext)
-    findPrev = QKeySequence(QKeySequence.StandardKey.FindNextPrevious)
+    findPrev = QKeySequence(QKeySequence.StandardKey.FindPrevious)
     # for pg up/down in chat view:
     pgUp = QKeySequence(QKeySequence.StandardKey.MoveToNextPage)
     pgDown = QKeySequence(QKeySequence.StandardKey.MoveToPreviousPage)
@@ -218,19 +256,21 @@ def todo_keys():
     shiftPgUp = QKeySequence(QKeySequence.StandardKey.SelectNextPage)
     shiftPgDown = QKeySequence(QKeySequence.StandardKey.SelectPreviousPage)
 
-def async_cb(method):
+def async_cb(
+    method: "Callable[_P, Coroutine[object, object, None]]",
+) -> "Callable[_P, asyncio.Task[None]]":
     """This wraps async MainWindow methods and runs them as tasks.
 
     Transient UI actions executed this way never block the loop, and a failing
     action leaves a logged traceback (create_task) instead of vanishing
     silently.
     """
-    def f(*args, **kwargs):
+    def f(*args: "_P.args", **kwargs: "_P.kwargs") -> "asyncio.Task[None]":
         return create_task(method(*args, **kwargs))
     return f
 
 
-async def _dialog_finished(dialog):
+async def _dialog_finished(dialog: QDialog) -> int:
     """Open a dialog without exec() and await its ``finished`` signal.
 
     dialog.exec() spins a nested Qt event loop; run inside a QtAsyncio task
@@ -239,13 +279,13 @@ async def _dialog_finished(dialog):
     to the normal event processing and resumes this coroutine via the finished
     signal instead.
     """
-    fut = asyncio.get_event_loop().create_future()
+    fut: "asyncio.Future[int]" = asyncio.get_event_loop().create_future()
     dialog.finished.connect(fut.set_result)
     dialog.open()
     return await fut
 
 
-async def _menu_chosen(menu, global_pos):
+async def _menu_chosen(menu: QMenu, global_pos: "QPoint") -> "QAction | None":
     """Show a popup menu non-blocking and return the triggered QAction.
 
     menu.exec() spins a nested Qt event loop; run inside a QtAsyncio task
@@ -254,13 +294,13 @@ async def _menu_chosen(menu, global_pos):
     menu hides, yielding the action the user picked (None if dismissed).
     """
     loop = asyncio.get_event_loop()
-    hidden = loop.create_future()
-    local = []
+    hidden: "asyncio.Future[None]" = loop.create_future()
+    local: "list[QAction]" = []
 
-    def _chosen(action):
+    def _chosen(action: QAction) -> None:
         local.append(action)
 
-    def _hidden():
+    def _hidden() -> None:
         if not hidden.done():
             hidden.set_result(None)
 
@@ -271,7 +311,7 @@ async def _menu_chosen(menu, global_pos):
     return local[0] if local else None
 
 
-async def _qml_source_ready(widget) -> None:
+async def _qml_source_ready(widget: "QQuickWidget") -> None:
     """Wait for a QQuickWidget to finish loading its source.
 
     ``QQuickWidget.setSource`` loads asynchronously on first use. The old
@@ -288,7 +328,7 @@ async def _qml_source_ready(widget) -> None:
     loop = asyncio.get_event_loop()
     fut = loop.create_future()
 
-    def _on_status(status):
+    def _on_status(status: "QQuickWidget.Status") -> None:
         if not fut.done() and status in settled:
             fut.set_result(status)
 
@@ -337,22 +377,22 @@ async def _commit_new_conversation(
 
 
 class FirewallNetworkAccessManager(QtNetwork.QNetworkAccessManager):
-    def connectToHost(self, *args) -> None:
+    def connectToHost(self, *args: object) -> None:
         print("firewall: connectToHost")
         return
-    def connectToHostEncrypted(self, *args) -> None:
+    def connectToHostEncrypted(self, *args: object) -> None:
         print("firewall: connectToHostEncrypted")
         return
 class FirewallNetworkAccessManagerFactory(QQmlNetworkAccessManagerFactory):
-    def create(self, obj:QObject) -> QtNetwork.QNetworkAccessManager:
+    def create(self, obj: "QObject") -> QtNetwork.QNetworkAccessManager:
         """TODO not sure this actually works"""
         return FirewallNetworkAccessManager(obj)
 
 class KeyPressFilter(QObject):
     """Listen for Space(bar) / push-to-talk"""
-    def eventFilter(self, widget, event):
+    def eventFilter(self, widget: "QObject", event: QEvent) -> bool:
         if event.type() == QEvent.Type.KeyPress:
-            text = event.text()
+            text = cast("QKeyEvent", event).text()
             #if event.modifiers():
             #    text = event.keyCombination().key().name.decode(encoding="utf-8")
             print("ev", text)
@@ -360,7 +400,7 @@ class KeyPressFilter(QObject):
             print(event.type(), repr(event))
         return False
 
-def duration_time_ns():
+def duration_time_ns() -> int:
     """Portable nanosecond delta timestamps.
 
     This is ~SI nanoseconds, but platform-defined epoch instead of UNIX epoch.
@@ -379,6 +419,15 @@ def _error_detail(exc: BaseException, limit: int = 200) -> str:
     The exception can come from parsing a peer's reply, so its text is
     attacker-chosen and unbounded, and QMessageBox renders AutoText. Keep the
     type, clamp the rest, drop control characters and angle brackets.
+
+    >>> _error_detail(ValueError("<b>boom</b>" + chr(7)))
+    'ValueError: bboom/b'
+    >>> _error_detail(ValueError(""))
+    'ValueError'
+    >>> len(_error_detail(ValueError("x" * 300)))
+    212
+    >>> len(_error_detail(ValueError("x" * 300), limit=10))
+    22
     """
     text = "".join(
         c for c in str(exc)
@@ -390,7 +439,13 @@ def _error_detail(exc: BaseException, limit: int = 200) -> str:
 class PendingVouchersDialog(QDialog):
     """Lists in-flight vouchers and lets the user abandon stale ones, e.g. a
     voucher whose code was lost and whose join never completed."""
-    def __init__(self, parent, rows):
+
+    cancelled: "list[uuid.UUID]"
+
+    def __init__(
+        self, parent: "QWidget | None",
+        rows: "list[tuple[uuid.UUID, str, str, str]]",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Pending vouchers")
         # ids the user marked for abandonment; the caller deletes them once the
@@ -416,7 +471,7 @@ class PendingVouchersDialog(QDialog):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
-    def _cancel_selected(self):
+    def _cancel_selected(self) -> None:
         item = self.list_widget.currentItem()
         if item is None:
             return
@@ -431,7 +486,7 @@ class StatsDialog(QDialog):
     snapshot is plain int reads, safe from the Qt thread under the GIL.
     """
 
-    def __init__(self, parent) -> None:
+    def __init__(self, parent: "QWidget | None") -> None:
         super().__init__(parent)
         self.setWindowTitle("Mixnet stats")
         layout = QFormLayout(self)
@@ -459,12 +514,12 @@ class StatsDialog(QDialog):
                 text = f"{text} ({pct:.1f}%)"
             label.setText(text)
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: "QShowEvent") -> None:
         self.refresh()
         self._timer.start()
         super().showEvent(event)
 
-    def hideEvent(self, event) -> None:
+    def hideEvent(self, event: "QHideEvent") -> None:
         self._timer.stop()
         super().hideEvent(event)
 
@@ -478,6 +533,8 @@ class ConsensusDialog(QDialog):
     epoch changes.
     """
 
+    _last_epoch: "int | None"
+
     _FIELD_LABELS = (
         ("epoch", "Current epoch"),
         ("genesis", "Genesis epoch"),
@@ -486,7 +543,9 @@ class ConsensusDialog(QDialog):
         ("consensus", "Consensus duration"),
     )
 
-    def __init__(self, parent, fetch) -> None:
+    def __init__(
+        self, parent: "QWidget | None", fetch: "Callable[[], Awaitable[object]]",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Network consensus")
         self._fetch = fetch
@@ -525,7 +584,7 @@ class ConsensusDialog(QDialog):
             # A fetch can fail while the daemon is down; the timer retries.
             self._fields["epoch"].setText("PKI document unavailable")
             return
-        summary = network.summarize_pki_document(document)
+        summary = network.summarize_pki_document(cast("dict[str, object] | None", document))
         if summary is None:
             self._fields["epoch"].setText("no PKI document yet")
             return
@@ -558,7 +617,7 @@ class ConsensusDialog(QDialog):
             "}"
         )
 
-    def _rebuild_tree(self, summary) -> None:
+    def _rebuild_tree(self, summary: "network.ConsensusSummary") -> None:
         self._tree.clear()
         groups = [("Gateways", summary.gateways)]
         groups += [
@@ -577,13 +636,13 @@ class ConsensusDialog(QDialog):
         self._tree.expandAll()
         self._tree.resizeColumnToContents(0)
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: "QShowEvent") -> None:
         self._apply_selection_style()
         self.refresh()
         self._timer.start()
         super().showEvent(event)
 
-    def hideEvent(self, event) -> None:
+    def hideEvent(self, event: "QHideEvent") -> None:
         self._timer.stop()
         super().hideEvent(event)
 
@@ -596,7 +655,7 @@ class PacketsDialog(QDialog):
     timer while visible.
     """
 
-    def __init__(self, parent) -> None:
+    def __init__(self, parent: "QWidget | None") -> None:
         super().__init__(parent)
         self.setWindowTitle("Packets")
         layout = QVBoxLayout(self)
@@ -664,17 +723,28 @@ class PacketsDialog(QDialog):
         network.clear_finished_packets()
         self._refresh()
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: "QShowEvent") -> None:
         self._refresh()
         self._timer.start()
         super().showEvent(event)
 
-    def hideEvent(self, event) -> None:
+    def hideEvent(self, event: "QHideEvent") -> None:
         self._timer.stop()
         super().hideEvent(event)
 
 
 class MainWindow(QMainWindow):
+    iothread: "AsyncioThread"
+    echomix_icon: QIcon
+    echomix_icon_new_message: QIcon
+    conversation_log_models: "dict[int, ConversationLogModel]"
+    systray: "MixSystrayIcon | None"
+    settings: "dict[str, str | int | None]"
+    _ptt_audio: "PttAudioBridge | None"
+    _playing_message_id: str
+    _playback_failure_message: "str | None"
+    push_to_talk_recording_conversation_id: "int | None"
+
     def X_keyPressEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key pressed", key)
@@ -685,7 +755,7 @@ class MainWindow(QMainWindow):
     def _push_to_talk_audio(self) -> PttAudioBridge | None:
         if getattr(self, "_ptt_audio_failed", False):
             return None
-        if audio := getattr(self, "_ptt_audio", None):
+        if audio := cast("PttAudioBridge | None", getattr(self, "_ptt_audio", None)):
             return audio
         try:
             self._ptt_audio = PttAudioBridge()
@@ -794,7 +864,8 @@ class MainWindow(QMainWindow):
     def _play_attachment_preview(self) -> None:
         audio = self._push_to_talk_audio()
         selected_path = self._selected_attachment_path()
-        if not audio or not self._is_previewable_attachment(selected_path):
+        if (not audio or selected_path is None
+                or not self._is_previewable_attachment(selected_path)):
             return
         try:
             audio.play_preview(selected_path)
@@ -1104,7 +1175,7 @@ class MainWindow(QMainWindow):
                 f"Failed to stop audio playback.\n\n{exc}",
             )
 
-    def push_to_talk_start(self):
+    def push_to_talk_start(self) -> None:
         audio = self._push_to_talk_audio()
         if not audio:
             return
@@ -1194,21 +1265,21 @@ class MainWindow(QMainWindow):
             self.push_to_talk_finish(cancel=True)
             return
 
-        if self.ui.ptt_tab.parent().currentWidget() != self.ui.ptt_tab:
+        if cast("QTabWidget", self.ui.ptt_tab.parent()).currentWidget() != self.ui.ptt_tab:
             self.push_to_talk_finish(cancel=True)
             return
 
         if duration_time_ns() - convo.last_push_to_talk_ns > 100_000_000:
             self.push_to_talk_finish(cancel=False)
 
-    def font_settings_dialog(self):
-        def font_example(qtoolbtn):
+    def font_settings_dialog(self) -> None:
+        def font_example(qtoolbtn: QToolButton) -> None:
             ok, font = QFontDialog.getFont() # returns a QFont
             if not ok:
                 return
             qtoolbtn.setText(f"{font.family()} {font.pointSize()}")
             option = qtoolbtn.objectName().replace("_toolButton", "")
-            new = {
+            new: "dict[str, str | int]" = {
               f"{option}.font.family": font.family(),
               f"{option}.font.pointSize": font.pointSize(),
             }
@@ -1219,7 +1290,7 @@ class MainWindow(QMainWindow):
                       if not (ex := sess.get(persistent.AppSetting, n)):
                           ex = persistent.AppSetting(id=n)
                       ex.type = 'int' if isinstance(v,int) else 'str'
-                      ex.value = v
+                      ex.value = str(v)
                       sess.add(ex)
                     sess.commit()
             except Exception as e:
@@ -1238,21 +1309,23 @@ class MainWindow(QMainWindow):
             for el in q.children():
                 if not isinstance(el, QToolButton):
                     continue
-                def stupid_scoping(x):
+                def stupid_scoping(x: QToolButton) -> "Callable[[], None]":
                     return lambda: font_example(x)
                 el.clicked.connect(stupid_scoping(el))
                 # restore font choice from DB, if any:
                 which = el.objectName().replace("_toolButton","")
-                if old_text := (self.settings.get(f"{which}.font.family","") + " " + str(self.settings.get(f"{which}.font.pointSize",""))).strip():
+                old_family = str(self.settings.get(f"{which}.font.family",""))
+                old_size = str(self.settings.get(f"{which}.font.pointSize",""))
+                if old_text := (old_family + " " + old_size).strip():
                     el.setText(old_text)
         self.font_settings_qdialog.show()
 
-    def theme_settings_dialog(self):
+    def theme_settings_dialog(self) -> None:
         # Modal chooser; applies and persists on accept (see theme.py).
         theme.ThemeDialog(self.theme, self).exec()
 
     @async_cb
-    async def testme(self):
+    async def testme(self) -> None:
         logger.info("testing")
         import secrets
         x = secrets.token_bytes(32)
@@ -1262,7 +1335,9 @@ class MainWindow(QMainWindow):
         write_cap , read_cap = network.create_new_keypair(x)
         logger.critical(write_cap)
         logger.critical(read_cap)
-        await self.iothread.run_in_io(network.test_keypair(self.iothread.kp_client, write_cap, read_cap))
+        client = self.iothread.kp_client
+        assert client is not None
+        await self.iothread.run_in_io(network.test_keypair(client, write_cap, read_cap))
         # we want to make a regular conversation,
         # give it a name,
         # pick a name for ourselves
@@ -1273,7 +1348,7 @@ class MainWindow(QMainWindow):
         
         
 
-    def push_to_talk_pressed(self):
+    def push_to_talk_pressed(self) -> bool:
         """The shortcut has autoRepeat=True, so we will keep getting these at regular intervals.
         Instead of relying on receiving a keyReleased event, we do a "dead man's switch" thing
         and record until we haven't seen a PTT shortcut trigger for a while (~100ms? - TODO how
@@ -1285,7 +1360,7 @@ class MainWindow(QMainWindow):
         TODO: We should also have a keyboard combination to do that, while they're holding space (escape? delete?)
         """
         # CONDITION: push to talk mode in the chat input
-        if self.ui.ptt_tab.parent().currentWidget() != self.ui.ptt_tab:
+        if cast("QTabWidget", self.ui.ptt_tab.parent()).currentWidget() != self.ui.ptt_tab:
             # Switched away from the ptt tab, we should stop recording.
             # Probably cancel sending it too.
             # TODO actually this could just be a listener on singlemultitab
@@ -1318,15 +1393,15 @@ class MainWindow(QMainWindow):
         # Expose a tiny playback surface to QML instead of routing the whole
         # window object through custom model roles.
         self.ui.qml_ChatLines.rootContext().setContextProperty("chatController", self)
-        self._ptt_audio: PttAudioBridge | None = None
+        self._ptt_audio = None
         self._ptt_audio_failed = False
-        self._playing_message_id: str = ""
-        self._playback_failure_message: str | None = None
+        self._playing_message_id = ""
+        self._playback_failure_message = None
         self._playback_error_timer = QTimer(self)
         self._playback_error_timer.setInterval(100)
         self._playback_error_timer.timeout.connect(self._poll_playback_error)
         self.push_to_talk_started = False
-        self.push_to_talk_recording_conversation_id: int | None = None
+        self.push_to_talk_recording_conversation_id = None
         self.push_to_talk_watchdog = QTimer(self)
         self.push_to_talk_watchdog.setInterval(50)
         self.push_to_talk_watchdog.timeout.connect(self.push_to_talk_watchdog_tick)
@@ -1454,7 +1529,9 @@ class MainWindow(QMainWindow):
         # a conversation to stop/resume reading that one stream. The
         # Transfers panel and this menu give the user a handle on streams
         # that the contacts tree does not render.
-        self.ui.contacts_treeWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.ui.contacts_treeWidget.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
         self.ui.contacts_treeWidget.customContextMenuRequested.connect(
             self.peer_context_menu
         )
@@ -1471,7 +1548,9 @@ class MainWindow(QMainWindow):
         self.transfers_view.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
-        self.transfers_view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.transfers_view.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
         self.transfers_view.customContextMenuRequested.connect(
             self.transfers_context_menu
         )
@@ -1494,7 +1573,7 @@ class MainWindow(QMainWindow):
 
     # -- composer input tabs -------------------------------------------------
 
-    def _fit_composer(self, *_) -> None:
+    def _fit_composer(self, *_: object) -> None:
         """Clamp the composer's tab widget to the height of its current tab."""
         tabs = self.ui.singlemultitab
         page = tabs.currentWidget()
@@ -1569,7 +1648,9 @@ class MainWindow(QMainWindow):
         ))
 
     @async_cb
-    async def tally_vote(self, panel: TallyPanel, choice) -> None:
+    async def tally_vote(
+        self, panel: TallyPanel, choice: "dict[str, str]",
+    ) -> None:
         """Persist the panel's edited selection and broadcast it."""
         key = panel.current_survey()
         if key is None:
@@ -1636,7 +1717,13 @@ class MainWindow(QMainWindow):
         dialog.open()
 
     @async_cb
-    async def _create_poll(self, conversation_id, topic, mode, slots) -> None:
+    async def _create_poll(
+        self,
+        conversation_id: int,
+        topic: str,
+        mode: "tally_schema.Mode",
+        slots: "list[str]",
+    ) -> None:
         """Create and broadcast a survey; report a failure to the user."""
         if not topic or not slots:
             return
@@ -1743,14 +1830,16 @@ class MainWindow(QMainWindow):
         ))
         return True
 
-    def _restore_unsent_text(self, convo_state, msg: str) -> None:
+    def _restore_unsent_text(
+        self, convo_state: ConversationUIState, msg: str,
+    ) -> None:
         if self.convo_state_or_none() is not convo_state:
             convo_state.chat_lineEdit_buffer = msg
         elif not self.ui.chat_lineEdit.text():
             self.ui.chat_lineEdit.setText(msg)
 
     @async_cb
-    async def chat_msg_single_line(self):
+    async def chat_msg_single_line(self) -> None:
         """Send a single line message to the currently selected chat window."""
         msg = self.ui.chat_lineEdit.text()
         self.ui.chat_lineEdit.setText("")
@@ -1808,7 +1897,9 @@ class MainWindow(QMainWindow):
             )
         )
 
-    async def _wait_for_conversation_state(self, conversation_id, *, what: str) -> bool:
+    async def _wait_for_conversation_state(
+        self, conversation_id: int, *, what: str,
+    ) -> bool:
         """Wait for conversation_id to appear in conversation_state_by_id.
 
         Bounded: the UI can briefly lag the io thread at startup, but a
@@ -1832,7 +1923,7 @@ class MainWindow(QMainWindow):
     def _supervised_listener(
         self,
         name: str,
-        coro_factory,
+        coro_factory: "Callable[[], Coroutine[object, object, None]]",
         *,
         restart_on_finish: bool = False,
         backoff_s: float = 2.0,
@@ -1845,7 +1936,7 @@ class MainWindow(QMainWindow):
         reschedule a fresh run after ``backoff_s`` so the live UI refresh can
         never silently die for the rest of the session.
         """
-        def _on_done(task: asyncio.Task) -> None:
+        def _on_done(task: "asyncio.Task[object]") -> None:
             if task.cancelled():
                 return
             exc = task.exception()
@@ -1869,7 +1960,7 @@ class MainWindow(QMainWindow):
         task = create_task(coro_factory())
         task.add_done_callback(_on_done)
 
-    async def receive_msg_listener(self):
+    async def receive_msg_listener(self) -> None:
         """Listen to the network thread to learn when it has updated a persistent.Conversation,
         and make the UI refresh with bells and whistles."""
         while True:
@@ -1890,7 +1981,9 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
-    async def _process_conversation_update(self, conversation_id, redraw_only) -> None:
+    async def _process_conversation_update(
+        self, conversation_id: int, redraw_only: bool,
+    ) -> None:
         if not await self._wait_for_conversation_state(conversation_id, what="receive_msg_listener"):
             return
         convo_state = self.conversation_state_by_id[conversation_id]
@@ -1930,9 +2023,10 @@ class MainWindow(QMainWindow):
         if not self.app.focusWidget():
             self.app.alert(self)
             # self.app.beep()
-        self.systray.has_new_messages() # TODO move this into block above
+        if self.systray is not None:
+            self.systray.has_new_messages() # TODO move this into block above
 
-    async def peer_added_listener(self):
+    async def peer_added_listener(self) -> None:
         """Append members announced via INTRODUCTION to the contacts tree in
         real time. The receive path persists the peer but stays Qt-free; this
         listener turns that into a visible row (deduplicated by name), so a
@@ -1971,7 +2065,7 @@ class MainWindow(QMainWindow):
         )
         if already:
             return
-        new_item = QStandardItem(name)
+        new_item = ContactsItem(name)
         # Tag like add_conversation's peers so the per-peer pause/resume
         # context menu works on dynamically-announced members
         # too. The queue only carries (conversation_id, name); resolve the
@@ -1982,8 +2076,8 @@ class MainWindow(QMainWindow):
                 select(persistent.ConversationPeer)
                 .join(
                     persistent.ConversationPeerLink,
-                    persistent.ConversationPeerLink.conversation_peer_id ==
-                    persistent.ConversationPeer.id,
+                    col(persistent.ConversationPeerLink.conversation_peer_id)
+                    == persistent.ConversationPeer.id,
                 )
                 .where(
                     persistent.ConversationPeerLink.conversation_id == conversation_id,
@@ -2172,7 +2266,7 @@ class MainWindow(QMainWindow):
             root.setProperty("ctx", state.qml_ctx(root, settings=self.settings))
 
     @async_cb
-    async def transfers_context_menu(self, pos) -> None:
+    async def transfers_context_menu(self, pos: "QPoint") -> None:
         """Right-click a Transfers row: Pause / Resume that substream
         download, or Remove a failed one. Reuses the item-5 per-stream
         primitive (pause freezes the BACAP cursor + cancels the in-flight
@@ -2188,7 +2282,7 @@ class MainWindow(QMainWindow):
         if not rcw_id:
             return
         rcw_id = uuid.UUID(rcw_id)
-        transfers_model = view.model()
+        transfers_model = cast(DownloadsModel, view.model())
         row_data = transfers_model._rows.get(rcw_id, {})
         api = QMenu(view)
         if row_data.get("failed", False):
@@ -2271,26 +2365,38 @@ class MainWindow(QMainWindow):
                     self.transfers_model.remove_transfer(event.rcw_id)
                     continue
                 kind = event[0]
-                rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]
+                raw_id = event[1]
+                rcw_id = (
+                    uuid.UUID(raw_id) if isinstance(raw_id, str)
+                    else cast(uuid.UUID, raw_id)
+                )
                 if kind == "started":
                     _, _, conv_id, total, parent_name = event
                     self.transfers_model.start_transfer(
-                        rcw_id, conv_id, parent_name, total,
+                        rcw_id, cast(int, conv_id), cast(str, parent_name),
+                        cast("int | None", total),
                     )
                 elif kind == "upload_started":
                     _, _, conv_id, total, total_bytes, parent_name, basename = event
                     label = (
                         f"{basename} (in {parent_name})"
-                        if basename else parent_name
+                        if basename else cast(str, parent_name)
                     )
                     self.transfers_model.start_transfer(
-                        rcw_id, conv_id, label, total,
-                        direction="upload", raw_bytes=total_bytes,
+                        rcw_id, cast(int, conv_id), label,
+                        cast("int | None", total),
+                        direction="upload", raw_bytes=cast(int, total_bytes),
                     )
                 elif kind == "piece":
-                    self.transfers_model.notify_piece(rcw_id, event[2], event[3])
+                    self.transfers_model.notify_piece(
+                        rcw_id, cast(int, event[2]),
+                        cast("int | None", event[3]),
+                    )
                 elif kind == "upload_piece":
-                    self.transfers_model.notify_piece(rcw_id, event[2], event[3])
+                    self.transfers_model.notify_piece(
+                        rcw_id, cast(int, event[2]),
+                        cast("int | None", event[3]),
+                    )
                 elif kind == "completed":
                     self.transfers_model.complete_transfer(rcw_id)
                 elif kind == "upload_completed":
@@ -2306,7 +2412,9 @@ class MainWindow(QMainWindow):
                 elif kind == "upload_resumed":
                     self.transfers_model.set_paused(rcw_id, paused=False)
                 elif kind == "failed":
-                    self.transfers_model.fail_transfer(rcw_id, event[2])
+                    self.transfers_model.fail_transfer(
+                        rcw_id, cast(str, event[2]),
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -2331,16 +2439,18 @@ class MainWindow(QMainWindow):
         idx = self.ui.contacts_treeWidget.selectionModel().currentIndex()
         if idx.parent().isValid():
             idx = idx.parent()
-        idx = self.ui.contacts_treeWidget.model().mapToSource(idx)
+        idx = cast(FilterProxyModel, self.ui.contacts_treeWidget.model()).mapToSource(idx)
         q = self.all_contacts.item(idx.row(), idx.column())
         #q = self.ui.contacts_treeWidget.currentItem()
         if not q:
             return None
         #q = q.parent() or q
-        return self.conversation_state_by_id[q.conversation_id]
+        return self.conversation_state_by_id[
+            cast(ContactsItem, q).conversation_id
+        ]
 
     @async_cb
-    async def send_file(self):
+    async def send_file(self) -> None:
         """Send each queued attachment as its own SendOperation.
         
         Wire format is a full GroupChatMessage (bytes in PWAL); the local
@@ -2458,10 +2568,10 @@ class MainWindow(QMainWindow):
             for draft_path in voice_note_drafts:
                 audio.discard_draft(draft_path)
 
-    def attach_file(self, _checked: bool = False):
+    def attach_file(self, _checked: bool = False) -> None:
         dialog = QFileDialog()
         dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)  # allow more than one file
-        dialog.setAcceptMode(QFileDialog.AcceptOpen)  # files should exist already
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)  # files should exist already
         dialog.setViewMode(QFileDialog.ViewMode.Detail)
         if saved := getattr(self, "saved_file_dialog", None):
             dialog.restoreState(saved)
@@ -2478,7 +2588,9 @@ class MainWindow(QMainWindow):
         convo.attached_files |= set(dialog.selectedFiles())  # add entries to convo_state
         self.refresh_attached_files_for_conversation(convo)
 
-    def refresh_attached_files_for_conversation(self, convo: ConversationUIState):
+    def refresh_attached_files_for_conversation(
+        self, convo: ConversationUIState,
+    ) -> None:
         selected_path = self._selected_attachment_path()
         self.ui.attached_files_QListWidget.clear()
         audio = getattr(self, "_ptt_audio", None)
@@ -2521,7 +2633,9 @@ class MainWindow(QMainWindow):
         self._fit_composer()
 
     @async_cb
-    async def conversation_selected(self, selected:QTreeWidgetItem, old:QTreeWidgetItem|None):
+    async def conversation_selected(
+        self, selected: "QModelIndex | None", old: "QModelIndex | None",
+    ) -> None:
         # https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QTreeWidget.html
         # scrollToItem ; setCurrentItem
         if not selected or not selected.isValid():
@@ -2531,7 +2645,7 @@ class MainWindow(QMainWindow):
         if selected.parent().isValid():
             # peer name selected under a conversation, we want to look up the data for the conversation:
             selected = selected.parent()
-        if old.parent().isValid():
+        if old is not None and old.parent().isValid():
             old = old.parent()
         selected_qmi = selected.model().mapToSource(selected)
         selected_item = self.all_contacts.item(selected_qmi.row(), selected_qmi.column())
@@ -2564,7 +2678,7 @@ class MainWindow(QMainWindow):
                             ),
                         )
             root = self.ui.qml_ChatLines.rootObject()
-            if root and (vscrollbar := root.findChild(object, "vscrollbar")):
+            if root and (vscrollbar := root.findChild(QObject, "vscrollbar")):
                 #vrect = vscrollbar.findChild(object, "vscrollbar_rect")
                 #vh = root.height()
                 #vcih = c.property("contentHeight")
@@ -2604,7 +2718,6 @@ class MainWindow(QMainWindow):
             root.setProperty("ctx", props)
             #convo_state = self.convo_state()
             # backend.set_convo_model_and_scroll()
-            vscrollbar = root.findChild(object, "vscrollbar")
             #vscrollbar.setProperty("position", convo_state.chat_lines_scroll_idx)
             #print('set first restored scroll to', convo_state.chat_lines_scroll_idx, vscrollbar.property("position"))
         else:
@@ -2655,7 +2768,8 @@ class MainWindow(QMainWindow):
         # Restore attached_files:
         self.refresh_attached_files_for_conversation(convo_state)
 
-        self.systray.has_read_messages()
+        if self.systray is not None:
+            self.systray.has_read_messages()
 
     def do_we_even_have_unread_messages(self) -> bool:
         """
@@ -2669,7 +2783,7 @@ class MainWindow(QMainWindow):
         return False
 
     @async_cb
-    async def new_conversation(self):
+    async def new_conversation(self) -> None:
         title_dialog = QInputDialog(self)
         title_dialog.setWindowTitle("New conversation")
         title_dialog.setLabelText("Choose conversation title:")
@@ -2720,7 +2834,7 @@ class MainWindow(QMainWindow):
         await add_conversation(self, convo)
 
     @async_cb
-    async def generate_voucher(self):
+    async def generate_voucher(self) -> None:
         """Joiner side of the Contact Voucher protocol: mint a Voucher over the
         selected conversation's MessageStream, publish it, and show the token to
         hand to an existing member out of band. The join completes in the
@@ -2778,8 +2892,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            client = self.iothread.kp_client
+            assert client is not None
             voucher = await self.iothread.run_in_io(
-                mint_and_publish(self.iothread.kp_client, conv_id, display_name)
+                mint_and_publish(client, conv_id, display_name)
             )
         except Exception as e:
             QTimer.singleShot(0, lambda err=e: QMessageBox.critical(
@@ -2834,7 +2950,7 @@ class MainWindow(QMainWindow):
             # Synthetic substream peers are never rendered.
             if name.startswith(network._SUBSTREAM_NAME_PREFIX):
                 continue
-            new_item = QStandardItem(name)
+            new_item = ContactsItem(name)
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on dynamically-announced members too. Sync
             # engine: the Qt loop must not open the async engine (see
@@ -2855,7 +2971,9 @@ class MainWindow(QMainWindow):
             f"Joined: {APP_NAME}", f"You have joined. Members added: {joined}.",
         ))
 
-    async def _wait_and_open_with_retries(self, conversation_id: int, delay: float = 2.0):
+    async def _wait_and_open_with_retries(
+        self, conversation_id: int, delay: float = 2.0,
+    ) -> "list[str]":
         for attempt in range(5):
             try:
                 # getattr, not a direct attribute access: AsyncioThread sets
@@ -2864,8 +2982,10 @@ class MainWindow(QMainWindow):
                 # otherwise raise AttributeError here instead of waiting.
                 while getattr(self.iothread, "kp_client", None) is None:
                     await asyncio.sleep(1)
+                client = self.iothread.kp_client
+                assert client is not None
                 return await self.iothread.run_in_io(
-                    await_and_open(self.iothread.kp_client, conversation_id)
+                    await_and_open(client, conversation_id)
                 )
             except (ThinClientOfflineError, ConnectionError, BrokenPipeError, OSError):
                 logging.warning("voucher join attempt %d failed (daemon transient); retrying", attempt + 1)
@@ -2874,7 +2994,7 @@ class MainWindow(QMainWindow):
         raise ConnectionError("voucher join could not reach the daemon after retries")
 
     @async_cb
-    async def induct_via_voucher(self):
+    async def induct_via_voucher(self) -> None:
         """Inductor side of the Contact Voucher protocol: read the joiner's
         published voucher, reply over the rendezvous stream with this group's
         read caps, and add the joiner on their salt-mutated read cap."""
@@ -2906,9 +3026,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            client = self.iothread.kp_client
+            assert client is not None
             joiner_name = await self.iothread.run_in_io(
                 derive_read_and_induct(
-                    self.iothread.kp_client, convo.conversation_id, "", voucher,
+                    client, convo.conversation_id, "", voucher,
                 )
             )
         except Exception as e:
@@ -2932,7 +3054,7 @@ class MainWindow(QMainWindow):
 
         # Synthetic substream peers are never rendered.
         if not joiner_name.startswith(network._SUBSTREAM_NAME_PREFIX):
-            new_item = QStandardItem(joiner_name)
+            new_item = ContactsItem(joiner_name)
             # Tag like add_conversation's peers so the per-peer pause/resume
             # context menu works on inducted members too.
             # Sync engine (Qt loop; see persistent.warm_async_engine).
@@ -2941,8 +3063,8 @@ class MainWindow(QMainWindow):
                     select(persistent.ConversationPeer)
                     .join(
                         persistent.ConversationPeerLink,
-                        persistent.ConversationPeerLink.conversation_peer_id ==
-                        persistent.ConversationPeer.id,
+                        col(persistent.ConversationPeerLink.conversation_peer_id)
+                        == persistent.ConversationPeer.id,
                     )
                     .where(
                         persistent.ConversationPeerLink.conversation_id == convo.conversation_id,
@@ -2961,7 +3083,7 @@ class MainWindow(QMainWindow):
         ))
 
     @async_cb
-    async def show_pending_vouchers(self):
+    async def show_pending_vouchers(self) -> None:
         """Open the pending-voucher view so the user can abandon stale ones."""
         rows = await self.iothread.run_in_io(list_pending_vouchers())
         if not rows:
@@ -2974,7 +3096,7 @@ class MainWindow(QMainWindow):
         for pv_id in dialog.cancelled:
             await self.iothread.run_in_io(cancel_pending_voucher(pv_id))
 
-    def show_stats(self, _checked: bool = False):
+    def show_stats(self, _checked: bool = False) -> None:
         """Open (or raise) the modeless Mixnet stats window."""
         dialog = getattr(self, "stats_dialog", None)
         if dialog is None:
@@ -2984,11 +3106,11 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
-    def show_consensus(self, _checked: bool = False):
+    def show_consensus(self, _checked: bool = False) -> None:
         """Open (or raise) the modeless Network consensus window."""
         dialog = getattr(self, "consensus_dialog", None)
         if dialog is None:
-            async def fetch():
+            async def fetch() -> object:
                 return await self.iothread.run_in_io(
                     network.get_pki_document(self.iothread.kp_client)
                 )
@@ -2998,7 +3120,7 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
-    def show_packets(self, _checked: bool = False):
+    def show_packets(self, _checked: bool = False) -> None:
         """Open (or raise) the modeless Packets window."""
         dialog = getattr(self, "packets_dialog", None)
         if dialog is None:
@@ -3008,21 +3130,23 @@ class MainWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
-    def close(self, *args, **kwargs):
+    def close(self, *args: object, **kwargs: object) -> bool:
         if kwargs.get('really_quit', False):
             logger.critical("QUITTING")
             network.shutdown()
-            self.systray = False
+            self.systray = None
             self.app.quit()
-    def closeEvent(self, event, **kwargs):
-        if getattr(self, "systray", False):
+        return False
+    def closeEvent(self, event: "QCloseEvent", **kwargs: object) -> None:
+        systray = self.systray
+        if systray is not None:
             event.ignore()
-            self.systray.showMessage('Still running', f"{APP_NAME} running in background.")
+            systray.showMessage('Still running', f"{APP_NAME} running in background.")
             self.hide()
 
 class Backend(QObject):
     updated = Signal(str, arguments=[])
-    def set_convo_model_and_scroll(self):
+    def set_convo_model_and_scroll(self) -> None:
         self.updated.emit("a")
 
 class MixSystrayIcon(QSystemTrayIcon):
@@ -3035,7 +3159,7 @@ class MixSystrayIcon(QSystemTrayIcon):
         super().__init__()
         if not self.isSystemTrayAvailable():
             return
-        mw.systray : "MixSystrayIcon" = self
+        mw.systray = self
         self.mw : MainWindow = mw
 
         #for icon_name in ( "SP_DialogYesButton",
@@ -3084,7 +3208,7 @@ class MixSystrayIcon(QSystemTrayIcon):
         #else:
         #    super().showMessage(title, message)
 
-    def on_left_click(self, reason: QSystemTrayIcon.ActivationReason):
+    def on_left_click(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         self.mw.show()  # if they closed the window
         self.mw.raise_()  # raise to top  /  make active window in WM
 
@@ -3093,11 +3217,15 @@ class MixSystrayIcon(QSystemTrayIcon):
         # has a chance to run here, but it should only do that when we actually resume
         # to the conversation that has the new messages.
 
-    def messageClicked(self,*args,**kwargs):
+    
+    def messageClicked(self, *args: object, **kwargs: object) -> None:
         print("Someone clicked message", args, kwargs)
 
-    
-async def _stage_local_tally(sess, convo, gcm) -> None:
+async def _stage_local_tally(
+    sess: "AsyncSession",
+    convo: persistent.Conversation,
+    gcm: GroupChatMessage,
+) -> None:
     """Stage an outbound tally message and append its optimistic chat row.
 
     Runs inside the caller's ``conversation_log_order_lock``: the row's order is
@@ -3115,7 +3243,12 @@ async def _stage_local_tally(sess, convo, gcm) -> None:
     ))
 
 
-async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes | None":
+async def _io_tally_create(
+    conversation_id: int,
+    topic: str,
+    mode: "tally_schema.Mode",
+    slots: "list[str]",
+) -> "bytes | None":
     """Create a survey, persist it and stage its broadcast, on the io loop.
 
     Returns the survey id (None on failure).
@@ -3151,7 +3284,9 @@ async def _io_tally_create(conversation_id: int, topic, mode, slots) -> "bytes |
     return survey_id
 
 
-async def _io_tally_vote(conversation_id: int, survey_id: bytes, choice) -> bool:
+async def _io_tally_vote(
+    conversation_id: int, survey_id: bytes, choice: "dict[str, str]",
+) -> bool:
     """Record our vote locally and stage the broadcast, on the io loop."""
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conversation_id)
@@ -3190,12 +3325,14 @@ async def _io_tally_close(conversation_id: int, survey_id: bytes) -> bool:
     return True
 
 
-async def add_conversation(window, convo: persistent.Conversation) -> None:
+async def add_conversation(
+    window: MainWindow, convo: persistent.Conversation,
+) -> None:
     window.conversation_log_models = getattr(window, "conversation_log_models", dict())
 
     contacts = window.ui.contacts_treeWidget
     #qtwi = QTreeWidgetItem([convo.name])
-    qtwi = QStandardItem(convo.name)
+    qtwi = ContactsItem(convo.name)
     qtwi.conversation_id = convo.id
     clm = ConversationLogModel(convo.id)
     convo_state = ConversationUIState(
@@ -3215,7 +3352,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
         #ptwi = QTreeWidgetItem([peer.name])
         if not _peer_is_displayable(peer):
             continue
-        ptwi = QStandardItem(peer.name)
+        ptwi = ContactsItem(peer.name)
         # The peer row is the per-peer pause/resume target:
         # tag it with its read cap (the bacap_stream the drain reads on) so
         # the contacts-tree context menu can resolve the right stream, and
@@ -3232,7 +3369,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     # and make the new convo selected:
     window.all_contacts.appendRow(qtwi)  # append conversation to model
     real_index = window.all_contacts.index(window.all_contacts.rowCount()-1, 0)
-    pwmi = window.ui.contacts_treeWidget.model().mapFromSource(real_index)
+    pwmi = cast(FilterProxyModel, window.ui.contacts_treeWidget.model()).mapFromSource(real_index)
     if pwmi.isValid():
         # Select the new conversation, if the filter would display it.
         # We could maybe clear the existing filter in case it doesn't.
@@ -3245,7 +3382,7 @@ async def add_conversation(window, convo: persistent.Conversation) -> None:
     for _ in range(3): # yield a bunch to make Qt not complain ...
         await asyncio.sleep(0.001)
 
-def rebuild_pydantic_models():
+def rebuild_pydantic_models() -> None:
     """Updated pydantic models with the classes defined in this file"""
     #ConversationUIState.model_rebuild()
     pass
@@ -3262,8 +3399,8 @@ async def _wait_for_engine_warmed(iothread: AsyncioThread) -> None:
         await asyncio.sleep(0.01)
 
 
-async def main(window: MainWindow):
-    def report_exception2(*args):
+async def main(window: MainWindow) -> None:
+    def report_exception2(*args: object) -> None:
         for m in args:
             print("report_exception2", m)
             QTimer.singleShot(0, lambda: QMessageBox.critical(window, f"Exception", f"{m}"))
@@ -3295,11 +3432,11 @@ async def main(window: MainWindow):
     contacts : QTreeView = window.ui.contacts_treeWidget
 
     # populate setting and contacts from persistent.py:
-    window.settings: dict[str, str|int|None] = dict()
+    window.settings = dict()
     with persistent.Session(persistent._engine_sync) as sess:
         settings = sess.exec(select(persistent.AppSetting))
         for setting in settings:
-            parsed = None
+            parsed: "str | int | None" = None
             if setting.type == 'str':
                 parsed = setting.value
             elif setting.type == 'int':
@@ -3343,7 +3480,7 @@ async def _resume_pending_joins(window: MainWindow) -> None:
             )
 
 
-def todo_settings():
+def todo_settings() -> None:
     # https://doc.qt.io/qtforpython-6/examples/example_corelib_settingseditor.html
     #org_settings = QSettings(QSettings.IniFormat, APP_ORGANIZATION)  # for other Qt apps by same APP_ORGANIZATION
     #app_settings = QSettings(QSettings.IniFormat, APP_ORGANIZATION, APP_NAME)
@@ -3356,15 +3493,15 @@ def todo_settings():
 
 # Make the fd global so it doesn't go out of scope when we return
 # since close(2) will unlock:
-already_running_fd: "typing.IO | None" = None
+already_running_fd: "typing.IO[bytes] | None" = None
 
 def is_there_already_an_instance_running() -> bool:
     """
     Checks if there are other instances of the application running.
 
     Returns
-      False: There is already an app instance running
-      True: This is the first app instance
+      True: There is already an app instance running
+      False: This is the first app instance, and it now holds the lock
     """
     # TODO: use a config file entry or something else than __FILE__:
     global already_running_fd
@@ -3382,7 +3519,7 @@ def error_and_exit(app: QApplication, why: str, main_window: QMainWindow | None=
     app.quit()
     sys.exit(why)
 
-def get_all_loggers():
+def get_all_loggers() -> "set[str]":
     return set(logging.root.manager.loggerDict.keys())
 
 def install_log_handlers() -> None:
@@ -3430,7 +3567,7 @@ def parse_log_levels(argv: "list[str] | None" = None) -> "list[tuple[str, str]]"
         raise SystemExit(chosen if isinstance(chosen, int) else 0)
     return chosen
 
-def cli():
+def cli() -> object:
     # The chat view is a QQuickWidget. Qt Quick's default GL/RHI backend
     # renders it solid black on displays without working hardware GL (SSH
     # X-forwarding, VNC, headless or software-GL remotes), which is how this
@@ -3484,3 +3621,144 @@ def cli():
     window.iothread = iothread
 
     return QtAsyncio.run(main(window), handle_sigint=True)
+__all__ = [
+    "APP_NAME",
+    "APP_ORGANIZATION",
+    "AsyncioThread",
+    "AudioEngineError",
+    "AudioEngineUnavailable",
+    "ConsensusDialog",
+    "ContactsItem",
+    "FirewallNetworkAccessManager",
+    "FirewallNetworkAccessManagerFactory",
+    "GroupChatFileUpload",
+    "GroupChatMessage",
+    "GroupChatPleaseAdd",
+    "KeyPressFilter",
+    "MainWindow",
+    "MixSystrayIcon",
+    "NamedTuple",
+    "Optional",
+    "PacketsDialog",
+    "Path",
+    "PendingVouchersDialog",
+    "Property",
+    "PttAudioBridge",
+    "QAbstractItemModelTester",
+    "QAbstractItemView",
+    "QAction",
+    "QApplication",
+    "QComboBox",
+    "QCoreApplication",
+    "QDesktopServices",
+    "QDialog",
+    "QDialogButtonBox",
+    "QEvent",
+    "QFile",
+    "QFileDialog",
+    "QFontDialog",
+    "QFormLayout",
+    "QHBoxLayout",
+    "QIcon",
+    "QInputDialog",
+    "QItemSelectionModel",
+    "QKeySequence",
+    "QLabel",
+    "QListView",
+    "QListWidget",
+    "QListWidgetItem",
+    "QMainWindow",
+    "QMenu",
+    "QMessageBox",
+    "QModelIndex",
+    "QPixmap",
+    "QPushButton",
+    "QQmlNetworkAccessManagerFactory",
+    "QQmlPropertyMap",
+    "QSettings",
+    "QShortcut",
+    "QSize",
+    "QStandardItem",
+    "QStandardItemModel",
+    "QStyle",
+    "QSystemTrayIcon",
+    "QTableView",
+    "QTextBrowser",
+    "QThread",
+    "QTimer",
+    "QToolButton",
+    "QTreeView",
+    "QTreeWidget",
+    "QTreeWidgetItem",
+    "QUrl",
+    "QVBoxLayout",
+    "QtAsyncio",
+    "QtCore",
+    "QtNetwork",
+    "SendOperation",
+    "Signal",
+    "Slot",
+    "StatsDialog",
+    "TYPE_CHECKING",
+    "TallyCreateDialog",
+    "TallyPanel",
+    "ThinClientOfflineError",
+    "Ui_FontSettingsDialog",
+    "Ui_MainWindow",
+    "add_conversation",
+    "already_running_fd",
+    "async_cb",
+    "asyncio",
+    "attachment_images",
+    "await_and_open",
+    "b64decode",
+    "b64encode",
+    "cancel_pending_voucher",
+    "cbor2",
+    "cli",
+    "click",
+    "conversation_handlers",
+    "conversation_is_joined",
+    "create_task",
+    "derive_read_and_induct",
+    "duration_time_ns",
+    "error_and_exit",
+    "fcntl",
+    "get_all_loggers",
+    "hashlib",
+    "install_log_handlers",
+    "is_risky_attachment_extension",
+    "is_there_already_an_instance_running",
+    "list_pending_vouchers",
+    "log_level_command",
+    "logger",
+    "logging",
+    "main",
+    "math",
+    "mint_and_publish",
+    "network",
+    "os",
+    "parse_log_levels",
+    "partial",
+    "pending_joiner_join_conversation_ids",
+    "pending_voucher_for",
+    "persistent",
+    "rebuild_pydantic_models",
+    "select",
+    "shutil",
+    "sys",
+    "tally_controller",
+    "tally_events",
+    "tally_presenter",
+    "tally_schema",
+    "tally_send",
+    "tally_sync",
+    "theme",
+    "threading",
+    "time",
+    "todo_keys",
+    "todo_keys_push_to_talk",
+    "todo_settings",
+    "uuid",
+]
+
