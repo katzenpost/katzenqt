@@ -217,9 +217,10 @@ async def _delete_outbound_state(
     await sess.exec(sa.delete(persistent.ConversationLog).where(
         persistent.ConversationLog.conversation_id == conversation_id,
     ))
-    await sess.exec(sa.delete(persistent.SentLog).where(
+    await sess.exec(sa.delete(persistent.SentLog).where(sa.or_(
+        persistent.SentLog.conversation_id == conversation_id,
         persistent.SentLog.id.in_([*sent_ids, *pwal_ids]),
-    ))
+    )))
     await sess.exec(sa.delete(persistent.MixWAL).where(sa.or_(
         persistent.MixWAL.plaintextwal.in_(pwal_ids),
         persistent.MixWAL.bacap_stream.in_(doomed.write_streams),

@@ -191,6 +191,7 @@ async def _populate_conversation(conv_id: int) -> uuid.UUID:
         ))
         sess.add(_mixwal(conv.write_cap, is_read=False, plaintextwal=pwal))
         sess.add(_mixwal(alice.read_cap_id, is_read=True))
+        sess.add(persistent.SentLog(id=uuid.uuid4(), conversation_id=conv_id))
         sess.add(persistent.SentLog(id=uuid.uuid4()))
         sess.add(persistent.TallyState(
             survey_id=uuid.uuid4().bytes, conversation_id=conv_id, doc_state=b"d",
@@ -217,13 +218,14 @@ ALL_TABLES = (
 async def test_remove_conversation_leaves_nothing_behind():
     conv_id = await _make_conversation()
     await _populate_conversation(conv_id)
-    sent_before = await _count(persistent.SentLog)
 
     await removal.remove_conversation(conversation_id=conv_id)
 
     for model in ALL_TABLES:
         assert await _count(model) == 0, model.__name__
-    assert await _count(persistent.SentLog) == sent_before
+    async with persistent.asession() as sess:
+        left = (await sess.exec(select(persistent.SentLog))).all()
+    assert [row.conversation_id for row in left] == [None]
     assert not (persistent.state_file.parent / "attachments" / str(conv_id)).exists()
 
 
@@ -247,6 +249,9 @@ async def test_remove_conversation_leaves_other_conversations_alone():
     for model in ALL_TABLES:
         assert await _count(model) * 2 == counts[model], model.__name__
     assert (persistent.state_file.parent / "attachments" / str(kept) / "f.bin").exists()
+    async with persistent.asession() as sess:
+        owners = [row.conversation_id for row in (await sess.exec(select(persistent.SentLog))).all()]
+    assert sorted(owners, key=lambda c: (c is None, c)) == [kept, None, None]
 
 
 @pytest.mark.asyncio
@@ -281,3 +286,15 @@ async def test_remove_conversation_announces_transfer_removal():
 async def test_remove_conversation_unknown_id():
     with pytest.raises(removal.RemovalError):
         await removal.remove_conversation(conversation_id=12345)
+
+
+def test_sent_log_records_the_conversation_it_was_sent_in():
+    pwal = persistent.PlaintextWAL(
+        id=uuid.uuid4(), bacap_stream=uuid.uuid4(), conversation_id=7,
+        bacap_payload=b"Chello",
+    )
+    with persistent.Session(persistent._engine_sync) as sess:
+        persistent._ensure_sent_log_and_flip_status(sess, pwal)
+        sess.commit()
+        row = sess.get(persistent.SentLog, pwal.id)
+        assert row is not None and row.conversation_id == 7
