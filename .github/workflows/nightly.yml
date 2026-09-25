@@ -1,0 +1,45 @@
+name: nightly (uv)
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: nightly (uv)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '>=1.26'
+          cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Select the Rust toolchain
+        run: timeout --kill-after=10s 300s bash tools/ci-rust.sh
+
+      - name: Install dependencies
+        run: |
+          bash tools/ci-deps.sh
+
+      - name: Verify the rust audio extension built
+        run: uv run python -c "import rustic_audio_tool as r; assert hasattr(r, 'PttAudioEngine')"
+
+      - name: Run the full-size cases
+        run: |
+          make test-nightly-uv

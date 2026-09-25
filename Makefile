@@ -239,6 +239,24 @@ test-uv: $(STAMP_UV)
 
 test-pip: $(STAMP_PIP)
 	@$(VENV)/bin/pytest
+.PHONY: test-nightly test-nightly-uv test-nightly-pip
+
+test-nightly: setup
+	@if [[ -e "$(BACKEND_UV)" ]]; then \
+		$(MAKE) test-nightly-uv; \
+	elif [[ -e "$(BACKEND_PIP)" ]]; then \
+		$(MAKE) test-nightly-pip; \
+	else \
+		printf '%s\n' "error: no backend selected. run: make setup-uv OR make setup-pip"; \
+		exit 1; \
+	fi
+
+test-nightly-uv: $(STAMP_UV)
+	@$(UV) run pytest -m nightly --no-cov
+
+test-nightly-pip: $(STAMP_PIP)
+	@$(VENV)/bin/pytest -m nightly --no-cov
+
 
 mypy: setup
 	@if [[ -e "$(BACKEND_UV)" ]]; then \

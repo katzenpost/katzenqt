@@ -114,6 +114,7 @@ norecursedirs = ["src/katzenqt/migrations", ".hypothesis"]
 source = ["katzenqt"]
 
 [tool.coverage.report]
+fail_under = 100
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
