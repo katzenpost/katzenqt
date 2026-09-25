@@ -45,7 +45,9 @@ def _conversation_item(conversation_id: int, name: str) -> QStandardItem:
     return item
 
 
-def _window(model: QStandardItemModel, states: dict, current=None, answer=True) -> SimpleNamespace:
+def _window(
+    model: QStandardItemModel, states: dict, current=None, answer=True
+) -> SimpleNamespace:
     async def confirm(text: str) -> bool:
         confirm.asked.append(text)
         return answer
@@ -62,10 +64,14 @@ def _window(model: QStandardItemModel, states: dict, current=None, answer=True) 
         failures=[],
         _confirm=confirm,
         convo_state_or_none=lambda: current,
-        ui=SimpleNamespace(qml_ChatLines=SimpleNamespace(rootObject=lambda: window.root)),
+        ui=SimpleNamespace(
+            qml_ChatLines=SimpleNamespace(rootObject=lambda: window.root)
+        ),
         root=_Root(),
     )
-    window._clear_chat_view = lambda: setattr(window, "cleared", window.cleared + 1)
+    window._clear_chat_view = lambda: setattr(
+        window, "cleared", window.cleared + 1
+    )
     window._report_removal_failure = window.failures.append
     return window
 
@@ -170,7 +176,9 @@ async def _wired_peer(answer: bool):
     model.appendRow(conv_item)
     state = _state(_Model())
     window = _window(model, {conv_id: state}, current=state, answer=answer)
-    window._drop_peer_ui = lambda *a: katzen.MainWindow._drop_peer_ui(window, *a)
+    window._drop_peer_ui = lambda *a: katzen.MainWindow._drop_peer_ui(
+        window, *a
+    )
     window._peer_id_of = lambda it: katzen.MainWindow._peer_id_of(window, it)
     return window, conv_item, item, conv_id
 
@@ -183,9 +191,17 @@ async def test_remove_peer_confirmed_deletes_state_and_the_row():
 
     assert conv_item.rowCount() == 0
     async with persistent.asession() as sess:
-        names = [p.name for p in (await sess.exec(select(persistent.ConversationPeer))).all()]
+        names = [
+            p.name
+            for p in (
+                await sess.exec(select(persistent.ConversationPeer))
+            ).all()
+        ]
     assert names == ["me"]
-    assert "alice" in window._confirm.asked[0] and "demo" in window._confirm.asked[0]
+    assert (
+        "alice" in window._confirm.asked[0]
+        and "demo" in window._confirm.asked[0]
+    )
 
 
 @pytest.mark.asyncio
@@ -196,7 +212,10 @@ async def test_remove_peer_declined_changes_nothing():
 
     assert conv_item.rowCount() == 1
     async with persistent.asession() as sess:
-        assert len((await sess.exec(select(persistent.ConversationPeer))).all()) == 2
+        assert (
+            len((await sess.exec(select(persistent.ConversationPeer))).all())
+            == 2
+        )
 
 
 @pytest.mark.asyncio
@@ -206,7 +225,9 @@ async def test_remove_conversation_confirmed_deletes_it_and_drops_the_row():
     item = _conversation_item(conv_id, "demo")
     model.appendRow(item)
     window = _window(model, {conv_id: _state(_Model())}, current=None)
-    window._drop_conversation_ui = lambda it: katzen.MainWindow._drop_conversation_ui(window, it)
+    window._drop_conversation_ui = lambda it: (
+        katzen.MainWindow._drop_conversation_ui(window, it)
+    )
 
     await katzen.MainWindow._remove_conversation(window, item)
 

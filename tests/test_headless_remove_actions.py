@@ -8,7 +8,12 @@ from tests.test_membership_hash import _make_conversation
 
 async def _peer_names() -> "list[str]":
     async with persistent.asession() as sess:
-        return sorted(p.name for p in (await sess.exec(select(persistent.ConversationPeer))).all())
+        return sorted(
+            p.name
+            for p in (
+                await sess.exec(select(persistent.ConversationPeer))
+            ).all()
+        )
 
 
 @pytest.mark.asyncio
@@ -16,7 +21,9 @@ async def test_remove_peer_action_deletes_the_named_member():
     await _make_conversation("room")
 
     code = await _actions._action_remove_peer(
-        _args.RemovePeer(action="remove-peer", conv_name="room", peer_name="alice"),
+        _args.RemovePeer(
+            action="remove-peer", conv_name="room", peer_name="alice"
+        ),
     )
 
     assert code == 0
@@ -24,12 +31,16 @@ async def test_remove_peer_action_deletes_the_named_member():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("conv,peer", [("room", "nobody"), ("room", "me"), ("ghost", "alice")])
+@pytest.mark.parametrize(
+    "conv,peer", [("room", "nobody"), ("room", "me"), ("ghost", "alice")]
+)
 async def test_remove_peer_action_refuses_and_changes_nothing(conv, peer):
     await _make_conversation("room")
 
     code = await _actions._action_remove_peer(
-        _args.RemovePeer(action="remove-peer", conv_name=conv, peer_name=peer),
+        _args.RemovePeer(
+            action="remove-peer", conv_name=conv, peer_name=peer
+        ),
     )
 
     assert code == 2
@@ -47,7 +58,10 @@ async def test_remove_conv_action_deletes_only_that_conversation():
 
     assert code == 0
     async with persistent.asession() as sess:
-        names = [c.name for c in (await sess.exec(select(persistent.Conversation))).all()]
+        names = [
+            c.name
+            for c in (await sess.exec(select(persistent.Conversation))).all()
+        ]
     assert names == ["kept"]
 
 

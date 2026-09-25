@@ -6,6 +6,8 @@ import pytest
 from sqlmodel import select
 
 from katzenqt import network, persistent, removal
+from katzenqt.qt_models import ConversationLogModel
+from katzenqt.tally.presenter import first_unread_order
 from katzenqt.tally import controller as tally_controller
 from tests.test_membership_hash import _make_conversation
 
@@ -371,6 +373,8 @@ def test_sent_log_records_the_conversation_it_was_sent_in():
 @pytest.mark.parametrize(
     "payload",
     [
+        b"F\xa1",
+        b"F\x1c",
         b"F\xff\xff not cbor",
         b"F" + cbor2.dumps([1, 2, 3]),
         b"F" + cbor2.dumps("rel_path"),
@@ -398,3 +402,23 @@ async def test_remove_peer_leaves_the_membership_hash_until_deleted():
         peer = await sess.get(persistent.ConversationPeer, alice.id)
         rcw = await sess.get(persistent.ReadCapWAL, alice.read_cap_id)
         assert peer.active and rcw.paused
+
+
+@pytest.mark.asyncio
+async def test_first_unread_stays_within_the_log_after_removal():
+    conv_id = await _make_conversation()
+    alice = await _alice(conv_id)
+    for order in range(3):
+        await _log(conv_id, alice.id, order)
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conv_id)
+        conv.first_unread = 2
+        sess.add(conv)
+        await sess.commit()
+
+    await removal.remove_peer(conversation_id=conv_id, peer_id=alice.id)
+
+    log_model = ConversationLogModel(convo_id=conv_id)
+    log_model.set_row_count()
+    row = log_model.row_for_order(first_unread_order(conv_id))
+    assert row <= log_model.rowCount(None)
