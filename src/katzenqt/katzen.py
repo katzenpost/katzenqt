@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from collections.abc import Collection
 from typing import NamedTuple, Optional, TYPE_CHECKING, assert_never, cast
 
 import cbor2
@@ -85,6 +86,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("katzen")
 logger.setLevel("INFO")
+
+
+def contact_label(
+    name: str, read_cap_id: "uuid.UUID | None", taken: "Collection[str]",
+) -> str:
+    """The label a contact row shows, suffixed when the name is taken.
+
+    >>> contact_label("alice", None, [])
+    'alice'
+    >>> import uuid
+    >>> cap = uuid.UUID("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+    >>> contact_label("alice", cap, ["alice"])
+    'alice #3f2504'
+    >>> contact_label("alice", None, ["alice"])
+    'alice'
+    """
+    if name not in taken or read_cap_id is None:
+        return name
+    return f"{name} #{str(read_cap_id)[:6]}"
+
+
+def sibling_labels(parent: "QStandardItem") -> "list[str]":
+    """The labels already on a contact row's children.
+
+    >>> sibling_labels(ContactsItem("empty"))
+    []
+    """
+    return [
+        child.text()
+        for row in range(parent.rowCount())
+        if (child := parent.child(row)) is not None
+    ]
 
 
 def _peer_is_displayable(peer: persistent.ConversationPeer) -> bool:
@@ -3346,7 +3379,9 @@ async def add_conversation(
         #ptwi = QTreeWidgetItem([peer.name])
         if not _peer_is_displayable(peer):
             continue
-        ptwi = ContactsItem(peer.name)
+        ptwi = ContactsItem(
+            contact_label(peer.name, peer.read_cap_id, sibling_labels(qtwi)),
+        )
         # The peer row is the per-peer pause/resume target:
         # tag it with its read cap (the bacap_stream the drain reads on) so
         # the contacts-tree context menu can resolve the right stream, and
