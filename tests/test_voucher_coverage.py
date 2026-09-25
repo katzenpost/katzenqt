@@ -133,7 +133,7 @@ async def _add_pending_joiner(conversation_id: int) -> None:
             role="joiner", conversation_id=conversation_id,
             step=voucher.STEP_AWAITING, voucher=bytes([0x22]) * 32,
             voucher_secret_key=bytes([0x33]) * 32,
-            box1_index=bytes(104),
+            box1_index=bytes(104), voucher_read_cap=bytes(136),
         ))
         await sess.commit()
 

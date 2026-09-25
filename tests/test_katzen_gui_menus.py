@@ -4,14 +4,15 @@ import asyncio
 import os
 import uuid
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 
 import cbor2
 import pytest
+from sqlmodel import select
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint  # noqa: E402
+from PySide6.QtCore import QModelIndex, QPoint  # noqa: E402
 from PySide6.QtGui import QAction  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
@@ -33,7 +34,7 @@ from tests.test_katzen_gui_common import (  # noqa: E402,F401
     seed_conversation,
     window,
 )
-from tests.stubs import ignore
+from tests.stubs import ignore, returning
 
 Pick = Callable[[QMenu], QAction | None]
 
@@ -423,14 +424,6 @@ def test_the_nanosecond_clock_falls_back_to_monotonic_ns(
         assert katzen.duration_time_ns() == 1234
 
 
-def test_the_unicode_entry_placeholder_is_still_unwired(
-    qt_app: QApplication,
-) -> None:
-    with pytest.raises(NameError) as caught:
-        katzen.todo_unicode()
-    assert "tr" in str(caught.value)
-
-
 @pytest.mark.asyncio
 async def test_a_substream_peer_never_reaches_the_contacts_tree(
     window: katzen.MainWindow,
@@ -644,3 +637,236 @@ async def test_selecting_nothing_leaves_the_chat_view_alone(
     before = loaded_window.ui.ContactName.text()
     await loaded_window.conversation_selected(None, None)
     assert loaded_window.ui.ContactName.text() == before
+
+
+def answering(verdict: bool) -> Callable[[QDialog], "Coroutine[object, object, int]"]:
+    async def answer(dialog: QDialog) -> int:
+        if verdict:
+            return int(QMessageBox.StandardButton.Yes)
+        return int(QMessageBox.StandardButton.No)
+
+    return answer
+
+
+@pytest.fixture()
+def confirms(monkeypatch: pytest.MonkeyPatch) -> Callable[[bool], None]:
+    def install(verdict: bool) -> None:
+        monkeypatch.setattr(katzen, "_dialog_finished", answering(verdict))
+
+    return install
+
+
+async def _shown(win: katzen.MainWindow, peers: tuple[str, ...] = ()) -> int:
+    seeded = await seed_conversation(peers=peers)
+    await add_seeded_conversation(win, seeded.conversation_id)
+    for _ in range(80):
+        await asyncio.sleep(0)
+    win.show()
+    win.resize(900, 600)
+    return seeded.conversation_id
+
+
+def conversation_row(win: katzen.MainWindow) -> katzen.QStandardItem:
+    return win.convo_state().contacts_standard_item
+
+
+@pytest.mark.asyncio
+async def test_removing_a_group_chat_from_its_row_menu(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    confirms: Callable[[bool], None],
+) -> None:
+    conv_id = await _shown(window)
+    confirms(True)
+    chosen(by_text("Remove group chat..."))
+    await window.peer_context_menu(peer_position(window, conversation_row(window)))
+
+    assert conv_id not in window.conversation_state_by_id
+    async with persistent.asession() as sess:
+        assert await sess.get(persistent.Conversation, conv_id) is None
+
+
+@pytest.mark.asyncio
+async def test_declining_the_group_chat_removal_keeps_it(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    confirms: Callable[[bool], None],
+) -> None:
+    conv_id = await _shown(window)
+    confirms(False)
+    chosen(by_text("Remove group chat..."))
+    await window.peer_context_menu(peer_position(window, conversation_row(window)))
+
+    assert conv_id in window.conversation_state_by_id
+    async with persistent.asession() as sess:
+        assert await sess.get(persistent.Conversation, conv_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_group_chat_removal_is_reported(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    confirms: Callable[[bool], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conv_id = await _shown(window)
+    reported: list[BaseException] = []
+    monkeypatch.setattr(window, "_report_removal_failure", reported.append)
+
+    async def explode(*, conversation_id: int) -> None:
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(katzen.removal, "remove_conversation", explode)
+    confirms(True)
+    chosen(by_text("Remove group chat..."))
+    await window.peer_context_menu(peer_position(window, conversation_row(window)))
+
+    assert [type(e) for e in reported] == [RuntimeError]
+    assert conv_id in window.conversation_state_by_id
+
+
+@pytest.mark.asyncio
+async def test_removing_a_peer_from_its_row_menu(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    confirms: Callable[[bool], None],
+) -> None:
+    await _shown(window, peers=("bob",))
+    bob = peer_named(window, "bob")
+    confirms(True)
+    chosen(by_text("Remove bob from this group chat..."))
+    await window.peer_context_menu(peer_position(window, bob))
+
+    async with persistent.asession() as sess:
+        names = [
+            p.name
+            for p in (await sess.exec(select(persistent.ConversationPeer))).all()
+        ]
+    assert "bob" not in names
+
+
+@pytest.mark.asyncio
+async def test_declining_the_peer_removal_keeps_them(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    confirms: Callable[[bool], None],
+) -> None:
+    await _shown(window, peers=("bob",))
+    bob = peer_named(window, "bob")
+    confirms(False)
+    chosen(by_text("Remove bob from this group chat..."))
+    await window.peer_context_menu(peer_position(window, bob))
+
+    async with persistent.asession() as sess:
+        names = [
+            p.name
+            for p in (await sess.exec(select(persistent.ConversationPeer))).all()
+        ]
+    assert "bob" in names
+
+
+@pytest.mark.asyncio
+async def test_a_peer_row_naming_no_database_row_removes_nothing(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    confirms: Callable[[bool], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _shown(window, peers=("bob",))
+    bob = peer_named(window, "bob")
+    asked: list[str] = []
+    monkeypatch.setattr(window, "_peer_id_of", returning(None))
+
+    async def record(text: str) -> bool:
+        asked.append(text)
+        return True
+
+    monkeypatch.setattr(window, "_confirm", record)
+    chosen(by_text("Remove bob from this group chat..."))
+    await window.peer_context_menu(peer_position(window, bob))
+
+    assert asked == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_peer_removal_is_reported(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    confirms: Callable[[bool], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _shown(window, peers=("bob",))
+    bob = peer_named(window, "bob")
+    reported: list[BaseException] = []
+    monkeypatch.setattr(window, "_report_removal_failure", reported.append)
+
+    async def explode(*, conversation_id: int, peer_id: int) -> None:
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(katzen.removal, "remove_peer", explode)
+    confirms(True)
+    chosen(by_text("Remove bob from this group chat..."))
+    await window.peer_context_menu(peer_position(window, bob))
+
+    assert [type(e) for e in reported] == [RuntimeError]
+    assert peer_named(window, "bob") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_removal_failure_reaches_a_message_box(
+    window: katzen.MainWindow,
+    boxes: type[FakeMessageBox],
+    instant_timer: None,
+) -> None:
+    window._report_removal_failure(RuntimeError("the database said no"))
+
+    assert [kind for kind, _title, _text in boxes.seen] == ["critical"]
+    assert "the database said no" in boxes.seen[0][2]
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_peer_row_of_an_unknown_chat_touches_no_model(
+    window: katzen.MainWindow,
+) -> None:
+    await _shown(window, peers=("bob",))
+    bob = peer_named(window, "bob")
+    conversation = conversation_row(window)
+    window.conversation_state_by_id.clear()
+
+    window._drop_peer_ui(conversation, bob)
+
+    remaining = [
+        conversation.child(row).text()
+        for row in range(conversation.rowCount())
+    ]
+    assert "bob" not in remaining
+
+
+@pytest.mark.asyncio
+async def test_selecting_a_row_whose_chat_is_gone_is_ignored(
+    window: katzen.MainWindow,
+) -> None:
+    await _shown(window)
+    tree = window.ui.contacts_treeWidget
+    source = window.all_contacts.indexFromItem(conversation_row(window))
+    proxy = tree.model().mapFromSource(source)
+    window.conversation_state_by_id.clear()
+
+    await window.conversation_selected(proxy, QModelIndex())
+
+    assert window.conversation_state_by_id == {}
+
+
+@pytest.mark.asyncio
+async def test_a_row_the_proxy_cannot_map_back_names_no_contact(
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _shown(window)
+    tree = window.ui.contacts_treeWidget
+    pos = peer_position(window, conversation_row(window))
+    monkeypatch.setattr(
+        tree.model(), "mapToSource", returning(QModelIndex()),
+    )
+
+    assert window._contact_item_at(pos) is None

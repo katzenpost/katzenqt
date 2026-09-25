@@ -283,7 +283,7 @@ def test_closing_with_really_quit_shuts_the_network_down(
         "RecordingApp", (), {"quit": appending(quits, 1)},
     )()
     window.close(really_quit=True)
-    assert window.systray is False
+    assert not window.systray
     assert quits == [1]
     assert getattr(network, "__should_quit").is_set() is True
 
