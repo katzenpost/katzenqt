@@ -29,7 +29,7 @@ def test_run_docker_names_the_instance_and_the_docker_daemon() -> None:
     text = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "\nINSTANCE ?= alice\n" in text
     recipe = _recipe("run-docker")
-    assert "KQT_STATE=$(INSTANCE)" in recipe
+    assert "KQT_STATE=docker-$(INSTANCE)" in recipe
     assert (
         "KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml"
         in recipe

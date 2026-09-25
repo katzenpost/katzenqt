@@ -344,7 +344,7 @@ mixnet-down: $(KATZENPOST_DIR)
 	@$(MAKE) -C $(KATZENPOST_DIR)/docker stop
 
 run-docker:
-	@KQT_STATE=$(INSTANCE) \
+	@KQT_STATE=docker-$(INSTANCE) \
 		KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml \
 		$(MAKE) run
 
