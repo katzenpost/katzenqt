@@ -1,7 +1,6 @@
 APP_ORGANIZATION = "Mixnetwork"
 APP_NAME = "KatzenQt"
 
-import argparse
 import asyncio
 import fcntl
 from functools import partial
@@ -18,6 +17,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional, TYPE_CHECKING
 
 import cbor2
+import click
 
 import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
@@ -3245,25 +3245,50 @@ def error_and_exit(app: QApplication, why: str, main_window: QMainWindow | None=
 def get_all_loggers():
     return set(logging.root.manager.loggerDict.keys())
 
-def add_log_args(parser: argparse.ArgumentParser):
+def install_log_handlers() -> None:
     for ln in get_all_loggers():
-        fmt = logging.Formatter("%(name)s - %(levelname)s")
         lnlog = logging.getLogger(ln)
         if lnlog.hasHandlers():
             lnlog.handlers.clear()
         ch = logging.StreamHandler()
-        fmt = logging.Formatter("%(asctime)s %(name)s: %(levelname)s: %(message)s")
-        ch.setFormatter(fmt)
+        ch.setFormatter(
+            logging.Formatter("%(asctime)s %(name)s: %(levelname)s: %(message)s"),
+        )
         lnlog.addHandler(ch)
         print("log fmt set", ln)
         lnlog.critical("test")
-    parser.add_argument(
-        '--level',
-        type=str, nargs=2,
-        metavar=("LOGGER", "LEVEL"),
-        help=f"Override log level for LOGGER. Available loggers: {', '.join(get_all_loggers())}",
-        action="append",
+
+
+def log_level_command() -> click.Command:
+    @click.command(
+        name="katzenqt",
+        context_settings={"help_option_names": ["-h", "--help"]},
+        help="Katzenpost group chat client.",
     )
+    @click.option(
+        "--level", nargs=2, multiple=True, metavar="LOGGER LEVEL",
+        help="Override log level for LOGGER. Available loggers: "
+             + ", ".join(sorted(get_all_loggers())),
+    )
+    def run(level: "tuple[tuple[str, str], ...]") -> "list[tuple[str, str]]":
+        return list(level)
+
+    return run
+
+
+def parse_log_levels(argv: "list[str] | None" = None) -> "list[tuple[str, str]]":
+    try:
+        chosen = log_level_command().main(
+            args=argv, prog_name="katzenqt", standalone_mode=False,
+        )
+    except click.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        raise SystemExit(1) from None
+    if not isinstance(chosen, list):
+        raise SystemExit(chosen if isinstance(chosen, int) else 0)
+    return chosen
 
 def cli():
     # The chat view is a QQuickWidget. Qt Quick's default GL/RHI backend
@@ -3284,9 +3309,8 @@ def cli():
     app = QApplication(sys.argv)
     if (_res_root / "resources" / "echomix_256.png").is_file():
         app.setWindowIcon(QIcon("resources/echomix_256.png"))
-    parser = argparse.ArgumentParser()
-    add_log_args(parser)
-    args = parser.parse_args()
+    install_log_handlers()
+    levels = parse_log_levels()
     app.setStyle("Fusion")
 
     logger.critical("going to init_and_migrate")
@@ -3295,8 +3319,8 @@ def cli():
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
 
-    if args.level:
-        for logger_name, level in args.level:
+    if levels:
+        for logger_name, level in levels:
             log_level = getattr(logging, level.upper(), None)
             if log_level:
                 logging.getLogger(logger_name).disabled = False

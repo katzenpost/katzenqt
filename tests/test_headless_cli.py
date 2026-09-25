@@ -37,8 +37,8 @@ def test_actions_module_exists_with_parser_builder():
     """The plan moves the action dispatch table out of
     integration_runner and into katzenqt.headless._actions. Pin the
     new home so it does not drift back."""
-    from katzenqt.headless import _actions
-    assert callable(_actions._build_parser)
+    from katzenqt.headless import _actions, _cli
+    assert callable(_cli.parse)
     assert callable(_actions._action_create_conv)
     assert callable(_actions._action_voucher_mint)
     assert callable(_actions._action_voucher_induct)

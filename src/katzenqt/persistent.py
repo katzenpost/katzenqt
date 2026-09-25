@@ -18,7 +18,6 @@ import aiosqlite # https://pypi.org/project/aiosqlite/
 from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, NamedTuple, TypeVar
 from .katzen_util import create_task
 if TYPE_CHECKING:
-    from typing import AsyncContextManager
     import sqlmodel
 from alembic import context
 import logging
@@ -305,7 +304,7 @@ metadata.naming_convention = NAMING_CONVENTION
 
 
 @asynccontextmanager
-async def asession() -> "AsyncContextManager[sqlmodel.ext.asyncio.session.AsyncSession]":
+async def asession() -> "AsyncIterator[sqlmodel.ext.asyncio.session.AsyncSession]":
     """Opens a sqlmodel.ext.asyncio.session.AsyncSession
 
     Connection acquisition and release are shielded from task
@@ -367,7 +366,7 @@ def _restrict_state_file_perms(path: Path) -> None:
         logger.warning("could not restrict permissions on %s: %s", path, exc)
 
 
-def init_and_migrate():
+def init_and_migrate() -> None:
     """Initialize database and migrates application schema.
 
     This MUST be called on application startup.
