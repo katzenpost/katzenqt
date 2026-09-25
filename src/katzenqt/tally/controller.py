@@ -107,6 +107,11 @@ class TallyController:
     def surveys(self) -> "list[tuple[int, bytes]]":
         return list(self._docs)
 
+    def forget_conversation(self, conversation_id: int) -> None:
+        for table in (self._docs, self._pending):
+            for key in [k for k in table if k[0] == conversation_id]:
+                del table[key]
+
     async def load_all(self) -> None:
         """Populate the in-memory Docs from persisted state. Optional: the
         receive path also loads lazily on first reference."""

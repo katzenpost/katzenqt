@@ -2255,6 +2255,25 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   __mixwal_updated.set()
 
 
+async def stop_stream(stream: uuid.UUID) -> None:
+    """Cancel the in-flight read and write on ``stream`` and forget it, so its
+    rows can be deleted without a live task resurrecting them."""
+    for tasks in (_inflight_reads, _inflight_writes):
+        task = tasks.pop(stream, None)
+        if task is None or task.done():
+            continue
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception:
+            logger.exception("Task failed while stopping %s", stream)
+    __resend_queue.discard(stream)
+    _write_acknowledged.discard(stream)
+
+
 async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
     """Pause polling without removing the peer from its conversation.
 
