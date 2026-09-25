@@ -52,6 +52,7 @@ class VoucherDaemon(FakeThinClient):
         super().__init__()
         self.streams: dict[bytes, tuple[bytes, bytes, bytes]] = {}
         self.mints: list[VoucherMintResult] = []
+        self.tombstoned: set[tuple[bytes, bytes]] = set()
 
     async def voucher_mint(
         self, message_write_cap: bytes, display_name: str,
@@ -341,6 +342,32 @@ async def test_a_full_group_refuses_the_next_induction(
     assert extra.name not in members
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="the sealed reply is published before the capacity check, so a "
+    "refused joiner still receives every member's read cap "
+    "(OPEN_ITEMS 3.26)",
+)
+@pytest.mark.asyncio
+async def test_a_refused_joiner_is_handed_nothing(
+    daemon: VoucherDaemon,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    creator, extra, token = await _fill_group(daemon, monkeypatch, cap=4)
+    assert (
+        await voucher.derive_read_and_induct(
+            creator.connection,
+            creator.conversation_id,
+            extra.name,
+            token,
+        )
+        is None
+    )
+    await voucher.await_and_open(extra.connection, extra.conversation_id)
+    assert await extra.members() == []
+    assert await voucher.voucher_used_for(extra.conversation_id) is False
+
+
 @pytest.mark.asyncio
 async def test_a_second_mint_while_one_is_pending_is_refused(
     daemon: VoucherDaemon,
@@ -383,3 +410,18 @@ async def test_a_tampered_payload_is_refused_by_induction(
             inductor.connection, inductor.conversation_id, joiner.name, token,
         )
     assert await inductor.members() == []
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="spec/contact-vouchers.md tombstones the payload after induction; "
+    "neither implementation does yet (OPEN_ITEMS 3.25)",
+)
+@pytest.mark.asyncio
+async def test_the_voucher_payload_is_tombstoned_after_induction(
+    daemon: VoucherDaemon,
+) -> None:
+    await _grow_star(daemon, 2)
+    mint = daemon.mints[-1]
+    index0 = mint.voucher_write_cap[-_INDEX:]
+    assert (mint.voucher_read_cap, index0) in daemon.tombstoned
