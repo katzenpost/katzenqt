@@ -1,4 +1,6 @@
-"""The last unexercised lines of the framing, entry point and stream teardown."""
+"""The last unexercised lines of the framing, the entry point and the
+stream teardown."""
+
 from __future__ import annotations
 
 import asyncio
@@ -44,4 +46,3 @@ async def test_stopping_a_stream_passes_on_its_own_cancellation() -> None:
     with pytest.raises(asyncio.CancelledError):
         await stopping
     assert stopping.cancelled()
-

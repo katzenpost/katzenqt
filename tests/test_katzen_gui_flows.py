@@ -93,15 +93,20 @@ async def test_a_send_before_joining_is_refused_and_keeps_the_text(
 
 @pytest.mark.asyncio
 async def test_a_refused_send_buffers_the_text_for_a_background_convo(
-    loaded_window: katzen.MainWindow, not_joined: None, instant_timer: None,
+    loaded_window: katzen.MainWindow,
+    not_joined: None,
+    instant_timer: None,
 ) -> None:
     convo = loaded_window.convo_state()
     loaded_window.ui.chat_lineEdit.setText("draft text")
     loaded_window._restore_unsent_text(convo, "draft text")
     assert loaded_window.ui.chat_lineEdit.text() == "draft text"
     other = katzen.ConversationUIState(
-        conversation_id=999, own_peer_id=1, own_peer_name="x",
-        own_peer_bacap_uuid=uuid.uuid4(), chat_lineEdit_buffer="",
+        conversation_id=999,
+        own_peer_id=1,
+        own_peer_name="x",
+        own_peer_bacap_uuid=uuid.uuid4(),
+        chat_lineEdit_buffer="",
         conversation_log_model=convo.conversation_log_model,
         contacts_standard_item=convo.contacts_standard_item,
     )
@@ -111,7 +116,9 @@ async def test_a_refused_send_buffers_the_text_for_a_background_convo(
 
 @pytest.mark.asyncio
 async def test_an_empty_line_sends_nothing(
-    loaded_window: katzen.MainWindow, joined: None, sent: Sent,
+    loaded_window: katzen.MainWindow,
+    joined: None,
+    sent: Sent,
 ) -> None:
     loaded_window.ui.chat_lineEdit.setText("   ")
     await loaded_window.chat_msg_single_line()
@@ -121,7 +128,9 @@ async def test_an_empty_line_sends_nothing(
 
 @pytest.mark.asyncio
 async def test_a_single_line_message_reaches_the_send_path(
-    loaded_window: katzen.MainWindow, joined: None, sent: Sent,
+    loaded_window: katzen.MainWindow,
+    joined: None,
+    sent: Sent,
 ) -> None:
     loaded_window.ui.chat_lineEdit.setText("hello mixnet")
     await loaded_window.chat_msg_single_line()
@@ -262,7 +271,8 @@ async def test_attaching_files_adds_them_to_the_conversation(
     monkeypatch.setattr(katzen, "QFileDialog", FakeFileDialog)
     loaded_window.attach_file()
     assert loaded_window.convo_state().attached_files == {
-        str(first), str(second),
+        str(first),
+        str(second),
     }
     assert loaded_window.saved_file_dialog == b"dialog-state"
     assert loaded_window.ui.attached_files_QListWidget.count() == 2
@@ -273,7 +283,8 @@ async def test_attaching_files_adds_them_to_the_conversation(
 
 @pytest.mark.asyncio
 async def test_cancelling_the_file_picker_attaches_nothing(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     FakeFileDialog.accepted = False
     monkeypatch.setattr(katzen, "QFileDialog", FakeFileDialog)
@@ -330,7 +341,8 @@ async def test_selecting_a_peer_row_selects_its_conversation(
     names = [convo_item.child(r).text() for r in range(convo_item.rowCount())]
     assert sorted(names) == ["bob", "me"]
     bob = next(
-        convo_item.child(r) for r in range(convo_item.rowCount())
+        convo_item.child(r)
+        for r in range(convo_item.rowCount())
         if convo_item.child(r).text() == "bob"
     )
     assert bob.peer_is_own is False
@@ -344,7 +356,8 @@ async def test_selecting_a_peer_row_selects_its_conversation(
 
 @pytest.mark.asyncio
 async def test_creating_a_conversation_walks_both_prompts(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     answers = ["Book club", "reader"]
 
@@ -369,7 +382,8 @@ async def test_creating_a_conversation_walks_both_prompts(
 
 @pytest.mark.asyncio
 async def test_a_cancelled_title_prompt_creates_nothing(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def refuse(dialog: object) -> int:
         return 0
@@ -381,7 +395,8 @@ async def test_a_cancelled_title_prompt_creates_nothing(
 
 @pytest.mark.asyncio
 async def test_a_blank_title_creates_nothing(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def blank(dialog: QInputDialog) -> int:
         dialog.setTextValue("   ")
@@ -394,7 +409,8 @@ async def test_a_blank_title_creates_nothing(
 
 @pytest.mark.asyncio
 async def test_a_blank_display_name_creates_nothing(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     answers = ["Reading room", "  "]
 
@@ -442,7 +458,9 @@ def voucher_flow(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return None
 
     async def mint(
-        client: object, conversation_id: int, display_name: str,
+        client: object,
+        conversation_id: int,
+        display_name: str,
     ) -> bytes:
         log.append(f"mint:{display_name}")
         return b"voucher-bytes"
@@ -463,7 +481,8 @@ async def test_generating_a_voucher_shows_the_code(
 ) -> None:
     supervised: list[str] = []
     monkeypatch.setattr(
-        loaded_window, "_supervised_listener",
+        loaded_window,
+        "_supervised_listener",
         appending_from(supervised, first_argument),
     )
 
@@ -526,7 +545,9 @@ async def test_a_failed_mint_is_reported(
         return None
 
     async def mint(
-        client: object, conversation_id: int, display_name: str,
+        client: object,
+        conversation_id: int,
+        display_name: str,
     ) -> bytes:
         raise RuntimeError("courier refused")
 
@@ -575,15 +596,18 @@ async def test_a_completed_join_lists_the_new_members(
         signalled.append(1)
 
     monkeypatch.setattr(
-        loaded_window, "_wait_and_open_with_retries", opened,
+        loaded_window,
+        "_wait_and_open_with_retries",
+        opened,
     )
     monkeypatch.setattr(network, "signal_readables_to_mixwal", signal)
     convo = loaded_window.convo_state()
     await loaded_window._await_voucher_join(convo)
     item = convo.contacts_standard_item
-    assert [
-        item.child(r).text() for r in range(item.rowCount())
-    ] == ["me", "carol"]
+    assert [item.child(r).text() for r in range(item.rowCount())] == [
+        "me",
+        "carol",
+    ]
     assert signalled == [1]
     assert boxes.seen[-1].text == "You have joined. Members added: carol."
 
@@ -607,7 +631,8 @@ async def test_a_failed_join_is_reported_with_a_bounded_detail(
 
 @pytest.mark.asyncio
 async def test_the_join_retry_loop_returns_the_opened_members(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def open_it(client: object, conversation_id: int) -> list[str]:
         return ["dave"]
@@ -708,7 +733,10 @@ async def test_an_induction_adds_the_joiner_to_the_tree(
         return 1
 
     async def induct(
-        client: object, conversation_id: int, name: str, voucher: bytes,
+        client: object,
+        conversation_id: int,
+        name: str,
+        voucher: bytes,
     ) -> str:
         assert voucher == b"voucher"
         return "erin"
@@ -722,9 +750,10 @@ async def test_an_induction_adds_the_joiner_to_the_tree(
     convo = loaded_window.convo_state()
     await loaded_window.induct_via_voucher()
     item = convo.contacts_standard_item
-    assert [
-        item.child(r).text() for r in range(item.rowCount())
-    ] == ["me", "erin"]
+    assert [item.child(r).text() for r in range(item.rowCount())] == [
+        "me",
+        "erin",
+    ]
     assert signalled == [1]
     assert boxes.seen[-1].text == "Inducted erin into this conversation."
 
@@ -741,7 +770,10 @@ async def test_a_repeated_induction_says_so(
         return 1
 
     async def induct(
-        client: object, conversation_id: int, name: str, voucher: bytes,
+        client: object,
+        conversation_id: int,
+        name: str,
+        voucher: bytes,
     ) -> None:
         return None
 
@@ -763,7 +795,10 @@ async def test_a_failed_induction_is_reported(
         return 1
 
     async def induct(
-        client: object, conversation_id: int, name: str, voucher: bytes,
+        client: object,
+        conversation_id: int,
+        name: str,
+        voucher: bytes,
     ) -> str:
         raise RuntimeError("no such voucher\x07")
 
@@ -787,7 +822,10 @@ async def test_an_inducted_substream_peer_is_not_rendered(
         return 1
 
     async def induct(
-        client: object, conversation_id: int, name: str, voucher: bytes,
+        client: object,
+        conversation_id: int,
+        name: str,
+        voucher: bytes,
     ) -> str:
         return f"{network._SUBSTREAM_NAME_PREFIX}parent:1234"
 
@@ -820,7 +858,8 @@ async def test_no_pending_vouchers_says_so(
 
 @pytest.mark.asyncio
 async def test_abandoning_a_pending_voucher_cancels_it(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pv_id = uuid.uuid4()
     cancelled: list[uuid.UUID] = []
@@ -845,23 +884,32 @@ async def test_abandoning_a_pending_voucher_cancels_it(
 
 @pytest.mark.asyncio
 async def test_main_populates_the_window_and_starts_the_listeners(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     started: list[str] = []
     monkeypatch.setattr(
-        window, "_supervised_listener",
+        window,
+        "_supervised_listener",
         appending_from(started, first_argument),
     )
-    monkeypatch.setattr(katzen, "pending_joiner_join_conversation_ids",
-                        list)
+    monkeypatch.setattr(katzen, "pending_joiner_join_conversation_ids", list)
     seeded = await seed_conversation(name="startup room")
     with persistent.Session(persistent._engine_sync) as sess:
-        sess.add(persistent.AppSetting(
-            id="chat.font.family", type="str", value="Serif",
-        ))
-        sess.add(persistent.AppSetting(
-            id="chat.font.pointSize", type="int", value="13",
-        ))
+        sess.add(
+            persistent.AppSetting(
+                id="chat.font.family",
+                type="str",
+                value="Serif",
+            )
+        )
+        sess.add(
+            persistent.AppSetting(
+                id="chat.font.pointSize",
+                type="int",
+                value="13",
+            )
+        )
         sess.add(persistent.AppSetting(id="junk", type="bool", value="x"))
         sess.commit()
 
@@ -874,8 +922,10 @@ async def test_main_populates_the_window_and_starts_the_listeners(
     assert window.settings["junk"] is None
     assert seeded.conversation_id in window.conversation_state_by_id
     assert started == [
-        "receive_msg_listener", "peer_added_listener",
-        "tally_listener", "transfers_listener",
+        "receive_msg_listener",
+        "peer_added_listener",
+        "tally_listener",
+        "transfers_listener",
     ]
     assert window.isVisible() is True
     assert window.echomix_icon.isNull() is False
@@ -889,10 +939,11 @@ async def test_main_installs_an_exception_handler_that_reports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        window, "_supervised_listener", ignore,
+        window,
+        "_supervised_listener",
+        ignore,
     )
-    monkeypatch.setattr(katzen, "pending_joiner_join_conversation_ids",
-                        list)
+    monkeypatch.setattr(katzen, "pending_joiner_join_conversation_ids", list)
     await katzen.main(window)
     asyncio.get_running_loop().call_exception_handler({"message": "boom"})
     assert boxes.seen[-1].kind == "critical"
@@ -901,16 +952,19 @@ async def test_main_installs_an_exception_handler_that_reports(
 
 @pytest.mark.asyncio
 async def test_a_pending_join_is_resumed_for_a_known_conversation(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resumed: list[str] = []
     convo_id = loaded_window.convo_state().conversation_id
     monkeypatch.setattr(
-        loaded_window, "_supervised_listener",
+        loaded_window,
+        "_supervised_listener",
         appending_from(resumed, first_argument),
     )
     monkeypatch.setattr(
-        katzen, "pending_joiner_join_conversation_ids",
+        katzen,
+        "pending_joiner_join_conversation_ids",
         returning([convo_id, 4242]),
     )
     await katzen._resume_pending_joins(loaded_window)
@@ -919,7 +973,8 @@ async def test_a_pending_join_is_resumed_for_a_known_conversation(
 
 @pytest.mark.asyncio
 async def test_a_supervised_listener_restarts_after_a_crash(
-    window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     runs: list[int] = []
 
@@ -938,7 +993,8 @@ async def test_a_supervised_listener_restarts_after_a_crash(
 
 @pytest.mark.asyncio
 async def test_a_supervised_listener_may_stop_quietly(
-    window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     runs: list[int] = []
 

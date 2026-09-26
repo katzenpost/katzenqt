@@ -28,7 +28,10 @@ from tests.test_headless_actions_common import (
 
 def _tally_with(votes: "list[dict[str, str]]") -> "tally_engine.TallyResult":
     doc = tally_schema.new_survey_doc(
-        uuid.uuid4().bytes, "lunch?", tally_schema.Mode.APPROVAL, ["mon", "tue"],
+        uuid.uuid4().bytes,
+        "lunch?",
+        tally_schema.Mode.APPROVAL,
+        ["mon", "tue"],
     )
     for index, choice in enumerate(votes):
         tally_engine.apply_vote(doc, bytes([index + 1]) * 16, choice, 1)
@@ -46,7 +49,10 @@ def test_seconds_rejects_bad_values(value: str) -> None:
 
 
 def test_parse_slot_votes_builds_a_mapping() -> None:
-    assert _actions._parse_slot_votes(["s0=yes", "s1=no"]) == {"s0": "yes", "s1": "no"}
+    assert _actions._parse_slot_votes(["s0=yes", "s1=no"]) == {
+        "s0": "yes",
+        "s1": "no",
+    }
 
 
 def test_parse_slot_votes_rejects_a_vote_without_an_equals_sign() -> None:
@@ -66,11 +72,16 @@ def test_tally_json_carries_slots_and_outcome() -> None:
 
 
 def test_declare_outcome_reports_a_single_winner() -> None:
-    assert _actions._declare_outcome(_tally_with([{"s0": "yes"}])) == "WINNER=mon (1 yes)"
+    assert (
+        _actions._declare_outcome(_tally_with([{"s0": "yes"}]))
+        == "WINNER=mon (1 yes)"
+    )
 
 
 def test_declare_outcome_reports_a_tie() -> None:
-    declared = _actions._declare_outcome(_tally_with([{"s0": "yes", "s1": "yes"}]))
+    declared = _actions._declare_outcome(
+        _tally_with([{"s0": "yes", "s1": "yes"}])
+    )
     assert declared == "TIE=mon, tue (1 yes each)"
 
 
@@ -88,7 +99,9 @@ def test_set_connection_config_records_the_path(
     assert _actions._CONNECTION_CONFIG == "/tmp/thinclient.toml"
 
 
-def test_resolve_connection_config_passes_an_explicit_config_through() -> None:
+def test_resolve_connection_config_passes_an_explicit_config_through() -> (
+    None
+):
     args = _cli.parse(["read", "--config", "/etc/tc.toml", "c", "1"]).args
     assert _actions.resolve_connection_config(args) == ("/etc/tc.toml", None)
 
@@ -98,12 +111,20 @@ def test_resolve_connection_config_passes_an_explicit_config_through() -> None:
     [("tcp", 'Network = "tcp"'), ("unix", "[Dial.Unix]")],
 )
 def test_resolve_connection_config_synthesises_a_toml_for_an_address(
-    network_arg: str, expected: str,
+    network_arg: str,
+    expected: str,
 ) -> None:
-    args = _cli.parse([
-        "read", "--address", "127.0.0.1:64331", "--network", network_arg,
-        "c", "1",
-    ]).args
+    args = _cli.parse(
+        [
+            "read",
+            "--address",
+            "127.0.0.1:64331",
+            "--network",
+            network_arg,
+            "c",
+            "1",
+        ]
+    ).args
     path, temp_path = _actions.resolve_connection_config(args)
     try:
         assert path == temp_path
@@ -133,17 +154,27 @@ async def test_conversation_by_name_returns_the_row_or_none() -> None:
 @pytest.mark.asyncio
 async def test_wait_for_conv_write_cap_sees_a_provisioned_cap() -> None:
     handle = await make_conversation("provisioned")
-    assert await _actions._wait_for_conv_write_cap(
-        handle.conversation_id, attempts=2, delay=0.0,
-    ) is True
+    assert (
+        await _actions._wait_for_conv_write_cap(
+            handle.conversation_id,
+            attempts=2,
+            delay=0.0,
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio
 async def test_wait_for_conv_write_cap_gives_up_when_unprovisioned() -> None:
     handle = await make_conversation("bare", provision_write_cap=False)
-    assert await _actions._wait_for_conv_write_cap(
-        handle.conversation_id, attempts=2, delay=0.0,
-    ) is False
+    assert (
+        await _actions._wait_for_conv_write_cap(
+            handle.conversation_id,
+            attempts=2,
+            delay=0.0,
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -153,11 +184,13 @@ async def test_wait_for_survey_finds_a_persisted_row(
     handle = await make_conversation("surveyed")
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
-        sess.add(persistent.TallyState(
-            survey_id=survey_id,
-            conversation_id=handle.conversation_id,
-            doc_state=b"blob",
-        ))
+        sess.add(
+            persistent.TallyState(
+                survey_id=survey_id,
+                conversation_id=handle.conversation_id,
+                doc_state=b"blob",
+            )
+        )
         await sess.commit()
     clock = FakeClock()
     clock.install(monkeypatch)
@@ -166,7 +199,9 @@ async def test_wait_for_survey_finds_a_persisted_row(
 
 
 @pytest.mark.asyncio
-async def test_wait_for_survey_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_wait_for_survey_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = FakeClock()
     clock.install(monkeypatch)
     assert await _actions._wait_for_survey(uuid.uuid4().bytes, 120.0) is False
@@ -186,7 +221,9 @@ async def test_wait_for_sent_sees_the_sentlog_row(
 
 
 @pytest.mark.asyncio
-async def test_wait_for_sent_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_wait_for_sent_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = FakeClock()
     clock.install(monkeypatch)
     assert await _actions._wait_for_sent(uuid.uuid4(), 120.0) is False
@@ -195,14 +232,21 @@ async def test_wait_for_sent_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_connect_and_start_dials_the_recorded_config(
-    monkeypatch: pytest.MonkeyPatch, fake_thinclient: FakeThinClient,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_thinclient: FakeThinClient,
 ) -> None:
-    monkeypatch.setattr(_actions, "_CONNECTION_CONFIG", "/nowhere/thinclient.toml")
+    monkeypatch.setattr(
+        _actions, "_CONNECTION_CONFIG", "/nowhere/thinclient.toml"
+    )
     dialled: "list[str | None]" = []
 
-    async def fake_reconnect(config_path: "str | None" = None) -> FakeThinClient:
+    async def fake_reconnect(
+        config_path: "str | None" = None,
+    ) -> FakeThinClient:
         dialled.append(config_path)
-        await network.on_connection_status({"is_connected": True, "err": None})
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         return fake_thinclient
 
     monkeypatch.setattr(network, "reconnect", fake_reconnect)
@@ -218,20 +262,27 @@ async def test_connect_and_start_dials_the_recorded_config(
 
 @pytest.mark.asyncio
 async def test_connect_and_start_reconciles_the_tally_when_asked(
-    monkeypatch: pytest.MonkeyPatch, fake_thinclient: FakeThinClient,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_thinclient: FakeThinClient,
 ) -> None:
     reconciled: "list[int]" = []
 
     async def fake_reconcile(controller: object) -> None:
         reconciled.append(1)
 
-    async def fake_reconnect(config_path: "str | None" = None) -> FakeThinClient:
-        await network.on_connection_status({"is_connected": True, "err": None})
+    async def fake_reconnect(
+        config_path: "str | None" = None,
+    ) -> FakeThinClient:
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         return fake_thinclient
 
     monkeypatch.setattr(network, "reconnect", fake_reconnect)
     monkeypatch.setattr(
-        type(_actions.tally_instance), "reconcile_from_log", fake_reconcile,
+        type(_actions.tally_instance),
+        "reconcile_from_log",
+        fake_reconcile,
     )
     connection, bg = await _actions._connect_and_start(reconcile_tally=True)
     try:
@@ -253,7 +304,9 @@ async def test_shutdown_closes_the_connection_for_a_finished_task() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shutdown_reraises_the_background_failure_after_closing() -> None:
+async def test_shutdown_reraises_the_background_failure_after_closing() -> (
+    None
+):
     async def explode() -> None:
         raise RuntimeError("bg boom")
 
@@ -266,7 +319,8 @@ async def test_shutdown_reraises_the_background_failure_after_closing() -> None:
 
 @pytest.mark.asyncio
 async def test_shutdown_warns_when_the_join_overruns_its_budget(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     stuck = asyncio.Event()
 
@@ -287,11 +341,13 @@ async def test_shutdown_warns_when_the_join_overruns_its_budget(
 
 @pytest.mark.asyncio
 async def test_action_info_reports_schema_conversations_and_wal_counts(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
     handle = await make_conversation(
-        "reported", peers=("bob", f"{network._SUBSTREAM_NAME_PREFIX}x"),
+        "reported",
+        peers=("bob", f"{network._SUBSTREAM_NAME_PREFIX}x"),
     )
     await add_log_row(
         conversation_id=handle.conversation_id,
@@ -303,18 +359,21 @@ async def test_action_info_reports_schema_conversations_and_wal_counts(
         assert await run_action(["info"]) == 0
     payload = json.loads(caplog.records[-1].getMessage())
     assert payload["state_file"] == str(persistent.state_file)
-    assert payload["conversations"] == [{
-        "id": handle.conversation_id,
-        "name": "reported",
-        "peer_count": 2,
-        "messages": 1,
-    }]
+    assert payload["conversations"] == [
+        {
+            "id": handle.conversation_id,
+            "name": "reported",
+            "peer_count": 2,
+            "messages": 1,
+        }
+    ]
     assert payload["wal"] == {"plaintext": 0, "mix": 0, "received_piece": 0}
 
 
 @pytest.mark.asyncio
 async def test_action_membership_hash_prints_a_digest(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
     await make_conversation("hashed", peers=("bob",))
@@ -327,7 +386,8 @@ async def test_action_membership_hash_prints_a_digest(
 
 @pytest.mark.asyncio
 async def test_action_membership_hash_refuses_an_unknown_conversation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
     with caplog.at_level(logging.ERROR):
@@ -350,7 +410,9 @@ async def test_shutdown_reraises_cancellation_after_the_join_completes(
     monkeypatch.setattr(network, "_cancel_and_join", joinable)
     connection = StubConnection()
     shutting = asyncio.ensure_future(
-        _actions._shutdown(asyncio.ensure_future(done_quickly()), connection, 30.0)
+        _actions._shutdown(
+            asyncio.ensure_future(done_quickly()), connection, 30.0
+        )
     )
     for _ in range(10):
         await asyncio.sleep(0)

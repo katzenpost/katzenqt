@@ -25,7 +25,8 @@ ADDRESS = ["--address", "127.0.0.1:64331"]
 
 @pytest.fixture(autouse=True)
 def _logger_into_caplog(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
     caplog.set_level(logging.INFO)
@@ -35,7 +36,8 @@ def _logger_into_caplog(
 def stub_session(monkeypatch: pytest.MonkeyPatch) -> StubConnection:
     connection = StubConnection()
     monkeypatch.setattr(
-        _actions, "_connect_and_start",
+        _actions,
+        "_connect_and_start",
         AsyncMock(return_value=(connection, object())),
     )
     monkeypatch.setattr(_actions, "_shutdown", AsyncMock())
@@ -52,7 +54,8 @@ async def _mark_every_plaintext_sent() -> None:
 
 @pytest.mark.asyncio
 async def test_create_conv_reports_created_once_the_read_cap_lands(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def provisioning_connect(
         reconcile_tally: bool = False,
@@ -71,11 +74,13 @@ async def test_create_conv_reports_created_once_the_read_cap_lands(
     assert await run_action(["create-conv", "fresh", "alice", *ADDRESS]) == 0
     assert "CREATED" in caplog.text
     async with persistent.asession() as sess:
-        convo = (await sess.exec(
-            select(persistent.Conversation).where(
-                persistent.Conversation.name == "fresh"
+        convo = (
+            await sess.exec(
+                select(persistent.Conversation).where(
+                    persistent.Conversation.name == "fresh"
+                )
             )
-        )).first()
+        ).first()
         assert convo is not None
         log_rows = (await sess.exec(select(persistent.ConversationLog))).all()
     assert len(log_rows) == 1
@@ -83,9 +88,12 @@ async def test_create_conv_reports_created_once_the_read_cap_lands(
 
 @pytest.mark.asyncio
 async def test_create_conv_gives_up_when_no_read_cap_is_provisioned(
-    stub_session: StubConnection, caplog: pytest.LogCaptureFixture,
+    stub_session: StubConnection,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    assert await run_action(["create-conv", "stalled", "alice", *ADDRESS]) == 2
+    assert (
+        await run_action(["create-conv", "stalled", "alice", *ADDRESS]) == 2
+    )
     assert "no read_cap provisioned after timeout" in caplog.text
     assert "CREATED" not in caplog.text
 
@@ -100,22 +108,29 @@ async def test_voucher_mint_refuses_an_unknown_conversation(
 
 @pytest.mark.asyncio
 async def test_voucher_mint_gives_up_without_a_provisioned_write_cap(
-    stub_session: StubConnection, caplog: pytest.LogCaptureFixture,
+    stub_session: StubConnection,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("unprovisioned", provision_write_cap=False)
-    assert await run_action(["voucher-mint", "unprovisioned", "alice", *ADDRESS]) == 2
+    assert (
+        await run_action(["voucher-mint", "unprovisioned", "alice", *ADDRESS])
+        == 2
+    )
     assert "write cap not provisioned after timeout" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_voucher_mint_logs_the_base64_voucher(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     minted = AsyncMock(return_value=b"voucher-bytes")
     monkeypatch.setattr(_actions, "mint_and_publish", minted)
     await make_conversation("mintable")
-    assert await run_action(["voucher-mint", "mintable", "alice", *ADDRESS]) == 0
+    assert (
+        await run_action(["voucher-mint", "mintable", "alice", *ADDRESS]) == 0
+    )
     assert f"VOUCHER={b64encode(b'voucher-bytes').decode()}" in caplog.text
     assert minted.await_count == 1
 
@@ -124,9 +139,10 @@ async def test_voucher_mint_logs_the_base64_voucher(
 async def test_voucher_induct_refuses_an_unknown_conversation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    assert await run_action(
-        ["voucher-induct", "ghost", "bob", "AAAA", *ADDRESS]
-    ) == 2
+    assert (
+        await run_action(["voucher-induct", "ghost", "bob", "AAAA", *ADDRESS])
+        == 2
+    )
     assert "conversation 'ghost' not found" in caplog.text
 
 
@@ -135,24 +151,31 @@ async def test_voucher_induct_rejects_an_undecodable_voucher(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("inducting")
-    assert await run_action(
-        ["voucher-induct", "inducting", "bob", "abc", *ADDRESS]
-    ) == 2
+    assert (
+        await run_action(
+            ["voucher-induct", "inducting", "bob", "abc", *ADDRESS]
+        )
+        == 2
+    )
     assert "invalid voucher encoding" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_voucher_induct_logs_the_joiner(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     inducted = AsyncMock(return_value="bob")
     monkeypatch.setattr(_actions, "derive_read_and_induct", inducted)
     await make_conversation("inducting")
     payload = b64encode(b"voucher").decode()
-    assert await run_action(
-        ["voucher-induct", "inducting", "bob", payload, *ADDRESS]
-    ) == 0
+    assert (
+        await run_action(
+            ["voucher-induct", "inducting", "bob", payload, *ADDRESS]
+        )
+        == 0
+    )
     assert "INDUCTED=bob" in caplog.text
     assert inducted.await_args is not None
     assert inducted.await_args.args[3] == b"voucher"
@@ -168,7 +191,8 @@ async def test_voucher_await_refuses_an_unknown_conversation(
 
 @pytest.mark.asyncio
 async def test_voucher_await_logs_joined(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     opened = AsyncMock(return_value=None)
@@ -189,7 +213,8 @@ async def test_send_refuses_an_unknown_conversation(
 
 @pytest.mark.asyncio
 async def test_send_reports_sent_once_the_plaintext_clears(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("chatty", peers=("bob",))
@@ -203,7 +228,8 @@ async def test_send_reports_sent_once_the_plaintext_clears(
 
 @pytest.mark.asyncio
 async def test_send_honours_the_budget_floor_override(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
 ) -> None:
     await make_conversation("floored")
     monkeypatch.setenv("KQT_SEND_BUDGET_FLOOR_S", "100.0")
@@ -216,7 +242,8 @@ async def test_send_honours_the_budget_floor_override(
 
 @pytest.mark.asyncio
 async def test_send_file_refuses_a_missing_path(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     missing = tmp_path / "nope.bin"
     assert await run_action(["send-file", "any", str(missing), *ADDRESS]) == 2
@@ -225,7 +252,8 @@ async def test_send_file_refuses_a_missing_path(
 
 @pytest.mark.asyncio
 async def test_send_file_refuses_a_file_over_the_hard_cap(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(network, "_ATTACHMENT_HARD_CAP", 4)
@@ -237,18 +265,31 @@ async def test_send_file_refuses_a_file_over_the_hard_cap(
 
 @pytest.mark.asyncio
 async def test_send_file_reports_sent_with_overridden_metadata(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     handle = await make_conversation("filedrop")
     path = tmp_path / "note.txt"
     path.write_bytes(bytes((i * 7 + 3) & 255 for i in range(4000)))
     monkeypatch.setattr(network, "check_for_new", _mark_every_plaintext_sent)
     FakeClock().install(monkeypatch)
-    assert await run_action([
-        "send-file", "filedrop", str(path),
-        "--basename", "renamed.txt", "--filetype", "text/plain", *ADDRESS,
-    ]) == 0
+    assert (
+        await run_action(
+            [
+                "send-file",
+                "filedrop",
+                str(path),
+                "--basename",
+                "renamed.txt",
+                "--filetype",
+                "text/plain",
+                *ADDRESS,
+            ]
+        )
+        == 0
+    )
     assert "SENT" in caplog.text
     async with persistent.asession() as sess:
         caps = (await sess.exec(select(persistent.WriteCapWAL))).all()
@@ -266,13 +307,17 @@ async def test_multi_send_refuses_an_unknown_conversation(
 
 @pytest.mark.asyncio
 async def test_multi_send_queues_every_text_then_waits_for_the_last(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("burst", peers=("bob",))
     monkeypatch.setattr(network, "check_for_new", _mark_every_plaintext_sent)
     FakeClock().install(monkeypatch)
-    assert await run_action(["multi-send", "burst", "one|two|three", *ADDRESS]) == 0
+    assert (
+        await run_action(["multi-send", "burst", "one|two|three", *ADDRESS])
+        == 0
+    )
     assert "SENT" in caplog.text
     async with persistent.asession() as sess:
         sent = (await sess.exec(select(persistent.SentLog))).all()
@@ -281,7 +326,8 @@ async def test_multi_send_queues_every_text_then_waits_for_the_last(
 
 @pytest.mark.asyncio
 async def test_multi_send_times_out_when_nothing_clears(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("stuck")
@@ -295,12 +341,18 @@ async def test_multi_send_times_out_when_nothing_clears(
 
 @pytest.mark.asyncio
 async def test_send_stages_rows_against_the_conversation_write_cap(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
 ) -> None:
     handle = await make_conversation("streamed")
     monkeypatch.setattr(network, "check_for_new", AsyncMock())
     FakeClock().install(monkeypatch)
-    assert await run_action(["send", "streamed", "hi", "--timeout", "1", *ADDRESS]) == 3
+    assert (
+        await run_action(
+            ["send", "streamed", "hi", "--timeout", "1", *ADDRESS]
+        )
+        == 3
+    )
     async with persistent.asession() as sess:
         rows = (await sess.exec(select(persistent.PlaintextWAL))).all()
     assert [row.bacap_stream for row in rows] == [handle.write_cap_id]

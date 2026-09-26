@@ -65,19 +65,25 @@ def test_pending_vouchers_dialog_lists_every_row(
     window: katzen.MainWindow,
 ) -> None:
     first, second = uuid.uuid4(), uuid.uuid4()
-    dialog = katzen.PendingVouchersDialog(window, [
-        (first, "room one", "joiner", "minted"),
-        (second, "room two", "inductor", "replied"),
-    ])
+    dialog = katzen.PendingVouchersDialog(
+        window,
+        [
+            (first, "room one", "joiner", "minted"),
+            (second, "room two", "inductor", "replied"),
+        ],
+    )
     assert dialog.windowTitle() == "Pending vouchers"
     assert dialog.list_widget.count() == 2
     assert dialog.list_widget.item(0).text() == "room one   [joiner, minted]"
     assert dialog.list_widget.item(1).text() == (
         "room two   [inductor, replied]"
     )
-    assert dialog.list_widget.item(0).data(
-        Qt.ItemDataRole.UserRole,
-    ) == first
+    assert (
+        dialog.list_widget.item(0).data(
+            Qt.ItemDataRole.UserRole,
+        )
+        == first
+    )
     assert dialog.cancelled == []
     dialog.deleteLater()
 
@@ -86,10 +92,13 @@ def test_cancelling_a_voucher_removes_its_row(
     window: katzen.MainWindow,
 ) -> None:
     first, second = uuid.uuid4(), uuid.uuid4()
-    dialog = katzen.PendingVouchersDialog(window, [
-        (first, "room one", "joiner", "minted"),
-        (second, "room two", "joiner", "minted"),
-    ])
+    dialog = katzen.PendingVouchersDialog(
+        window,
+        [
+            (first, "room one", "joiner", "minted"),
+            (second, "room two", "joiner", "minted"),
+        ],
+    )
     dialog.list_widget.setCurrentRow(1)
     dialog._cancel_selected()
     assert dialog.cancelled == [second]
@@ -235,7 +244,8 @@ def test_show_packets_creates_the_window_once(
 
 @pytest.mark.asyncio
 async def test_show_consensus_wires_a_fetch_through_the_io_thread(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = {"Epoch": 7}
 
@@ -255,7 +265,8 @@ async def test_show_consensus_wires_a_fetch_through_the_io_thread(
 
 
 def test_closing_without_really_quit_keeps_the_app(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     shutdowns: list[int] = []
     quits: list[int] = []
@@ -280,7 +291,9 @@ def test_closing_with_really_quit_shuts_the_network_down(
 ) -> None:
     quits: list[int] = []
     window.app = type(
-        "RecordingApp", (), {"quit": appending(quits, 1)},
+        "RecordingApp",
+        (),
+        {"quit": appending(quits, 1)},
     )()
     window.close(really_quit=True)
     assert not window.systray
@@ -313,7 +326,8 @@ def test_the_close_event_without_a_tray_is_accepted(
 
 
 def test_error_and_exit_reports_and_raises(
-    qt_app: QApplication, boxes: type[FakeMessageBox],
+    qt_app: QApplication,
+    boxes: type[FakeMessageBox],
 ) -> None:
     holder = QMainWindow()
     with pytest.raises(SystemExit) as caught:
@@ -326,7 +340,8 @@ def test_error_and_exit_reports_and_raises(
 
 
 def test_error_and_exit_makes_its_own_window_when_given_none(
-    qt_app: QApplication, boxes: type[FakeMessageBox],
+    qt_app: QApplication,
+    boxes: type[FakeMessageBox],
 ) -> None:
     with pytest.raises(SystemExit):
         katzen.error_and_exit(qt_app, "no state file")
@@ -397,8 +412,10 @@ def test_the_key_press_filter_never_eats_an_event(
 ) -> None:
     filt = katzen.KeyPressFilter()
     key = QKeyEvent(
-        katzen.QEvent.Type.KeyPress, Qt.Key.Key_Space,
-        Qt.KeyboardModifier.NoModifier, " ",
+        katzen.QEvent.Type.KeyPress,
+        Qt.Key.Key_Space,
+        Qt.KeyboardModifier.NoModifier,
+        " ",
     )
     other = katzen.QEvent(katzen.QEvent.Type.None_)
     assert filt.eventFilter(None, key) is False
@@ -432,7 +449,8 @@ def test_an_action_error_is_logged_and_queued(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        katzen.QTimer, "singleShot",
+        katzen.QTimer,
+        "singleShot",
         staticmethod(call_now),
     )
     caplog.set_level(logging.ERROR, logger="katzen")
@@ -485,7 +503,8 @@ async def test_a_dismissed_menu_returns_nothing(
 
 
 def test_the_font_dialog_is_built_once_and_reused(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(katzen, "QFontDialog", FakeFontDialog)
     window.font_settings_dialog()
@@ -498,7 +517,8 @@ def test_the_font_dialog_is_built_once_and_reused(
 
 
 def test_a_stored_font_choice_is_restored_onto_the_button(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(katzen, "QFontDialog", FakeFontDialog)
     window.settings = {
@@ -508,7 +528,8 @@ def test_a_stored_font_choice_is_restored_onto_the_button(
     window.font_settings_dialog()
     dialog = window.font_settings_qdialog
     button = next(
-        c for c in dialog.children()
+        c
+        for c in dialog.children()
         if isinstance(c, QToolButton)
         and c.objectName() == "contactName_toolButton"
     )
@@ -517,7 +538,8 @@ def test_a_stored_font_choice_is_restored_onto_the_button(
 
 
 def test_picking_a_font_persists_it(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(katzen, "QFontDialog", FakeFontDialog)
     FakeFontDialog.chosen = QFont("Courier", 18)
@@ -525,7 +547,8 @@ def test_picking_a_font_persists_it(
     window.font_settings_dialog()
     dialog = window.font_settings_qdialog
     button = next(
-        c for c in dialog.children()
+        c
+        for c in dialog.children()
         if isinstance(c, QToolButton)
         and c.objectName() == "messageText_toolButton"
     )
@@ -544,7 +567,8 @@ def test_picking_a_font_persists_it(
 
 
 def test_cancelling_the_font_picker_changes_nothing(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(katzen, "QFontDialog", FakeFontDialog)
     FakeFontDialog.chosen = None
@@ -585,7 +609,8 @@ def test_a_broken_database_only_costs_the_saved_font(
 
 
 def test_the_theme_dialog_is_opened_with_the_window_manager(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     FakeThemeDialog.opened = []
     monkeypatch.setattr(theme, "ThemeDialog", FakeThemeDialog)
@@ -594,10 +619,13 @@ def test_the_theme_dialog_is_opened_with_the_window_manager(
 
 
 def test_the_systray_icon_mirrors_the_unread_state(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(returning(True)),
+        QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(returning(True)),
     )
     window.systray = None
     window.echomix_icon = QIcon()
@@ -619,10 +647,13 @@ def test_the_systray_icon_mirrors_the_unread_state(
 
 
 def test_the_systray_icon_gives_up_without_a_tray(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(returning(False)),
+        QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(returning(False)),
     )
     systray = window.systray
     tray = katzen.MixSystrayIcon(window, QIcon())
@@ -632,13 +663,16 @@ def test_the_systray_icon_gives_up_without_a_tray(
 
 @pytest.mark.asyncio
 async def test_the_io_thread_reports_a_failed_tally_reconcile(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def boom() -> None:
         raise RuntimeError("log unreadable")
 
     monkeypatch.setattr(
-        katzen.tally_controller.INSTANCE, "reconcile_from_log", boom,
+        katzen.tally_controller.INSTANCE,
+        "reconcile_from_log",
+        boom,
     )
     caplog.set_level(logging.ERROR, logger="katzen")
     thread = katzen.AsyncioThread()
@@ -656,7 +690,9 @@ async def test_the_io_thread_reconciles_the_tally_quietly(
         calls.append(1)
 
     monkeypatch.setattr(
-        katzen.tally_controller.INSTANCE, "reconcile_from_log", reconcile,
+        katzen.tally_controller.INSTANCE,
+        "reconcile_from_log",
+        reconcile,
     )
     thread = katzen.AsyncioThread()
     await thread.reconcile_tally_once()
@@ -753,6 +789,8 @@ async def test_waiting_gives_up_on_a_dead_io_thread(
 
 
 def test_the_resolved_attachment_defaults_to_received() -> None:
-    resolved = katzen._ResolvedAttachment("a.txt", "text/plain", Path("/a.txt"))
+    resolved = katzen._ResolvedAttachment(
+        "a.txt", "text/plain", Path("/a.txt")
+    )
     assert resolved.received is True
     assert resolved.basename == "a.txt"

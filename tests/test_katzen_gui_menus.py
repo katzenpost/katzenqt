@@ -65,7 +65,8 @@ def nothing(menu: QMenu) -> QAction | None:
 
 
 def peer_position(
-    win: katzen.MainWindow, item: katzen.QStandardItem,
+    win: katzen.MainWindow,
+    item: katzen.QStandardItem,
 ) -> QPoint:
     tree = win.ui.contacts_treeWidget
     source = win.all_contacts.indexFromItem(item)
@@ -90,8 +91,11 @@ def peer_named(win: katzen.MainWindow, name: str) -> katzen.QStandardItem:
 @pytest.fixture()
 def pauses(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[uuid.UUID]]:
     calls: dict[str, list[uuid.UUID]] = {
-        "pause_read": [], "resume_read": [],
-        "pause_upload": [], "resume_upload": [], "cancel_upload": [],
+        "pause_read": [],
+        "resume_read": [],
+        "pause_upload": [],
+        "resume_upload": [],
+        "cancel_upload": [],
         "dismiss": [],
     }
 
@@ -102,29 +106,42 @@ def pauses(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[uuid.UUID]]:
         return record
 
     monkeypatch.setattr(
-        network, "pause_peer_reads", recorder("pause_read", "bacap_stream"),
+        network,
+        "pause_peer_reads",
+        recorder("pause_read", "bacap_stream"),
     )
     monkeypatch.setattr(
-        network, "resume_peer_reads", recorder("resume_read", "bacap_stream"),
+        network,
+        "resume_peer_reads",
+        recorder("resume_read", "bacap_stream"),
     )
     monkeypatch.setattr(
-        network, "pause_upload", recorder("pause_upload", "rcw_id"),
+        network,
+        "pause_upload",
+        recorder("pause_upload", "rcw_id"),
     )
     monkeypatch.setattr(
-        network, "resume_upload", recorder("resume_upload", "rcw_id"),
+        network,
+        "resume_upload",
+        recorder("resume_upload", "rcw_id"),
     )
     monkeypatch.setattr(
-        network, "cancel_upload", recorder("cancel_upload", "rcw_id"),
+        network,
+        "cancel_upload",
+        recorder("cancel_upload", "rcw_id"),
     )
     monkeypatch.setattr(
-        network, "dismiss_failed_transfer", recorder("dismiss", "bacap_stream"),
+        network,
+        "dismiss_failed_transfer",
+        recorder("dismiss", "bacap_stream"),
     )
     return calls
 
 
 @pytest.mark.asyncio
 async def test_a_click_off_any_row_offers_no_peer_menu(
-    loaded_window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    loaded_window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     chosen(nothing)
@@ -134,7 +151,8 @@ async def test_a_click_off_any_row_offers_no_peer_menu(
 
 @pytest.mark.asyncio
 async def test_a_click_on_a_conversation_row_offers_no_peer_menu(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     seeded = await seed_conversation(peers=("bob",))
@@ -152,7 +170,8 @@ async def test_a_click_on_a_conversation_row_offers_no_peer_menu(
 
 @pytest.mark.asyncio
 async def test_our_own_peer_row_offers_no_menu(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     seeded = await seed_conversation(peers=("bob",))
@@ -168,7 +187,8 @@ async def test_our_own_peer_row_offers_no_menu(
 
 @pytest.mark.asyncio
 async def test_pausing_a_peer_stops_reading_its_stream(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     seeded = await seed_conversation(peers=("bob",))
@@ -186,7 +206,8 @@ async def test_pausing_a_peer_stops_reading_its_stream(
 
 @pytest.mark.asyncio
 async def test_resuming_a_paused_peer_restarts_its_stream(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     seeded = await seed_conversation(peers=("bob",))
@@ -210,7 +231,8 @@ async def test_resuming_a_paused_peer_restarts_its_stream(
 
 @pytest.mark.asyncio
 async def test_dismissing_the_peer_menu_changes_nothing(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     seeded = await seed_conversation(peers=("bob",))
@@ -240,7 +262,8 @@ def add_download(win: katzen.MainWindow, stream: uuid.UUID) -> None:
 
 @pytest.mark.asyncio
 async def test_a_click_off_any_transfer_row_offers_no_menu(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     chosen(nothing)
@@ -250,15 +273,20 @@ async def test_a_click_off_any_transfer_row_offers_no_menu(
 
 @pytest.mark.asyncio
 async def test_pausing_a_download_from_the_transfers_menu(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     stream = uuid.uuid4()
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.ReadCapWAL(id=stream, read_cap=b"r" * 136))
-        sess.add(persistent.ConversationPeer(
-            name=":substream:1:aa", read_cap_id=stream, active=True,
-        ))
+        sess.add(
+            persistent.ConversationPeer(
+                name=":substream:1:aa",
+                read_cap_id=stream,
+                active=True,
+            )
+        )
         sess.commit()
     window.show()
     add_download(window, stream)
@@ -269,17 +297,26 @@ async def test_pausing_a_download_from_the_transfers_menu(
 
 @pytest.mark.asyncio
 async def test_resuming_a_paused_download_from_the_transfers_menu(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     stream = uuid.uuid4()
     with persistent.Session(persistent._engine_sync) as sess:
-        sess.add(persistent.ReadCapWAL(
-            id=stream, read_cap=b"r" * 136, paused=True,
-        ))
-        sess.add(persistent.ConversationPeer(
-            name=":substream:1:aa", read_cap_id=stream, active=True,
-        ))
+        sess.add(
+            persistent.ReadCapWAL(
+                id=stream,
+                read_cap=b"r" * 136,
+                paused=True,
+            )
+        )
+        sess.add(
+            persistent.ConversationPeer(
+                name=":substream:1:aa",
+                read_cap_id=stream,
+                active=True,
+            )
+        )
         sess.commit()
     window.show()
     add_download(window, stream)
@@ -290,7 +327,8 @@ async def test_resuming_a_paused_download_from_the_transfers_menu(
 
 @pytest.mark.asyncio
 async def test_removing_a_failed_transfer_drops_its_row(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     stream = uuid.uuid4()
@@ -305,7 +343,8 @@ async def test_removing_a_failed_transfer_drops_its_row(
 
 @pytest.mark.asyncio
 async def test_dismissing_the_failed_transfer_menu_keeps_the_row(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     stream = uuid.uuid4()
@@ -320,13 +359,19 @@ async def test_dismissing_the_failed_transfer_menu_keeps_the_row(
 
 @pytest.mark.asyncio
 async def test_pausing_and_resuming_an_upload(
-    window: katzen.MainWindow, chosen: Callable[[Pick], None],
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
     pauses: dict[str, list[uuid.UUID]],
 ) -> None:
     stream = uuid.uuid4()
     window.show()
     window.transfers_model.start_transfer(
-        stream, 1, "pic.png (in bob)", 4, direction="upload", raw_bytes=99,
+        stream,
+        1,
+        "pic.png (in bob)",
+        4,
+        direction="upload",
+        raw_bytes=99,
     )
     window.transfers_view.resize(600, 200)
     chosen(by_text("Pause upload"))
@@ -357,7 +402,11 @@ async def test_cancelling_an_upload_needs_confirmation(
     stream = uuid.uuid4()
     window.show()
     window.transfers_model.start_transfer(
-        stream, 1, "pic.png", 4, direction="upload",
+        stream,
+        1,
+        "pic.png",
+        4,
+        direction="upload",
     )
     window.transfers_view.resize(600, 200)
     chosen(by_text("Cancel upload"))
@@ -383,7 +432,11 @@ async def test_a_confirmed_upload_cancel_is_dispatched(
     stream = uuid.uuid4()
     window.show()
     window.transfers_model.start_transfer(
-        stream, 1, "pic.png", 4, direction="upload",
+        stream,
+        1,
+        "pic.png",
+        4,
+        direction="upload",
     )
     window.transfers_view.resize(600, 200)
     chosen(by_text("Cancel upload"))
@@ -393,7 +446,8 @@ async def test_a_confirmed_upload_cancel_is_dispatched(
 
 @pytest.mark.asyncio
 async def test_the_test_shortcut_round_trips_a_keypair(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tested: list[tuple[bytes, bytes]] = []
 
@@ -401,7 +455,9 @@ async def test_the_test_shortcut_round_trips_a_keypair(
         return b"write", b"read"
 
     async def test_keypair(
-        client: object, write_cap: bytes, read_cap: bytes,
+        client: object,
+        write_cap: bytes,
+        read_cap: bytes,
     ) -> None:
         tested.append((write_cap, read_cap))
 
@@ -442,7 +498,8 @@ async def test_a_substream_peer_never_reaches_the_contacts_tree(
 
 @pytest.mark.asyncio
 async def test_a_cancelled_display_name_prompt_creates_nothing(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     answers = [1, 0]
 
@@ -467,7 +524,8 @@ async def test_a_new_poll_without_a_conversation_does_nothing(
 
 @pytest.mark.asyncio
 async def test_the_join_loop_waits_for_the_daemon_connection(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window.iothread.kp_client = None
 
@@ -488,29 +546,45 @@ async def test_a_body_that_is_not_cbor_at_all_is_not_an_attachment(
 ) -> None:
     message_uuid = uuid.uuid4()
     with persistent.Session(persistent._engine_sync) as sess:
-        sess.add(persistent.ConversationLog(
-            id=message_uuid, conversation_id=1, conversation_peer_id=1,
-            conversation_order=0, payload=b"F\x9f",
-        ))
+        sess.add(
+            persistent.ConversationLog(
+                id=message_uuid,
+                conversation_id=1,
+                conversation_peer_id=1,
+                conversation_order=0,
+                payload=b"F\x9f",
+            )
+        )
         sess.commit()
     assert window._resolve_attachment(str(message_uuid)) is None
 
 
 @pytest.mark.asyncio
 async def test_a_sent_attachment_whose_source_moved_is_refused(
-    window: katzen.MainWindow, tmp_path: Path,
+    window: katzen.MainWindow,
+    tmp_path: Path,
 ) -> None:
     message_uuid = uuid.uuid4()
     gone = tmp_path / "moved-away.txt"
-    payload = b"F" + cbor2.dumps({
-        "kind": "file_outgoing", "basename": "moved-away.txt",
-        "filetype": "text/plain", "src_path": str(gone),
-    })
+    payload = b"F" + cbor2.dumps(
+        {
+            "kind": "file_outgoing",
+            "basename": "moved-away.txt",
+            "filetype": "text/plain",
+            "src_path": str(gone),
+        }
+    )
     with persistent.Session(persistent._engine_sync) as sess:
-        sess.add(persistent.ConversationLog(
-            id=message_uuid, conversation_id=1, conversation_peer_id=1,
-            conversation_order=0, payload=payload, network_status=2,
-        ))
+        sess.add(
+            persistent.ConversationLog(
+                id=message_uuid,
+                conversation_id=1,
+                conversation_peer_id=1,
+                conversation_order=0,
+                payload=payload,
+                network_status=2,
+            )
+        )
         sess.commit()
     with pytest.raises(katzen._AttachmentError) as caught:
         window._resolve_attachment(str(message_uuid))
@@ -522,7 +596,8 @@ async def test_a_sent_attachment_whose_source_moved_is_refused(
 
 @pytest.mark.asyncio
 async def test_push_to_talk_without_an_engine_records_nothing(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(loaded_window, "_push_to_talk_audio", ignore)
     loaded_window.push_to_talk_start()
@@ -551,16 +626,17 @@ async def test_a_poll_window_whose_survey_vanished_is_left_alone(
 ) -> None:
     convo_id = loaded_window.convo_state().conversation_id
     survey_id = await katzen._io_tally_create(
-        convo_id, "Gone?", tally_schema.Mode.APPROVAL, ["yes"],
+        convo_id,
+        "Gone?",
+        tally_schema.Mode.APPROVAL,
+        ["yes"],
     )
     assert survey_id is not None
     loaded_window.openPoll(survey_id.hex())
     panel = loaded_window._poll_windows[(convo_id, survey_id)]
     panel.hide()
     with persistent.Session(persistent._engine_sync) as sess:
-        for row in sess.exec(
-            persistent.select(persistent.TallyState)
-        ).all():
+        for row in sess.exec(persistent.select(persistent.TallyState)).all():
             sess.delete(row)
         sess.commit()
     loaded_window._open_poll_window(convo_id, survey_id)
@@ -612,7 +688,10 @@ async def test_an_inducted_member_already_in_the_database_is_tagged(
         return 1
 
     async def induct(
-        client: object, conversation_id: int, name: str, voucher: bytes,
+        client: object,
+        conversation_id: int,
+        name: str,
+        voucher: bytes,
     ) -> str:
         return "carol"
 
@@ -639,7 +718,9 @@ async def test_selecting_nothing_leaves_the_chat_view_alone(
     assert loaded_window.ui.ContactName.text() == before
 
 
-def answering(verdict: bool) -> Callable[[QDialog], "Coroutine[object, object, int]"]:
+def answering(
+    verdict: bool,
+) -> Callable[[QDialog], "Coroutine[object, object, int]"]:
     async def answer(dialog: QDialog) -> int:
         if verdict:
             return int(QMessageBox.StandardButton.Yes)
@@ -679,7 +760,9 @@ async def test_removing_a_group_chat_from_its_row_menu(
     conv_id = await _shown(window)
     confirms(True)
     chosen(by_text("Remove group chat..."))
-    await window.peer_context_menu(peer_position(window, conversation_row(window)))
+    await window.peer_context_menu(
+        peer_position(window, conversation_row(window))
+    )
 
     assert conv_id not in window.conversation_state_by_id
     async with persistent.asession() as sess:
@@ -695,7 +778,9 @@ async def test_declining_the_group_chat_removal_keeps_it(
     conv_id = await _shown(window)
     confirms(False)
     chosen(by_text("Remove group chat..."))
-    await window.peer_context_menu(peer_position(window, conversation_row(window)))
+    await window.peer_context_menu(
+        peer_position(window, conversation_row(window))
+    )
 
     assert conv_id in window.conversation_state_by_id
     async with persistent.asession() as sess:
@@ -719,7 +804,9 @@ async def test_a_failed_group_chat_removal_is_reported(
     monkeypatch.setattr(katzen.removal, "remove_conversation", explode)
     confirms(True)
     chosen(by_text("Remove group chat..."))
-    await window.peer_context_menu(peer_position(window, conversation_row(window)))
+    await window.peer_context_menu(
+        peer_position(window, conversation_row(window))
+    )
 
     assert [type(e) for e in reported] == [RuntimeError]
     assert conv_id in window.conversation_state_by_id
@@ -740,7 +827,9 @@ async def test_removing_a_peer_from_its_row_menu(
     async with persistent.asession() as sess:
         names = [
             p.name
-            for p in (await sess.exec(select(persistent.ConversationPeer))).all()
+            for p in (
+                await sess.exec(select(persistent.ConversationPeer))
+            ).all()
         ]
     assert "bob" not in names
 
@@ -760,7 +849,9 @@ async def test_declining_the_peer_removal_keeps_them(
     async with persistent.asession() as sess:
         names = [
             p.name
-            for p in (await sess.exec(select(persistent.ConversationPeer))).all()
+            for p in (
+                await sess.exec(select(persistent.ConversationPeer))
+            ).all()
         ]
     assert "bob" in names
 
@@ -866,7 +957,9 @@ async def test_a_row_the_proxy_cannot_map_back_names_no_contact(
     tree = window.ui.contacts_treeWidget
     pos = peer_position(window, conversation_row(window))
     monkeypatch.setattr(
-        tree.model(), "mapToSource", returning(QModelIndex()),
+        tree.model(),
+        "mapToSource",
+        returning(QModelIndex()),
     )
 
     assert window._contact_item_at(pos) is None

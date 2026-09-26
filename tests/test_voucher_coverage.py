@@ -45,14 +45,16 @@ class _Opened:
 
 
 class MintingThinClient(FakeThinClient):
-
     def __init__(self) -> None:
         super().__init__()
         self.mint_calls: "list[tuple[bytes, str]]" = []
         self.payload = b"joiner voucher payload"
 
     async def voucher_mint(
-        self, *, message_write_cap: bytes, display_name: str,
+        self,
+        *,
+        message_write_cap: bytes,
+        display_name: str,
     ) -> _Mint:
         self.mint_calls.append((message_write_cap, display_name))
         keypair = await self.new_keypair(seed=bytes([0x11]) * 32)
@@ -76,7 +78,11 @@ class InductingConnection:
         )
 
     async def voucher_induct(
-        self, *, voucher: bytes, voucher_payload: bytes, who_reply: bytes,
+        self,
+        *,
+        voucher: bytes,
+        voucher_payload: bytes,
+        who_reply: bytes,
     ) -> _Inducted:
         self.induct_calls += 1
         return _Inducted(
@@ -91,7 +97,10 @@ class OpeningConnection:
         self._who_reply = who_reply
 
     async def voucher_open(
-        self, *, voucher_secret_key: bytes, sealed_reply: bytes,
+        self,
+        *,
+        voucher_secret_key: bytes,
+        sealed_reply: bytes,
         message_write_cap: bytes,
     ) -> _Opened:
         return _Opened(
@@ -101,19 +110,29 @@ class OpeningConnection:
 
 
 async def _make_conversation(
-    name: str = "demo", *, write_cap: "bytes | None" = _PROVISIONED_WRITE_CAP,
+    name: str = "demo",
+    *,
+    write_cap: "bytes | None" = _PROVISIONED_WRITE_CAP,
 ) -> int:
     wcapwal = persistent.WriteCapWAL(
-        id=uuid.uuid4(), write_cap=write_cap,
+        id=uuid.uuid4(),
+        write_cap=write_cap,
         next_index=None if write_cap is None else write_cap[-104:],
     )
     rcapwal = persistent.ReadCapWAL(
-        id=uuid.uuid4(), write_cap_id=wcapwal.id,
-        read_cap=bytes(136), next_index=bytes(104),
+        id=uuid.uuid4(),
+        write_cap_id=wcapwal.id,
+        read_cap=bytes(136),
+        next_index=bytes(104),
     )
-    convo = persistent.Conversation(name=name, write_cap=wcapwal.id, first_unread=0)
+    convo = persistent.Conversation(
+        name=name, write_cap=wcapwal.id, first_unread=0
+    )
     own_peer = persistent.ConversationPeer(
-        name="me", read_cap_id=rcapwal.id, active=False, conversation=convo,
+        name="me",
+        read_cap_id=rcapwal.id,
+        active=False,
+        conversation=convo,
     )
     convo.own_peer = own_peer
     async with persistent.asession() as sess:
@@ -129,12 +148,17 @@ async def _make_conversation(
 
 async def _add_pending_joiner(conversation_id: int) -> None:
     async with persistent.asession() as sess:
-        sess.add(persistent.PendingVoucher(
-            role="joiner", conversation_id=conversation_id,
-            step=voucher.STEP_AWAITING, voucher=bytes([0x22]) * 32,
-            voucher_secret_key=bytes([0x33]) * 32,
-            box1_index=bytes(104), voucher_read_cap=bytes(136),
-        ))
+        sess.add(
+            persistent.PendingVoucher(
+                role="joiner",
+                conversation_id=conversation_id,
+                step=voucher.STEP_AWAITING,
+                voucher=bytes([0x22]) * 32,
+                voucher_secret_key=bytes([0x33]) * 32,
+                box1_index=bytes(104),
+                voucher_read_cap=bytes(136),
+            )
+        )
         await sess.commit()
 
 
@@ -156,7 +180,9 @@ async def test_an_unknown_conversation_is_not_joined() -> None:
 async def test_minting_refuses_a_conversation_without_a_write_cap() -> None:
     conversation_id = await _make_conversation(write_cap=None)
     with pytest.raises(RuntimeError, match="no provisioned write cap"):
-        await voucher.mint_and_publish(MintingThinClient(), conversation_id, "me")
+        await voucher.mint_and_publish(
+            MintingThinClient(), conversation_id, "me"
+        )
 
 
 @pytest.mark.asyncio
@@ -177,9 +203,10 @@ async def test_minting_publishes_box0_and_records_the_box1_index() -> None:
         assert pending.voucher_write_cap is not None
         voucher_write_cap = pending.voucher_write_cap
 
-    assert client.box_store[
-        (voucher_write_cap[32:], voucher_write_cap[-104:])
-    ] == client.payload
+    assert (
+        client.box_store[(voucher_write_cap[32:], voucher_write_cap[-104:])]
+        == client.payload
+    )
 
 
 @pytest.mark.asyncio
@@ -191,14 +218,21 @@ async def test_awaiting_without_a_pending_voucher_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_opening_caps_the_members_it_takes_from_the_reply(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     conversation_id = await _make_conversation()
     await _add_pending_joiner(conversation_id)
-    who_reply = models.GroupChatReplyWho(please_adds=[
-        models.GroupChatPleaseAdd(display_name="alice", read_cap=bytes([0x05]) * 136),
-        models.GroupChatPleaseAdd(display_name="bob", read_cap=bytes([0x06]) * 136),
-    ])
+    who_reply = models.GroupChatReplyWho(
+        please_adds=[
+            models.GroupChatPleaseAdd(
+                display_name="alice", read_cap=bytes([0x05]) * 136
+            ),
+            models.GroupChatPleaseAdd(
+                display_name="bob", read_cap=bytes([0x06]) * 136
+            ),
+        ]
+    )
 
     async def read_box(*_a: object, **_k: object) -> "tuple[bytes, bytes]":
         return (b"sealed reply", bytes(104))
@@ -208,7 +242,8 @@ async def test_opening_caps_the_members_it_takes_from_the_reply(
 
     with caplog.at_level(logging.WARNING):
         added = await voucher.await_and_open(
-            OpeningConnection(who_reply.to_cbor()), conversation_id,
+            OpeningConnection(who_reply.to_cbor()),
+            conversation_id,
         )
 
     assert added == []
@@ -222,9 +257,13 @@ async def test_opening_adds_the_members_named_in_the_reply(
 ) -> None:
     conversation_id = await _make_conversation()
     await _add_pending_joiner(conversation_id)
-    who_reply = models.GroupChatReplyWho(please_adds=[
-        models.GroupChatPleaseAdd(display_name="alice", read_cap=bytes([0x05]) * 136),
-    ])
+    who_reply = models.GroupChatReplyWho(
+        please_adds=[
+            models.GroupChatPleaseAdd(
+                display_name="alice", read_cap=bytes([0x05]) * 136
+            ),
+        ]
+    )
 
     async def read_box(*_a: object, **_k: object) -> "tuple[bytes, bytes]":
         return (b"sealed reply", bytes(104))
@@ -232,7 +271,8 @@ async def test_opening_adds_the_members_named_in_the_reply(
     monkeypatch.setattr(voucher, "_read_box", read_box)
 
     added = await voucher.await_and_open(
-        OpeningConnection(who_reply.to_cbor()), conversation_id,
+        OpeningConnection(who_reply.to_cbor()),
+        conversation_id,
     )
 
     assert added == ["alice"]
@@ -241,7 +281,8 @@ async def test_opening_adds_the_members_named_in_the_reply(
 
 @pytest.mark.asyncio
 async def test_inducting_refuses_once_the_group_is_at_capacity(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     conversation_id = await _make_conversation()
 
@@ -253,7 +294,9 @@ async def test_inducting_refuses_once_the_group_is_at_capacity(
 
     announced: "list[tuple[int, str, bytes]]" = []
 
-    async def send_intro(cid: int, display_name: str, read_cap: bytes) -> None:
+    async def send_intro(
+        cid: int, display_name: str, read_cap: bytes
+    ) -> None:
         announced.append((cid, display_name, read_cap))
 
     monkeypatch.setattr(voucher, "_read_box", read_box)
@@ -263,7 +306,10 @@ async def test_inducting_refuses_once_the_group_is_at_capacity(
 
     with caplog.at_level(logging.WARNING):
         joined = await voucher.derive_read_and_induct(
-            InductingConnection(), conversation_id, "bob", bytes([0x22]) * 32,
+            InductingConnection(),
+            conversation_id,
+            "bob",
+            bytes([0x22]) * 32,
         )
 
     assert joined is None
@@ -274,7 +320,8 @@ async def test_inducting_refuses_once_the_group_is_at_capacity(
 
 @pytest.mark.asyncio
 async def test_an_unacked_introduction_is_reported_not_raised(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def never_sent(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
         return False

@@ -13,8 +13,9 @@ from tests.stubs import ignore, returning
 
 @pytest.fixture
 def _restore_logging() -> Iterator[None]:
-    loggers = [logging.getLogger(n)
-               for n in sorted(logging.root.manager.loggerDict)]
+    loggers = [
+        logging.getLogger(n) for n in sorted(logging.root.manager.loggerDict)
+    ]
     loggers.append(logging.root)
     saved = {
         lg: (list(lg.handlers), lg.level, lg.propagate, lg.disabled)
@@ -59,7 +60,8 @@ async def test_connect_delegates_to_network_reconnect(
 
 
 def test_log_level_override_sets_the_root_level(
-    monkeypatch: pytest.MonkeyPatch, _restore_logging: None,
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
 ) -> None:
     monkeypatch.setenv("KQT_LOG_LEVEL", "debug")
     headless._configure_logging()
@@ -67,7 +69,8 @@ def test_log_level_override_sets_the_root_level(
 
 
 def test_an_unknown_log_level_falls_back_to_info(
-    monkeypatch: pytest.MonkeyPatch, _restore_logging: None,
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
 ) -> None:
     monkeypatch.setenv("KQT_LOG_LEVEL", "not-a-level")
     headless._configure_logging()
@@ -75,7 +78,8 @@ def test_an_unknown_log_level_falls_back_to_info(
 
 
 def test_quiet_default_clamps_the_handlers(
-    monkeypatch: pytest.MonkeyPatch, _restore_logging: None,
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
 ) -> None:
     monkeypatch.delenv("KQT_LOG_LEVEL", raising=False)
     headless._configure_logging()
@@ -84,8 +88,10 @@ def test_quiet_default_clamps_the_handlers(
 
 
 def test_verbose_mode_turns_on_engine_echo(
-    monkeypatch: pytest.MonkeyPatch, _restore_logging: None,
-    _restore_echo: None, _no_migrate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
+    _restore_echo: None,
+    _no_migrate: None,
 ) -> None:
     monkeypatch.setenv("KQT_LOG_LEVEL", "INFO")
     persistent._engine.echo = False
@@ -96,8 +102,10 @@ def test_verbose_mode_turns_on_engine_echo(
 
 
 def test_quiet_mode_leaves_engine_echo_off(
-    monkeypatch: pytest.MonkeyPatch, _restore_logging: None,
-    _restore_echo: None, _no_migrate: None,
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
+    _restore_echo: None,
+    _no_migrate: None,
 ) -> None:
     monkeypatch.delenv("KQT_LOG_LEVEL", raising=False)
     persistent._engine.echo = True
@@ -108,8 +116,11 @@ def test_quiet_mode_leaves_engine_echo_off(
 
 
 def test_a_vanished_temp_config_does_not_break_the_exit(
-    monkeypatch: pytest.MonkeyPatch, _restore_logging: None,
-    _restore_echo: None, _no_migrate: None, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
+    _restore_echo: None,
+    _no_migrate: None,
+    tmp_path: Path,
 ) -> None:
     temp = tmp_path / "thinclient.toml"
     temp.write_text("")
@@ -121,7 +132,9 @@ def test_a_vanished_temp_config_does_not_break_the_exit(
         raise OSError("already gone")
 
     monkeypatch.setattr(
-        headless._actions, "resolve_connection_config", fake_resolve,
+        headless._actions,
+        "resolve_connection_config",
+        fake_resolve,
     )
     monkeypatch.setattr(headless._actions, "set_connection_config", ignore)
     monkeypatch.setattr(os, "remove", exploding_remove)
@@ -130,8 +143,11 @@ def test_a_vanished_temp_config_does_not_break_the_exit(
 
 
 def test_stragglers_are_cancelled_and_a_gone_temp_config_is_tolerated(
-    monkeypatch: pytest.MonkeyPatch, _restore_logging: None,
-    _restore_echo: None, _no_migrate: None, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
+    _restore_echo: None,
+    _no_migrate: None,
+    tmp_path: Path,
 ) -> None:
     import asyncio
 
@@ -154,11 +170,14 @@ def test_stragglers_are_cancelled_and_a_gone_temp_config_is_tolerated(
 
     monkeypatch.setattr(headless._actions, "_action_create_conv", fake_action)
     monkeypatch.setattr(
-        headless._actions, "resolve_connection_config",
+        headless._actions,
+        "resolve_connection_config",
         returning((str(temp), str(temp))),
     )
     monkeypatch.setattr(
-        headless._actions, "set_connection_config", ignore,
+        headless._actions,
+        "set_connection_config",
+        ignore,
     )
     monkeypatch.setattr(os, "remove", exploding_remove)
     monkeypatch.delenv("KQT_LOG_LEVEL", raising=False)

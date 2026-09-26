@@ -33,11 +33,16 @@ async def test_asession_awaits_the_close_when_cancelled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_for_sent_returns_false_when_the_deadline_has_passed(
-) -> None:
-    assert await persistent.wait_for_sent(
-        uuid.uuid4(), deadline_s=-1.0,
-    ) is False
+async def test_wait_for_sent_returns_false_when_the_deadline_has_passed() -> (
+    None
+):
+    assert (
+        await persistent.wait_for_sent(
+            uuid.uuid4(),
+            deadline_s=-1.0,
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -46,9 +51,14 @@ async def test_wait_for_sent_returns_true_once_the_row_is_there() -> None:
     async with persistent.asession() as sess:
         sess.add(persistent.SentLog(id=pwal_id))
         await sess.commit()
-    assert await persistent.wait_for_sent(
-        pwal_id, deadline_s=5.0, poll_s=0.01,
-    ) is True
+    assert (
+        await persistent.wait_for_sent(
+            pwal_id,
+            deadline_s=5.0,
+            poll_s=0.01,
+        )
+        is True
+    )
 
 
 def _mixwal(stream: uuid.UUID, pwal_id: uuid.UUID) -> persistent.MixWAL:
@@ -75,8 +85,13 @@ def test_mark_sent_txn_reaps_the_mixwal_when_the_pwal_is_gone() -> None:
         mw_id = mw.id
 
     result = persistent._mark_sent_txn(
-        mw_id, stream, missing_pwal, False,
-        b"\x02" * 104, b"\x02" * 104, b"\x01" * 104,
+        mw_id,
+        stream,
+        missing_pwal,
+        False,
+        b"\x02" * 104,
+        b"\x02" * 104,
+        b"\x01" * 104,
     )
     assert result is None
     with Session(persistent._engine_sync) as sess:
@@ -122,8 +137,13 @@ def test_mark_sent_txn_logs_a_missing_write_cap_and_a_stream_mismatch(
 
     with caplog.at_level("ERROR"):
         persistent._mark_sent_txn(
-            mw_id, other_stream, pwal_id, False,
-            b"\x02" * 104, b"\x02" * 104, b"\x01" * 104,
+            mw_id,
+            other_stream,
+            pwal_id,
+            False,
+            b"\x02" * 104,
+            b"\x02" * 104,
+            b"\x01" * 104,
         )
     assert "no WriteCapWAL for bacap_stream" in caplog.text
     assert "doesn't match pwal.bacap_stream" in caplog.text

@@ -15,8 +15,9 @@ from tests.stubs import ignore
 
 @pytest.fixture
 def preserved_logging() -> Iterator[None]:
-    loggers = [logging.getLogger(n)
-               for n in sorted(logging.root.manager.loggerDict)]
+    loggers = [
+        logging.getLogger(n) for n in sorted(logging.root.manager.loggerDict)
+    ]
     loggers.append(logging.root)
     saved = {
         lg: (list(lg.handlers), lg.level, lg.propagate, lg.disabled)
@@ -61,7 +62,8 @@ async def test_get_pki_document_comes_from_the_connection() -> None:
 
 
 def test_cli_tolerates_a_loop_without_signal_handlers(
-    monkeypatch: pytest.MonkeyPatch, preserved_logging: None,
+    monkeypatch: pytest.MonkeyPatch,
+    preserved_logging: None,
 ) -> None:
     real_new_loop = asyncio.new_event_loop
 

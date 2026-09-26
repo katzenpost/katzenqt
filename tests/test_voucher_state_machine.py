@@ -47,7 +47,6 @@ def _fresh_write_cap() -> bytes:
 
 
 class VoucherDaemon(FakeThinClient):
-
     def __init__(self) -> None:
         super().__init__()
         self.streams: dict[bytes, tuple[bytes, bytes, bytes]] = {}
@@ -55,14 +54,20 @@ class VoucherDaemon(FakeThinClient):
         self.tombstoned: set[tuple[bytes, bytes]] = set()
 
     async def voucher_mint(
-        self, message_write_cap: bytes, display_name: str,
+        self,
+        message_write_cap: bytes,
+        display_name: str,
     ) -> VoucherMintResult:
         voucher_write_cap = _fresh_write_cap()
         voucher_read_cap = voucher_write_cap[32:]
         secret = secrets.token_bytes(32)
         payload = voucher_read_cap + _pubkey(secret) + display_name.encode()
         token = hashlib.blake2b(payload, digest_size=32).digest()
-        self.streams[token] = (voucher_write_cap, voucher_read_cap, message_write_cap)
+        self.streams[token] = (
+            voucher_write_cap,
+            voucher_read_cap,
+            message_write_cap,
+        )
         result = VoucherMintResult(
             voucher=token,
             voucher_payload=payload,
@@ -74,24 +79,35 @@ class VoucherDaemon(FakeThinClient):
         self.mints.append(result)
         return result
 
-    async def voucher_derive_stream(self, voucher: bytes) -> VoucherStreamResult:
+    async def voucher_derive_stream(
+        self, voucher: bytes
+    ) -> VoucherStreamResult:
         write_cap, read_cap, _ = self.streams[voucher]
         return VoucherStreamResult(
-            voucher_write_cap=write_cap, voucher_read_cap=read_cap,
+            voucher_write_cap=write_cap,
+            voucher_read_cap=read_cap,
         )
 
     async def voucher_induct(
-        self, voucher: bytes, voucher_payload: bytes, who_reply: bytes,
+        self,
+        voucher: bytes,
+        voucher_payload: bytes,
+        who_reply: bytes,
     ) -> VoucherInductResult:
-        if hashlib.blake2b(voucher_payload, digest_size=32).digest() != voucher:
+        if (
+            hashlib.blake2b(voucher_payload, digest_size=32).digest()
+            != voucher
+        ):
             raise ValueError("voucher payload does not hash to the voucher")
         write_cap, read_cap, joiner_write_cap = self.streams[voucher]
         salt = secrets.token_bytes(32)
-        display_name = voucher_payload[_READ_CAP_LEN + 32:].decode()
-        pubkey = voucher_payload[_READ_CAP_LEN:_READ_CAP_LEN + 32]
+        display_name = voucher_payload[_READ_CAP_LEN + 32 :].decode()
+        pubkey = voucher_payload[_READ_CAP_LEN : _READ_CAP_LEN + 32]
         return VoucherInductResult(
             display_name=display_name,
-            mutated_message_read_cap=_mutate_read_cap(joiner_write_cap[32:], salt),
+            mutated_message_read_cap=_mutate_read_cap(
+                joiner_write_cap[32:], salt
+            ),
             sealed_reply=pubkey + salt + who_reply,
             voucher_write_cap=write_cap,
             voucher_read_cap=read_cap,
@@ -99,7 +115,9 @@ class VoucherDaemon(FakeThinClient):
         )
 
     async def voucher_open(
-        self, voucher_secret_key: bytes, sealed_reply: bytes,
+        self,
+        voucher_secret_key: bytes,
+        sealed_reply: bytes,
         message_write_cap: bytes,
     ) -> VoucherOpenResult:
         if sealed_reply[:32] != _pubkey(voucher_secret_key):
@@ -114,7 +132,6 @@ class VoucherDaemon(FakeThinClient):
 
 
 class Peer:
-
     def __init__(self, name: str, daemon: VoucherDaemon) -> None:
         self.name = name
         self.connection = cast("ThinClient", daemon)
@@ -123,16 +140,24 @@ class Peer:
 
     async def create_view(self) -> None:
         wcw = persistent.WriteCapWAL(
-            id=uuid.uuid4(), write_cap=self.write_cap,
+            id=uuid.uuid4(),
+            write_cap=self.write_cap,
             next_index=self.write_cap[-_INDEX:],
         )
         rcw = persistent.ReadCapWAL(
-            id=uuid.uuid4(), write_cap_id=wcw.id,
-            read_cap=self.write_cap[32:], next_index=self.write_cap[-_INDEX:],
+            id=uuid.uuid4(),
+            write_cap_id=wcw.id,
+            read_cap=self.write_cap[32:],
+            next_index=self.write_cap[-_INDEX:],
         )
-        convo = persistent.Conversation(name="group", write_cap=wcw.id, first_unread=0)
+        convo = persistent.Conversation(
+            name="group", write_cap=wcw.id, first_unread=0
+        )
         own = persistent.ConversationPeer(
-            name=self.name, read_cap_id=rcw.id, active=False, conversation=convo,
+            name=self.name,
+            read_cap_id=rcw.id,
+            active=False,
+            conversation=convo,
         )
         convo.own_peer = own
         async with persistent.asession() as sess:
@@ -146,32 +171,43 @@ class Peer:
 
     async def pending_step(self) -> str | None:
         async with persistent.asession() as sess:
-            row = (await sess.exec(
-                select(persistent.PendingVoucher).where(
-                    persistent.PendingVoucher.conversation_id == self.conversation_id,
+            row = (
+                await sess.exec(
+                    select(persistent.PendingVoucher).where(
+                        persistent.PendingVoucher.conversation_id
+                        == self.conversation_id,
+                    )
                 )
-            )).first()
+            ).first()
             return None if row is None else row.step
 
     async def members(self) -> list[tuple[str, bytes]]:
         async with persistent.asession() as sess:
-            rows = (await sess.exec(
-                select(persistent.ConversationPeer, persistent.ReadCapWAL)
-                .join(persistent.ConversationPeerLink)
-                .join(
-                    persistent.ReadCapWAL,
-                    col(persistent.ReadCapWAL.id) == col(persistent.ConversationPeer.read_cap_id),
+            rows = (
+                await sess.exec(
+                    select(persistent.ConversationPeer, persistent.ReadCapWAL)
+                    .join(persistent.ConversationPeerLink)
+                    .join(
+                        persistent.ReadCapWAL,
+                        col(persistent.ReadCapWAL.id)
+                        == col(persistent.ConversationPeer.read_cap_id),
+                    )
+                    .where(
+                        persistent.ConversationPeerLink.conversation_id
+                        == self.conversation_id,
+                        col(persistent.ConversationPeer.active).is_(True),
+                    )
                 )
-                .where(
-                    persistent.ConversationPeerLink.conversation_id == self.conversation_id,
-                    col(persistent.ConversationPeer.active).is_(True),
-                )
-            )).all()
-            return sorted((peer.name, rcw.read_cap or b"") for peer, rcw in rows)
+            ).all()
+            return sorted(
+                (peer.name, rcw.read_cap or b"") for peer, rcw in rows
+            )
 
     async def current_write_cap(self) -> bytes:
         async with persistent.asession() as sess:
-            convo = await sess.get(persistent.Conversation, self.conversation_id)
+            convo = await sess.get(
+                persistent.Conversation, self.conversation_id
+            )
             assert convo is not None
             wcw = await sess.get(persistent.WriteCapWAL, convo.write_cap)
             assert wcw is not None and wcw.write_cap is not None
@@ -179,8 +215,10 @@ class Peer:
 
 
 async def _check_transition(
-    peer: Peer, table: dict[str | None, dict[str, str | None]],
-    before: str | None, action: str,
+    peer: Peer,
+    table: dict[str | None, dict[str, str | None]],
+    before: str | None,
+    action: str,
 ) -> None:
     assert action in table[before], (
         f"{peer.name}: {action!r} is not a legal transition from {before!r}"
@@ -188,32 +226,50 @@ async def _check_transition(
     expected = table[before][action]
     after = await peer.pending_step()
     assert after == expected, (
-        f"{peer.name}: {action} left the row at {after!r}, expected {expected!r}"
+        f"{peer.name}: {action} left the row at {after!r}, "
+        f"expected {expected!r}"
     )
 
 
 async def _induct(
-    daemon: VoucherDaemon, joiner: Peer, inductor: Peer,
+    daemon: VoucherDaemon,
+    joiner: Peer,
+    inductor: Peer,
 ) -> None:
     before = await joiner.pending_step()
     token = await voucher.mint_and_publish(
-        joiner.connection, joiner.conversation_id, joiner.name,
+        joiner.connection,
+        joiner.conversation_id,
+        joiner.name,
     )
     await _check_transition(joiner, JOINER_STEPS, before, "mint_and_publish")
     mint = daemon.mints[-1]
     index0 = mint.voucher_write_cap[-_INDEX:]
-    assert daemon.box_store[(mint.voucher_read_cap, index0)] == mint.voucher_payload
-    assert hashlib.blake2b(mint.voucher_payload, digest_size=32).digest() == token
+    assert (
+        daemon.box_store[(mint.voucher_read_cap, index0)]
+        == mint.voucher_payload
+    )
+    assert (
+        hashlib.blake2b(mint.voucher_payload, digest_size=32).digest()
+        == token
+    )
 
     before = await inductor.pending_step()
     added_name = await voucher.derive_read_and_induct(
-        inductor.connection, inductor.conversation_id, joiner.name, token,
+        inductor.connection,
+        inductor.conversation_id,
+        joiner.name,
+        token,
     )
-    await _check_transition(inductor, INDUCTOR_STEPS, before, "derive_read_and_induct")
+    await _check_transition(
+        inductor, INDUCTOR_STEPS, before, "derive_read_and_induct"
+    )
     assert added_name == joiner.name
 
     before = await joiner.pending_step()
-    added = await voucher.await_and_open(joiner.connection, joiner.conversation_id)
+    added = await voucher.await_and_open(
+        joiner.connection, joiner.conversation_id
+    )
     await _check_transition(joiner, JOINER_STEPS, before, "await_and_open")
     assert inductor.name in added
     assert await voucher.voucher_used_for(joiner.conversation_id) is True
@@ -249,17 +305,23 @@ class _StarSweep:
 
     @pytest.mark.asyncio
     async def test_every_peer_holds_every_other_peers_read_cap(
-        self, daemon: VoucherDaemon,
+        self,
+        daemon: VoucherDaemon,
     ) -> None:
         peers = await _grow_star(daemon, type(self).n)
         creator = peers[0]
-        expected = {p.name: (await p.current_write_cap())[32:] for p in peers[1:]}
+        expected = {
+            p.name: (await p.current_write_cap())[32:] for p in peers[1:]
+        }
         assert dict(await creator.members()) == expected
         last = peers[-1]
         last_view = dict(await last.members())
         assert set(last_view) == {p.name for p in peers[:-1]}
         for other in peers[1:-1]:
-            assert last_view[other.name] == (await other.current_write_cap())[32:]
+            assert (
+                last_view[other.name]
+                == (await other.current_write_cap())[32:]
+            )
 
 
 class TestPeers2(_StarSweep):
@@ -314,7 +376,9 @@ async def test_a_chain_inductor_advertises_its_current_mutated_cap(
 
 
 async def _fill_group(
-    daemon: VoucherDaemon, monkeypatch: pytest.MonkeyPatch, cap: int,
+    daemon: VoucherDaemon,
+    monkeypatch: pytest.MonkeyPatch,
+    cap: int,
 ) -> tuple[Peer, Peer, bytes]:
     monkeypatch.setattr(voucher, "MAX_GROUP_MEMBERS", cap)
     peers = await _grow_star(daemon, cap + 1)
@@ -323,18 +387,24 @@ async def _fill_group(
     extra = Peer("one_too_many", daemon)
     await extra.create_view()
     token = await voucher.mint_and_publish(
-        extra.connection, extra.conversation_id, extra.name,
+        extra.connection,
+        extra.conversation_id,
+        extra.name,
     )
     return creator, extra, token
 
 
 @pytest.mark.asyncio
 async def test_a_full_group_refuses_the_next_induction(
-    daemon: VoucherDaemon, monkeypatch: pytest.MonkeyPatch,
+    daemon: VoucherDaemon,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     creator, extra, token = await _fill_group(daemon, monkeypatch, cap=4)
     refused = await voucher.derive_read_and_induct(
-        creator.connection, creator.conversation_id, extra.name, token,
+        creator.connection,
+        creator.conversation_id,
+        extra.name,
+        token,
     )
     assert refused is None
     members = dict(await creator.members())
@@ -374,10 +444,14 @@ async def test_a_second_mint_while_one_is_pending_is_refused(
 ) -> None:
     joiner = Peer("eager", daemon)
     await joiner.create_view()
-    await voucher.mint_and_publish(joiner.connection, joiner.conversation_id, joiner.name)
+    await voucher.mint_and_publish(
+        joiner.connection, joiner.conversation_id, joiner.name
+    )
     with pytest.raises(voucher.PendingVoucherExistsError):
         await voucher.mint_and_publish(
-            joiner.connection, joiner.conversation_id, joiner.name,
+            joiner.connection,
+            joiner.conversation_id,
+            joiner.name,
         )
 
 
@@ -387,7 +461,9 @@ async def test_a_joined_peer_cannot_mint_again(daemon: VoucherDaemon) -> None:
     joiner = peers[1]
     with pytest.raises(voucher.AlreadyJoinedError):
         await voucher.mint_and_publish(
-            joiner.connection, joiner.conversation_id, joiner.name,
+            joiner.connection,
+            joiner.conversation_id,
+            joiner.name,
         )
 
 
@@ -400,14 +476,21 @@ async def test_a_tampered_payload_is_refused_by_induction(
     await joiner.create_view()
     await inductor.create_view()
     token = await voucher.mint_and_publish(
-        joiner.connection, joiner.conversation_id, joiner.name,
+        joiner.connection,
+        joiner.conversation_id,
+        joiner.name,
     )
     mint = daemon.mints[-1]
     index0 = mint.voucher_write_cap[-_INDEX:]
-    daemon.box_store[(mint.voucher_read_cap, index0)] = b"x" + mint.voucher_payload[1:]
+    daemon.box_store[(mint.voucher_read_cap, index0)] = (
+        b"x" + mint.voucher_payload[1:]
+    )
     with pytest.raises(Exception):
         await voucher.derive_read_and_induct(
-            inductor.connection, inductor.conversation_id, joiner.name, token,
+            inductor.connection,
+            inductor.conversation_id,
+            joiner.name,
+            token,
         )
     assert await inductor.members() == []
 

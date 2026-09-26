@@ -22,7 +22,8 @@ async def test_resend_loop_retries_when_the_connection_gate_says_no(
 
     monkeypatch.setattr(network, "_wait_for_connection_or_shutdown", gate)
     await asyncio.wait_for(
-        network.send_resendable_plaintexts(cast("object", None)), timeout=5,
+        network.send_resendable_plaintexts(cast("object", None)),
+        timeout=5,
     )
     assert len(calls) >= 2
     assert calls[0] == network._CONNECTION_IDLE_RETRY_S

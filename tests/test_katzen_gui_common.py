@@ -40,12 +40,13 @@ class RecordedBox(NamedTuple):
 
 
 class FakeMessageBox:
-
     Icon = QMessageBox.Icon
     StandardButton = QMessageBox.StandardButton
 
     seen: ClassVar[list[RecordedBox]] = []
-    answer: ClassVar[QMessageBox.StandardButton] = QMessageBox.StandardButton.No
+    answer: ClassVar[QMessageBox.StandardButton] = (
+        QMessageBox.StandardButton.No
+    )
 
     def __init__(
         self,
@@ -76,27 +77,36 @@ class FakeMessageBox:
         return type(self).answer
 
     @classmethod
-    def _record(cls, kind: str, title: str, text: str) -> (
-        QMessageBox.StandardButton
-    ):
+    def _record(
+        cls, kind: str, title: str, text: str
+    ) -> QMessageBox.StandardButton:
         cls.seen.append(RecordedBox(kind, title, text))
         return cls.answer
 
     @classmethod
     def warning(
-        cls, parent: QWidget | None, title: str, text: str,
+        cls,
+        parent: QWidget | None,
+        title: str,
+        text: str,
     ) -> QMessageBox.StandardButton:
         return cls._record("warning", title, text)
 
     @classmethod
     def critical(
-        cls, parent: QWidget | None, title: str, text: str,
+        cls,
+        parent: QWidget | None,
+        title: str,
+        text: str,
     ) -> QMessageBox.StandardButton:
         return cls._record("critical", title, text)
 
     @classmethod
     def information(
-        cls, parent: QWidget | None, title: str, text: str,
+        cls,
+        parent: QWidget | None,
+        title: str,
+        text: str,
     ) -> QMessageBox.StandardButton:
         return cls._record("information", title, text)
 
@@ -106,7 +116,6 @@ class FakeMessageBox:
 
 
 class FakeFileDialog:
-
     FileMode = QFileDialog.FileMode
     AcceptMode = QFileDialog.AcceptMode
     AcceptOpen = QFileDialog.AcceptMode.AcceptOpen
@@ -159,7 +168,6 @@ class VoiceDraft(NamedTuple):
 
 
 class FakeAudio:
-
     def __init__(self, root: Path) -> None:
         self.root = root
         self.drafts_dir = root / "drafts"
@@ -221,7 +229,10 @@ class FakeAudio:
         return error
 
     def cache_received_clip(
-        self, message_id: str, basename: str, payload: bytes,
+        self,
+        message_id: str,
+        basename: str,
+        payload: bytes,
     ) -> Path:
         path = self.received_dir / f"{message_id}-{basename}"
         path.write_bytes(payload)
@@ -236,7 +247,6 @@ class FakeAudio:
 
 
 class FakeIoThread:
-
     def __init__(self) -> None:
         self.kp_client = object()
         self.engine_warmed = threading.Event()
@@ -248,7 +258,8 @@ class FakeIoThread:
         return self.alive
 
     async def run_in_io(
-        self, coroutine: Coroutine[object, object, object],
+        self,
+        coroutine: Coroutine[object, object, object],
     ) -> object:
         self.ran += 1
         return await coroutine
@@ -313,7 +324,8 @@ def fresh_queues(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def audio(
-    window: katzen.MainWindow, tmp_path: Path,
+    window: katzen.MainWindow,
+    tmp_path: Path,
 ) -> FakeAudio:
     bridge = FakeAudio(tmp_path / "audio")
     window._ptt_audio = bridge
@@ -330,7 +342,8 @@ def boxes(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[FakeMessageBox]]:
 
 @pytest.fixture()
 def instant_timer(
-    boxes: type[FakeMessageBox], monkeypatch: pytest.MonkeyPatch,
+    boxes: type[FakeMessageBox],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fire(msec: int, callback: Callable[[], None]) -> None:
         callback()
@@ -346,29 +359,44 @@ class SeededConversation(NamedTuple):
 
 
 async def seed_conversation(
-    name: str = "testroom", own_name: str = "me", peers: tuple[str, ...] = (),
+    name: str = "testroom",
+    own_name: str = "me",
+    peers: tuple[str, ...] = (),
 ) -> SeededConversation:
     wcapwal = persistent.WriteCapWAL(id=uuid.uuid4())
     rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
     convo = persistent.Conversation(
-        name=name, write_cap=wcapwal.id, first_unread=0,
+        name=name,
+        write_cap=wcapwal.id,
+        first_unread=0,
     )
     own_peer = persistent.ConversationPeer(
-        name=own_name, read_cap_id=rcapwal.id, active=False, conversation=convo,
+        name=own_name,
+        read_cap_id=rcapwal.id,
+        active=False,
+        conversation=convo,
     )
     convo.own_peer = own_peer
     first_post = persistent.ConversationLog(
-        conversation=convo, conversation_peer=own_peer, conversation_order=0,
+        conversation=convo,
+        conversation_peer=own_peer,
+        conversation_order=0,
         payload=b"opening line",
     )
     extra: list[object] = []
     for peer_name in peers:
-        peer_rcap = persistent.ReadCapWAL(id=uuid.uuid4(), read_cap=b"r" * 136)
+        peer_rcap = persistent.ReadCapWAL(
+            id=uuid.uuid4(), read_cap=b"r" * 136
+        )
         extra.append(peer_rcap)
-        extra.append(persistent.ConversationPeer(
-            name=peer_name, read_cap_id=peer_rcap.id, active=True,
-            conversation=convo,
-        ))
+        extra.append(
+            persistent.ConversationPeer(
+                name=peer_name,
+                read_cap_id=peer_rcap.id,
+                active=True,
+                conversation=convo,
+            )
+        )
     async with persistent.asession() as sess:
         sess.add(wcapwal)
         sess.add(rcapwal)
@@ -383,12 +411,16 @@ async def seed_conversation(
         await sess.refresh(wcapwal)
         await sess.refresh(rcapwal)
         return SeededConversation(
-            convo.id, own_peer.id, wcapwal.id, rcapwal.id,
+            convo.id,
+            own_peer.id,
+            wcapwal.id,
+            rcapwal.id,
         )
 
 
 async def add_seeded_conversation(
-    win: katzen.MainWindow, conversation_id: int,
+    win: katzen.MainWindow,
+    conversation_id: int,
 ) -> None:
     with persistent.Session(persistent._engine_sync) as sess:
         convo = sess.get(persistent.Conversation, conversation_id)

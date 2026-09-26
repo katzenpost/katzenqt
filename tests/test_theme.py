@@ -222,9 +222,13 @@ def _stored_mode() -> str | None:
 
 def _seed_mode(value: str) -> None:
     with persistent.Session(persistent._engine_sync) as sess:
-        sess.add(persistent.AppSetting(
-            id=THEME_SETTING, type="str", value=value,
-        ))
+        sess.add(
+            persistent.AppSetting(
+                id=THEME_SETTING,
+                type="str",
+                value=value,
+            )
+        )
         sess.commit()
 
 
@@ -242,7 +246,8 @@ def test_normalize_mode_keeps_every_known_mode(mode: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "junk", ["", "neon", "Dark", "SYSTEM", "solarized", None, 7, b"dark"],
+    "junk",
+    ["", "neon", "Dark", "SYSTEM", "solarized", None, 7, b"dark"],
 )
 def test_normalize_mode_rejects_junk(junk: object) -> None:
     assert normalize_mode(junk) == "system"
@@ -250,7 +255,8 @@ def test_normalize_mode_rejects_junk(junk: object) -> None:
 
 
 def test_themed_icon_recolors_every_fully_opaque_pixel(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     icon = themed_icon(_ACCEPT_SVG, QColor(0xFF, 0x00, 0x00), 27)
@@ -260,7 +266,8 @@ def test_themed_icon_recolors_every_fully_opaque_pixel(
 
 
 def test_themed_icon_honours_the_requested_size(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     icon = themed_icon(_ACCEPT_SVG, QColor(0x00, 0xFF, 0x00), 25)
@@ -269,10 +276,13 @@ def test_themed_icon_honours_the_requested_size(
 
 
 def test_themed_icon_is_empty_when_the_path_does_not_resolve(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
-    icon = themed_icon("resources/no-such-glyph.svg", QColor(0xFF, 0xFF, 0xFF))
+    icon = themed_icon(
+        "resources/no-such-glyph.svg", QColor(0xFF, 0xFF, 0xFF)
+    )
     assert icon.isNull() is True
     assert icon.availableSizes() == []
 
@@ -288,7 +298,9 @@ def test_dark_palette_uses_the_documented_colours() -> None:
     assert p.color(QPalette.ColorRole.Link) == QColor(0x2A, 0x82, 0xDA)
     assert p.color(QPalette.ColorRole.ToolTipBase) == QColor(0x35, 0x35, 0x35)
     assert p.color(QPalette.ColorRole.PlaceholderText) == QColor(
-        0x7F, 0x7F, 0x7F,
+        0x7F,
+        0x7F,
+        0x7F,
     )
 
 
@@ -305,14 +317,20 @@ def test_fill_palette_greys_the_disabled_text_roles(
 ) -> None:
     dark = _build_dark_palette()
     assert dark.color(QPalette.ColorGroup.Disabled, role) == QColor(
-        0x7F, 0x7F, 0x7F,
+        0x7F,
+        0x7F,
+        0x7F,
     )
     assert dark.color(QPalette.ColorGroup.Active, role) != QColor(
-        0x7F, 0x7F, 0x7F,
+        0x7F,
+        0x7F,
+        0x7F,
     )
     solarized = _build_solarized_light_palette()
     assert solarized.color(QPalette.ColorGroup.Disabled, role) == QColor(
-        0x93, 0xA2, 0xA1,
+        0x93,
+        0xA2,
+        0xA1,
     )
 
 
@@ -323,11 +341,15 @@ def test_solarized_light_uses_the_canonical_colours() -> None:
     assert p.color(QPalette.ColorRole.Text) == QColor(0x65, 0x7B, 0x83)
     assert p.color(QPalette.ColorRole.Button) == QColor(0xEE, 0xE8, 0xD5)
     assert p.color(QPalette.ColorRole.AlternateBase) == QColor(
-        0xEE, 0xE8, 0xD5,
+        0xEE,
+        0xE8,
+        0xD5,
     )
     assert p.color(QPalette.ColorRole.Highlight) == QColor(0x26, 0x8B, 0xD2)
     assert p.color(QPalette.ColorRole.HighlightedText) == QColor(
-        0xFD, 0xF6, 0xE3,
+        0xFD,
+        0xF6,
+        0xE3,
     )
     assert p.color(QPalette.ColorRole.BrightText) == QColor(0xDC, 0x32, 0x2F)
 
@@ -340,7 +362,9 @@ def test_solarized_dark_uses_the_canonical_colours() -> None:
     assert p.color(QPalette.ColorRole.Button) == QColor(0x00, 0x2B, 0x36)
     assert p.color(QPalette.ColorRole.Highlight) == QColor(0x26, 0x8B, 0xD2)
     assert p.color(QPalette.ColorRole.HighlightedText) == QColor(
-        0x07, 0x36, 0x42,
+        0x07,
+        0x36,
+        0x42,
     )
     assert p.color(QPalette.ColorRole.BrightText) == QColor(0xCB, 0x4B, 0x16)
     assert p.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text) == (
@@ -379,7 +403,8 @@ def test_apply_requests_the_scheme_and_installs_the_palette(
 
 @pytest.mark.parametrize("mode", ["light", "system"])
 def test_light_and_system_modes_take_the_style_standard_palette(
-    make_theme: MakeTheme, mode: str,
+    make_theme: MakeTheme,
+    mode: str,
 ) -> None:
     harness = make_theme("none")
     harness.manager.apply(mode)
@@ -426,7 +451,9 @@ def test_restore_applies_the_persisted_mode(make_theme: MakeTheme) -> None:
     harness.manager.restore()
     assert harness.manager.mode == "solarized_dark"
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(
-        0x00, 0x2B, 0x36,
+        0x00,
+        0x2B,
+        0x36,
     )
     assert _setting_row_count() == 1
     assert _stored_mode() == "solarized_dark"
@@ -434,7 +461,8 @@ def test_restore_applies_the_persisted_mode(make_theme: MakeTheme) -> None:
 
 @pytest.mark.parametrize("stored", ["", "neon", "Dark"])
 def test_restore_falls_back_for_an_unusable_stored_value(
-    make_theme: MakeTheme, stored: str,
+    make_theme: MakeTheme,
+    stored: str,
 ) -> None:
     _seed_mode(stored)
     harness = make_theme("none")
@@ -482,7 +510,9 @@ def test_save_mode_survives_a_broken_session(
     harness.manager.apply("dark")
     assert harness.manager.mode == "dark"
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(
-        0x35, 0x35, 0x35,
+        0x35,
+        0x35,
+        0x35,
     )
     assert "could not persist theme mode: disk on fire" in caplog.text
 
@@ -493,7 +523,9 @@ def test_system_mode_follows_a_dark_desktop(make_theme: MakeTheme) -> None:
     harness.manager.apply("system", persist=False)
     assert harness.manager._resolve_scheme() == "dark"
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(
-        0x35, 0x35, 0x35,
+        0x35,
+        0x35,
+        0x35,
     )
 
 
@@ -516,7 +548,9 @@ def test_a_desktop_scheme_change_reapplies_the_palette(
 
     harness.hints().set_desktop_scheme(Qt.ColorScheme.Dark)
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(
-        0x35, 0x35, 0x35,
+        0x35,
+        0x35,
+        0x35,
     )
 
     harness.hints().set_desktop_scheme(Qt.ColorScheme.Light)
@@ -533,12 +567,15 @@ def test_a_forced_mode_ignores_the_desktop_scheme(
     harness.hints().set_desktop_scheme(Qt.ColorScheme.Dark)
     assert harness.manager._resolve_scheme() == "light"
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(
-        0xFD, 0xF6, 0xE3,
+        0xFD,
+        0xF6,
+        0xE3,
     )
 
 
 def test_sync_pushes_the_dark_palette_into_the_pinned_widgets(
-    make_theme: MakeTheme, monkeypatch: pytest.MonkeyPatch,
+    make_theme: MakeTheme,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     harness = make_theme("full")
@@ -554,7 +591,8 @@ def test_sync_pushes_the_dark_palette_into_the_pinned_widgets(
 
 
 def test_sync_clears_the_pinned_invite_button_stylesheet(
-    make_theme: MakeTheme, monkeypatch: pytest.MonkeyPatch,
+    make_theme: MakeTheme,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     harness = make_theme("full")
@@ -567,7 +605,8 @@ def test_sync_clears_the_pinned_invite_button_stylesheet(
 
 
 def test_sync_restyles_the_contacts_tree_from_the_palette(
-    make_theme: MakeTheme, monkeypatch: pytest.MonkeyPatch,
+    make_theme: MakeTheme,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     harness = make_theme("full")
@@ -587,7 +626,8 @@ def test_sync_restyles_the_contacts_tree_from_the_palette(
 
 
 def test_dark_mode_tints_the_toolbar_icons_white(
-    make_theme: MakeTheme, monkeypatch: pytest.MonkeyPatch,
+    make_theme: MakeTheme,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     harness = make_theme("full")
@@ -598,28 +638,36 @@ def test_dark_mode_tints_the_toolbar_icons_white(
         (0xFF, 0xFF, 0xFF),
     }
     assert _fully_opaque_colors(
-        harness.ui.action_accept_invitation.icon(), 27,
+        harness.ui.action_accept_invitation.icon(),
+        27,
     ) == {(0xFF, 0xFF, 0xFF)}
     assert _fully_opaque_colors(
-        harness.ui.invite_contact_toolButton.icon(), 25,
+        harness.ui.invite_contact_toolButton.icon(),
+        25,
     ) == {(0xFF, 0xFF, 0xFF)}
     assert _fully_opaque_colors(
-        harness.ui.actionDocumentation.icon(), 27,
+        harness.ui.actionDocumentation.icon(),
+        27,
     ) == {(0xFF, 0xFF, 0xFF)}
 
 
 def test_light_mode_uses_the_untinted_toolbar_icons(
-    make_theme: MakeTheme, monkeypatch: pytest.MonkeyPatch,
+    make_theme: MakeTheme,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(_REPO_ROOT)
     harness = make_theme("full")
     harness.manager.apply("dark", persist=False)
     harness.manager._sync_theme()
-    tinted = _fully_opaque_colors(harness.ui.action_accept_invitation.icon(), 27)
+    tinted = _fully_opaque_colors(
+        harness.ui.action_accept_invitation.icon(), 27
+    )
 
     harness.manager.apply("light", persist=False)
     harness.manager._sync_theme()
-    plain = _fully_opaque_colors(harness.ui.action_accept_invitation.icon(), 27)
+    plain = _fully_opaque_colors(
+        harness.ui.action_accept_invitation.icon(), 27
+    )
     assert plain
     assert plain != tinted
     assert (0xFF, 0xFF, 0xFF) not in plain
@@ -627,7 +675,8 @@ def test_light_mode_uses_the_untinted_toolbar_icons(
 
 
 def test_sync_does_not_enumerate_every_widget_in_the_process(
-    make_theme: MakeTheme, monkeypatch: pytest.MonkeyPatch,
+    make_theme: MakeTheme,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = make_theme("full")
 
@@ -650,9 +699,12 @@ def test_sync_ignores_a_window_without_a_ui(make_theme: MakeTheme) -> None:
     themed = harness.app.palette().color(QPalette.ColorRole.Window)
     assert harness.window.ui is None
     assert themed != before
-    assert harness.witness.palette().color(
-        QPalette.ColorRole.Window,
-    ) == before
+    assert (
+        harness.witness.palette().color(
+            QPalette.ColorRole.Window,
+        )
+        == before
+    )
 
 
 def test_sync_tolerates_a_ui_without_the_named_widgets(
@@ -692,10 +744,14 @@ def test_the_real_application_receives_the_dark_palette(
     manager = ThemeManager(real_app, window)
     manager.apply("dark", persist=False)
     assert real_app.palette().color(QPalette.ColorRole.Window) == QColor(
-        0x35, 0x35, 0x35,
+        0x35,
+        0x35,
+        0x35,
     )
     assert real_app.palette().color(QPalette.ColorRole.Highlight) == QColor(
-        0x2A, 0x82, 0xDA,
+        0x2A,
+        0x82,
+        0xDA,
     )
     window.deleteLater()
 
@@ -708,7 +764,11 @@ def test_the_dialog_preselects_the_current_mode(
     dialog = ThemeDialog(harness.manager)
     assert dialog.windowTitle() == "Display mode"
     assert set(dialog._buttons) == {
-        "system", "light", "dark", "solarized_light", "solarized_dark",
+        "system",
+        "light",
+        "dark",
+        "solarized_light",
+        "solarized_dark",
     }
     checked = [m for m, b in dialog._buttons.items() if b.isChecked()]
     assert checked == ["solarized_dark"]
@@ -730,7 +790,9 @@ def test_the_dialog_applies_the_checked_mode_on_accept(
 
     assert harness.manager.mode == "solarized_light"
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(
-        0xFD, 0xF6, 0xE3,
+        0xFD,
+        0xF6,
+        0xE3,
     )
     assert dialog.result() == QDialog.DialogCode.Accepted
     assert _stored_mode() == "solarized_light"

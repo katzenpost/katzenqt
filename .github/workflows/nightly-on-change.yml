@@ -36,9 +36,15 @@ jobs:
             make test-nightly-uv
             exit 0
           fi
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then base=$(git rev-parse HEAD~1 2>/dev/null || echo HEAD); fi
-          if git diff --name-only "$base" HEAD | grep -qE '^(src/katzenqt/voucher\.py|tests/test_voucher_state_machine\.py)$'; then
+          base="${{ github.event.pull_request.base.sha }}"
+          [ -n "$base" ] || base="${{ github.event.before }}"
+          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null; then
+            base=$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)
+          fi
+          one='src/katzenqt/voucher\.py'
+          two='tests/test_voucher_state_machine\.py'
+          if git diff --name-only "$base" HEAD \
+               | grep -qE "^($one|$two)$"; then
             make test-nightly-uv
           else
             echo "no change under the nightly cases; skipped"

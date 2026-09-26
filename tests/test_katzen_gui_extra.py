@@ -87,28 +87,30 @@ def test_the_io_thread_runs_every_startup_step_in_order(
 
 
 def test_a_cancelled_io_task_is_not_reported(
-    io_thread_startup: IoThreadStartup, capsys: pytest.CaptureFixture[str],
+    io_thread_startup: IoThreadStartup,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     io_thread_startup.report(None, {"exception": asyncio.CancelledError()})
     assert capsys.readouterr().out == ""
 
 
 def test_a_failed_io_task_is_reported(
-    io_thread_startup: IoThreadStartup, capsys: pytest.CaptureFixture[str],
+    io_thread_startup: IoThreadStartup,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     io_thread_startup.report(None, {"exception": RuntimeError("boom")})
     assert "AsyncioThread exception" in capsys.readouterr().out
 
 
 def test_an_io_loop_context_without_an_exception_is_reported(
-    io_thread_startup: IoThreadStartup, capsys: pytest.CaptureFixture[str],
+    io_thread_startup: IoThreadStartup,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     io_thread_startup.report(None, {"message": "handle is closed"})
     assert "AsyncioThread exception" in capsys.readouterr().out
 
 
 class JumpingClock:
-
     def __init__(self) -> None:
         self.readings = 0
 
@@ -122,7 +124,8 @@ class JumpingClock:
 
 @pytest.mark.asyncio
 async def test_a_slow_io_loop_handoff_is_logged(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     thread = katzen.AsyncioThread()
     thread.loop = asyncio.new_event_loop()
@@ -177,7 +180,8 @@ async def test_a_source_that_settles_while_connecting_needs_no_wait() -> None:
 
 
 def test_a_composer_with_no_current_tab_keeps_its_height(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     empty = QTabWidget()
     before = empty.maximumHeight()
@@ -191,11 +195,14 @@ def test_a_composer_with_no_current_tab_keeps_its_height(
 
 @pytest.mark.asyncio
 async def test_a_single_line_send_without_a_conversation_does_nothing(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sent: list[str] = []
     monkeypatch.setattr(
-        window, "_refuse_unless_joined", appending(sent, "asked"),
+        window,
+        "_refuse_unless_joined",
+        appending(sent, "asked"),
     )
     window.ui.chat_lineEdit.setText("never sent")
     monkeypatch.setattr(window, "convo_state", ignore)
@@ -208,7 +215,8 @@ async def test_a_single_line_send_without_a_conversation_does_nothing(
 
 @pytest.mark.asyncio
 async def test_a_moved_unread_marker_is_persisted_on_a_refresh(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     saved: list[tuple[int, int]] = []
 
@@ -220,7 +228,8 @@ async def test_a_moved_unread_marker_is_persisted_on_a_refresh(
     state.first_unread = 7
 
     await loaded_window._process_conversation_update(
-        state.conversation_id, False,
+        state.conversation_id,
+        False,
     )
 
     assert saved == [(state.conversation_id, 0)]
@@ -259,7 +268,6 @@ def peer_named(win: katzen.MainWindow, name: str) -> QStandardItem:
 
 
 class EmptyContacts:
-
     def __init__(self, real: object) -> None:
         self._real = real
 
@@ -272,7 +280,8 @@ class EmptyContacts:
 
 @pytest.mark.asyncio
 async def test_a_peer_row_with_no_backing_item_offers_no_menu(
-    window: katzen.MainWindow, popped: list[str],
+    window: katzen.MainWindow,
+    popped: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seeded = await seed_conversation(peers=("bob",))
@@ -284,9 +293,13 @@ async def test_a_peer_row_with_no_backing_item_offers_no_menu(
     pos = peer_position(window, peer_named(window, "bob"))
 
     with monkeypatch.context() as patched:
-        patched.setattr(window, "all_contacts", EmptyContacts(
-            window.all_contacts,
-        ))
+        patched.setattr(
+            window,
+            "all_contacts",
+            EmptyContacts(
+                window.all_contacts,
+            ),
+        )
         await window.peer_context_menu(pos)
 
     assert popped == []
@@ -294,7 +307,8 @@ async def test_a_peer_row_with_no_backing_item_offers_no_menu(
 
 @pytest.mark.asyncio
 async def test_a_peer_row_without_a_read_cap_offers_no_menu(
-    window: katzen.MainWindow, popped: list[str],
+    window: katzen.MainWindow,
+    popped: list[str],
 ) -> None:
     seeded = await seed_conversation(peers=("bob",))
     await add_seeded_conversation(window, seeded.conversation_id)
@@ -313,7 +327,8 @@ async def test_a_peer_row_without_a_read_cap_offers_no_menu(
 
 @pytest.mark.asyncio
 async def test_a_transfer_row_without_an_id_offers_no_menu(
-    window: katzen.MainWindow, popped: list[str],
+    window: katzen.MainWindow,
+    popped: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stream = uuid.uuid4()
@@ -335,9 +350,9 @@ async def test_a_transfer_row_without_an_id_offers_no_menu(
     assert popped == []
 
 
-def conversation_index(win: katzen.MainWindow, conversation_id: int) -> (
-    QModelIndex
-):
+def conversation_index(
+    win: katzen.MainWindow, conversation_id: int
+) -> QModelIndex:
     state = win.conversation_state_by_id[conversation_id]
     source = win.all_contacts.indexFromItem(state.contacts_standard_item)
     index: QModelIndex = win.ui.contacts_treeWidget.model().mapFromSource(
@@ -347,7 +362,9 @@ def conversation_index(win: katzen.MainWindow, conversation_id: int) -> (
 
 
 def peer_index(
-    win: katzen.MainWindow, conversation_id: int, name: str,
+    win: katzen.MainWindow,
+    conversation_id: int,
+    name: str,
 ) -> QModelIndex:
     parent = win.conversation_state_by_id[conversation_id]
     item = parent.contacts_standard_item
@@ -364,7 +381,8 @@ def peer_index(
 
 @pytest.mark.asyncio
 async def test_leaving_a_peer_row_persists_the_old_unread_marker(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     saved: list[tuple[int, int]] = []
 
@@ -392,7 +410,8 @@ async def test_leaving_a_peer_row_persists_the_old_unread_marker(
 
 @pytest.mark.asyncio
 async def test_a_selection_with_no_conversation_state_stops_early(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first_id = loaded_window.convo_state().conversation_id
     before = loaded_window.ui.ContactName.text()
@@ -408,7 +427,8 @@ async def test_a_selection_with_no_conversation_state_stops_early(
 
 @pytest.mark.asyncio
 async def test_a_chatview_without_a_root_object_is_logged(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     sources: list[str] = []
@@ -423,10 +443,14 @@ async def test_a_chatview_without_a_root_object_is_logged(
     with monkeypatch.context() as patched:
         patched.setattr(katzen, "_qml_source_ready", ready)
         patched.setattr(
-            loaded_window.ui.qml_ChatLines, "rootObject", ignore,
+            loaded_window.ui.qml_ChatLines,
+            "rootObject",
+            ignore,
         )
         patched.setattr(
-            loaded_window.ui.qml_ChatLines, "setSource", sources.append,
+            loaded_window.ui.qml_ChatLines,
+            "setSource",
+            sources.append,
         )
         await loaded_window.conversation_selected(selected, QModelIndex())
 

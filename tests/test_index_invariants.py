@@ -323,10 +323,12 @@ def test_send_resendable_plaintexts_has_no_late_bound_lambda() -> None:
     import ast
     import inspect
 
-    tree = ast.parse(inspect.getsource(network.send_resendable_plaintexts).lstrip())
+    source = inspect.getsource(network.send_resendable_plaintexts)
+    tree = ast.parse(source.lstrip())
     for lam in (n for n in ast.walk(tree) if isinstance(n, ast.Lambda)):
         free = {n.id for n in ast.walk(lam.body) if isinstance(n, ast.Name)}
-        bound = {a.arg for a in lam.args.args} | {a.arg for a in lam.args.kwonlyargs}
+        bound = ({a.arg for a in lam.args.args}
+                 | {a.arg for a in lam.args.kwonlyargs})
         assert "pwal" not in (free - bound), (
             "late-binding closure over the loop variable `pwal`: "
             + ast.unparse(lam)

@@ -19,7 +19,6 @@ async def run_action(argv: "list[str]") -> int:
 
 
 class FakeClock:
-
     def __init__(self) -> None:
         self.now = 0.0
 
@@ -31,14 +30,17 @@ class FakeClock:
         return result
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_actions, "asyncio", SimpleNamespace(
-            get_event_loop=returning(SimpleNamespace(time=self.time)),
-            sleep=self.sleep,
-        ))
+        monkeypatch.setattr(
+            _actions,
+            "asyncio",
+            SimpleNamespace(
+                get_event_loop=returning(SimpleNamespace(time=self.time)),
+                sleep=self.sleep,
+            ),
+        )
 
 
 class StubConnection:
-
     def __init__(self) -> None:
         self.stopped = False
 
@@ -76,9 +78,13 @@ async def make_conversation(
         write_cap_id=wcap.id,
         read_cap=OWN_READ_CAP if provision_read_cap else None,
     )
-    convo = persistent.Conversation(name=name, write_cap=wcap.id, first_unread=0)
+    convo = persistent.Conversation(
+        name=name, write_cap=wcap.id, first_unread=0
+    )
     own_peer = persistent.ConversationPeer(
-        name=own_name, read_cap_id=own_rcap.id, conversation=convo,
+        name=own_name,
+        read_cap_id=own_rcap.id,
+        conversation=convo,
     )
     convo.own_peer = own_peer
 
@@ -91,10 +97,13 @@ async def make_conversation(
         extra = []
         for index, peer_name in enumerate(peers):
             rcap = persistent.ReadCapWAL(
-                id=uuid.uuid4(), read_cap=peer_read_cap(index),
+                id=uuid.uuid4(),
+                read_cap=peer_read_cap(index),
             )
             peer = persistent.ConversationPeer(
-                name=peer_name, read_cap_id=rcap.id, conversation=convo,
+                name=peer_name,
+                read_cap_id=rcap.id,
+                conversation=convo,
             )
             sess.add(rcap)
             sess.add(peer)

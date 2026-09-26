@@ -39,7 +39,9 @@ def _idx(counter: int) -> bytes:
     return counter.to_bytes(8, "little") + bytes(96)
 
 
-async def _spin_until(check: Callable[[], bool], budget_s: float = 30.0) -> None:
+async def _spin_until(
+    check: Callable[[], bool], budget_s: float = 30.0
+) -> None:
     deadline = time.monotonic() + budget_s
     while time.monotonic() < deadline:
         if check():
@@ -51,12 +53,19 @@ async def _spin_until(check: Callable[[], bool], budget_s: float = 30.0) -> None
 async def _add_read_mixwal(stream: uuid.UUID) -> uuid.UUID:
     mw_id = uuid.uuid4()
     async with persistent.asession() as sess:
-        sess.add(persistent.MixWAL(
-            id=mw_id, bacap_stream=stream, plaintextwal=None,
-            envelope_hash=uuid.uuid4().bytes, encrypted_payload=b"ct",
-            envelope_descriptor=b"ed", current_message_index=_idx(0),
-            next_message_index=_idx(1), is_read=True,
-        ))
+        sess.add(
+            persistent.MixWAL(
+                id=mw_id,
+                bacap_stream=stream,
+                plaintextwal=None,
+                envelope_hash=uuid.uuid4().bytes,
+                encrypted_payload=b"ct",
+                envelope_descriptor=b"ed",
+                current_message_index=_idx(0),
+                next_message_index=_idx(1),
+                is_read=True,
+            )
+        )
         await sess.commit()
     return mw_id
 
@@ -83,7 +92,8 @@ def _drain_conversation_updates() -> Iterator[None]:
 class TestDrainMixwalReadSkips:
     @pytest.mark.asyncio
     async def test_a_read_without_a_read_cap_row_is_skipped(
-        self, fake_thinclient: _Fake,
+        self,
+        fake_thinclient: _Fake,
     ) -> None:
         stream = uuid.uuid4()
         mw_id = await _add_read_mixwal(stream)
@@ -95,14 +105,20 @@ class TestDrainMixwalReadSkips:
 
     @pytest.mark.asyncio
     async def test_a_paused_read_is_skipped(
-        self, fake_thinclient: _Fake,
+        self,
+        fake_thinclient: _Fake,
     ) -> None:
         stream = uuid.uuid4()
         async with persistent.asession() as sess:
-            sess.add(persistent.ReadCapWAL(
-                id=stream, write_cap_id=None, read_cap=bytes(136),
-                next_index=_idx(0), paused=True,
-            ))
+            sess.add(
+                persistent.ReadCapWAL(
+                    id=stream,
+                    write_cap_id=None,
+                    read_cap=bytes(136),
+                    next_index=_idx(0),
+                    paused=True,
+                )
+            )
             await sess.commit()
         mw_id = await _add_read_mixwal(stream)
         await _run_one_drain_pass(fake_thinclient)
@@ -113,14 +129,20 @@ class TestDrainMixwalReadSkips:
 
     @pytest.mark.asyncio
     async def test_a_malformed_read_cap_skips_only_that_stream(
-        self, fake_thinclient: _Fake, caplog: pytest.LogCaptureFixture,
+        self,
+        fake_thinclient: _Fake,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         stream = uuid.uuid4()
         async with persistent.asession() as sess:
-            sess.add(persistent.ReadCapWAL(
-                id=stream, write_cap_id=None, read_cap=b"too short",
-                next_index=_idx(0),
-            ))
+            sess.add(
+                persistent.ReadCapWAL(
+                    id=stream,
+                    write_cap_id=None,
+                    read_cap=b"too short",
+                    next_index=_idx(0),
+                )
+            )
             await sess.commit()
         mw_id = await _add_read_mixwal(stream)
         with caplog.at_level(logging.ERROR, logger="katzen.network"):
@@ -135,24 +157,37 @@ class TestDrainMixwalReadSkips:
 
     @pytest.mark.asyncio
     async def test_a_paused_write_keeps_its_row(
-        self, fake_thinclient: _Fake,
+        self,
+        fake_thinclient: _Fake,
     ) -> None:
         stream = uuid.uuid4()
         mw_id = uuid.uuid4()
         async with persistent.asession() as sess:
             sess.add(persistent.WriteCapWAL(id=stream, paused=True))
-            sess.add(persistent.MixWAL(
-                id=mw_id, bacap_stream=stream, plaintextwal=None,
-                envelope_hash=uuid.uuid4().bytes, encrypted_payload=b"ct",
-                envelope_descriptor=b"ed", current_message_index=_idx(0),
-                next_message_index=_idx(1), is_read=False,
-            ))
+            sess.add(
+                persistent.MixWAL(
+                    id=mw_id,
+                    bacap_stream=stream,
+                    plaintextwal=None,
+                    envelope_hash=uuid.uuid4().bytes,
+                    encrypted_payload=b"ct",
+                    envelope_descriptor=b"ed",
+                    current_message_index=_idx(0),
+                    next_message_index=_idx(1),
+                    is_read=False,
+                )
+            )
             await sess.commit()
-        await network.on_connection_status({"is_connected": True, "err": None})
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         await _run_one_drain_pass(fake_thinclient)
-        assert fake_thinclient.call_count(
-            "start_resending_encrypted_message",
-        ) == 0
+        assert (
+            fake_thinclient.call_count(
+                "start_resending_encrypted_message",
+            )
+            == 0
+        )
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, mw_id) is not None
 
@@ -160,7 +195,8 @@ class TestDrainMixwalReadSkips:
 class TestProvisionReadCaps:
     @pytest.mark.asyncio
     async def test_a_fresh_keypair_is_persisted_and_the_loops_are_poked(
-        self, fake_thinclient: _Fake,
+        self,
+        fake_thinclient: _Fake,
     ) -> None:
         stream = uuid.uuid4()
         async with persistent.asession() as sess:
@@ -190,7 +226,8 @@ class TestProvisionReadCaps:
 class TestReadablesToMixwalShutdown:
     @pytest.mark.asyncio
     async def test_a_shutdown_while_offline_ends_the_loop(
-        self, fake_thinclient: _Fake,
+        self,
+        fake_thinclient: _Fake,
     ) -> None:
         _event("__resend_queue_populated").set()
         task = asyncio.ensure_future(
@@ -203,20 +240,30 @@ class TestReadablesToMixwalShutdown:
 
     @pytest.mark.asyncio
     async def test_a_shutdown_while_armed_ends_the_loop(
-        self, fake_thinclient: _Fake,
+        self,
+        fake_thinclient: _Fake,
     ) -> None:
         kp = await fake_thinclient.new_keypair(b"\x55" * 32)
         stream = uuid.uuid4()
         async with persistent.asession() as sess:
-            sess.add(persistent.ReadCapWAL(
-                id=stream, write_cap_id=None, read_cap=kp.read_cap,
-                next_index=kp.first_message_index,
-            ))
-            sess.add(persistent.ConversationPeer(
-                name="peer", read_cap_id=stream,
-            ))
+            sess.add(
+                persistent.ReadCapWAL(
+                    id=stream,
+                    write_cap_id=None,
+                    read_cap=kp.read_cap,
+                    next_index=kp.first_message_index,
+                )
+            )
+            sess.add(
+                persistent.ConversationPeer(
+                    name="peer",
+                    read_cap_id=stream,
+                )
+            )
             await sess.commit()
-        await network.on_connection_status({"is_connected": True, "err": None})
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         _event("__resend_queue_populated").set()
         updated = _event("__mixwal_updated")
         updated.clear()
@@ -228,18 +275,23 @@ class TestReadablesToMixwalShutdown:
         network.readables_to_mixwal_event.set()
         await asyncio.wait_for(task, timeout=10.0)
         async with persistent.asession() as sess:
-            armed = (await sess.exec(
-                persistent.select(persistent.MixWAL),
-            )).all()
+            armed = (
+                await sess.exec(
+                    persistent.select(persistent.MixWAL),
+                )
+            ).all()
         assert [row.bacap_stream for row in armed] == [stream]
 
 
 class TestSendResendablePlaintexts:
     @pytest.mark.asyncio
     async def test_a_shutdown_while_idle_ends_the_loop(
-        self, fake_thinclient: _Fake,
+        self,
+        fake_thinclient: _Fake,
     ) -> None:
-        await network.on_connection_status({"is_connected": True, "err": None})
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         network.resendable_event.clear()
         task = asyncio.ensure_future(
             network.send_resendable_plaintexts(_conn(fake_thinclient)),
@@ -252,13 +304,17 @@ class TestSendResendablePlaintexts:
 
     @pytest.mark.asyncio
     async def test_sqlite_busy_defers_the_sweep(
-        self, fake_thinclient: _Fake, monkeypatch: pytest.MonkeyPatch,
+        self,
+        fake_thinclient: _Fake,
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level(logging.WARNING, logger="katzen.network"):
             await self._sweep_with_failing_commit(
-                fake_thinclient, monkeypatch,
-                Exception("database is locked"), fatal=False,
+                fake_thinclient,
+                monkeypatch,
+                Exception("database is locked"),
+                fatal=False,
             )
         assert any(
             "sqlite busy; retrying on the next sweep" in r.message
@@ -267,17 +323,25 @@ class TestSendResendablePlaintexts:
 
     @pytest.mark.asyncio
     async def test_a_fatal_database_error_is_not_swallowed(
-        self, fake_thinclient: _Fake, monkeypatch: pytest.MonkeyPatch,
+        self,
+        fake_thinclient: _Fake,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         with pytest.raises(OperationalError):
             await self._sweep_with_failing_commit(
-                fake_thinclient, monkeypatch,
-                Exception("no such table: plaintextwal"), fatal=True,
+                fake_thinclient,
+                monkeypatch,
+                Exception("no such table: plaintextwal"),
+                fatal=True,
             )
 
     async def _sweep_with_failing_commit(
-        self, fake: _Fake, monkeypatch: pytest.MonkeyPatch,
-        orig: Exception, *, fatal: bool,
+        self,
+        fake: _Fake,
+        monkeypatch: pytest.MonkeyPatch,
+        orig: Exception,
+        *,
+        fatal: bool,
     ) -> None:
         real = persistent.asession
         failures: list[str] = []
@@ -298,7 +362,9 @@ class TestSendResendablePlaintexts:
             async with real() as sess:
                 yield _CommitFails(sess)
 
-        await network.on_connection_status({"is_connected": True, "err": None})
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         network.resendable_event.clear()
         task = asyncio.ensure_future(
             network.send_resendable_plaintexts(_conn(fake)),
@@ -323,15 +389,20 @@ class TestSendResendablePlaintexts:
 class TestProvisionLegacyRows:
     @pytest.mark.asyncio
     async def test_a_pre_existing_write_cap_cannot_be_converted(
-        self, fake_thinclient: _Fake, caplog: pytest.LogCaptureFixture,
+        self,
+        fake_thinclient: _Fake,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         kp = await fake_thinclient.new_keypair(b"\x66" * 32)
         stream = uuid.uuid4()
         async with persistent.asession() as sess:
-            sess.add(persistent.WriteCapWAL(
-                id=stream, write_cap=kp.write_cap,
-                next_index=kp.first_message_index,
-            ))
+            sess.add(
+                persistent.WriteCapWAL(
+                    id=stream,
+                    write_cap=kp.write_cap,
+                    next_index=kp.first_message_index,
+                )
+            )
             sess.add(persistent.ReadCapWAL(id=stream, write_cap_id=stream))
             await sess.commit()
         task = asyncio.ensure_future(
@@ -339,7 +410,9 @@ class TestProvisionLegacyRows:
         )
         try:
             with caplog.at_level(logging.WARNING, logger="katzen.network"):
-                await _spin_until(partial(logged, caplog, "DB was created with old API"))
+                await _spin_until(
+                    partial(logged, caplog, "DB was created with old API")
+                )
         finally:
             network.shutdown()
             await asyncio.wait_for(task, timeout=10.0)
@@ -352,23 +425,37 @@ class TestProvisionLegacyRows:
 class TestDuplicateArming:
     @pytest.mark.asyncio
     async def test_two_peers_sharing_a_read_cap_arm_it_once(
-        self, fake_thinclient: _Fake, caplog: pytest.LogCaptureFixture,
+        self,
+        fake_thinclient: _Fake,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         kp = await fake_thinclient.new_keypair(b"\x77" * 32)
         stream = uuid.uuid4()
         async with persistent.asession() as sess:
-            sess.add(persistent.ReadCapWAL(
-                id=stream, write_cap_id=None, read_cap=kp.read_cap,
-                next_index=kp.first_message_index,
-            ))
-            sess.add(persistent.ConversationPeer(
-                name="peer", read_cap_id=stream,
-            ))
-            sess.add(persistent.ConversationPeer(
-                name="peer-alias", read_cap_id=stream,
-            ))
+            sess.add(
+                persistent.ReadCapWAL(
+                    id=stream,
+                    write_cap_id=None,
+                    read_cap=kp.read_cap,
+                    next_index=kp.first_message_index,
+                )
+            )
+            sess.add(
+                persistent.ConversationPeer(
+                    name="peer",
+                    read_cap_id=stream,
+                )
+            )
+            sess.add(
+                persistent.ConversationPeer(
+                    name="peer-alias",
+                    read_cap_id=stream,
+                )
+            )
             await sess.commit()
-        await network.on_connection_status({"is_connected": True, "err": None})
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         _event("__resend_queue_populated").set()
         updated = _event("__mixwal_updated")
         updated.clear()
@@ -386,27 +473,37 @@ class TestDuplicateArming:
             "skipping duplicate rcw" in r.message for r in caplog.records
         )
         async with persistent.asession() as sess:
-            armed = (await sess.exec(
-                persistent.select(persistent.MixWAL),
-            )).all()
+            armed = (
+                await sess.exec(
+                    persistent.select(persistent.MixWAL),
+                )
+            ).all()
         assert [row.bacap_stream for row in armed] == [stream]
 
 
 class TestSendSweepCadence:
     @pytest.mark.asyncio
     async def test_the_sweep_runs_without_being_poked(
-        self, fake_thinclient: _Fake, monkeypatch: pytest.MonkeyPatch,
+        self,
+        fake_thinclient: _Fake,
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.01)
-        await network.on_connection_status({"is_connected": True, "err": None})
+        await network.on_connection_status(
+            {"is_connected": True, "err": None}
+        )
         network.resendable_event.clear()
         task = asyncio.ensure_future(
             network.send_resendable_plaintexts(_conn(fake_thinclient)),
         )
         try:
             with caplog.at_level(logging.DEBUG, logger="katzen.network"):
-                await _spin_until(partial(logged, caplog, "send_resendable_plaintexts: running"))
+                await _spin_until(
+                    partial(
+                        logged, caplog, "send_resendable_plaintexts: running"
+                    )
+                )
         finally:
             network.shutdown()
             network.resendable_event.set()

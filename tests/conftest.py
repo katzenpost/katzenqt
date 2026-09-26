@@ -90,7 +90,10 @@ def _reset_network_module_state() -> Iterator[None]:
         # Transfers-panel events must not leak across tests.
         while not network.substream_progress_queue.empty():
             network.substream_progress_queue.get_nowait()
-        for _q in (network.conversation_update_queue, network.peer_added_queue):
+        for _q in (
+            network.conversation_update_queue,
+            network.peer_added_queue,
+        ):
             while not _q.empty():
                 _q.get_nowait()
         network._inflight_reads.clear()

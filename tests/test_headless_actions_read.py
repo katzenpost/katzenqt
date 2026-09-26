@@ -26,7 +26,8 @@ NO_MEMBERSHIP = bytes(32)
 
 @pytest.fixture(autouse=True)
 def _logger_into_caplog(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
     caplog.set_level(logging.INFO)
@@ -36,7 +37,8 @@ def _logger_into_caplog(
 def stub_session(monkeypatch: pytest.MonkeyPatch) -> StubConnection:
     connection = StubConnection()
     monkeypatch.setattr(
-        _actions, "_connect_and_start",
+        _actions,
+        "_connect_and_start",
         AsyncMock(return_value=(connection, object())),
     )
     monkeypatch.setattr(_actions, "_shutdown", AsyncMock())
@@ -45,7 +47,9 @@ def stub_session(monkeypatch: pytest.MonkeyPatch) -> StubConnection:
 
 def _text_payload(text: str) -> bytes:
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=NO_MEMBERSHIP, text=text,
+        version=0,
+        membership_hash=NO_MEMBERSHIP,
+        text=text,
     )
     body: bytes = gcm.to_cbor()
     return b"F" + body
@@ -56,7 +60,8 @@ def _introduction_payload(display_name: str) -> bytes:
         version=0,
         membership_hash=NO_MEMBERSHIP,
         introduction=models.GroupChatPleaseAdd(
-            display_name=display_name, read_cap=bytes([0x44]) * 136,
+            display_name=display_name,
+            read_cap=bytes([0x44]) * 136,
         ),
     )
     body: bytes = gcm.to_cbor()
@@ -92,7 +97,8 @@ async def test_read_refuses_an_unknown_conversation(
 
 @pytest.mark.asyncio
 async def test_read_times_out_with_no_peer_messages(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("quiet", peers=("bob",))
@@ -105,16 +111,20 @@ async def test_read_times_out_with_no_peer_messages(
 
 @pytest.mark.asyncio
 async def test_read_surfaces_the_first_peer_text(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     handle = await make_conversation("noisy", peers=("bob",))
-    await _peer_rows(handle, [
-        b"Cchunk",
-        b"F\xff\xff\xff",
-        _text_payload(""),
-        _text_payload("hello there"),
-    ])
+    await _peer_rows(
+        handle,
+        [
+            b"Cchunk",
+            b"F\xff\xff\xff",
+            _text_payload(""),
+            _text_payload("hello there"),
+        ],
+    )
     await add_log_row(
         conversation_id=handle.conversation_id,
         conversation_peer_id=handle.own_peer_id,
@@ -128,7 +138,8 @@ async def test_read_surfaces_the_first_peer_text(
 
 @pytest.mark.asyncio
 async def test_read_waits_for_the_expected_text(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     handle = await make_conversation("picky", peers=("bob",))
@@ -141,7 +152,8 @@ async def test_read_waits_for_the_expected_text(
 
 @pytest.mark.asyncio
 async def test_read_announces_an_introduction_once(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     handle = await make_conversation("growing", peers=("bob",))
@@ -157,26 +169,49 @@ async def test_read_announces_an_introduction_once(
 
 @pytest.mark.asyncio
 async def test_read_file_refuses_an_unknown_conversation(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    assert await run_action([
-        "read-file", "ghost", "--to-dir", str(tmp_path / "out"), *ADDRESS,
-    ]) == 2
+    assert (
+        await run_action(
+            [
+                "read-file",
+                "ghost",
+                "--to-dir",
+                str(tmp_path / "out"),
+                *ADDRESS,
+            ]
+        )
+        == 2
+    )
     assert "conversation 'ghost' not found" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_read_file_times_out_with_no_marker(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("empty", peers=("bob",))
     clock = FakeClock()
     clock.install(monkeypatch)
     out = tmp_path / "out"
-    assert await run_action([
-        "read-file", "empty", "--to-dir", str(out), "--timeout", "120", *ADDRESS,
-    ]) == 1
+    assert (
+        await run_action(
+            [
+                "read-file",
+                "empty",
+                "--to-dir",
+                str(out),
+                "--timeout",
+                "120",
+                *ADDRESS,
+            ]
+        )
+        == 1
+    )
     assert "TIMEOUT" in caplog.text
     assert out.is_dir()
     assert clock.now == 120.0
@@ -184,8 +219,10 @@ async def test_read_file_times_out_with_no_marker(
 
 @pytest.mark.asyncio
 async def test_read_file_skips_unusable_rows_and_copies_the_match(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(persistent, "state_file", tmp_path / "state.sqlite3")
     handle = await make_conversation("attached", peers=("bob",))
@@ -193,31 +230,58 @@ async def test_read_file_skips_unusable_rows_and_copies_the_match(
     (tmp_path / "blobs").mkdir()
     (tmp_path / "blobs" / "stored.bin").write_bytes(body)
     digest = hashlib.sha256(body).digest()
-    await _peer_rows(handle, [
-        b"Cchunk",
-        b"F\xa1",
-        _non_dict_payload(),
-        _marker_payload({"kind": "other"}),
-        _marker_payload({
-            "kind": "file_marker", "basename": "other.bin",
-            "rel_path": "blobs/stored.bin", "sha256": digest,
-        }),
-        _marker_payload({"kind": "file_marker", "basename": "want.bin"}),
-        _marker_payload({
-            "kind": "file_marker", "basename": "want.bin",
-            "rel_path": "blobs/absent.bin", "sha256": digest,
-        }),
-        _marker_payload({
-            "kind": "file_marker", "basename": "want.bin",
-            "rel_path": "blobs/stored.bin", "sha256": digest,
-        }),
-    ])
+    await _peer_rows(
+        handle,
+        [
+            b"Cchunk",
+            b"F\xa1",
+            _non_dict_payload(),
+            _marker_payload({"kind": "other"}),
+            _marker_payload(
+                {
+                    "kind": "file_marker",
+                    "basename": "other.bin",
+                    "rel_path": "blobs/stored.bin",
+                    "sha256": digest,
+                }
+            ),
+            _marker_payload({"kind": "file_marker", "basename": "want.bin"}),
+            _marker_payload(
+                {
+                    "kind": "file_marker",
+                    "basename": "want.bin",
+                    "rel_path": "blobs/absent.bin",
+                    "sha256": digest,
+                }
+            ),
+            _marker_payload(
+                {
+                    "kind": "file_marker",
+                    "basename": "want.bin",
+                    "rel_path": "blobs/stored.bin",
+                    "sha256": digest,
+                }
+            ),
+        ],
+    )
     out = tmp_path / "out"
     FakeClock().install(monkeypatch)
-    assert await run_action([
-        "read-file", "attached", "--to-dir", str(out),
-        "--basename", "want.bin", "--timeout", "120", *ADDRESS,
-    ]) == 0
+    assert (
+        await run_action(
+            [
+                "read-file",
+                "attached",
+                "--to-dir",
+                str(out),
+                "--basename",
+                "want.bin",
+                "--timeout",
+                "120",
+                *ADDRESS,
+            ]
+        )
+        == 0
+    )
     assert (out / "want.bin").read_bytes() == body
     assert f"RECV_FILE={(out / 'want.bin').resolve()}" in caplog.text
     assert "sha256 mismatch" not in caplog.text
@@ -225,24 +289,44 @@ async def test_read_file_skips_unusable_rows_and_copies_the_match(
 
 @pytest.mark.asyncio
 async def test_read_file_warns_on_a_digest_mismatch_but_still_copies(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(persistent, "state_file", tmp_path / "state.sqlite3")
     handle = await make_conversation("tampered", peers=("bob",))
     (tmp_path / "blobs").mkdir()
     (tmp_path / "blobs" / "stored.bin").write_bytes(b"real bytes")
-    await _peer_rows(handle, [
-        _marker_payload({
-            "kind": "file_marker", "basename": "claim.bin",
-            "rel_path": "blobs/stored.bin", "sha256": hashlib.sha256(b"lie").digest(),
-        }),
-    ])
+    await _peer_rows(
+        handle,
+        [
+            _marker_payload(
+                {
+                    "kind": "file_marker",
+                    "basename": "claim.bin",
+                    "rel_path": "blobs/stored.bin",
+                    "sha256": hashlib.sha256(b"lie").digest(),
+                }
+            ),
+        ],
+    )
     out = tmp_path / "out"
     FakeClock().install(monkeypatch)
-    assert await run_action([
-        "read-file", "tampered", "--to-dir", str(out), "--timeout", "120", *ADDRESS,
-    ]) == 0
+    assert (
+        await run_action(
+            [
+                "read-file",
+                "tampered",
+                "--to-dir",
+                str(out),
+                "--timeout",
+                "120",
+                *ADDRESS,
+            ]
+        )
+        == 0
+    )
     assert "sha256 mismatch for claim.bin" in caplog.text
     assert (out / "claim.bin").read_bytes() == b"real bytes"
 
@@ -251,31 +335,50 @@ async def test_read_file_warns_on_a_digest_mismatch_but_still_copies(
 async def test_chat_session_refuses_an_unknown_conversation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    assert await run_action(["chat-session", "ghost", "SLEEP:1", *ADDRESS]) == 2
+    assert (
+        await run_action(["chat-session", "ghost", "SLEEP:1", *ADDRESS]) == 2
+    )
     assert "conversation 'ghost' not found" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_chat_session_rejects_an_unknown_step(
-    stub_session: StubConnection, caplog: pytest.LogCaptureFixture,
+    stub_session: StubConnection,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("stepping", peers=("bob",))
-    assert await run_action(["chat-session", "stepping", "DANCE:now", *ADDRESS]) == 5
+    assert (
+        await run_action(["chat-session", "stepping", "DANCE:now", *ADDRESS])
+        == 5
+    )
     assert "STEP_FAIL:0:unknown-step:DANCE:now" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_chat_session_runs_send_read_and_sleep_to_completion(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     handle = await make_conversation("session", peers=("bob",))
     await _peer_rows(handle, [b"Cchunk", b"F\xff\xff", _text_payload("pong")])
-    monkeypatch.setattr(persistent, "wait_for_sent", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        persistent, "wait_for_sent", AsyncMock(return_value=True)
+    )
     FakeClock().install(monkeypatch)
-    assert await run_action([
-        "chat-session", "session", "SEND:ping", "READ:pong", "SLEEP:2", *ADDRESS,
-    ]) == 0
+    assert (
+        await run_action(
+            [
+                "chat-session",
+                "session",
+                "SEND:ping",
+                "READ:pong",
+                "SLEEP:2",
+                *ADDRESS,
+            ]
+        )
+        == 0
+    )
     assert "STEP_WAITING_ACK:0:SEND:ping" in caplog.text
     assert "STEP_OK:0:SEND:ping" in caplog.text
     assert "STEP_OK:1:READ:pong" in caplog.text
@@ -285,24 +388,36 @@ async def test_chat_session_runs_send_read_and_sleep_to_completion(
 
 @pytest.mark.asyncio
 async def test_chat_session_fails_a_send_that_is_never_acked(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("unacked", peers=("bob",))
-    monkeypatch.setattr(persistent, "wait_for_sent", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        persistent, "wait_for_sent", AsyncMock(return_value=False)
+    )
     FakeClock().install(monkeypatch)
-    assert await run_action(["chat-session", "unacked", "SEND:ping", *ADDRESS]) == 3
+    assert (
+        await run_action(["chat-session", "unacked", "SEND:ping", *ADDRESS])
+        == 3
+    )
     assert "STEP_FAIL:0:send-timeout:ping" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_chat_session_fails_a_read_that_never_arrives(
-    monkeypatch: pytest.MonkeyPatch, stub_session: StubConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     await make_conversation("silent", peers=("bob",))
     clock = FakeClock()
     clock.install(monkeypatch)
-    assert await run_action(["chat-session", "silent", "READ:pong:120", *ADDRESS]) == 4
+    assert (
+        await run_action(
+            ["chat-session", "silent", "READ:pong:120", *ADDRESS]
+        )
+        == 4
+    )
     assert "STEP_FAIL:0:read-timeout:pong" in caplog.text
     assert clock.now == 120.0

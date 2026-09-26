@@ -31,7 +31,6 @@ from tests.test_katzen_gui_common import (  # noqa: E402,F401
 
 
 class StepClock:
-
     def __init__(self, values: list[float]) -> None:
         self._values = list(values)
 
@@ -66,19 +65,28 @@ async def test_waiting_for_a_known_conversation_returns_at_once(
     loaded_window: katzen.MainWindow,
 ) -> None:
     convo_id = loaded_window.convo_state().conversation_id
-    assert await loaded_window._wait_for_conversation_state(
-        convo_id, what="test",
-    ) is True
+    assert (
+        await loaded_window._wait_for_conversation_state(
+            convo_id,
+            what="test",
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio
 async def test_waiting_for_an_unknown_conversation_gives_up(
-    window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
-    assert await window._wait_for_conversation_state(
-        4242, what="receive_msg_listener",
-    ) is False
+    assert (
+        await window._wait_for_conversation_state(
+            4242,
+            what="receive_msg_listener",
+        )
+        is False
+    )
     assert "conversation_id 4242 never appeared" in caplog.text
 
 
@@ -112,12 +120,14 @@ async def test_an_update_for_a_background_conversation_bumps_the_scroll(
     for _ in range(80):
         await asyncio.sleep(0)
     first = next(
-        state for cid, state in loaded_window.conversation_state_by_id.items()
+        state
+        for cid, state in loaded_window.conversation_state_by_id.items()
         if cid != other.conversation_id
     )
     before = first.chat_lines_scroll_idx
     await loaded_window._process_conversation_update(
-        first.conversation_id, False,
+        first.conversation_id,
+        False,
     )
     assert first.chat_lines_scroll_idx == before + 1.0
     assert loaded_window.systray.new_messages == 1
@@ -125,7 +135,8 @@ async def test_an_update_for_a_background_conversation_bumps_the_scroll(
 
 @pytest.mark.asyncio
 async def test_the_receive_listener_survives_a_bad_queue_item(
-    loaded_window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    loaded_window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
     await network.conversation_update_queue.put("not a pair")
@@ -167,7 +178,8 @@ async def test_an_announced_peer_carries_its_read_cap_tag(
         await asyncio.sleep(0)
     state = window.conversation_state_by_id[seeded.conversation_id]
     state.contacts_standard_item.removeRows(
-        0, state.contacts_standard_item.rowCount(),
+        0,
+        state.contacts_standard_item.rowCount(),
     )
     await window._process_peer_added(seeded.conversation_id, "hank")
     added = state.contacts_standard_item.child(0)
@@ -184,14 +196,16 @@ async def test_a_substream_peer_is_never_rendered(
     item = loaded_window.convo_state().contacts_standard_item
     before = item.rowCount()
     await loaded_window._process_peer_added(
-        convo_id, f"{network._SUBSTREAM_NAME_PREFIX}parent:aa",
+        convo_id,
+        f"{network._SUBSTREAM_NAME_PREFIX}parent:aa",
     )
     assert item.rowCount() == before
 
 
 @pytest.mark.asyncio
 async def test_the_peer_listener_survives_a_bad_queue_item(
-    loaded_window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    loaded_window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
     await network.peer_added_queue.put(None)
@@ -282,7 +296,8 @@ async def test_a_failed_transfer_keeps_its_reason(
 
 @pytest.mark.asyncio
 async def test_the_transfers_listener_survives_a_bad_event(
-    window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
     network.substream_progress_queue.put_nowait(("started",))
@@ -302,7 +317,8 @@ async def test_the_tally_listener_refreshes_the_poll_views(
 
 @pytest.mark.asyncio
 async def test_the_tally_listener_survives_a_bad_item(
-    window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
     await network.tally_update_queue.put(["unhashable"])
@@ -316,22 +332,36 @@ async def test_creating_a_survey_stages_it_for_broadcast(
 ) -> None:
     convo_id = loaded_window.convo_state().conversation_id
     survey_id = await katzen._io_tally_create(
-        convo_id, "Lunch?", tally_schema.Mode.AVAILABILITY, ["pizza", "soup"],
+        convo_id,
+        "Lunch?",
+        tally_schema.Mode.AVAILABILITY,
+        ["pizza", "soup"],
     )
     assert isinstance(survey_id, bytes)
     assert len(survey_id) == 16
-    assert await katzen._io_tally_vote(
-        convo_id, survey_id, {"s0": "yes"},
-    ) is True
+    assert (
+        await katzen._io_tally_vote(
+            convo_id,
+            survey_id,
+            {"s0": "yes"},
+        )
+        is True
+    )
     assert await katzen._io_tally_close(convo_id, survey_id) is True
 
 
 @pytest.mark.asyncio
 async def test_tally_operations_refuse_an_unknown_conversation(
-    window: katzen.MainWindow, caplog: pytest.LogCaptureFixture,
+    window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
-    assert await katzen._io_tally_create(4242, "t", tally_schema.Mode.APPROVAL, ["a"]) is None
+    assert (
+        await katzen._io_tally_create(
+            4242, "t", tally_schema.Mode.APPROVAL, ["a"]
+        )
+        is None
+    )
     assert await katzen._io_tally_vote(4242, b"s" * 16, {}) is False
     assert await katzen._io_tally_close(4242, b"s" * 16) is False
     assert "tally create: conversation 4242 not found" in caplog.text
@@ -356,7 +386,10 @@ async def test_a_slow_log_lock_is_reported(
     caplog.set_level(logging.WARNING, logger="katzen")
     convo_id = loaded_window.convo_state().conversation_id
     await katzen._io_tally_create(
-        convo_id, "Slow?", tally_schema.Mode.APPROVAL, ["a"],
+        convo_id,
+        "Slow?",
+        tally_schema.Mode.APPROVAL,
+        ["a"],
     )
     assert "waited 5.0s for the conversation log lock" in caplog.text
 
@@ -367,7 +400,10 @@ async def test_opening_a_poll_window_shows_the_survey(
 ) -> None:
     convo_id = loaded_window.convo_state().conversation_id
     survey_id = await katzen._io_tally_create(
-        convo_id, "Colour?", tally_schema.Mode.APPROVAL, ["red", "blue"],
+        convo_id,
+        "Colour?",
+        tally_schema.Mode.APPROVAL,
+        ["red", "blue"],
     )
     assert survey_id is not None
     loaded_window.openPoll(survey_id.hex())
@@ -431,7 +467,8 @@ async def test_a_new_poll_before_joining_is_refused(
 
 @pytest.mark.asyncio
 async def test_a_new_poll_without_a_conversation_does_nothing(
-    window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     opened: list[object] = []
 
@@ -447,7 +484,8 @@ async def test_a_new_poll_without_a_conversation_does_nothing(
 
 @pytest.mark.asyncio
 async def test_the_create_dialog_drives_the_poll_create(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def joined(conversation_id: int) -> bool:
         return True
@@ -458,7 +496,10 @@ async def test_the_create_dialog_drives_the_poll_create(
         await asyncio.sleep(0)
     convo_id = loaded_window.convo_state().conversation_id
     await loaded_window._create_poll(
-        convo_id, "Snack?", tally_schema.Mode.APPROVAL, ["nuts"],
+        convo_id,
+        "Snack?",
+        tally_schema.Mode.APPROVAL,
+        ["nuts"],
     )
     for _ in range(20):
         await asyncio.sleep(0)
@@ -473,7 +514,10 @@ async def test_an_empty_poll_is_not_created(
 ) -> None:
     convo_id = loaded_window.convo_state().conversation_id
     await loaded_window._create_poll(
-        convo_id, "", tally_schema.Mode.APPROVAL, [],
+        convo_id,
+        "",
+        tally_schema.Mode.APPROVAL,
+        [],
     )
     assert loaded_window._poll_windows == {}
 
@@ -491,7 +535,10 @@ async def test_a_failing_poll_create_is_reported(
     monkeypatch.setattr(katzen, "_io_tally_create", boom)
     convo_id = loaded_window.convo_state().conversation_id
     await loaded_window._create_poll(
-        convo_id, "Topic", tally_schema.Mode.APPROVAL, ["a"],
+        convo_id,
+        "Topic",
+        tally_schema.Mode.APPROVAL,
+        ["a"],
     )
     assert boxes.seen[0].text == (
         "Could not create the poll:\nno room on the stream"
@@ -500,7 +547,8 @@ async def test_a_failing_poll_create_is_reported(
 
 @pytest.mark.asyncio
 async def test_a_vote_is_staged_and_the_views_refresh(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def joined(conversation_id: int) -> bool:
         return True
@@ -508,7 +556,10 @@ async def test_a_vote_is_staged_and_the_views_refresh(
     monkeypatch.setattr(katzen, "conversation_is_joined", joined)
     convo_id = loaded_window.convo_state().conversation_id
     survey_id = await katzen._io_tally_create(
-        convo_id, "Tea?", tally_schema.Mode.APPROVAL, ["yes", "no"],
+        convo_id,
+        "Tea?",
+        tally_schema.Mode.APPROVAL,
+        ["yes", "no"],
     )
     assert survey_id is not None
     loaded_window.openPoll(survey_id.hex())
@@ -522,13 +573,16 @@ async def test_a_vote_is_staged_and_the_views_refresh(
 
 @pytest.mark.asyncio
 async def test_a_vote_without_a_survey_does_nothing(
-    loaded_window: katzen.MainWindow, monkeypatch: pytest.MonkeyPatch,
+    loaded_window: katzen.MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     votes: list[bytes] = []
     closes: list[bytes] = []
 
     async def record_vote(
-        conversation_id: int, survey_id: bytes, choice: dict[str, str],
+        conversation_id: int,
+        survey_id: bytes,
+        choice: dict[str, str],
     ) -> bool:
         votes.append(survey_id)
         return True
@@ -565,7 +619,10 @@ async def test_a_vote_before_joining_is_refused(
     monkeypatch.setattr(katzen, "conversation_is_joined", not_joined)
     convo_id = loaded_window.convo_state().conversation_id
     survey_id = await katzen._io_tally_create(
-        convo_id, "Beer?", tally_schema.Mode.APPROVAL, ["yes"],
+        convo_id,
+        "Beer?",
+        tally_schema.Mode.APPROVAL,
+        ["yes"],
     )
     assert survey_id is not None
     loaded_window.openPoll(survey_id.hex())
@@ -592,7 +649,10 @@ async def test_a_failing_vote_and_close_are_reported(
     monkeypatch.setattr(katzen, "conversation_is_joined", joined)
     convo_id = loaded_window.convo_state().conversation_id
     survey_id = await katzen._io_tally_create(
-        convo_id, "Cake?", tally_schema.Mode.APPROVAL, ["yes"],
+        convo_id,
+        "Cake?",
+        tally_schema.Mode.APPROVAL,
+        ["yes"],
     )
     assert survey_id is not None
     loaded_window.openPoll(survey_id.hex())
@@ -614,7 +674,10 @@ async def test_staging_a_tally_appends_an_optimistic_row(
 ) -> None:
     convo_id = loaded_window.convo_state().conversation_id
     survey_id = await katzen._io_tally_create(
-        convo_id, "Film?", tally_schema.Mode.APPROVAL, ["yes"],
+        convo_id,
+        "Film?",
+        tally_schema.Mode.APPROVAL,
+        ["yes"],
     )
     assert survey_id is not None
     with persistent.Session(persistent._engine_sync) as sess:

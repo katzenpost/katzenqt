@@ -26,6 +26,7 @@ from tests.stubs import returning
 def _fake_main(window: object) -> str:
     return f"main for {window!r}"
 
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 LOG_FORMAT = "%(asctime)s %(name)s: %(levelname)s: %(message)s"
@@ -166,7 +167,8 @@ class CliProbe:
 
 @pytest.fixture()
 def cli_probe(
-    boxes: type[FakeMessageBox], monkeypatch: pytest.MonkeyPatch,
+    boxes: type[FakeMessageBox],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> CliProbe:
     probe = CliProbe()
     monkeypatch.chdir(REPO_ROOT)
@@ -202,10 +204,13 @@ def cli_probe(
 
     monkeypatch.setattr(katzen, "QApplication", make_app)
     monkeypatch.setattr(katzen, "install_log_handlers", install)
-    monkeypatch.setattr(katzen, "parse_log_levels", partial(getattr, probe, "levels"))
+    monkeypatch.setattr(
+        katzen, "parse_log_levels", partial(getattr, probe, "levels")
+    )
     monkeypatch.setattr(persistent, "init_and_migrate", migrate)
     monkeypatch.setattr(
-        katzen, "is_there_already_an_instance_running",
+        katzen,
+        "is_there_already_an_instance_running",
         partial(getattr, probe, "already_running"),
     )
     monkeypatch.setattr(katzen, "AsyncioThread", make_thread)
@@ -255,7 +260,8 @@ def test_a_requested_level_is_applied_and_an_unknown_one_disables(
 
 
 def test_a_failed_migration_reports_the_error_and_exits(
-    cli_probe: CliProbe, boxes: type[FakeMessageBox],
+    cli_probe: CliProbe,
+    boxes: type[FakeMessageBox],
 ) -> None:
     failure = RuntimeError("alembic refused the head")
     cli_probe.migration_error = failure
@@ -271,7 +277,8 @@ def test_a_failed_migration_reports_the_error_and_exits(
 
 
 def test_a_second_instance_is_refused_before_any_thread_starts(
-    cli_probe: CliProbe, boxes: type[FakeMessageBox],
+    cli_probe: CliProbe,
+    boxes: type[FakeMessageBox],
 ) -> None:
     cli_probe.already_running = True
 

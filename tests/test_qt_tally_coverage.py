@@ -35,13 +35,19 @@ def _qt_app() -> Iterator[QCoreApplication]:
 def _make_conversation(name: str = "lobby", first_unread: int = 0) -> int:
     wcap = persistent.WriteCapWAL(id=uuid.uuid4())
     own_rcap = persistent.ReadCapWAL(
-        id=uuid.uuid4(), write_cap_id=wcap.id, read_cap=OWN_CAP,
+        id=uuid.uuid4(),
+        write_cap_id=wcap.id,
+        read_cap=OWN_CAP,
     )
     convo = persistent.Conversation(
-        name=name, write_cap=wcap.id, first_unread=first_unread,
+        name=name,
+        write_cap=wcap.id,
+        first_unread=first_unread,
     )
     own_peer = persistent.ConversationPeer(
-        name="me", read_cap_id=own_rcap.id, conversation=convo,
+        name="me",
+        read_cap_id=own_rcap.id,
+        conversation=convo,
     )
     convo.own_peer = own_peer
     with persistent.Session(persistent._engine_sync) as sess:
@@ -56,14 +62,20 @@ def _make_conversation(name: str = "lobby", first_unread: int = 0) -> int:
 
 def _seed_survey(convo_id: int, survey_id: bytes) -> None:
     doc = schema.new_survey_doc(
-        survey_id, "lunch?", schema.Mode.APPROVAL, ("chicken", "pasta"),
+        survey_id,
+        "lunch?",
+        schema.Mode.APPROVAL,
+        ("chicken", "pasta"),
         creator=voter_id_from_read_cap(OWN_CAP),
     )
     with persistent.Session(persistent._engine_sync) as sess:
-        sess.add(persistent.TallyState(
-            survey_id=survey_id, conversation_id=convo_id,
-            doc_state=sync.full_state(doc),
-        ))
+        sess.add(
+            persistent.TallyState(
+                survey_id=survey_id,
+                conversation_id=convo_id,
+                doc_state=sync.full_state(doc),
+            )
+        )
         sess.commit()
 
 
@@ -80,9 +92,12 @@ def test_outcome_text_reports_a_tie_by_option_name() -> None:
 
 
 def test_outcome_text_handles_a_winner_kind_with_no_winners() -> None:
-    assert outcome_text(
-        Outcome(kind="winner", winners=[], top_yes=1),
-    ) == "No winner yet."
+    assert (
+        outcome_text(
+            Outcome(kind="winner", winners=[], top_yes=1),
+        )
+        == "No winner yet."
+    )
 
 
 def test_slot_totals_mentions_maybe_only_when_it_is_used() -> None:
@@ -94,7 +109,9 @@ def test_slot_totals_mentions_maybe_only_when_it_is_used() -> None:
     assert TallyPanel._slot_totals(without) == f"yes 2 {MIDDLE_DOT} no 3"
 
 
-def test_a_panel_with_no_survey_draws_nothing_and_ignores_edit_and_submit() -> None:
+def test_a_panel_with_no_survey_ignores_edit_and_submit() -> (
+    None
+):
     panel = TallyPanel()
     fired: list[object] = []
     panel.voteSubmitted.connect(fired.append)
