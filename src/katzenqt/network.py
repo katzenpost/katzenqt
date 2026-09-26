@@ -8,6 +8,7 @@ CourierError, CourierInvalidEpochError, ReplicaError,
 )
 from katzenpost_thinclient import Config as ThinClientConfig
 import dataclasses
+import functools
 import hashlib
 import math
 import errno
@@ -26,17 +27,53 @@ import asyncio
 import traceback
 import uuid
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Hashable, Iterable
+from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import (
     Any,
+    TYPE_CHECKING,
     Literal,
     NamedTuple,
     Protocol,
     TypedDict,
     TypeVar,
     Unpack,
+    cast,
 )
+
+if TYPE_CHECKING:
+    from katzenpost_thinclient import EncryptWriteResult
+    from sqlalchemy.orm import Mapped
+
+    from . import _types
+
+    class _MessageReply(TypedDict):
+        message_id: bytes
+        surbid: "bytes | None"
+        payload: "bytes | None"
+
+    class _MessageSent(TypedDict):
+        message_id: bytes
+        surbid: "bytes | None"
+        sent_at: int
+        reply_eta: int
+        err: "str | None"
+
+    class _PacketRow(TypedDict):
+        id: str
+        kind: str
+        stream_id: "uuid.UUID | None"
+        box_index: "int | None"
+        box_position: "int | None"
+        attempt: int
+        sent_at: float
+        sent_wall: float
+        timeout_s: "float | None"
+        status: str
+        finished_at: "float | None"
+        envelope_hash: "bytes | None"
+        stage: "str | None"
+        label: "str | None"
 
 import cbor2
 
@@ -45,7 +82,7 @@ from ._thinclient import ThinClient
 from . import epochs
 from pydantic.dataclasses import dataclass
 from . import attachment_images, conversation_handlers, models, persistent
-from sqlmodel import select
+from sqlmodel import col, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 logger = logging.getLogger("katzen.network")
@@ -146,8 +183,22 @@ class PacketContext:
         "timed_out", "packet_id", "stage", "label",
     )
 
-    def __init__(self, kind: str, *, stream_id=None, box_index=None,
-                 box_position=None, timeout_s=None, stage=None, label=None):
+    kind: str
+    stream_id: "uuid.UUID | None"
+    box_index: "int | None"
+    box_position: "int | None"
+    timeout_s: "float | None"
+    timed_out: bool
+    packet_id: "str | None"
+    stage: "str | None"
+    label: "str | None"
+
+    def __init__(self, kind: str, *, stream_id: "uuid.UUID | None" = None,
+                 box_index: "int | None" = None,
+                 box_position: "int | None" = None,
+                 timeout_s: "float | None" = None,
+                 stage: "str | None" = None,
+                 label: "str | None" = None) -> None:
         self.kind = kind
         self.stream_id = stream_id
         self.box_index = box_index
@@ -166,7 +217,23 @@ class _PacketRecord:
         "envelope_hash", "stage", "label",
     )
 
-    def __init__(self, packet_id, context, envelope_hash):
+    id: str
+    kind: str
+    stream_id: "uuid.UUID | None"
+    box_index: "int | None"
+    box_position: "int | None"
+    attempt: int
+    sent_at: float
+    sent_wall: float
+    timeout_s: "float | None"
+    status: str
+    finished_at: "float | None"
+    envelope_hash: "bytes | None"
+    stage: "str | None"
+    label: "str | None"
+
+    def __init__(self, packet_id: str, context: PacketContext,
+                 envelope_hash: "bytes | None") -> None:
         self.id = packet_id
         self.kind = context.kind
         self.stream_id = context.stream_id
@@ -198,17 +265,40 @@ _PACKET_ATTEMPT_CAP = 8192
 _packets_lock = threading.Lock()
 
 
-def _packet_attempt_key(context: PacketContext):
+def _packet_attempt_key(context: PacketContext) -> "tuple[object, object]":
+    """The retry-counter key for a packet, by stream when it has one.
+
+    >>> _packet_attempt_key(PacketContext("read", box_index=3))
+    ('read', 3)
+    >>> _packet_attempt_key(PacketContext("read", stream_id="S", box_index=3))
+    ('S', 3)
+    """
     if context.stream_id is not None:
         return (context.stream_id, context.box_index)
     return (context.kind, context.box_index)
 
 
-def _box_position(box_index, cap: "bytes | None") -> "int | None":
+def _box_position(box_index: "int | None", cap: "bytes | None") -> "int | None":
     """1-based position of ``box_index`` within its stream, using the stream's
     first BACAP counter in the cap's trailing 104-byte index (present in both
     the 168-byte write cap and the 136-byte read cap). None when it can't be
-    derived."""
+    derived.
+
+    >>> read_cap = bytes(32) + (5).to_bytes(8, "little") + bytes(96)
+    >>> len(read_cap)
+    136
+    >>> _box_position(7, read_cap)
+    3
+    >>> _box_position(5, read_cap)
+    1
+    >>> _box_position(4, read_cap) is None
+    True
+    >>> write_cap = bytes(32) + read_cap
+    >>> len(write_cap), _box_position(7, write_cap)
+    (168, 3)
+    >>> _box_position(7, None) is None
+    True
+    """
     if box_index is None or not cap or len(cap) < 104:
         return None
     first = int.from_bytes(cap[-104:][:8], "little")
@@ -224,7 +314,7 @@ _upload_label_order: "list[object]" = []
 _UPLOAD_LABEL_CAP = 4096
 
 
-def set_upload_label(stream_id, label: "str | None") -> None:
+def set_upload_label(stream_id: "uuid.UUID | None", label: "str | None") -> None:
     if stream_id is None or not label:
         return
     with _packets_lock:
@@ -235,13 +325,25 @@ def set_upload_label(stream_id, label: "str | None") -> None:
             _upload_labels.pop(_upload_label_order.pop(0), None)
 
 
-def upload_label(stream_id) -> "str | None":
+def upload_label(stream_id: "uuid.UUID | None") -> "str | None":
     with _packets_lock:
         return _upload_labels.get(stream_id)
 
 
 def _file_marker_basename(payload: bytes) -> "str | None":
-    """The basename of a local ``file_outgoing`` marker payload, if it is one."""
+    """The basename of a local ``file_outgoing`` marker payload, if it is one.
+
+    >>> _file_marker_basename(
+    ...     b"F" + cbor2.dumps({"kind": "file_outgoing", "basename": "cat.png"}))
+    'cat.png'
+    >>> _file_marker_basename(b"F" + cbor2.dumps({"kind": "file_marker"})) is None
+    True
+    >>> _file_marker_basename(
+    ...     b"C" + cbor2.dumps({"kind": "file_outgoing", "basename": "x"})) is None
+    True
+    >>> _file_marker_basename(b"F" + b"not-cbor-at-all") is None
+    True
+    """
     if not payload or payload[:1] != b"F":
         return None
     try:
@@ -264,7 +366,7 @@ def _next_packet_attempt(context: PacketContext) -> int:
     return attempt
 
 
-def packet_begin(context: PacketContext, envelope_hash=None) -> str:
+def packet_begin(context: PacketContext, envelope_hash: "bytes | None" = None) -> str:
     """Record a send starting; returns its id."""
     with _packets_lock:
         packet_id = uuid.uuid4().hex
@@ -312,7 +414,7 @@ def clear_finished_packets() -> None:
         _packet_finished_order.clear()
 
 
-def packets_snapshot() -> "list[dict]":
+def packets_snapshot() -> "list[_PacketRow]":
     """A copy of the live packet records, safe to read from the Qt thread."""
     with _packets_lock:
         return [
@@ -349,7 +451,7 @@ def reset_packets() -> None:
         _packet_finished_limit = DEFAULT_PACKET_FINISHED_LIMIT
 
 
-def install_stats_counters(connection) -> None:
+def install_stats_counters(connection: ThinClient) -> None:
     """Wrap ``connection``'s encrypt_read/encrypt_write/
     start_resending_encrypted_message so every pigeonhole operation -- on any
     stream kind (normal, substream, voucher) -- is counted.
@@ -365,17 +467,17 @@ def install_stats_counters(connection) -> None:
     original_encrypt_write = connection.encrypt_write
     original_start_resending = connection.start_resending_encrypted_message
 
-    async def encrypt_read(*args, **kwargs):
+    async def encrypt_read(*args: object, **kwargs: object) -> object:
         stats.reads_prepared += 1
         return await original_encrypt_read(*args, **kwargs)
 
-    async def encrypt_write(*args, **kwargs):
+    async def encrypt_write(*args: object, **kwargs: object) -> object:
         stats.writes_prepared += 1
         return await original_encrypt_write(*args, **kwargs)
 
-    async def start_resending_encrypted_message(*args, **kwargs):
+    async def start_resending_encrypted_message(*args: object, **kwargs: object) -> object:
         # Read calls pass read_cap (write_cap=None); write calls pass write_cap.
-        context = kwargs.pop("_packet_context", None)
+        context = cast("PacketContext | None", kwargs.pop("_packet_context", None))
         is_read = kwargs.get("read_cap") is not None
         is_write = kwargs.get("write_cap") is not None
         stats.packets_sent += 1
@@ -385,7 +487,7 @@ def install_stats_counters(connection) -> None:
         elif is_write:
             stats.writes_sent += 1
         packet_id = (
-            packet_begin(context, kwargs.get("envelope_hash"))
+            packet_begin(context, cast("bytes | None", kwargs.get("envelope_hash")))
             if context is not None else None
         )
         try:
@@ -431,19 +533,19 @@ def install_stats_counters(connection) -> None:
     connection.start_resending_encrypted_message = start_resending_encrypted_message
 
 
-conversation_update_queue: "Tuple[int,bool]" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
+conversation_update_queue: "_types.ConversationUpdateQueue" = asyncio.Queue()  # queue of `int`,which are Conversation.id, when we have written to ConversationLog. the bool is "redraw_only"; when True it only redraws and doesn't grow the model
 
 # Tally events consumed off the receive path, as conversation ids. Pushed only
 # after the consuming transaction has committed (same discipline as
 # conversation_update_queue/peer_added_queue), so the GUI never refreshes
 # against uncommitted TallyState rows. The GUI drains this in a queued
 # connection and repaints its poll list / timeline placeholders / tab badge.
-tally_update_queue: "Tuple[int]" = asyncio.Queue()
+tally_update_queue: "_types.TallyEventQueue" = asyncio.Queue()
 
 # Peers the local client learned of via an INTRODUCTION announcement, as
 # ``(conversation_id, display_name)``. Announced on the io loop by the receive
 # path; the GUI appends the name to the contacts tree in its own listener.
-peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
+peer_added_queue: "asyncio.Queue[tuple[int, str]]" = asyncio.Queue()
 
 
 
@@ -472,18 +574,18 @@ class TransferRemoved:
 # wire/framing overhead excluded).
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
-substream_progress_queue: "asyncio.Queue[Any]" = asyncio.Queue()
+substream_progress_queue: "asyncio.Queue[tuple[object, ...] | TransferRemoved]" = asyncio.Queue()
 
-__resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
+__resend_queue: "set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
 
 # In-flight drain_mixwal_read_single tasks keyed by bacap_stream, so a pause
 # or cancel can stop one peer's reads without ending the drain loop.
-_inflight_reads: "dict[uuid.UUID, asyncio.Task]" = {}
+_inflight_reads: "dict[uuid.UUID, asyncio.Task[object]]" = {}
 
 # In-flight drain_mixwal_write_single tasks keyed by bacap_stream; pause and
 # cancel use this to stop the chunk currently being cast.
-_inflight_writes: "dict[uuid.UUID, asyncio.Task]" = {}
+_inflight_writes: "dict[uuid.UUID, asyncio.Task[object]]" = {}
 
 # Streams whose current write has been ACK'd by the courier. The ACK
 # bookkeeping that follows must not be interrupted, so pause and cancel leave
@@ -502,9 +604,16 @@ async def check_for_new() -> None:
     resendable_event.set()
 
 
-async def notify_outbound_chat_sent(*, conversation_id, conversation_peer_id,
-                                     new_write_caps, db_entries, payload,
-                                     final_pwal_id=None, log_id=None):
+async def notify_outbound_chat_sent(
+    *,
+    conversation_id: int,
+    conversation_peer_id: int,
+    new_write_caps: "list[uuid.UUID]",
+    db_entries: "Sequence[persistent.SQLModel]",
+    payload: bytes,
+    final_pwal_id: "uuid.UUID | None" = None,
+    log_id: "uuid.UUID | None" = None,
+) -> None:
     """Append an outbound chat message's WAL rows/log entry and wake the
     receive-side listeners, all in one io-loop hop.
 
@@ -565,7 +674,7 @@ _last_epoch: "int | None" = None
 _epoch_event = asyncio.Event()
 
 
-async def on_new_pki_document(event: "Dict[str, Any]") -> None:
+async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     """Bump _epoch_event on every epoch advance.
 
     Parses the epoch out of the raw event ourselves (rather than going
@@ -608,7 +717,17 @@ def derive_epoch_period_seconds(
 ) -> "int | None":
     """Recover the network's epoch duration in seconds from the current epoch.
 
-    ``None`` when the epoch is unknown or non-positive."""
+    ``None`` when the epoch is unknown or non-positive.
+
+    >>> from datetime import timedelta
+    >>> derive_epoch_period_seconds(
+    ...     2, KATZENPOST_EPOCH_ORIGIN + timedelta(seconds=2400))
+    1200
+    >>> derive_epoch_period_seconds(0) is None
+    True
+    >>> derive_epoch_period_seconds(None) is None
+    True
+    """
     if epoch is None or epoch <= 0:
         return None
     now = now or datetime.now(timezone.utc)
@@ -616,8 +735,20 @@ def derive_epoch_period_seconds(
     return int(round(elapsed / epoch))
 
 
-def format_duration(seconds: "int | None") -> str:
-    """Human-readable duration, e.g. ``3y 5d`` / ``2h 5m`` / ``12s``."""
+def format_duration(seconds: "float | None") -> str:
+    """Human-readable duration, e.g. ``3y 5d`` / ``2h 5m`` / ``12s``.
+
+    >>> format_duration(None)
+    'unknown'
+    >>> format_duration(86400 * 365)
+    '1y 0d'
+    >>> format_duration(86400 * 2 + 3600 * 5)
+    '2d 5h'
+    >>> format_duration(125)
+    '2m 5s'
+    >>> format_duration(-1)
+    '0s'
+    """
     if seconds is None:
         return "unknown"
     seconds = max(int(seconds), 0)
@@ -657,38 +788,71 @@ class ConsensusSummary(NamedTuple):
 
     @property
     def epochs_elapsed(self) -> int:
+        """Epochs since genesis, clamped at zero.
+
+        >>> ConsensusSummary(5, 2, 1200, [], [], [], []).epochs_elapsed
+        3
+        >>> ConsensusSummary(1, 2, 1200, [], [], [], []).epochs_elapsed
+        0
+        """
         return max(self.epoch - self.genesis_epoch, 0)
 
     @property
     def consensus_seconds(self) -> "int | None":
+        """How long the consensus has run, or None without a known period.
+
+        >>> ConsensusSummary(5, 2, 1200, [], [], [], []).consensus_seconds
+        3600
+        >>> ConsensusSummary(5, 2, None, [], [], [], []).consensus_seconds is None
+        True
+        """
         if self.period_seconds is None:
             return None
         return self.epochs_elapsed * self.period_seconds
 
 
-def _node_from_descriptor(desc: "dict") -> ConsensusNode:
+def _node_from_descriptor(desc: "dict[str, object]") -> ConsensusNode:
+    """Flatten one node descriptor into a name and transport-tagged addresses.
+
+    >>> _node_from_descriptor(
+    ...     {"Name": "gateway1", "Addresses": {"tcp": ["1.2.3.4:1234"]}})
+    ConsensusNode(name='gateway1', addresses=['tcp://1.2.3.4:1234'])
+    >>> _node_from_descriptor({})
+    ConsensusNode(name='?', addresses=[])
+    """
+    by_transport = cast("dict[str, list[str]]", desc.get("Addresses") or {})
     addresses = [
         addr if "://" in addr else f"{transport}://{addr}"
-        for transport, addrs in (desc.get("Addresses") or {}).items()
+        for transport, addrs in by_transport.items()
         for addr in addrs
     ]
     return ConsensusNode(name=str(desc.get("Name") or "?"), addresses=addresses)
 
 
-def _decode_nodes(entries) -> "list[ConsensusNode]":
+def _decode_nodes(entries: "Iterable[object] | None") -> "list[ConsensusNode]":
     """Decode the node descriptors the PKI document carries.
 
     The daemon strips the document's signatures and cert wrapper before
     forwarding it; mix, gateway and service entries are CBOR byte strings
     (see the thin client's pretty_print_pki_doc), while storage replicas
-    arrive already decoded as maps."""
+    arrive already decoded as maps.
+
+    >>> _decode_nodes([
+    ...     cbor2.dumps({"Name": "mix1", "Addresses": {}}),
+    ...     {"Name": "mix2"},
+    ...     b"not-cbor-at-all",
+    ... ])
+    [ConsensusNode(name='mix1', addresses=[]), ConsensusNode(name='mix2', addresses=[])]
+    >>> _decode_nodes(None)
+    []
+    """
     nodes = []
     for entry in entries or []:
         if isinstance(entry, dict):
             desc = entry
         else:
             try:
-                desc = cbor2.loads(entry)
+                desc = cbor2.loads(cast("bytes", entry))
             except Exception:
                 continue
         if isinstance(desc, dict):
@@ -697,53 +861,93 @@ def _decode_nodes(entries) -> "list[ConsensusNode]":
 
 
 def summarize_pki_document(
-    doc, now: "datetime | None" = None,
+    doc: "Mapping[str, object] | None", now: "datetime | None" = None,
 ) -> "ConsensusSummary | None":
-    """Summarize a parsed PKI document, or None when none is available."""
+    """Summarize a parsed PKI document, or None when none is available.
+
+    >>> from datetime import timedelta
+    >>> summarize_pki_document(None) is None
+    True
+    >>> summary = summarize_pki_document(
+    ...     {"Epoch": 2, "GenesisEpoch": 1, "GatewayNodes": [{"Name": "gw"}]},
+    ...     now=KATZENPOST_EPOCH_ORIGIN + timedelta(seconds=2400),
+    ... )
+    >>> summary.epochs_elapsed, summary.period_seconds, summary.consensus_seconds
+    (1, 1200, 1200)
+    >>> summary.gateways
+    [ConsensusNode(name='gw', addresses=[])]
+    >>> summary.mix_layers
+    []
+    """
     if not doc:
         return None
-    epoch = int(doc.get("Epoch") or 0)
-    genesis_epoch = int(doc.get("GenesisEpoch") or 0)
+    epoch = int(cast("int", doc.get("Epoch") or 0))
+    genesis_epoch = int(cast("int", doc.get("GenesisEpoch") or 0))
     return ConsensusSummary(
         epoch=epoch,
         genesis_epoch=genesis_epoch,
         period_seconds=derive_epoch_period_seconds(epoch, now),
         mix_layers=[
-            _decode_nodes(layer) for layer in (doc.get("Topology") or [])
+            _decode_nodes(cast("Iterable[object]", layer))
+            for layer in cast("Iterable[object]", doc.get("Topology") or [])
         ],
-        gateways=_decode_nodes(doc.get("GatewayNodes") or []),
-        service_nodes=_decode_nodes(doc.get("ServiceNodes") or []),
-        storage_replicas=_decode_nodes(doc.get("StorageReplicas") or []),
+        gateways=_decode_nodes(
+            cast("Iterable[object]", doc.get("GatewayNodes") or []),
+        ),
+        service_nodes=_decode_nodes(
+            cast("Iterable[object]", doc.get("ServiceNodes") or []),
+        ),
+        storage_replicas=_decode_nodes(
+            cast("Iterable[object]", doc.get("StorageReplicas") or []),
+        ),
     )
 
 
-async def get_pki_document(connection):
+async def get_pki_document(connection: "ThinClient | None") -> "_types.PkiDocument | None":
     """Snapshot the daemon's current parsed PKI document (io loop only).
 
     Returns None before the client has connected."""
     if connection is None:
         return None
-    return connection.pki_document()
+    return cast("_types.PkiDocument | None", connection.pki_document())
 
 
-def _is_transient_sqlite_busy(exc: OperationalError) -> bool:
+def _is_transient_sqlite_busy(exc: "OperationalError | IntegrityError") -> bool:
     """True for sqlite's own lock-contention error, false for anything else
     (schema drift, a malformed database, a readonly filesystem) that also
     happens to raise sqlalchemy.exc.OperationalError. Only the former should
     be treated as "retry later"; the latter is an invariant bug and ought to
-    stay loud instead of retrying forever."""
+    stay loud instead of retrying forever.
+
+    >>> from sqlalchemy.exc import OperationalError
+    >>> _is_transient_sqlite_busy(
+    ...     OperationalError("s", {}, Exception("database is locked")))
+    True
+    >>> _is_transient_sqlite_busy(
+    ...     OperationalError("s", {}, Exception("no such table: mixwal")))
+    False
+    """
     return "database is locked" in str(exc.orig).lower()
 
 def _is_duplicate_arming(exc: "OperationalError | IntegrityError") -> bool:
     """True when a pass tried to arm a read whose stream already has a MixWAL
     row. The row is already there, so the pass has nothing to add and the next
-    sweep re-selects whatever still needs arming."""
+    sweep re-selects whatever still needs arming.
+
+    >>> from sqlalchemy.exc import IntegrityError
+    >>> _is_duplicate_arming(IntegrityError(
+    ...     "s", {}, Exception("UNIQUE constraint failed: mixwal.bacap_stream")))
+    True
+    >>> _is_duplicate_arming(IntegrityError(
+    ...     "s", {}, Exception("UNIQUE constraint failed: mixwal.id")))
+    False
+    """
     return "unique constraint failed: mixwal.bacap_stream" in str(
         exc.orig
     ).lower()
 
 
-__on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
+__on_message_queues: "dict[bytes, asyncio.Queue[Mapping[str, object]]]" = {}
 
 __should_quit = asyncio.Event()
 def shutdown() -> None:
@@ -806,15 +1010,21 @@ def _failure_reason(exc: BaseException) -> str:
     transfer.
 
     The reason is persisted and rendered in the transfers panel; the full
-    exception is logged with a traceback elsewhere."""
+    exception is logged with a traceback elsewhere.
+
+    >>> _failure_reason(ValueError("peer-chosen detail"))
+    'ValueError'
+    >>> _failure_reason(TimeoutError())
+    'TimeoutError'
+    """
     return type(exc).__name__
 
 
-async def drain_mixwal(connection: ThinClient):
+async def drain_mixwal(connection: ThinClient) -> None:
     await drain_mixwal2(connection)
 
 
-async def _remint_mixwal(mw: persistent.MixWAL, fresh) -> bool:
+async def _remint_mixwal(mw: persistent.MixWAL, fresh: "EncryptWriteResult") -> bool:
     """Persist a freshly minted envelope onto an existing MixWAL row.
 
     fresh is an EncryptWriteResult. Returns False if the row no longer
@@ -1131,11 +1341,27 @@ _SAFETY_CAP_LN_EPS = -math.log(1e-12)
 
 
 def _ms_to_s(ms: float) -> float:
+    """Convert a millisecond interval to seconds.
+
+    >>> _ms_to_s(1.0)
+    0.001
+    >>> _ms_to_s(2500.0)
+    2.5
+    """
     # The PKI lambdas are events per MILLISECOND; per-second is a 1000x error.
     return ms / 1000.0
 
 
 def _clamp(value: float, low: float, high: float) -> float:
+    """Restrict ``value`` to the inclusive range ``[low, high]``.
+
+    >>> _clamp(5.0, 1.0, 3.0)
+    3.0
+    >>> _clamp(-1.0, 1.0, 3.0)
+    1.0
+    >>> _clamp(2.0, 1.0, 3.0)
+    2.0
+    """
     return min(max(value, low), high)
 
 
@@ -1147,6 +1373,13 @@ def pacing_bounds_for(lambda_p: "float | None") -> PacingBounds:
     the first ceiling is its mean interval and the cap is the quantile
     common.SafetyCap uses. At the default LambdaP=0.001 that lands near
     the hand-picked 0.5s/30s it replaces.
+
+    >>> pacing_bounds_for(None) == DEFAULT_PACING
+    True
+    >>> pacing_bounds_for(0.0) == DEFAULT_PACING
+    True
+    >>> pacing_bounds_for(100.0)
+    PacingBounds(first_s=0.1, cap_s=1.0)
     """
     if lambda_p is None or not lambda_p > 0.0 or math.isinf(lambda_p):
         return DEFAULT_PACING
@@ -1156,6 +1389,15 @@ def pacing_bounds_for(lambda_p: "float | None") -> PacingBounds:
 
 
 def next_ceiling_s(previous_s: float, bounds: PacingBounds) -> float:
+    """Double the previous retry ceiling, starting at and capped by ``bounds``.
+
+    >>> next_ceiling_s(0.0, DEFAULT_PACING)
+    0.5
+    >>> next_ceiling_s(0.5, DEFAULT_PACING)
+    1.0
+    >>> next_ceiling_s(20.0, DEFAULT_PACING)
+    30.0
+    """
     if previous_s <= 0.0:
         return bounds.first_s
     return min(bounds.cap_s, previous_s * 2.0)
@@ -1209,6 +1451,7 @@ class _ResendingArguments(TypedDict, total=False):
     envelope_hash: bytes | None
     no_retry_on_box_id_not_found: bool
     no_idempotent_box_already_exists: bool
+    _packet_context: PacketContext
 
 
 class _ResendingClient(Protocol[_Reply_co]):
@@ -1242,6 +1485,15 @@ _REMINT_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
 
 
 def _retryable_rpc_error(exc: BaseException) -> bool:
+    """Whether an RPC failure is a transient link problem worth retrying.
+
+    >>> _retryable_rpc_error(OSError(errno.ECONNRESET, "reset"))
+    True
+    >>> _retryable_rpc_error(OSError(errno.ENOENT, "missing"))
+    False
+    >>> _retryable_rpc_error(TimeoutError())
+    False
+    """
     if isinstance(exc, _REMINT_TRANSIENT_ERRORS):
         return True
     if isinstance(exc, TimeoutError):
@@ -1292,7 +1544,7 @@ async def _rpc_racing_connection_life(
     task = asyncio.ensure_future(rpc_factory())
     reconnect_wait = asyncio.ensure_future(reconnect_marker.wait())
     epoch_wait = asyncio.ensure_future(epoch_marker.wait())
-    racing: set[asyncio.Future[_RpcResult] | asyncio.Future[bool]] = {
+    racing: set[asyncio.Future[_RpcResult] | asyncio.Future[Literal[True]]] = {
         task, reconnect_wait,
     }
     if race_epoch:
@@ -1418,7 +1670,15 @@ async def _await_read_reply(
 def _substream_parent_id(name: str) -> "int | None":
     """Parse the parent peer id out of a ``:substream:<parent_id>:<nonce>``
     name, or None when the name is malformed. Pure, so the sync-seeded
-    Transfers panel can resolve a parent without the async engine."""
+    Transfers panel can resolve a parent without the async engine.
+
+    >>> _substream_parent_id(":substream:42:abcd")
+    42
+    >>> _substream_parent_id(":substream:nope:abcd") is None
+    True
+    >>> _substream_parent_id("alice") is None
+    True
+    """
     parts = name.split(":")
     if len(parts) < 4:
         return None
@@ -1464,7 +1724,17 @@ _BASENAME_ALLOWED = frozenset(
 
 
 def _safe_basename(name: str) -> str:
-    """Reduce a peer-supplied name to 7-bit ASCII from the allowlist."""
+    """Reduce a peer-supplied name to 7-bit ASCII from the allowlist.
+
+    >>> _safe_basename("../../etc/passwd")
+    '_.._etc_passwd'
+    >>> _safe_basename("holiday photo.jpg")
+    'holiday photo.jpg'
+    >>> _safe_basename("")
+    'unnamed'
+    >>> len(_safe_basename("a" * 300))
+    200
+    """
     cleaned = "".join(c if c in _BASENAME_ALLOWED else "_" for c in (name or ""))
     cleaned = cleaned.lstrip(".")
     return cleaned[:200] or "unnamed"
@@ -1547,7 +1817,9 @@ def _spill_attachment(
     return b"F" + cbor2.dumps(marker_fields)
 
 
-async def _get_received_piece(sess, rcw_id: "uuid.UUID", idx_8b: bytes):
+async def _get_received_piece(
+    sess: "persistent.AsyncSession", rcw_id: "uuid.UUID", idx_8b: bytes,
+) -> "persistent.ReceivedPiece | None":
     """Lookup helper for the (read_cap, bacap_index) composite primary
     key. Returns ``None`` when no row matches."""
     return (await sess.exec(
@@ -1558,7 +1830,10 @@ async def _get_received_piece(sess, rcw_id: "uuid.UUID", idx_8b: bytes):
     )).first()
 
 
-async def _try_assemble(sess, rcw_id: "uuid.UUID", terminal_idx_8b: bytes):
+async def _try_assemble(
+    sess: "persistent.AsyncSession", rcw_id: "uuid.UUID",
+    terminal_idx_8b: bytes,
+) -> "tuple[Literal['F'], list[tuple[bytes, bytes]], list[persistent.ReceivedPiece], models.GroupChatMessage] | tuple[Literal['I'], bytes, list[persistent.ReceivedPiece]] | None":
     """Walk back from a freshly-inserted ``ReceivedPiece`` and try to
     coalesce a chain.
 
@@ -1620,6 +1895,17 @@ def _substream_miss_state(
     started_s: float | None, *, terminal: bool,
     now_s: float, budget_s: float,
 ) -> tuple[float, str | None]:
+    """Track when a substream box first went missing and when to give up on it.
+
+    >>> _substream_miss_state(None, terminal=False, now_s=100.0, budget_s=60.0)
+    (100.0, None)
+    >>> _substream_miss_state(90.0, terminal=False, now_s=100.0, budget_s=60.0)
+    (90.0, None)
+    >>> _substream_miss_state(10.0, terminal=False, now_s=100.0, budget_s=60.0)
+    (10.0, 'A required box remained unavailable')
+    >>> _substream_miss_state(90.0, terminal=True, now_s=100.0, budget_s=60.0)
+    (90.0, 'A required box is tombstoned')
+    """
     started = now_s if started_s is None else started_s
     if terminal:
         return started, "A required box is tombstoned"
@@ -1685,7 +1971,7 @@ async def _discard_substream_release(
         await sess.delete(piece)
 
 
-async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS, reconnect_grace_s: float = _RECONNECT_GRACE_SECONDS):
+async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS, reconnect_grace_s: float = _RECONNECT_GRACE_SECONDS) -> None:
   """Given a single persisten.MixWAL with is_read==True:
     - Send it to the network.
     - If we get a response:
@@ -1925,6 +2211,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
   async with persistent.asession() as sess:
     rcw = await sess.get(persistent.ReadCapWAL, mw.bacap_stream)
+    assert rcw is not None, "read MW without its ReadCapWAL"
+    assert rcw.next_index is not None, "armed read stream without next_index"
+    assert rcw.read_cap is not None, "armed read stream without read_cap"
     idx_old = await _box_index_counter(rcw.next_index)
     idx_new = await _box_index_counter(rcr.next_message_box_index)
     if idx_old >= idx_new:
@@ -1980,7 +2269,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # panel shows. The byte sum is the effective payload (ReceivedPiece.chunk
     # has the 1-byte chunk-type prefix already stripped), used for the rate
     # column.
-    substream_progress = []
+    substream_progress: "list[tuple[object, ...]]" = []
     if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
         piece_count, received_bytes = (await sess.exec(
             select(
@@ -2034,7 +2323,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         if spill_gcm.file_upload is not None:
             spill_conv_id = (
                 parent_peer.conversation.id
-                if cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+                if parent_peer is not None
                 else cp.conversation.id
             )
             spilled_payload = await asyncio.to_thread(
@@ -2064,7 +2353,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     if gcm.text is not None:
                         gcm.text = models.clamp_message_text(gcm.text)
                     full_payload = b"F" + gcm.to_cbor()
-                if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
+                if parent_peer is not None:
                     # Substream's terminal F: commit the assembled message into the
                     # parent peer's ConversationLog, prune the parent's indirection
                     # piece, and retire this synthetic peer.
@@ -2191,6 +2480,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       is_substream = _cp is not None and _cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
       
       if is_substream:
+          assert _cp is not None
           # Substream: deactivate peer and fire failed event. Rollback the
           # original session first to release any locks held by the failed
           # transaction.
@@ -2313,7 +2603,9 @@ async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         except asyncio.CancelledError:
             # The reader's cancellation is expected; only re-raise when this
             # caller is itself being cancelled.
-            if asyncio.current_task().cancelling():
+            current = asyncio.current_task()
+            assert current is not None
+            if current.cancelling():
                 raise
         except Exception:
             logger.exception("Read failed while pausing %s", bacap_stream)
@@ -2397,7 +2689,9 @@ async def pause_upload(*, rcw_id: uuid.UUID) -> None:
         except asyncio.CancelledError:
             # The writer's cancellation is expected; only re-raise when this
             # caller is itself being cancelled.
-            if asyncio.current_task().cancelling():
+            current = asyncio.current_task()
+            assert current is not None
+            if current.cancelling():
                 raise
         except Exception:
             logger.exception("write drain failed while pausing %s", agg)
@@ -2468,7 +2762,9 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
             except asyncio.CancelledError:
                 # The writer's cancellation is expected; only re-raise when
                 # this caller is itself being cancelled.
-                if asyncio.current_task().cancelling():
+                current = asyncio.current_task()
+                assert current is not None
+                if current.cancelling():
                     raise
             except Exception:
                 logger.exception("write drain failed during cancel of %s", agg)
@@ -2533,7 +2829,7 @@ async def _upload_stream_for_rcw(rcw_id: uuid.UUID) -> "uuid.UUID | None":
     discriminates the two.
     """
     async with persistent.asession() as sess:
-        rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+        rcw: "persistent.ReadCapWAL | None" = await sess.get(persistent.ReadCapWAL, rcw_id)
         if rcw is None or rcw.write_cap_id is None:
             return None
         if rcw.substream_total_chunks is None:
@@ -2615,8 +2911,9 @@ async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool
     return not __should_quit.is_set()
 
 
-def _done_callback(task: "asyncio.Task", *, desc: str,
-                   on_cancel=None, on_error=None) -> None:
+def _done_callback(task: "asyncio.Task[object]", *, desc: str,
+                   on_cancel: "Callable[[], object] | None" = None,
+                   on_error: "Callable[[BaseException], object] | None" = None) -> None:
     """Shared primitive for the fire-and-forget done-callbacks.
 
     The drain loops and on_error never await the tasks they fire, so a
@@ -2628,7 +2925,7 @@ def _done_callback(task: "asyncio.Task", *, desc: str,
     on success do neither. The exception is consumed (no "Task exception
     was never retrieved" warning) and NEVER re-raised.
     """
-    def _done(task: "asyncio.Task") -> None:
+    def _done(task: "asyncio.Task[object]") -> None:
         if task.cancelled():
             if on_cancel is not None:
                 on_cancel()
@@ -2648,14 +2945,18 @@ def _done_callback(task: "asyncio.Task", *, desc: str,
         _done(task)
 
 
-def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
-                   draining_right_now):
+def _on_write_done(task: "asyncio.Task[object]", stream: uuid.UUID,
+                   draining_right_now: "set[uuid.UUID]") -> None:
     """Done-callback for the fire-and-forget write drains in drain_mixwal2.
 
     Discards the stream from draining_right_now so a crashed write does not
     starve every later MW on it (the MixWAL row survives for the next pass),
     logs the failure, and pokes __mixwal_updated so the retry is prompt.
     """
+    def _release_and_poke(_exc: BaseException) -> None:
+        draining_right_now.discard(stream)
+        __mixwal_updated.set()
+
     _inflight_writes.pop(stream, None)
     _write_acknowledged.discard(stream)
     _done_callback(
@@ -2664,10 +2965,8 @@ def _on_write_done(task: "asyncio.Task", stream: uuid.UUID,
             f"drain_mixwal_write_single crashed for bacap_stream={stream}; "
             "releasing stream for another drain pass"
         ),
-        on_cancel=lambda: (draining_right_now.discard(stream), None),
-        on_error=lambda _exc: (
-            draining_right_now.discard(stream), __mixwal_updated.set(),
-        ),
+        on_cancel=lambda: draining_right_now.discard(stream),
+        on_error=_release_and_poke,
     )
 
 
@@ -2686,7 +2985,7 @@ async def drain_mixwal2(connection: ThinClient) -> None:
         - bump MessageBoxIndex
     """
 
-    draining_right_now : "Set[uuid.UUID]" = set()
+    draining_right_now : "set[uuid.UUID]" = set()
     await __resend_queue_populated.wait()
     shutdown = create_task(__should_quit.wait())
     requests: set[asyncio.Task[None]] = set()
@@ -2738,6 +3037,7 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                             draining_right_now.discard(mw.bacap_stream)
                             __resend_queue.discard(mw.bacap_stream)
                             continue
+                        assert rcw.read_cap is not None
                         if len(rcw.read_cap) != 136:
                             # A malformed row must not take down the whole drain
                             # loop (see drain_mixwal's wrapper, which catches an
@@ -2760,7 +3060,7 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                         read_task.add_done_callback(requests.discard)
                         _inflight_reads[mw.bacap_stream] = read_task
 
-                        def _on_read_done(task, stream=mw.bacap_stream) -> None:
+                        def _on_read_done(task: "asyncio.Task[None]", stream: uuid.UUID = mw.bacap_stream) -> None:
                             _inflight_reads.pop(stream, None)
                             # The drain loop never awaits read_task, so without
                             # this an unhandled exception (e.g. an OS-level send
@@ -2776,10 +3076,10 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                                     "for another drain pass"
                                 ),
                                 on_cancel=(
-                                    lambda: (draining_right_now.discard(stream), None)
+                                    lambda: draining_right_now.discard(stream)
                                 ),
-                                on_error=lambda _exc: (
-                                    draining_right_now.discard(stream), None
+                                on_error=(
+                                    lambda _exc: draining_right_now.discard(stream)
                                 ),
                             )
                             readables_to_mixwal_event.set()
@@ -2810,23 +3110,23 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                 _inflight_writes[mw.bacap_stream] = write_task
                 requests.add(write_task)
                 write_task.add_done_callback(requests.discard)
-                write_task.add_done_callback(
-                    lambda task, b=mw.bacap_stream: _on_write_done(task, b, draining_right_now))
+                write_task.add_done_callback(functools.partial(
+                    _on_write_done, stream=mw.bacap_stream,
+                    draining_right_now=draining_right_now))
 
     finally:
         await _cancel_and_join((*requests, shutdown))
 
 
-async def provision_read_caps(connection: ThinClient):
+async def provision_read_caps(connection: ThinClient) -> None:
     """Long-running process to tread persistent.WriteCapWAL and populate ReadCapWAL"""
     #print("provision read caps"*100)
-    import sqlalchemy as sa
     wait = 0
     while not __should_quit.is_set():
         await asyncio.sleep(wait)  # could make this smoother with an asyncio.Event(), but 5s is fine for now.
         wait = 5
         async with persistent.asession() as sess:
-            for (rcw, wcw) in await sess.exec(sa.select(persistent.ReadCapWAL,persistent.WriteCapWAL).where(persistent.ReadCapWAL.read_cap == None).where(persistent.ReadCapWAL.write_cap_id==persistent.WriteCapWAL.id)): #  &
+            for (rcw, wcw) in await sess.exec(select(persistent.ReadCapWAL,persistent.WriteCapWAL).where(col(persistent.ReadCapWAL.read_cap) == None).where(col(persistent.ReadCapWAL.write_cap_id)==persistent.WriteCapWAL.id)): #  &
                 logger.debug("provision_read_caps UPDATING rcw_id=%s wcw_id=%s",
                              rcw.id, wcw.id)
                 if wcw.write_cap is None:
@@ -2916,7 +3216,7 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
                         ).where(persistent.ConversationPeer.active==True
                         ).where(persistent.ConversationPeer.read_cap_id == persistent.ReadCapWAL.id
                                 ).where(
-                                    persistent.ReadCapWAL.id.not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?
+                                    cast("Mapped[uuid.UUID]", persistent.ReadCapWAL.id).not_in(select(persistent.MixWAL.bacap_stream)) # todo does the rcw.id correspond to a bacap_stream?? should we use the same id for both?
                                 )
                     )
                 ).all()
@@ -2936,6 +3236,7 @@ async def readables_to_mixwal(connection: ThinClient) -> None:
                         )
                         continue
                     armed.add(rcw.id)
+                    assert rcw.next_index is not None
                     logger.debug("going to process_box", cpeer.name, rcw.next_index[:8].hex())
                     try:
                       mw = await process_box(cpeer, rcw)
@@ -2997,7 +3298,9 @@ _SUPERVISOR_RETRY_MAX_S = 60.0
 _SUPERVISOR_HEALTHY_S = 300.0
 
 
-async def _supervised(worker, connection: ThinClient, *, on_restart=None) -> None:
+async def _supervised(worker: "Callable[[ThinClient], Awaitable[object]]",
+                      connection: ThinClient, *,
+                      on_restart: "Callable[[], object] | None" = None) -> None:
     """Run ``worker`` forever, restarting it after a failure or an early
     return with a backoff that doubles to _SUPERVISOR_RETRY_MAX_S and resets
     after a healthy run.
@@ -3034,7 +3337,8 @@ async def _supervised(worker, connection: ThinClient, *, on_restart=None) -> Non
             on_restart()
 
 
-def on_error(task, func, *args, **kwargs):
+def on_error(task: "asyncio.Task[_RpcResult]", func: "Callable[..., object]",
+             *args: object, **kwargs: object) -> "asyncio.Task[_RpcResult]":
     """Attach ``func(*args, **kwargs)`` to ``task``'s completion, firing only
     when the task raised.
 
@@ -3048,9 +3352,26 @@ def on_error(task, func, *args, **kwargs):
     _done_callback(
         task,
         desc="on_error: task failed",
-        on_error=lambda exc, f=func, a=args, k=kwargs: f(*a, **k),
+        on_error=cast("Callable[[BaseException], object]", lambda exc, f=func, a=args, k=kwargs: f(*a, **k)),
     )
     return task
+
+class _Resendable(Protocol):
+    @property
+    def id(self) -> uuid.UUID: ...
+
+    @property
+    def bacap_stream(self) -> uuid.UUID: ...
+
+    @property
+    def bacap_payload(self) -> bytes: ...
+
+
+class _ResendDispatch(NamedTuple):
+    id: uuid.UUID
+    bacap_stream: uuid.UUID
+    bacap_payload: bytes
+
 
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
     # look at persistent.PlaintextWAL:
@@ -3078,7 +3399,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                 continue
             resendable_event.clear()
             logger.debug("send_resendable_plaintexts: running")
-            pwals_to_send = set()
+            pwals_to_send: "set[uuid.UUID]" = set()
             async with persistent.asession() as sess:
                 query = persistent.PlaintextWAL.find_resendable(__resend_queue)
                 sendable_rows = (await sess.exec(query)).all()
@@ -3089,7 +3410,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                 # snapshot the (id, bacap_stream, payload) we need for
                 # dispatch into a detachable container so start_resending
                 # never touches a session-bound attribute.
-                dispatch: "list[types.SimpleNamespace]" = []
+                dispatch: "list[_ResendDispatch]" = []
                 for row in sendable_rows:
                     payload = row.bacap_payload
                     if row.indirection is not None and not payload:
@@ -3108,7 +3429,8 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                         # the sender's indirection ReadCapWAL created in
                         # models.serialize(); when it predates the column this
                         # falls back to a legacy 136-byte I-chunk.
-                        total = rcw.substream_total_chunks if rcw is not None else None
+                        assert rcw is not None and rcw.read_cap is not None
+                        total = rcw.substream_total_chunks
                         if total is None:
                             payload = b'I' + rcw.read_cap
                         else:
@@ -3117,7 +3439,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                         if pwal_orm is not None:
                             pwal_orm.bacap_payload = payload
                             sess.add(pwal_orm)
-                    dispatch.append(types.SimpleNamespace(
+                    dispatch.append(_ResendDispatch(
                         id=row.id,
                         bacap_stream=row.bacap_stream,
                         bacap_payload=payload,
@@ -3147,7 +3469,7 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
     finally:
         await _cancel_and_join(requests)
 
-async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
+async def start_resending(connection:ThinClient, pwal: "_Resendable") -> None:
     """
     called by network:send_resumable_plaintexts, at startup and peridically, guarded by __resend_queue
     creates MixWAL entries for plaintexts.
@@ -3168,7 +3490,8 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
       - these we persist to MixWAL
     """
     async with persistent.asession() as sess:
-        wc: persistent.WriteCapWAL = await sess.get(persistent.WriteCapWAL, pwal.bacap_stream)
+        wc = await sess.get(persistent.WriteCapWAL, pwal.bacap_stream)
+        assert wc is not None, "resendable PWAL without its WriteCapWAL"
 
     # now we have:
     # - a plaintext to send to send, pwal.bacap_payload
@@ -3211,11 +3534,11 @@ async def start_resending(connection:ThinClient, pwal: persistent.PlaintextWAL):
     # and issuing ThinClient.start_resending_encrypted_message
     __mixwal_updated.set()
 
-async def on_daemon_disconnected(event):
+async def on_daemon_disconnected(event: "Mapping[str, object]") -> None:
     await on_connection_status({"is_connected": False})
 
 
-async def on_connection_status(status:"Dict[str,Any]"):
+async def on_connection_status(status: "Mapping[str, object]") -> None:
     global _last_connected, _reconnect_event
     connected = bool(status["is_connected"])
     transitioned = _last_connected is not None and _last_connected != connected
@@ -3250,7 +3573,7 @@ async def on_connection_status(status:"Dict[str,Any]"):
         #import pdb;pdb.set_trace()
         return
 
-async def on_message_reply(reply):
+async def on_message_reply(reply: "_MessageReply") -> None:
     """Gets called each time a message reply comes in, whether it's from
     something we wrote or read.
     TODO pretty annoying that it's not async ...
@@ -3278,7 +3601,7 @@ async def on_message_reply(reply):
         await sess.commit()
     """
 
-async def on_message_sent(reply):
+async def on_message_sent(reply: "_MessageSent") -> None:
     """Example:
     {'message_id': b'\xe1\xb85\xe8u]\xf8\x85\xa9\xa7\xac\xf7\xcc\xe6\xdfQ',
     'surbid': b'\xf3\xa1\xfdni\r2\xe9\xbalH\xcfK\x89\x8e\xee',
@@ -3351,15 +3674,29 @@ async def reconnect(config_path: "str | Path | None" = None) -> ThinClient:
         on_new_pki_document=on_new_pki_document,
     )
     client = ThinClient(cfg)
-    await client.start(asyncio.get_running_loop())  # this can throw exceptions
+    _start = cast(
+        "Callable[[asyncio.AbstractEventLoop], Awaitable[None]]", client.start,
+    )
+    await _start(asyncio.get_running_loop())  # this can throw exceptions
     return client
 
 # events: we should keep track of ConnectionStatusEvent.IsConnected so we can tell the user whether the mixnet client is working
 
 # ThinClient.send_message(surb_id, payload, dest_node, dest_queue)
 
-def create_new_keypair(seed: bytes):
-    """Makes a new WriteCap/ReadCap pair from a 32byte seed, using blake2b as KDF"""
+def create_new_keypair(seed: bytes) -> "tuple[bytes, bytes]":
+    """Makes a new WriteCap/ReadCap pair from a 32byte seed, using blake2b as KDF
+
+    >>> write_cap, read_cap = create_new_keypair(bytes(32))
+    >>> len(write_cap), len(read_cap)
+    (168, 136)
+    >>> write_cap[32:] == read_cap
+    True
+    >>> create_new_keypair(bytes(32)) == (write_cap, read_cap)
+    True
+    >>> create_new_keypair(bytes(range(32))) == (write_cap, read_cap)
+    False
+    """
     assert len(seed) == 32
     assert isinstance(seed, bytes)
     from nacl.hash import blake2b
@@ -3385,7 +3722,8 @@ def create_new_keypair(seed: bytes):
     assert len(read_cap)  == 32 + 104
     return write_cap, read_cap
 
-async def test_keypair(connection, write_cap, read_cap):
+async def test_keypair(connection: ThinClient, write_cap: bytes,
+                       read_cap: bytes) -> None:
     """Test that create_new_keypair() results in usable+matching write/read caps."""
     wcr = await connection.encrypt_write(
         plaintext=b'hello',
@@ -3410,3 +3748,138 @@ async def test_keypair(connection, write_cap, read_cap):
         envelope_descriptor=rcr.envelope_descriptor,
         message_ciphertext=rcr.message_ciphertext,
         envelope_hash=rcr.envelope_hash)
+__all__ = [
+    "Awaitable",
+    "BACAPDecryptionFailedError",
+    "BoxIDNotFoundError",
+    "Callable",
+    "ConnectionLifeInterruptedError",
+    "ConsensusNode",
+    "ConsensusSummary",
+    "CourierError",
+    "CourierInvalidEpochError",
+    "DEFAULT_PACING",
+    "DEFAULT_PACKET_FINISHED_LIMIT",
+    "DatabaseFailureError",
+    "Hashable",
+    "IntegrityError",
+    "Iterable",
+    "KATZENPOST_EPOCH_ORIGIN",
+    "Literal",
+    "MixnetStats",
+    "NamedTuple",
+    "OperationalError",
+    "PACKET_FINISHED_LIMIT_OPTIONS",
+    "PACKET_STATUS_ACKED",
+    "PACKET_STATUS_BOXNOTFOUND",
+    "PACKET_STATUS_CANCELLED",
+    "PACKET_STATUS_EMPTY",
+    "PACKET_STATUS_ERROR",
+    "PACKET_STATUS_IN_FLIGHT",
+    "PACKET_STATUS_LINK_DOWN",
+    "PACKET_STATUS_PAYLOAD",
+    "PACKET_STATUS_TIMED_OUT",
+    "PacingBounds",
+    "PacketContext",
+    "Path",
+    "Protocol",
+    "READ_WATCHDOG_SECONDS",
+    "ReplicaError",
+    "RetryPacer",
+    "STATS_FIELDS",
+    "STATS_PERCENTAGES",
+    "StartResendingCancelledError",
+    "ThinClient",
+    "ThinClientConfig",
+    "ThinClientOfflineError",
+    "TombstoneError",
+    "TypeVar",
+    "TypedDict",
+    "Unpack",
+    "asyncio",
+    "attachment_images",
+    "cancel_upload",
+    "cbor2",
+    "check_for_new",
+    "clear_finished_packets",
+    "conversation_handlers",
+    "conversation_update_queue",
+    "create_new_keypair",
+    "create_task",
+    "dataclass",
+    "dataclasses",
+    "datetime",
+    "derive_epoch_period_seconds",
+    "dismiss_failed_transfer",
+    "drain_mixwal",
+    "drain_mixwal2",
+    "drain_mixwal_read_single",
+    "drain_mixwal_write_single",
+    "errno",
+    "format_duration",
+    "get_packet_finished_limit",
+    "get_pki_document",
+    "hashlib",
+    "importlib",
+    "install_stats_counters",
+    "katzenpost_thinclient",
+    "logger",
+    "logging",
+    "math",
+    "models",
+    "nacl",
+    "next_ceiling_s",
+    "notify_outbound_chat_sent",
+    "on_connection_status",
+    "on_daemon_disconnected",
+    "on_error",
+    "on_message_reply",
+    "on_message_sent",
+    "on_new_pki_document",
+    "os",
+    "pacing_bounds_for",
+    "packet_begin",
+    "packet_finish",
+    "packets_snapshot",
+    "pause_peer_reads",
+    "pause_upload",
+    "peer_added_queue",
+    "persist_first_unread",
+    "persistent",
+    "provision_read_caps",
+    "random",
+    "readables_to_mixwal",
+    "readables_to_mixwal_event",
+    "readables_to_mixwal_supervised",
+    "reconnect",
+    "resendable_event",
+    "reset_packets",
+    "reset_stats",
+    "resolve_thinclient_config",
+    "resume_peer_reads",
+    "resume_upload",
+    "secrets",
+    "select",
+    "send_resendable_plaintexts",
+    "set_packet_finished_limit",
+    "set_upload_label",
+    "shutdown",
+    "signal_readables_to_mixwal",
+    "start_background_threads",
+    "start_resending",
+    "stats",
+    "stats_snapshot",
+    "struct",
+    "substream_progress_queue",
+    "summarize_pki_document",
+    "tally_update_queue",
+    "test_keypair",
+    "threading",
+    "time",
+    "timezone",
+    "traceback",
+    "types",
+    "upload_label",
+    "uuid",
+]
+
