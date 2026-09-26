@@ -23,7 +23,7 @@ import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
 from PySide6 import QtCore, QtNetwork
 from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel,
-                            QModelIndex, QSettings, QSize, Property, Slot,
+                            QModelIndex, QPoint, QSettings, QSize, Property, Slot,
                             QThread, QUrl, Signal, QTimer)
 from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
                            QPixmap, QShortcut, QStandardItem, QStandardItemModel)
@@ -42,6 +42,7 @@ from . import attachment_images
 from . import conversation_handlers
 from . import network  # this is network.py
 from . import persistent
+from . import removal
 from . import theme  # theme.py: light/dark/system theming
 from base64 import b64decode, b64encode
 from katzenpost_thinclient import ThinClientOfflineError
@@ -1481,6 +1482,7 @@ class MainWindow(QMainWindow):
         # (conversation_id, survey_id). Clicking a tally row in the chat log
         # opens/raises that poll's window; the New-poll composer tab creates one.
         self._poll_windows: "dict[tuple[int, bytes], TallyPanel]" = {}
+        self._voucher_join_tasks: "dict[int, asyncio.Task[None]]" = {}
         self.ui.new_poll_button.clicked.connect(lambda: self.new_poll())
 
         # Keep the composer as short as its current tab needs. QTabWidget's
@@ -1995,26 +1997,38 @@ class MainWindow(QMainWindow):
         item.appendRow(new_item)
         logger.debug("added announced contact %r to conversation %d", name, conversation_id)
 
-    @async_cb
-    async def peer_context_menu(self, pos) -> None:
-        """Per-peer pause/resume: right-clicking a peer row
-        under a conversation offers Pause/Resume for exactly that peer's
-        read stream. Pausing stops the re-reads (and cancels any in-flight
-        ARQ) without touching the rest of the conversation; our own row (we
-        never read from ourselves, active=False) and the conversation rows
-        get no menu."""
+    def _contact_item_at(self, pos: QPoint) -> "QStandardItem | None":
         tree = self.ui.contacts_treeWidget
         idx = tree.indexAt(pos)
         if not idx.isValid():
-            return
-        # The contacts tree shows a FilterProxyModel over all_contacts: map
-        # the click back to the source row and require a peer (child) row.
+            return None
+        # The contacts tree shows a FilterProxyModel over all_contacts.
         src_idx = tree.model().mapToSource(idx)
-        if not src_idx.isValid() or not src_idx.parent().isValid():
+        if not src_idx.isValid():
+            return None
+        return self.all_contacts.itemFromIndex(src_idx)
+
+    @async_cb
+    async def peer_context_menu(self, pos: QPoint) -> None:
+        """Right-click in the contacts tree. A conversation row offers to
+        remove the group chat; a peer row offers pause/resume of that peer's
+        read stream and removal of the peer. Our own row gets no menu."""
+        item = self._contact_item_at(pos)
+        if item is None:
             return
-        item = self.all_contacts.itemFromIndex(src_idx)
-        if item is None or item.parent() is None:
-            return
+        global_pos = self.ui.contacts_treeWidget.viewport().mapToGlobal(pos)
+        if item.parent() is None:
+            await self._conversation_menu(item, global_pos)
+        else:
+            await self._peer_menu(item, global_pos)
+
+    async def _conversation_menu(self, item: QStandardItem, global_pos: QPoint) -> None:
+        api = QMenu(self.ui.contacts_treeWidget)
+        remove = api.addAction("Remove group chat...")
+        if await _menu_chosen(api, global_pos) is remove:
+            await self._remove_conversation(item)
+
+    async def _peer_menu(self, item: QStandardItem, global_pos: QPoint) -> None:
         # Skip rows tagged as our own (or untagged, e.g. an own row).
         if getattr(item, "peer_is_own", True):
             return
@@ -2032,12 +2046,14 @@ class MainWindow(QMainWindow):
             rcw = sess.get(persistent.ReadCapWAL, read_cap_id)
             active = bool(solo and solo.active and rcw and not rcw.paused)
         # A throwaway menu so we never clobber the tray's contextMenu().
-        api = QMenu(tree)
+        api = QMenu(self.ui.contacts_treeWidget)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
         rgm = api.addAction(f"Resume reading from {item.text()}")
+        api.addSeparator()
+        rm = api.addAction(f"Remove {item.text()} from this group chat...")
         pgm.setEnabled(active)
         rgm.setEnabled(not active)
-        chosen = await _menu_chosen(api, tree.viewport().mapToGlobal(pos))
+        chosen = await _menu_chosen(api, global_pos)
         if chosen is pgm and active:
             await self.iothread.run_in_io(
                 network.pause_peer_reads(bacap_stream=read_cap_id),
@@ -2046,6 +2062,114 @@ class MainWindow(QMainWindow):
             await self.iothread.run_in_io(
                 network.resume_peer_reads(bacap_stream=read_cap_id),
             )
+        elif chosen is rm:
+            await self._remove_peer(item)
+
+    async def _confirm(self, text: str) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return await _dialog_finished(box) == QMessageBox.StandardButton.Yes
+
+    def _report_removal_failure(self, exc: BaseException) -> None:
+        QTimer.singleShot(0, partial(
+            QMessageBox.critical, self, APP_NAME,
+            f"Removal failed: {_error_detail(exc)}",
+        ))
+
+    async def _remove_conversation(self, item: QStandardItem) -> None:
+        conversation_id = item.conversation_id
+        if not await self._confirm(
+            f"Remove the group chat \"{item.text()}\" from this device?\n\n"
+            "Its members, messages, files and polls are deleted and it is no "
+            "longer read. The other members are not told."
+        ):
+            return
+        try:
+            await self.iothread.run_in_io(
+                removal.remove_conversation(conversation_id=conversation_id),
+            )
+        except Exception as e:
+            logger.exception("removing conversation %d failed", conversation_id)
+            self._report_removal_failure(e)
+            return
+        self._drop_conversation_ui(item)
+
+    def _drop_conversation_ui(self, item: QStandardItem) -> None:
+        conversation_id = item.conversation_id
+        join = self._voucher_join_tasks.pop(conversation_id, None)
+        if join is not None:
+            join.cancel()
+        for key, panel in list(self._poll_windows.items()):
+            if key[0] == conversation_id:
+                panel.close()
+        self.all_contacts.removeRow(item.row())
+        self.conversation_state_by_id.pop(conversation_id, None)
+        if self.convo_state_or_none() is None:
+            self._clear_chat_view()
+
+    def _clear_chat_view(self) -> None:
+        self.ui.qml_ChatLines.setSource(QtCore.QUrl())
+        self.ui.ContactName.setText("")
+        self.ui.chat_lineEdit.clear()
+        self.ui.attached_files_QListWidget.clear()
+        for widget in (
+            self.ui.attach_file_tab, self.ui.attach_file_button,
+            self.ui.attached_files_QListWidget, self.ui.poll_tab,
+            self.ui.new_poll_button,
+        ):
+            widget.setEnabled(False)
+
+    def _peer_id_of(self, item: QStandardItem) -> "int | None":
+        with persistent.Session(persistent._engine_sync) as sess:
+            return sess.exec(
+                select(persistent.ConversationPeer.id)
+                .join(
+                    persistent.ConversationPeerLink,
+                    persistent.ConversationPeerLink.conversation_peer_id ==
+                    persistent.ConversationPeer.id,
+                )
+                .where(
+                    persistent.ConversationPeerLink.conversation_id ==
+                    item.parent().conversation_id,
+                    persistent.ConversationPeer.read_cap_id == item.peer_read_cap_id,
+                )
+            ).first()
+
+    async def _remove_peer(self, item: QStandardItem) -> None:
+        conversation_item = item.parent()
+        conversation_id = conversation_item.conversation_id
+        peer_id = self._peer_id_of(item)
+        if peer_id is None:
+            return
+        if not await self._confirm(
+            f"Remove {item.text()} from \"{conversation_item.text()}\"?\n\n"
+            "You stop reading them, and the messages and files they sent are "
+            "deleted from this device. The other members are not told."
+        ):
+            return
+        try:
+            await self.iothread.run_in_io(removal.remove_peer(
+                conversation_id=conversation_id, peer_id=peer_id,
+            ))
+        except Exception as e:
+            logger.exception("removing peer %d failed", peer_id)
+            self._report_removal_failure(e)
+            return
+        self._drop_peer_ui(conversation_item, item)
+
+    def _drop_peer_ui(self, conversation_item: QStandardItem, item: QStandardItem) -> None:
+        conversation_item.removeRow(item.row())
+        state = self.conversation_state_by_id.get(conversation_item.conversation_id)
+        if state is None:
+            return
+        state.conversation_log_model.refresh_row_count()
+        root = self.ui.qml_ChatLines.rootObject()
+        if state is self.convo_state_or_none() and root is not None:
+            root.setProperty("ctx", state.qml_ctx(root, settings=self.settings))
 
     @async_cb
     async def transfers_context_menu(self, pos) -> None:
@@ -2143,6 +2267,9 @@ class MainWindow(QMainWindow):
                 event = await self.iothread.run_in_io(
                     network.substream_progress_queue.get(),
                 )
+                if isinstance(event, network.TransferRemoved):
+                    self.transfers_model.remove_transfer(event.rcw_id)
+                    continue
                 kind = event[0]
                 rcw_id = uuid.UUID(event[1]) if isinstance(event[1], str) else event[1]
                 if kind == "started":
@@ -2397,7 +2524,7 @@ class MainWindow(QMainWindow):
     async def conversation_selected(self, selected:QTreeWidgetItem, old:QTreeWidgetItem|None):
         # https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QTreeWidget.html
         # scrollToItem ; setCurrentItem
-        if not selected:
+        if not selected or not selected.isValid():
             return
         #import pdb;pdb.set_trace()
         print("selected", selected)
@@ -2407,16 +2534,19 @@ class MainWindow(QMainWindow):
         if old.parent().isValid():
             old = old.parent()
         selected_qmi = selected.model().mapToSource(selected)
-        selected_id = self.all_contacts.item(selected_qmi.row(), selected_qmi.column()).conversation_id
-        selected = selected.data()  # type: ignore[call-arg]
-        # clicks may be on either convo or contact:
-        conversation = self.conversation_state_by_id[selected_id]
+        selected_item = self.all_contacts.item(selected_qmi.row(), selected_qmi.column())
+        if selected_item is None or selected_item.conversation_id not in self.conversation_state_by_id:
+            # A row removal left this index stale; the tree's current index
+            # has already moved on and its own signal follows.
+            return
+        selected = selected_item.text()
         #old = getattr(old, "parent", lambda: None)() or old
         old_convo = None
         if old and old.model():
             old = old.model().mapToSource(old)
-            old_id = self.all_contacts.item(old.row(), 0).conversation_id
-            old_convo = self.conversation_state_by_id[old_id]
+            old_item = self.all_contacts.item(old.row(), 0)
+            if old_item is not None:
+                old_convo = self.conversation_state_by_id.get(old_item.conversation_id)
         print("conversation selected", selected)
         ### TODO this was how far we got
 
@@ -2673,7 +2803,17 @@ class MainWindow(QMainWindow):
             lambda: self._await_voucher_join(convo),
         )
 
-    async def _await_voucher_join(self, convo):
+    async def _await_voucher_join(self, convo: ConversationUIState) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._voucher_join_tasks[convo.conversation_id] = task
+        try:
+            await self._run_voucher_join(convo)
+        finally:
+            if self._voucher_join_tasks.get(convo.conversation_id) is task:
+                del self._voucher_join_tasks[convo.conversation_id]
+
+    async def _run_voucher_join(self, convo: ConversationUIState) -> None:
         # A fresh GUI start may still be dialling the daemon on the io thread
         # (kp_client only becomes set once reconnect() returns), and transient
         # daemon dropouts mid-wait ride out the _read_box rounds in voucher.py.

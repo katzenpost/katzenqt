@@ -29,6 +29,7 @@ from pathlib import Path
 from collections.abc import Awaitable, Callable, Hashable, Iterable
 from datetime import datetime, timezone
 from typing import (
+    Any,
     Literal,
     NamedTuple,
     Protocol,
@@ -443,6 +444,13 @@ tally_update_queue: "Tuple[int]" = asyncio.Queue()
 # path; the GUI appends the name to the contacts tree in its own listener.
 peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 
+
+
+@dataclasses.dataclass(frozen=True)
+class TransferRemoved:
+    rcw_id: uuid.UUID
+
+
 # Substream file-transfer progress for the GUI Transfers panel.
 # Download events are ``(kind, rcw_id, *extra)``:
 #   ("started", rcw_id, conversation_id, total_or_None, parent_name)
@@ -458,11 +466,12 @@ peer_added_queue: "Tuple[int,str]" = asyncio.Queue()
 #   ("upload_completed", rcw_id)             # last C/F chunk ACK'd
 #   ("upload_paused",    rcw_id)
 #   ("upload_resumed",   rcw_id)
+# A removed transfer is a TransferRemoved(rcw_id) instance instead of a tuple.
 # Byte counts are effective payload bytes (the chunk-type prefix and any
 # wire/framing overhead excluded).
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
-substream_progress_queue: "Tuple[str, ...]" = asyncio.Queue()
+substream_progress_queue: "asyncio.Queue[Any]" = asyncio.Queue()
 
 __resend_queue: "Set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
@@ -2253,6 +2262,27 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
   __resend_queue.discard(bacap_uuid)  # this should be .remove(), but why is it empty?
   readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
   __mixwal_updated.set()
+
+
+async def stop_stream(stream: uuid.UUID) -> None:
+    """Cancel the in-flight read and write on ``stream`` and forget it, so its
+    rows can be deleted without a live task resurrecting them. A failure the
+    task raises instead of stopping is logged, not raised: the stream is
+    stopped either way."""
+    for tasks in (_inflight_reads, _inflight_writes):
+        task = tasks.pop(stream, None)
+        if task is None or task.done():
+            continue
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception:
+            logger.exception("Task failed while stopping %s", stream)
+    __resend_queue.discard(stream)
+    _write_acknowledged.discard(stream)
 
 
 async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:

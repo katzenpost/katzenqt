@@ -365,6 +365,23 @@ def _membership_hash(conv_name: str) -> "Plan[_args.MembershipHash]":
     ))
 
 
+@verbs.command("remove-conv", help="delete a conversation and all local state for it")
+@click.argument("conv_name")
+def _remove_conv(conv_name: str) -> "Plan[_args.RemoveConv]":
+    return plan("_action_remove_conv", _args.RemoveConv(
+        action=verb(), conv_name=conv_name,
+    ))
+
+
+@verbs.command("remove-peer", help="stop reading a member and delete what they sent")
+@click.argument("conv_name")
+@click.argument("peer_name")
+def _remove_peer(conv_name: str, peer_name: str) -> "Plan[_args.RemovePeer]":
+    return plan("_action_remove_peer", _args.RemovePeer(
+        action=verb(), conv_name=conv_name, peer_name=peer_name,
+    ))
+
+
 def parse(argv: "list[str] | None" = None) -> "Plan[Any]":
     try:
         chosen = verbs.main(

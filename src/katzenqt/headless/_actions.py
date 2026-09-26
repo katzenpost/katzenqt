@@ -65,6 +65,14 @@ https://katzenpost.network/docs/specs/contact_voucher/ .
         into DIR, verify SHA-256, and log
         ``RECV_FILE=<absolute path>`` or ``TIMEOUT``.
 
+    remove-conv CONV_NAME
+        Delete the conversation and all local state for it. Offline; logs
+        ``REMOVED_CONV``.
+
+    remove-peer CONV_NAME PEER_NAME
+        Stop reading a member and delete what they sent. Offline; logs
+        ``REMOVED_PEER=<name>``.
+
     info
         Emit one line of JSON describing the state file's current
         alembic revision, the state path, the list of (non-substream)
@@ -93,7 +101,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import _args
-from .. import conversation_handlers, models, network, persistent
+from .. import conversation_handlers, models, network, persistent, removal
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
 from ..tally import schema as tally_schema
@@ -1098,4 +1106,42 @@ async def _action_membership_hash(args: _args.MembershipHash) -> int:
         return 2
     digest = await conversation_handlers.membership_hash_for(conv_id)
     logger.info("MEMBERSHIP_HASH=%s", digest.hex())
+    return 0
+
+
+async def _action_remove_conv(args: _args.RemoveConv) -> int:
+    """Delete the conversation and everything stored for it. Offline; needs no
+    daemon. Logs ``REMOVED_CONV``."""
+    conv_id = await _conv_id_by_name(args.conv_name)
+    if conv_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    await removal.remove_conversation(conversation_id=conv_id)
+    logger.info("REMOVED_CONV")
+    return 0
+
+
+async def _action_remove_peer(args: _args.RemovePeer) -> int:
+    """Stop reading a member and delete what they sent. Offline; needs no
+    daemon. Logs ``REMOVED_PEER=<name>``."""
+    conv_id = await _conv_id_by_name(args.conv_name)
+    if conv_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    async with persistent.asession() as sess:
+        peer = await persistent.peer_named_in_conversation(
+            sess, conv_id, args.peer_name,
+        )
+        peer_id = peer.id if peer is not None else None
+    if peer_id is None:
+        logger.error(
+            "peer %r not found in conversation %r", args.peer_name, args.conv_name,
+        )
+        return 2
+    try:
+        await removal.remove_peer(conversation_id=conv_id, peer_id=peer_id)
+    except removal.RemovalError as exc:
+        logger.error("%s", exc)
+        return 2
+    logger.info("REMOVED_PEER=%s", args.peer_name)
     return 0

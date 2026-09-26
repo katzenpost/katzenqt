@@ -50,6 +50,8 @@ async def test_every_added_member_is_rendered(
         return ["alice", "bob"]
 
     window._wait_and_open_with_retries = added
+    window._voucher_join_tasks = {}
+    window._run_voucher_join = lambda c: katzen.MainWindow._run_voucher_join(window, c)
     await katzen.MainWindow._await_voucher_join(window, convo)
 
     assert [r.name for r in rows] == ["alice", "bob"]

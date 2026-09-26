@@ -540,6 +540,10 @@ async def _finish_thread(
 
 class SentLog(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)  # previously the UUID assigned in MixWAL
+    conversation_id: int | None = Field(
+        default=None, foreign_key="conversation.id", index=True,
+        description="the conversation the message was sent in; NULL for rows written before this column existed",
+    )
     @classmethod
     async def mark_sent(
         cls, connection, mw: MixWAL, resend_queue, *,
@@ -784,7 +788,7 @@ def _ensure_sent_log_and_flip_status(sess, pwal: "PlaintextWAL") -> "int | None"
     IntegrityError on the SentLog primary key.
     """
     if sess.get(SentLog, pwal.id) is None:
-        sess.add(SentLog(id=pwal.id))
+        sess.add(SentLog(id=pwal.id, conversation_id=pwal.conversation_id))
     conversation_id = None
     if pwal.bacap_payload[:1] in (b"F", b"I"):
         # This is either:
