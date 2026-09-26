@@ -20,13 +20,18 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from pycrdt import Doc
+from sqlmodel import col
 
 from .. import persistent
 from ..models import GroupChatMessage, GroupChatTypeEnum
 from . import engine, schema, send, sync
 from .events import build_sync_response
+from .schema import SurveyDoc
+
+if TYPE_CHECKING:
+    from sqlmodel.ext.asyncio.session import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +85,25 @@ def voter_id_from_read_cap(read_cap: bytes) -> bytes:
     for a given member, but the 104-byte index suffix varies (a joiner's own
     pre-mutation cap vs. the salt-mutated cap the group holds, and future-only
     read caps that start at a later index). Keying on the prefix makes every
-    such copy map to one identity."""
+    such copy map to one identity.
+
+    >>> cap = bytes(range(32)) + bytes(104)
+    >>> len(cap)
+    136
+    >>> voter_id_from_read_cap(cap).hex()
+    'f39a2cad58411cd49f577e5086b8031f'
+    >>> voter_id_from_read_cap(cap) == voter_id_from_read_cap(
+    ...     bytes(range(32)) + bytes(103) + bytes([7]))
+    True
+    >>> voter_id_from_read_cap(cap) == voter_id_from_read_cap(bytes(136))
+    False
+    """
     return hashlib.blake2b(read_cap[:32], digest_size=16).digest()
 
 
-async def _voter_id(sess, peer: "persistent.ConversationPeer") -> bytes:
+async def _voter_id(
+    sess: "AsyncSession", peer: "persistent.ConversationPeer",
+) -> bytes:
     rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id)
     if rcw is not None and rcw.read_cap is not None:
         return voter_id_from_read_cap(rcw.read_cap)
@@ -96,12 +115,12 @@ async def _voter_id(sess, peer: "persistent.ConversationPeer") -> bytes:
 
 class TallyController:
     def __init__(self) -> None:
-        self._docs: "dict[tuple[int, bytes], Doc]" = {}
+        self._docs: "dict[tuple[int, bytes], SurveyDoc]" = {}
         # Votes/closes seen before their survey was known, keyed by
         # (conversation_id, survey_id); drained when the Doc first appears.
         self._pending: "dict[tuple[int, bytes], list[PendingTally]]" = {}
 
-    def get(self, conversation_id: int, survey_id: bytes) -> "Doc | None":
+    def get(self, conversation_id: int, survey_id: bytes) -> "SurveyDoc | None":
         return self._docs.get((conversation_id, survey_id))
 
     def surveys(self) -> "list[tuple[int, bytes]]":
@@ -120,7 +139,9 @@ class TallyController:
         for row in rows:
             self._docs[(row.conversation_id, row.survey_id)] = sync.load_doc(row.doc_state)
 
-    async def _ensure_loaded(self, sess, conversation_id: int, survey_id: bytes) -> "Doc | None":
+    async def _ensure_loaded(
+        self, sess: "AsyncSession", conversation_id: int, survey_id: bytes,
+    ) -> "SurveyDoc | None":
         doc = self._docs.get((conversation_id, survey_id))
         if doc is not None:
             return doc
@@ -137,7 +158,9 @@ class TallyController:
         self._docs[(conversation_id, survey_id)] = doc
         return doc
 
-    async def _save(self, sess, survey_id: bytes, conversation_id: int) -> None:
+    async def _save(
+        self, sess: "AsyncSession", survey_id: bytes, conversation_id: int,
+    ) -> None:
         blob = sync.full_state(self._docs[(conversation_id, survey_id)])
         row = await sess.get(persistent.TallyState, survey_id)
         if row is None:
@@ -154,14 +177,27 @@ class TallyController:
             row.doc_state = blob
             sess.add(row)
 
-    async def create_local(self, sess, conversation, survey_id, topic, mode, slots) -> Doc:
+    async def create_local(
+        self,
+        sess: "AsyncSession",
+        conversation: "persistent.Conversation",
+        survey_id: bytes,
+        topic: str,
+        mode: schema.Mode,
+        slots: "list[str]",
+    ) -> SurveyDoc:
         creator = await _voter_id(sess, conversation.own_peer)
         doc = schema.new_survey_doc(survey_id, topic, mode, slots, creator=creator)
         self._docs[(conversation.id, survey_id)] = doc
         await self._save(sess, survey_id, conversation.id)
         return doc
 
-    async def close_local(self, sess, conversation, survey_id) -> bool:
+    async def close_local(
+        self,
+        sess: "AsyncSession",
+        conversation: "persistent.Conversation",
+        survey_id: bytes,
+    ) -> bool:
         """Close the survey if the local user opened it. Returns False if the
         survey is unknown or the user is not its creator."""
         doc = await self._ensure_loaded(sess, conversation.id, survey_id)
@@ -177,7 +213,9 @@ class TallyController:
         await self._save(sess, survey_id, conversation.id)
         return True
 
-    async def list_for_conversation(self, sess, conversation_id) -> "list[Doc]":
+    async def list_for_conversation(
+        self, sess: "AsyncSession", conversation_id: int,
+    ) -> "list[SurveyDoc]":
         """The survey Docs stored for a conversation, loaded from persisted state."""
         rows = (await sess.exec(persistent.select(persistent.TallyState).where(
             persistent.TallyState.conversation_id == conversation_id))).all()
@@ -189,7 +227,13 @@ class TallyController:
             docs.append(doc)
         return docs
 
-    async def cast_local_vote(self, sess, conversation, survey_id, choice) -> "int | None":
+    async def cast_local_vote(
+        self,
+        sess: "AsyncSession",
+        conversation: "persistent.Conversation",
+        survey_id: bytes,
+        choice: "dict[str, str]",
+    ) -> "int | None":
         """Record the user's own vote, minting the next version so a recast
         supersedes their prior one. Returns the version used, or ``None`` if the
         survey is unknown; the caller puts that version on the outbound event."""
@@ -203,7 +247,9 @@ class TallyController:
         await self._save(sess, survey_id, conversation.id)
         return version
 
-    async def _foreign_conversation(self, sess, survey_id: bytes, conversation_id: int) -> bool:
+    async def _foreign_conversation(
+        self, sess: "AsyncSession", survey_id: bytes, conversation_id: int,
+    ) -> bool:
         """True if a survey with ``survey_id`` is already persisted under a
         different conversation. The receive path drops such a message entirely
         rather than mint an in-memory Doc that ``_save`` would then refuse,
@@ -217,7 +263,13 @@ class TallyController:
             return True
         return False
 
-    async def _apply_full_or_update(self, sess, conversation_id: int, survey_id: bytes, crdt: "bytes | None") -> None:
+    async def _apply_full_or_update(
+        self,
+        sess: "AsyncSession",
+        conversation_id: int,
+        survey_id: bytes,
+        crdt: "bytes | None",
+    ) -> None:
         """Load a fresh Doc from ``crdt`` or merge it into the existing one, then
         persist, all keyed by ``(conversation_id, survey_id)``."""
         if crdt is None:
@@ -257,7 +309,9 @@ class TallyController:
         if entry not in pending:
             pending.append(entry)
 
-    def _drain_pending(self, doc, conversation_id: int, survey_id: bytes) -> None:
+    def _drain_pending(
+        self, doc: SurveyDoc, conversation_id: int, survey_id: bytes,
+    ) -> None:
         """Apply the buffered votes/closes for a survey once its Doc exists.
 
         Each is idempotent, so re-draining (a duplicate log row, or a create
@@ -271,7 +325,7 @@ class TallyController:
             elif entry.kind is GroupChatTypeEnum.TALLY_CLOSE:
                 self._replay_close(doc, entry)
 
-    def _replay_vote(self, doc, entry: PendingTally) -> None:
+    def _replay_vote(self, doc: SurveyDoc, entry: PendingTally) -> None:
         stored = engine.stored_choice(doc, entry.voter_id)
         if stored is not None:
             stored_version, stored_choices = stored
@@ -287,7 +341,7 @@ class TallyController:
                 schema.survey_id_of(doc).hex(), exc,
             )
 
-    def _replay_close(self, doc, entry: PendingTally) -> None:
+    def _replay_close(self, doc: SurveyDoc, entry: PendingTally) -> None:
         creator = schema.creator_of(doc)
         if creator is not None and creator != entry.voter_id:
             return
@@ -311,8 +365,8 @@ class TallyController:
             )).all())
             rows = (await sess.exec(
                 persistent.select(persistent.ConversationLog).order_by(
-                    persistent.ConversationLog.conversation_id,
-                    persistent.ConversationLog.conversation_order,
+                    col(persistent.ConversationLog.conversation_id),
+                    col(persistent.ConversationLog.conversation_order),
                 )
             )).all()
             for row in rows:
@@ -347,7 +401,12 @@ class TallyController:
                     PendingTally(voter, kind, choice, tally.version),
                 )
 
-    async def handle_event(self, sess, peer, gcm: GroupChatMessage) -> ApplyResult:
+    async def handle_event(
+        self,
+        sess: "AsyncSession",
+        peer: "persistent.ConversationPeer",
+        gcm: GroupChatMessage,
+    ) -> ApplyResult:
         """Apply an inbound tally message to the local Doc and report how it
         was handled (see :class:`ApplyResult`)."""
         tally = gcm.tally
@@ -456,5 +515,9 @@ class TallyController:
 INSTANCE = TallyController()
 
 
-async def handle_event(sess, peer, gcm: GroupChatMessage) -> ApplyResult:
+async def handle_event(
+    sess: "AsyncSession",
+    peer: "persistent.ConversationPeer",
+    gcm: GroupChatMessage,
+) -> ApplyResult:
     return await INSTANCE.handle_event(sess, peer, gcm)
