@@ -355,6 +355,21 @@ async def test_selecting_a_peer_row_selects_its_conversation(
 
 
 @pytest.mark.asyncio
+async def test_two_peers_sharing_a_name_each_get_their_own_row(
+    window: katzen.MainWindow,
+) -> None:
+    seeded = await seed_conversation(peers=("bob", "bob"))
+    await add_seeded_conversation(window, seeded.conversation_id)
+    for _ in range(80):
+        await asyncio.sleep(0)
+    item = window.conversation_state_by_id[
+        seeded.conversation_id
+    ].contacts_standard_item
+    names = [item.child(r).text() for r in range(item.rowCount())]
+    assert len([n for n in names if n.startswith("bob")]) == 2
+
+
+@pytest.mark.asyncio
 async def test_creating_a_conversation_walks_both_prompts(
     window: katzen.MainWindow,
     monkeypatch: pytest.MonkeyPatch,
