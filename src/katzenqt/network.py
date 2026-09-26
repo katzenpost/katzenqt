@@ -742,6 +742,8 @@ def _is_duplicate_arming(exc: "OperationalError | IntegrityError") -> bool:
     ).lower()
 
 
+__on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
+
 __status_listeners: "list[Callable[[bool], None]]" = []
 
 
@@ -766,8 +768,6 @@ def _notify_status(connected: bool) -> None:
             callback(connected)
         except Exception:
             logger.exception("connection status listener failed")
-
-__on_message_queues: "Dict[bytes, asyncio.Queue]" = {}
 
 __should_quit = asyncio.Event()
 def shutdown() -> None:

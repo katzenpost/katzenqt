@@ -685,13 +685,25 @@ def mixnet_status_text(connected: bool) -> "tuple[str, str]":
 
 
 class MainWindow(QMainWindow):
-    mixnet_status_changed = Signal(bool)
+    iothread: "AsyncioThread"
+    echomix_icon: QIcon
+    echomix_icon_new_message: QIcon
+    conversation_log_models: "dict[int, ConversationLogModel]"
+    systray: "MixSystrayIcon | None"
+    settings: "dict[str, str | int | None]"
+    _ptt_audio: "PttAudioBridge | None"
+    _playing_message_id: str
+    _playback_failure_message: "str | None"
+    push_to_talk_recording_conversation_id: "int | None"
+
     def X_keyPressEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key pressed", key)
     def X_keyReleaseEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key released", key)
+
+    mixnet_status_changed = Signal(bool)
 
     def _push_to_talk_audio(self) -> PttAudioBridge | None:
         if getattr(self, "_ptt_audio_failed", False):
