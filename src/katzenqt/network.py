@@ -29,6 +29,7 @@ from pathlib import Path
 from collections.abc import Awaitable, Callable, Hashable, Iterable
 from datetime import datetime, timezone
 from typing import (
+    Any,
     Literal,
     NamedTuple,
     Protocol,
@@ -2265,7 +2266,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
 async def stop_stream(stream: uuid.UUID) -> None:
     """Cancel the in-flight read and write on ``stream`` and forget it, so its
-    rows can be deleted without a live task resurrecting them."""
+    rows can be deleted without a live task resurrecting them. A failure the
+    task raises instead of stopping is logged, not raised: the stream is
+    stopped either way."""
     for tasks in (_inflight_reads, _inflight_writes):
         task = tasks.pop(stream, None)
         if task is None or task.done():
@@ -2276,7 +2279,6 @@ async def stop_stream(stream: uuid.UUID) -> None:
         except asyncio.CancelledError:
             if asyncio.current_task().cancelling():
                 raise
-            logger.debug("Stopped %s", stream)
         except Exception:
             logger.exception("Task failed while stopping %s", stream)
     __resend_queue.discard(stream)

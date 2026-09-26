@@ -247,3 +247,26 @@ async def test_remove_conversation_failure_is_reported_and_the_row_kept():
 
     assert model.rowCount() == 1
     assert len(window.failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_voucher_join_is_tracked_while_it_runs():
+    started = asyncio.Event()
+
+    async def run(convo) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    window = SimpleNamespace(_voucher_join_tasks={}, _run_voucher_join=run)
+    task = asyncio.create_task(
+        katzen.MainWindow._await_voucher_join(
+            window, SimpleNamespace(conversation_id=7)
+        ),
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    assert window._voucher_join_tasks == {7: task}
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert window._voucher_join_tasks == {}

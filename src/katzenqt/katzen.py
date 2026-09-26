@@ -2803,7 +2803,7 @@ class MainWindow(QMainWindow):
             lambda: self._await_voucher_join(convo),
         )
 
-    async def _await_voucher_join(self, convo):
+    async def _await_voucher_join(self, convo: ConversationUIState) -> None:
         task = asyncio.current_task()
         if task is not None:
             self._voucher_join_tasks[convo.conversation_id] = task
@@ -2813,7 +2813,7 @@ class MainWindow(QMainWindow):
             if self._voucher_join_tasks.get(convo.conversation_id) is task:
                 del self._voucher_join_tasks[convo.conversation_id]
 
-    async def _run_voucher_join(self, convo):
+    async def _run_voucher_join(self, convo: ConversationUIState) -> None:
         # A fresh GUI start may still be dialling the daemon on the io thread
         # (kp_client only becomes set once reconnect() returns), and transient
         # daemon dropouts mid-wait ride out the _read_box rounds in voucher.py.

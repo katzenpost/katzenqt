@@ -422,3 +422,24 @@ async def test_first_unread_stays_within_the_log_after_removal():
     log_model.set_row_count()
     row = log_model.row_for_order(first_unread_order(conv_id))
     assert row <= log_model.rowCount(None)
+
+
+@pytest.mark.asyncio
+async def test_stop_stream_logs_a_failing_task_and_carries_on(caplog):
+    stream = uuid.uuid4()
+    entered = asyncio.Event()
+
+    async def reader() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("boom") from None
+
+    network._inflight_reads[stream] = asyncio.create_task(reader())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+
+    await network.stop_stream(stream)
+
+    assert stream not in network._inflight_reads
+    assert "Task failed while stopping" in caplog.text
