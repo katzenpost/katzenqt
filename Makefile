@@ -123,10 +123,12 @@ $(SYSTEM_STAMP):
 clean-system-stamp:
 	@rm -f $(SYSTEM_STAMP)
 
+APT_DEPS := libxcb-cursor0 libegl1 libpulse0 libfontconfig1 \
+	libxkbcommon0 build-essential pkg-config git podman pipx \
+	python3 python3-venv
+
 install-debian-packages:
-	@$(MAKE) apt-install APT_PACKAGES="libxcb-cursor0 libegl1 libpulse0 \
-		libfontconfig1 libxkbcommon0 build-essential pkg-config git podman \
-		pipx python3 python3-venv"
+	@$(MAKE) apt-install APT_PACKAGES="$(APT_DEPS)"
 
 apt-install:
 	@if [[ "$$(id -u)" == 0 ]]; then \

@@ -17,9 +17,11 @@ class _Fake:
     calls: Path
     env: dict[str, str]
 
-    def make(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def make(
+        self, *args: str, target: str = "apt-install",
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [MAKE, "-f", str(ROOT / "Makefile"), "apt-install", *args],
+            [MAKE, "-f", str(ROOT / "Makefile"), target, *args],
             env=self.env,
             text=True,
             capture_output=True,
@@ -39,7 +41,7 @@ class _Fake:
 def fake(tmp_path: Path) -> Iterator[_Fake]:
     binary = tmp_path / "bin"
     binary.mkdir()
-    for name in ("bash", "printf", "sh"):
+    for name in ("bash", "printf", "sh", "make"):
         source = shutil.which(name)
         assert source is not None
         (binary / name).symlink_to(source)
@@ -106,3 +108,16 @@ def test_the_readme_offers_the_root_alternative() -> None:
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "su -c 'apt install -y git make'" in text
     assert ".profile" not in text
+
+
+def test_the_printed_advice_is_one_pasteable_line(fake: _Fake) -> None:
+    result = fake.make(target="install-debian-packages")
+    assert result.returncode != 0
+    advice = [
+        line
+        for line in result.stderr.splitlines()
+        if line.startswith("  su -c ")
+    ]
+    assert len(advice) == 1
+    assert "\t" not in advice[0]
+    assert "libfontconfig1" in advice[0]
