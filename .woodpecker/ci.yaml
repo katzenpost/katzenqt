@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+steps:
+  - name: test
+    image: docker.io/python:3.12
+    commands:
+      - make test
