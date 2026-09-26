@@ -6,14 +6,28 @@ from PySide6.QtQml import QQmlPropertyMap
 from PySide6.QtQuick import QQuickImageProvider
 
 from pydantic import BaseModel, Field
-from sqlmodel import select
+from sqlmodel import col, select
 import time
 import uuid
-from typing import Any, NamedTuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    NamedTuple,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    cast,
+    overload,
+)
 
 import cbor2
 
 from . import attachment_images, persistent
+
+if TYPE_CHECKING:
+    from . import katzen, models, network
+    from .tally import presenter
 
 import functools
 from bisect import bisect_left
@@ -25,18 +39,18 @@ from functools import lru_cache
 
 class FilterProxyModel(QtCore.QSortFilterProxyModel):
     # recursiveFilteringEnabled show parents when child matches
-    def __index__(self):
-        super(FilterProxyModel, self).__index__(self)
-    def __init__(self, window: "QMainWindow"):
+    def __index__(self) -> int:
+        raise TypeError("a filter proxy model has no index value")
+    def __init__(self, window: "katzen.MainWindow"):
         self.window = window
         super().__init__(recursiveFilteringEnabled=False)
         # self.setAutoAcceptChildRows(True)
 
-    def invalidate(self):
+    def invalidate(self) -> None:
         super().invalidate()
         self.window.ui.contacts_treeWidget.expandAll()  # ensure we expand all expandable after filtering.
 
-    def filterAcceptsRow(self, source_row, qmi:QModelIndex | QPersistentModelIndex):
+    def filterAcceptsRow(self, source_row: int, qmi:QModelIndex | QPersistentModelIndex) -> bool:
         model = self.sourceModel()
         source_idx = model.index(source_row, 0, qmi)
         filterstr = self.window.ui.contactFilterLineEdit.text().lower()
@@ -89,7 +103,17 @@ _TRANSFER_ROLES = {
 
 
 def format_rate(bytes_per_second: float) -> str:
-    """Human-readable transfer rate, e.g. ``1.2 MiB/s``."""
+    """Human-readable transfer rate, e.g. ``1.2 MiB/s``.
+
+    >>> format_rate(512.0)
+    '512 B/s'
+    >>> format_rate(1536.0)
+    '1.5 KiB/s'
+    >>> format_rate(-5.0)
+    '0 B/s'
+    >>> format_rate(3 * 1024 ** 3)
+    '3.0 GiB/s'
+    """
     value = max(bytes_per_second, 0.0)
     for unit in ("B/s", "KiB/s", "MiB/s"):
         if value < 1024:
@@ -98,6 +122,20 @@ def format_rate(bytes_per_second: float) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} GiB/s"
+
+
+class _TransferRow(TypedDict, total=False):
+    conversation_id: int
+    parent_name: str
+    pieces: int
+    total: "int | None"
+    active: bool
+    direction: str
+    raw_bytes: int
+    rate_base: int
+    rate_started_at: float
+    failed: bool
+    failure_reason: str
 
 
 class DownloadsModel(QtCore.QAbstractTableModel):
@@ -118,25 +156,26 @@ class DownloadsModel(QtCore.QAbstractTableModel):
 
     def __init__(self) -> None:
         super().__init__()
-        self._rows: "dict[uuid.UUID, dict[str, object]]" = {}
+        self._rows: "dict[uuid.UUID, _TransferRow]" = {}
         self._order: "list[uuid.UUID]" = []
 
-    def rowCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:  # type: ignore[override]
+    def rowCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:
         if parent is not None and parent.isValid():
             return 0
         return len(self._order)
 
-    def columnCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:  # type: ignore[override]
+    def columnCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:
         return 4
 
-    def headerData(self, section: int, orientation: "QtCore.Qt.Orientation", role: int = 0) -> object:  # type: ignore[override]
+    def headerData(self, section: int, orientation: "QtCore.Qt.Orientation", role: int = 0) -> object:
         if role != QtCore.Qt.ItemDataRole.DisplayRole:
             return None
         if orientation != QtCore.Qt.Orientation.Horizontal:
             return None
         return ("Contact", "Progress", "State", "Rate")[section]
 
-    def data(self, index: "QtCore.QModelIndex", role: int = 0) -> object:  # type: ignore[override]
+    def data(self, index: "QtCore.QModelIndex | QPersistentModelIndex",
+             role: int = 0) -> object:
         if not index.isValid() or not (0 <= index.row() < len(self._order)):
             return None
         rcw_id = self._order[index.row()]
@@ -181,7 +220,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             return self._rate_text(row)
         return None
 
-    def _rate_text(self, row: dict) -> str:
+    def _rate_text(self, row: _TransferRow) -> str:
         """Average effective-payload rate over the row's active transfer time.
 
         Paused or failed rows show zero. The baseline is reset when the row
@@ -203,7 +242,8 @@ class DownloadsModel(QtCore.QAbstractTableModel):
 
     # -- mutations (Qt-listener thread) ------------------------------------
 
-    def start_transfer(self, rcw_id: uuid.UUID, conversation_id, parent_name, total,
+    def start_transfer(self, rcw_id: uuid.UUID, conversation_id: int,
+                       parent_name: str, total: "int | None",
                        direction: str = "download", raw_bytes: int = 0) -> None:
         if rcw_id in self._rows:
             # Already tracked; refresh the denominator if it became known.
@@ -231,7 +271,8 @@ class DownloadsModel(QtCore.QAbstractTableModel):
         self._order.append(rcw_id)
         self.endInsertRows()
 
-    def notify_piece(self, rcw_id: uuid.UUID, pieces, raw_bytes=None) -> None:
+    def notify_piece(self, rcw_id: uuid.UUID, pieces: int,
+                     raw_bytes: "int | None" = None) -> None:
         if rcw_id not in self._rows:
             return
         self._rows[rcw_id]["pieces"] = pieces
@@ -341,7 +382,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
             prefix = network._SUBSTREAM_NAME_PREFIX
             streams = sess.exec(
                 select(persistent.ConversationPeer).where(
-                    persistent.ConversationPeer.name.like(f"{prefix}%"),
+                    col(persistent.ConversationPeer.name).like(f"{prefix}%"),
                 )
             ).all()
             for cp in streams:
@@ -384,7 +425,7 @@ class DownloadsModel(QtCore.QAbstractTableModel):
 
             self._seed_uploads(sess)
 
-    def _seed_uploads(self, sess) -> None:
+    def _seed_uploads(self, sess: "persistent.Session") -> None:
         """Seed Transfers rows for outbound substreams still in flight.
 
         An in-flight upload is a gated I-chunk: a PlaintextWAL with a non-null
@@ -442,7 +483,8 @@ class DownloadsModel(QtCore.QAbstractTableModel):
                 self.set_paused(rcw.id, paused=True)
 
 
-def _substream_parent_name(sess, cp) -> str:
+def _substream_parent_name(sess: "persistent.Session",
+                           cp: "persistent.ConversationPeer") -> str:
     """Best-effort display name of a substream peer's parent, for the panel.
     ``sess`` is a sync ``persistent.Session`` (the Qt-loop read path)."""
     from .network import _substream_parent_id
@@ -487,25 +529,25 @@ class PacketsModel(QtCore.QAbstractTableModel):
 
     def __init__(self) -> None:
         super().__init__()
-        self._rows: "list[dict]" = []
+        self._rows: "list[network._PacketRow]" = []
         self._ids: "list[str]" = []
         self._stream_info: "dict[object, tuple[str, int | None]]" = {}
 
-    def rowCount(self, parent=None) -> int:  # type: ignore[override]
+    def rowCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:
         if parent is not None and parent.isValid():
             return 0
         return len(self._rows)
 
-    def columnCount(self, parent=None) -> int:  # type: ignore[override]
+    def columnCount(self, parent: "QtCore.QModelIndex | QPersistentModelIndex | None" = None) -> int:
         return len(PACKET_COLUMNS)
 
-    def headerData(self, section, orientation, role=0):  # type: ignore[override]
+    def headerData(self, section: int, orientation: "QtCore.Qt.Orientation", role: int = 0) -> object:
         if (role == QtCore.Qt.ItemDataRole.DisplayRole
                 and orientation == QtCore.Qt.Orientation.Horizontal):
             return PACKET_COLUMNS[section]
         return None
 
-    def data(self, index, role=0):  # type: ignore[override]
+    def data(self, index: "QtCore.QModelIndex | QPersistentModelIndex", role: int = 0) -> object:
         if not index.isValid() or not (0 <= index.row() < len(self._rows)):
             return None
         if role not in (QtCore.Qt.ItemDataRole.DisplayRole,
@@ -536,7 +578,7 @@ class PacketsModel(QtCore.QAbstractTableModel):
                 self.index(len(self._rows) - 1, len(PACKET_COLUMNS) - 1),
             )
 
-    def _cell(self, row, column):
+    def _cell(self, row: "network._PacketRow", column: int) -> object:
         from . import network
         if column == 0:
             return time.strftime("%H:%M:%S", time.localtime(row["sent_wall"]))
@@ -574,7 +616,7 @@ class PacketsModel(QtCore.QAbstractTableModel):
             return network.format_duration(remaining)
         return None
 
-    def _stream_info_for(self, row) -> "tuple[str, int | None]":
+    def _stream_info_for(self, row: "network._PacketRow") -> "tuple[str, int | None]":
         kind = row["kind"]
         if kind.startswith("voucher"):
             return (row.get("stage") or "voucher", None)
@@ -589,10 +631,10 @@ class PacketsModel(QtCore.QAbstractTableModel):
         # A label captured at send time survives the I-chunk's deletion, which
         # breaks the DB link once the upload has been ACK'd.
         if row.get("label"):
-            label = row["label"]
+            label = cast(str, row["label"])
         return (label, total)
 
-    def _query_stream_info(self, stream_id) -> "tuple[str, int | None]":
+    def _query_stream_info(self, stream_id: uuid.UUID) -> "tuple[str, int | None]":
         """(label, substream_total_chunks) for a stream id.
 
         The total is set only for file-transfer substreams, on the substream's
@@ -654,7 +696,8 @@ class PacketsModel(QtCore.QAbstractTableModel):
         return (str(stream_id)[:8], None)
 
 
-def _upload_basename_for_agg(sess, rcw_id) -> "str | None":
+def _upload_basename_for_agg(sess: "persistent.Session",
+                             rcw_id: uuid.UUID) -> "str | None":
     """The filename of an outbound substream, from its ConversationLog marker.
 
     Resolvable only while the upload is in progress: the agg stream links to
@@ -698,7 +741,27 @@ class AttachmentDisplay(NamedTuple):
 
 def _attachment_display_for_marker(decoded: dict[str, Any]) -> AttachmentDisplay:
     """Build an :class:`AttachmentDisplay` from a decoded CBOR marker dict
-    (``file_marker`` / ``file_outgoing`` / ``file_oversized``)."""
+    (``file_marker`` / ``file_outgoing`` / ``file_oversized``).
+
+    >>> voice = _attachment_display_for_marker({
+    ...     "kind": "file_marker", "basename": "note.opus",
+    ...     "filetype": "audio/opus", "rel_path": "a/b.opus",
+    ... })
+    >>> voice.display, voice.is_audio, voice.kind, voice.rel_path
+    ('Voice note: note.opus', True, 'marker', 'a/b.opus')
+    >>> _attachment_display_for_marker({
+    ...     "kind": "file_oversized", "basename": "big.bin",
+    ...     "size": 3 * 1024 * 1024,
+    ... }).display
+    '[attachment too large] big.bin (3.0 MiB)'
+    >>> picture = _attachment_display_for_marker({
+    ...     "kind": "file_marker", "basename": "cat.jpg",
+    ...     "filetype": "arbitrary", "rel_path": "a/cat.jpg",
+    ...     "thumb_rel_path": "a/t.jpg",
+    ... })
+    >>> picture.display, picture.picture_path
+    ('', 'a/t.jpg')
+    """
     kind = decoded.get("kind")
     basename = decoded.get("basename") or "unnamed"
     filetype = decoded.get("filetype")
@@ -824,7 +887,21 @@ def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
 
 
 def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
-    """Map a decoded payload to the value for one attachment/display role."""
+    """Map a decoded payload to the value for one attachment/display role.
+
+    >>> info = AttachmentDisplay(
+    ...     display="d", basename="b", filetype="text/plain", is_audio=False,
+    ...     kind="marker", rel_path="r",
+    ... )
+    >>> _attachment_role_value(info, 0)
+    'd'
+    >>> _attachment_role_value(info, ROLE_CHAT_ATTACHMENT_KIND)
+    'marker'
+    >>> _attachment_role_value(info, ROLE_CHAT_PICTURE_PATH) is None
+    True
+    >>> _attachment_role_value(info, -1) is None
+    True
+    """
     if role == 0:
         return info.display
     if role == ROLE_CHAT_ATTACHMENT_BASENAME:
@@ -842,8 +919,17 @@ def _attachment_role_value(info: AttachmentDisplay, role: object) -> object:
     return None
 
 
-def _is_tally_type(msg_type) -> bool:
-    """True for the tally protocol's message family."""
+def _is_tally_type(msg_type: "models.GroupChatTypeEnum") -> bool:
+    """True for the tally protocol's message family.
+
+    >>> from katzenqt.models import GroupChatTypeEnum
+    >>> _is_tally_type(GroupChatTypeEnum.TALLY_VOTE)
+    True
+    >>> _is_tally_type(GroupChatTypeEnum.TALLY_SYNC_RESP)
+    True
+    >>> _is_tally_type(GroupChatTypeEnum.TEXT)
+    False
+    """
     from .models import GroupChatTypeEnum as T
 
     return msg_type in (
@@ -852,19 +938,18 @@ def _is_tally_type(msg_type) -> bool:
     )
 
 
-_TALLY_ROW_CACHE: "dict[tuple, object]" = {}
+_TALLY_ROW_CACHE: "dict[tuple[str, str], presenter.TallyRowText]" = {}
 
 
-def _tally_row(cl):
+def _tally_row(cl: "persistent.ConversationLog") -> "presenter.TallyRowText | None":
     """The projected :class:`presenter.TallyRowText` for a tally log row, or
     None when the row is not a tally message. Cached by row id: a log row's
     payload and peer name do not change."""
     if cl.payload[:1] != b"F":
         return None
     key = (str(cl.id), cl.conversation_peer.name if cl.conversation_peer else "")
-    cached = _TALLY_ROW_CACHE.get(key, False)
-    if cached is not False:
-        return cached
+    if key in _TALLY_ROW_CACHE:
+        return _TALLY_ROW_CACHE[key]
     from .models import GroupChatMessage
     from .tally import presenter
 
@@ -886,7 +971,8 @@ def _tally_row(cl):
     return row
 
 
-def _tally_survey_summary(conversation_id: int, survey_id: bytes):
+def _tally_survey_summary(conversation_id: int,
+                          survey_id: bytes) -> "presenter.SurveySummary | None":
     """Project the persisted survey a tally row concerns, or None if absent."""
     from .tally import presenter
     from .tally.sync import load_doc
@@ -904,13 +990,20 @@ def _tally_survey_summary(conversation_id: int, survey_id: bytes):
     )
 
 
-def lru_cache_for_data_roles(maxsize=10000):
+_DataMethod = TypeVar("_DataMethod", bound="Callable[..., object]")
+
+
+class _CacheClearable(Protocol):
+    cache_clear: "Callable[[], None]"
+
+
+def lru_cache_for_data_roles(maxsize: int = 10000) -> "Callable[[_DataMethod], _DataMethod]":
     """decorator for QtCore.QAbstractItemModel.data() that exempts certain roles (network status for unsent)"""
-    def decorator(func):
+    def decorator(func: _DataMethod) -> _DataMethod:
         cached_func = lru_cache(maxsize=maxsize)(func)
-        indices_with_stable_network_status = dict()
+        indices_with_stable_network_status: "dict[object, object]" = dict()
         @functools.wraps(func)
-        def wrapper(clm:"ConversationLogModel", index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):
+        def wrapper(clm:"ConversationLogModel", index:"QModelIndex | QPersistentModelIndex", role:int = QtCore.Qt.ItemDataRole.DisplayRole) -> object:
             if role != ROLE_CHAT_NETWORK_STATUS:
                 return cached_func(clm, index, role) ## call item.data() and cache it
             elif (status := indices_with_stable_network_status.get(index, None)) is not None:
@@ -926,8 +1019,8 @@ def lru_cache_for_data_roles(maxsize=10000):
         def cache_clear() -> None:
             cached_func.cache_clear()
             indices_with_stable_network_status.clear()
-        wrapper.cache_clear = cache_clear
-        return wrapper
+        cast(_CacheClearable, wrapper).cache_clear = cache_clear
+        return cast(_DataMethod, wrapper)
     return decorator
 
 class ConversationLogModel(QtCore.QAbstractItemModel):
@@ -940,7 +1033,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
     # https://doc.qt.io/qtforpython-6/PySide6/QtCore/QModelIndex.html
     # QModelIndex index = model->index(row, column, parent);
 
-    def __init__(self, convo_id) -> None:
+    def __init__(self, convo_id: int) -> None:
         super().__init__()
         self.convo_id = convo_id
         # Cached conversation_order values, ascending, re-read by
@@ -953,7 +1046,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self._row_count = 0
         self._view_count = 0
 
-    def roleNames(self):
+    def roleNames(self) -> "dict[int, QByteArray]":
         """These map names used in QML to ints used in QAbstractItemModel
         Inside a DelegateItem you can access model.author.
         See e.g. https://doc.qt.io/archives/qt-6.4/qt.html#ItemDataRole-enum
@@ -979,7 +1072,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             ROLE_CHAT_IS_TALLY: QByteArray(b'is_tally'),
         }
 
-    def index(self, row:int, column:int, parent:QModelIndex | None) -> QModelIndex:
+    def index(self, row:int, column:int, parent:"QModelIndex | QPersistentModelIndex" = QModelIndex()) -> QModelIndex:
         """A standard flat-list index: no custom internal id, and out-of-range
         rows are invalid. QML's TreeView adapts this model through
         QQmlTreeModelToTableModel, which stores QPersistentModelIndexes; an
@@ -991,10 +1084,16 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             return QModelIndex()
         return self.createIndex(row, column)
 
-    def parent(self, child:QModelIndex|QPersistentModelIndex) -> QModelIndex:
+    @overload
+    def parent(self) -> QObject: ...
+    @overload
+    def parent(self, child:"QModelIndex|QPersistentModelIndex", /) -> QModelIndex: ...
+    def parent(self, child:"QModelIndex|QPersistentModelIndex|None" = None) -> "QObject | QModelIndex":
         """Since we don't have any trees here, nochild indices have parents"""
+        if child is None:
+            return super().parent()
         return QModelIndex()
-    def rowCount(self, parent:QModelIndex|None) -> int:
+    def rowCount(self, parent:"QModelIndex|QPersistentModelIndex" = QModelIndex()) -> int:
         """number of chat messages, from the cached DB count (see
         refresh_row_count). Qt calls this during layout/paint, so it must not
         query; the cache is refreshed on each conversation-update notification.
@@ -1015,7 +1114,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 .where(
                     persistent.ConversationLog.conversation_id == self.convo_id
                 )
-                .order_by(persistent.ConversationLog.conversation_order)
+                .order_by(col(persistent.ConversationLog.conversation_order))
             ))
 
     def order_for_row(self, row: int) -> int:
@@ -1084,7 +1183,7 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self.endResetModel()
         return True
 
-    def redraw_network_status(self):
+    def redraw_network_status(self) -> None:
         """Repaint the network-status column without changing the row set."""
         if self._view_count == 0:
             return
@@ -1121,13 +1220,13 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
             [],
         )
 
-    def columnCount(self, parent:QModelIndex|QPersistentModelIndex|None) -> int:
+    def columnCount(self, parent:"QModelIndex|QPersistentModelIndex" = QModelIndex()) -> int:
         if parent.isValid():
             return 0
         return 1
 
     @lru_cache_for_data_roles()
-    def data(self, index:QModelIndex, role:QtCore.Qt.ItemDataRole|None):
+    def data(self, index:"QModelIndex | QPersistentModelIndex", role:int = QtCore.Qt.ItemDataRole.DisplayRole) -> object:
         """returns data for index
         PySide6.QtCore.Qt.DisplayRole
         """
@@ -1188,8 +1287,6 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                     return None
                 # TODO we probably want to do this as multiple columns? whatever, works for now
                 if role == ROLE_CHAT_AUTHOR:
-                    if cl.network_status == 1:
-                        return cl.conversation_peer.name
                     return cl.conversation_peer.name
                 elif role == ROLE_CHAT_NETWORK_STATUS:
                     return cl.network_status
@@ -1206,8 +1303,6 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                             return tally.survey_id.hex() if tally.survey_id else None
                         if role == ROLE_CHAT_IS_TALLY:
                             return True
-                        if role == ROLE_CHAT_AUTHOR:
-                            return cl.conversation_peer.name
                         # No attachment/picture roles for tally rows.
                         return None
                     # Derive display text and attachment roles from the payload.
@@ -1230,17 +1325,15 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                 # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent
         #print(self,"data", index, repr(QtCore.Qt.ItemDataRole(role)))
         #return f"hi {self.convo_id}"
-    def headerData(self, section:int, orientation:QtCore.Qt.Orientation, role:QtCore.Qt.ItemDataRole|None):
+    def headerData(self, section:int, orientation:QtCore.Qt.Orientation, role:int = QtCore.Qt.ItemDataRole.DisplayRole) -> object:
         """data for given role and section in the header"""
         print(self,"headerData",section,orientation,repr(QtCore.Qt.ItemDataRole(role)))
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
             return "header1"
         return None
-        return QLabel("a")
-        pass
-    def flags(self, index:QModelIndex):
+    def flags(self, index:"QModelIndex | QPersistentModelIndex") -> "QtCore.Qt.ItemFlag":
         # https://doc.qt.io/qtforpython-6/PySide6/QtCore/Qt.html#PySide6.QtCore.Qt.ItemFlag
-        return QtCore.Qt.NoItemFlags
+        return QtCore.Qt.ItemFlag.NoItemFlags
 
 class ChatImageProvider(QQuickImageProvider):
     """Serves inline chat thumbnails for ``image://ChatImageProvider/<rel>``.
