@@ -60,7 +60,7 @@ def test_bounce_helpers_use_the_selected_engine(
     run = Mock(return_value=subprocess.CompletedProcess(
         [], 0, "mix-kpclientd-1\t127.0.0.1:64331->64331/tcp\n", "",
     ))
-    monkeypatch.setattr(helpers.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
     assert helpers.find_kpclientd_container() == "mix-kpclientd-1"
     assert run.call_args.args[0][0] == engine
     assert run.call_args.kwargs["timeout"] == 10

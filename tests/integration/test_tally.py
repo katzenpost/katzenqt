@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -58,11 +59,11 @@ def _run_role(
     )
 
 
-def _output(proc: subprocess.CompletedProcess) -> str:
+def _output(proc: "subprocess.CompletedProcess[str]") -> str:
     return proc.stdout + proc.stderr
 
 
-def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+def _expect_token(proc: "subprocess.CompletedProcess[str]", token: str) -> str:
     for line in _output(proc).splitlines():
         idx = line.find(token)
         if idx != -1:
@@ -72,12 +73,32 @@ def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
     )
 
 
-def _slots_by_id(tally_json: dict) -> dict:
+class _SlotJson(TypedDict):
+    slot_id: str
+    text: str
+    yes: int
+    maybe: int
+    no: int
+
+
+class _TallyJson(TypedDict):
+    survey_id: str
+    mode: str
+    status: str
+    n_voters: int
+    slots: "list[_SlotJson]"
+    outcome: str
+
+
+def _slots_by_id(tally_json: _TallyJson) -> "dict[str, _SlotJson]":
     return {s["slot_id"]: s for s in tally_json["slots"]}
 
 
 @pytest.mark.integration
-def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
+def test_tally_converges_across_peers(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
 

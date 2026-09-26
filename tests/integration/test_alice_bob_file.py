@@ -81,7 +81,10 @@ def _sha256(p: Path) -> str:
 
 
 @pytest.mark.integration
-def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
+def test_file_roundtrip(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """A ~2 KB file spans two BACAP boxes (one substream chain plus the
     parent's indirection release), the smallest payload that still
     exercises the multi-box copy/reassembly path. Bob must reconstruct

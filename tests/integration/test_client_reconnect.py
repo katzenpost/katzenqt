@@ -109,7 +109,9 @@ def _wait_for_token(out_path: Path, token: str, deadline_s: float, what: str) ->
     )
 
 
-def _terminate(proc: subprocess.Popen, what: str, *, expect_signal: bool = True) -> None:
+def _terminate(
+    proc: "subprocess.Popen[str]", what: str, *, expect_signal: bool = True,
+) -> None:
     """Kill a spawned role, with a hard SIGKILL fallback so a stuck Python
     subprocess can't hang the test. ``headless.cli`` installs a SIGTERM
     handler that stops the event loop, so the raw SIGTERM exit is rc=-15

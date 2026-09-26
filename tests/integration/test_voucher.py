@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -45,7 +46,7 @@ _VOUCHER_MARKERS = (
 )
 
 
-def _timed_run(what: str, role_state: Path, *cli_args: str, timeout: float = 180.0) -> subprocess.CompletedProcess:
+def _timed_run(what: str, role_state: Path, *cli_args: str, timeout: float = 180.0) -> "subprocess.CompletedProcess[str]":
     """Run a role subprocess, printing wall-clock elapsed plus any voucher
     round-timing lines from its captured stderr when KQT_INTEGRATION_TIMING=1."""
     t0 = time.perf_counter()
@@ -122,18 +123,20 @@ def _spawn_role(
     )
 
 
-def _output(proc: subprocess.CompletedProcess) -> str:
+def _output(proc: "subprocess.CompletedProcess[str]") -> str:
     return proc.stdout + proc.stderr
 
 
-def _assert_ok(proc: subprocess.CompletedProcess, what: str) -> None:
+def _assert_ok(proc: "subprocess.CompletedProcess[str]", what: str) -> None:
     assert proc.returncode == 0, (
         f"{what} failed (rc={proc.returncode}):\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
 
 
-def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+def _expect_token(
+    proc: "subprocess.CompletedProcess[str]", token: str,
+) -> str:
     """Find a logged line containing token; return the text after it. The
     runner emits results through logging (stderr) with a level/name prefix,
     so match by substring rather than line start."""
@@ -146,22 +149,28 @@ def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
     )
 
 
-def _expect_info(proc: subprocess.CompletedProcess) -> dict:
+def _expect_info(
+    proc: "subprocess.CompletedProcess[str]",
+) -> "dict[str, object]":
     """The ``info`` verb logs one line of bare JSON on stderr; parse it."""
     for line in _output(proc).splitlines():
         stripped = line.strip()
         if stripped.startswith("{") and stripped.endswith("}"):
             try:
-                return json.loads(stripped)
+                parsed: "dict[str, object]" = json.loads(stripped)
             except ValueError:
                 continue
+            return parsed
     raise AssertionError(
         f"no JSON info line:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
 
 
 @pytest.mark.integration
-def test_voucher_handshake_then_bidirectional(kpclientd_endpoint, tmp_path_factory):
+def test_voucher_handshake_then_bidirectional(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Full handshake, then a message each way. The Bob -> Alice leg is the
     crux: it rides Bob's salt-mutated write cap and Alice's salt-mutated
     read cap, which must address the same boxes."""
@@ -230,7 +239,10 @@ def test_voucher_handshake_then_bidirectional(kpclientd_endpoint, tmp_path_facto
 
 
 @pytest.mark.integration
-def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory):
+def test_voucher_await_resumes_after_crash(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Bob mints, then his first voucher-await is killed mid-poll (the
     PendingVoucher row survives on disk). After Alice inducts, a second
     voucher-await resumes from that row and joins, proving crash recovery."""
@@ -273,7 +285,10 @@ def test_voucher_await_resumes_after_crash(kpclientd_endpoint, tmp_path_factory)
 
 @pytest.mark.integration
 @pytest.mark.epoch_driven
-def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
+def test_voucher_overlapping_await(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """The GUI interleaving: the joiner's poll of box 1 is already in flight
     (riding out BoxIDNotFound) before the inductor writes the reply, rather
     than starting after it like the other tests. A poll that precedes the
@@ -351,7 +366,10 @@ def test_voucher_overlapping_await(kpclientd_endpoint, tmp_path_factory):
 
 
 @pytest.mark.integration
-def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
+def test_voucher_3party(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Three-way membership: after Alice and Bob pair off, Bob inducts Carol,
     and all three end up able to read one another.
 
@@ -493,7 +511,6 @@ def test_voucher_3party(kpclientd_endpoint, tmp_path_factory):
     info_carol = _run_role(carol_state, "info", timeout=budget_s(30.0))
     _assert_ok(info_carol, "carol info")
     info = _expect_info(info_carol)
-    demo = next(
-        c for c in info["conversations"] if c["name"] == "demo"
-    )
+    conversations = cast("list[dict[str, object]]", info["conversations"])
+    demo = next(c for c in conversations if c["name"] == "demo")
     assert demo["peer_count"] == 3, f"Carol subscribed to herself? {demo}"
