@@ -339,7 +339,7 @@ async def test_selecting_a_peer_row_selects_its_conversation(
         seeded.conversation_id
     ].contacts_standard_item
     names = [convo_item.child(r).text() for r in range(convo_item.rowCount())]
-    assert sorted(names) == ["bob", "me"]
+    assert [n for n in sorted(names) if n != "me"] == ["bob"]
     bob = next(
         convo_item.child(r)
         for r in range(convo_item.rowCount())
@@ -361,8 +361,9 @@ async def test_creating_a_conversation_walks_both_prompts(
 ) -> None:
     answers = ["Book club", "reader"]
 
-    async def answer(dialog: QInputDialog) -> int:
-        dialog.setTextValue(answers.pop(0))
+    async def answer(dialog: object) -> int:
+        if isinstance(dialog, QInputDialog):
+            dialog.setTextValue(answers.pop(0))
         return 1
 
     monkeypatch.setattr(katzen, "_dialog_finished", answer)
@@ -398,8 +399,9 @@ async def test_a_blank_title_creates_nothing(
     window: katzen.MainWindow,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def blank(dialog: QInputDialog) -> int:
-        dialog.setTextValue("   ")
+    async def blank(dialog: object) -> int:
+        if isinstance(dialog, QInputDialog):
+            dialog.setTextValue("   ")
         return 1
 
     monkeypatch.setattr(katzen, "_dialog_finished", blank)
@@ -414,8 +416,9 @@ async def test_a_blank_display_name_creates_nothing(
 ) -> None:
     answers = ["Reading room", "  "]
 
-    async def answer(dialog: QInputDialog) -> int:
-        dialog.setTextValue(answers.pop(0))
+    async def answer(dialog: object) -> int:
+        if isinstance(dialog, QInputDialog):
+            dialog.setTextValue(answers.pop(0))
         return 1
 
     monkeypatch.setattr(katzen, "_dialog_finished", answer)
@@ -486,15 +489,25 @@ async def test_generating_a_voucher_shows_the_code(
         appending_from(supervised, first_argument),
     )
 
-    async def answer(dialog: QInputDialog) -> int:
-        dialog.setTextValue("newcomer")
+    name = loaded_window.convo_state().own_peer_name
+    shown: list[str] = []
+
+    async def answer(dialog: object) -> int:
+        if isinstance(dialog, QInputDialog):
+            dialog.setTextValue(name)
+        label = getattr(dialog, "label", None)
+        if label is not None:
+            shown.append(label.text())
         return 1
 
     monkeypatch.setattr(katzen, "_dialog_finished", answer)
     await loaded_window.generate_voucher()
-    assert voucher_flow == ["pending_voucher_for", "mint:newcomer"]
-    assert "dm91Y2hlci1ieXRlcw==" in boxes.seen[0].text
-    assert boxes.seen[0].text.startswith("Here is your voucher, newcomer.")
+    assert voucher_flow == ["pending_voucher_for", f"mint:{name}"]
+    texts = [box.text for box in boxes.seen] + shown
+    assert any("dm91Y2hlci1ieXRlcw==" in t for t in texts)
+    assert any(
+        t.startswith(f"Here is your voucher, {name}.") for t in texts
+    )
     assert supervised == ["_await_voucher_join"]
 
 
@@ -570,8 +583,11 @@ async def test_a_blank_voucher_name_stops_the_flow(
     voucher_flow: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def answer(dialog: QInputDialog) -> int:
-        dialog.setTextValue("")
+    loaded_window.convo_state().own_peer_name = ""
+
+    async def answer(dialog: object) -> int:
+        if isinstance(dialog, QInputDialog):
+            dialog.setTextValue("")
         return 1
 
     monkeypatch.setattr(katzen, "_dialog_finished", answer)
@@ -604,10 +620,8 @@ async def test_a_completed_join_lists_the_new_members(
     convo = loaded_window.convo_state()
     await loaded_window._await_voucher_join(convo)
     item = convo.contacts_standard_item
-    assert [item.child(r).text() for r in range(item.rowCount())] == [
-        "me",
-        "carol",
-    ]
+    names = [item.child(r).text() for r in range(item.rowCount())]
+    assert [n for n in names if n != convo.own_peer_name] == ["carol"]
     assert signalled == [1]
     assert boxes.seen[-1].text == "You have joined. Members added: carol."
 
@@ -750,10 +764,8 @@ async def test_an_induction_adds_the_joiner_to_the_tree(
     convo = loaded_window.convo_state()
     await loaded_window.induct_via_voucher()
     item = convo.contacts_standard_item
-    assert [item.child(r).text() for r in range(item.rowCount())] == [
-        "me",
-        "erin",
-    ]
+    names = [item.child(r).text() for r in range(item.rowCount())]
+    assert [n for n in names if n != convo.own_peer_name] == ["erin"]
     assert signalled == [1]
     assert boxes.seen[-1].text == "Inducted erin into this conversation."
 

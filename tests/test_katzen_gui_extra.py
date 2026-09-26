@@ -391,7 +391,9 @@ async def test_leaving_a_peer_row_persists_the_old_unread_marker(
 
     monkeypatch.setattr(network, "persist_first_unread", persist)
     first_id = loaded_window.convo_state().conversation_id
-    other = await seed_conversation(name="other room", own_name="me2")
+    other = await seed_conversation(
+        name="other room", own_name="me2", peers=("zoe",),
+    )
     await add_seeded_conversation(loaded_window, other.conversation_id)
     for _ in range(80):
         await asyncio.sleep(0)
@@ -401,7 +403,7 @@ async def test_leaving_a_peer_row_persists_the_old_unread_marker(
 
     await loaded_window.conversation_selected(
         conversation_index(loaded_window, first_id),
-        peer_index(loaded_window, other.conversation_id, "me2"),
+        peer_index(loaded_window, other.conversation_id, "zoe"),
     )
 
     assert saved == [(other.conversation_id, 0)]

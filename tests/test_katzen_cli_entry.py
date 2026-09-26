@@ -127,6 +127,10 @@ class FakeApp:
         self.icons: list[object] = []
         self.styles: list[str] = []
         self.quits = 0
+        self.desktop_files: list[str] = []
+
+    def setDesktopFileName(self, name: str) -> None:
+        self.desktop_files.append(name)
 
     def setWindowIcon(self, icon: object) -> None:
         self.icons.append(icon)

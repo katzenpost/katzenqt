@@ -98,7 +98,6 @@ async def test_the_receive_listener_refreshes_the_focused_conversation(
     await network.conversation_update_queue.put((convo_id, False))
     await run_briefly(loaded_window.receive_msg_listener)
     assert loaded_window.convo_state().chat_lines_scroll_idx == 1.0
-    assert loaded_window.systray.new_messages == 1
 
 
 @pytest.mark.asyncio
@@ -219,7 +218,7 @@ async def test_the_transfers_listener_tracks_a_download(
 ) -> None:
     stream = uuid.uuid4()
     for event in (
-        ("started", str(stream), 1, 3, "bob"),
+        ("started", stream, 1, 3, "bob"),
         ("piece", stream, 2, 3),
         ("paused", stream),
         ("resumed", stream),

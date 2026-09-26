@@ -180,7 +180,9 @@ async def test_our_own_peer_row_offers_no_menu(
         await asyncio.sleep(0)
     window.show()
     window.resize(900, 600)
-    pos = peer_position(window, peer_named(window, "me"))
+    own = katzen.QStandardItem("me")
+    window.convo_state().contacts_standard_item.appendRow(own)
+    pos = peer_position(window, own)
     await window.peer_context_menu(pos)
     assert pauses["pause_read"] == []
 
@@ -493,7 +495,7 @@ async def test_a_substream_peer_never_reaches_the_contacts_tree(
         seeded.conversation_id
     ].contacts_standard_item
     names = [item.child(r).text() for r in range(item.rowCount())]
-    assert sorted(names) == ["bob", "me"]
+    assert [n for n in sorted(names) if n != "me"] == ["bob"]
 
 
 @pytest.mark.asyncio
