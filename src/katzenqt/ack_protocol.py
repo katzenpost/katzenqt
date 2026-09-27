@@ -44,8 +44,13 @@ class ReaderScan:
     stalled_since: "float | None" = None
 
 
-# Events: the outcomes `step` can be fed. Exactly one of the three read
-# outcomes, or a bare clock tick with no read outcome at all.
+# Events: the outcome of one read attempt. There is no separate "clock
+# tick" event: the driver's read loop already retries the expected
+# position on its own paced cadence (see `_pacer` in network.py), and every
+# such retry is a real attempt that gets one of these three outcomes -- the
+# real driver never has occasion to check the clock except when a retry
+# has just come back not-found, so `step` checks it exactly then, as part
+# of handling that outcome, rather than needing its own event type.
 
 @dataclass(frozen=True)
 class ReadOk:
@@ -61,16 +66,11 @@ class ReadTombstoned:
 
 @dataclass(frozen=True)
 class ReadNotFound:
-    """A box was probed and nothing has ever been written there."""
+    """A box was probed and nothing has ever been written there (yet, or
+    ever)."""
 
 
-@dataclass(frozen=True)
-class Elapsed:
-    """No read outcome happened; just check whether a stall has gone on
-    long enough to escalate."""
-
-
-ScanEvent: TypeAlias = "ReadOk | ReadTombstoned | ReadNotFound | Elapsed"
+ScanEvent: TypeAlias = "ReadOk | ReadTombstoned | ReadNotFound"
 
 
 # Effects: instructions back to the driver. `step` never performs I/O or
@@ -126,7 +126,14 @@ def step(
     (same state, no effects), spelled out rather than left undefined.
 
     `now` and `stall_threshold_s` are always supplied, whether or not this
-    particular event needs them, so the signature never changes shape.
+    particular event needs them, so the signature never changes shape. The
+    escalation check (has this gone on long enough to start scanning) is
+    evaluated here, as part of handling a `ReadNotFound` while already
+    `STALLED` -- not on some separate timer -- because that is genuinely
+    the only moment the driver has fresh information to check it against:
+    every `STALLED`-state retry is a real read attempt at the driver's own
+    paced cadence, and a `ReadNotFound` outcome is what this function
+    receives each time one of those comes back empty.
     """
     if scan.state is ScanState.WAITING:
         if isinstance(event, ReadOk):
@@ -135,8 +142,6 @@ def step(
             return ReaderScan(ScanState.WAITING), [AdvanceExpected()]
         if isinstance(event, ReadNotFound):
             return ReaderScan(ScanState.STALLED, stalled_since=now), []
-        if isinstance(event, Elapsed):
-            return scan, []
         raise TypeError(f"unhandled event {event!r} in {scan.state}")
 
     if scan.state is ScanState.STALLED:
@@ -145,16 +150,14 @@ def step(
         if isinstance(event, ReadTombstoned):
             return ReaderScan(ScanState.WAITING), [AdvanceExpected()]
         if isinstance(event, ReadNotFound):
-            # Still stalled; stalled_since is the FIRST not-found and is
-            # never reset by a later one.
-            return scan, []
-        if isinstance(event, Elapsed):
             assert scan.stalled_since is not None
             if now - scan.stalled_since > stall_threshold_s:
                 return (
                     ReaderScan(ScanState.SCANNING, stalled_since=scan.stalled_since),
                     [ProbeBackward(), ProbeForward()],
                 )
+            # Still stalled; stalled_since is the FIRST not-found and is
+            # never reset by a later one.
             return scan, []
         raise TypeError(f"unhandled event {event!r} in {scan.state}")
 
@@ -165,8 +168,6 @@ def step(
             return scan, [ProbeForward()]
         if isinstance(event, ReadNotFound):
             return ReaderScan(ScanState.WAITING), [AdoptFrontier()]
-        if isinstance(event, Elapsed):
-            return scan, []
         raise TypeError(f"unhandled event {event!r} in {scan.state}")
 
     raise TypeError(f"unhandled state {scan.state!r}")  # pragma: no cover
