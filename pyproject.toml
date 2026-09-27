@@ -93,13 +93,15 @@ module = "katzenqt._thinclient"
 disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
-addopts = "--cov=katzenqt --cov-report=term-missing --doctest-modules -n auto --dist loadscope -vv -m 'not nightly'"
+addopts = """\
+--cov=katzenqt --cov-report=term-missing --doctest-modules \
+-n auto --dist loadscope -vv -m 'not nightly'"""
 testpaths = [
     "src",
     "tests",
 ]
 markers = [
-    "nightly: full-size runs for the nightly job or when their subject changes",
+    "nightly: full-size runs for the nightly job or a changed subject",
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
     "serial_docker: bounces shared docker containers (kpclientd/gateway); run after and separately from the parallel workers",

@@ -247,7 +247,8 @@ test-nightly: setup
 	elif [[ -e "$(BACKEND_PIP)" ]]; then \
 		$(MAKE) test-nightly-pip; \
 	else \
-		printf '%s\n' "error: no backend selected. run: make setup-uv OR make setup-pip"; \
+		printf '%s\n' "error: no backend selected"; \
+		printf '%s\n' "run: make setup-uv OR make setup-pip"; \
 		exit 1; \
 	fi
 
