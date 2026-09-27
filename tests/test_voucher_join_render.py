@@ -1,32 +1,36 @@
+from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from katzenqt import katzen
+
+if TYPE_CHECKING:
+    from katzenqt.qt_models import ConversationUIState
 
 
 @pytest.mark.asyncio
 async def test_every_added_member_is_rendered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rows: list[object] = []
-    infos: list[tuple[str, str]] = []
-
     class Item:
         def __init__(self, name: str) -> None:
             self.name = name
 
-    def single_shot(delay: int, callback: Any) -> None:
+    rows: list[Item] = []
+    infos: list[tuple[str, str]] = []
+
+    def single_shot(delay: int, callback: Callable[[], None]) -> None:
         callback()
 
-    async def run_in_io(coro: Any) -> None:
+    async def run_in_io(coro: Coroutine[object, object, object]) -> None:
         coro.close()
 
     async def signal() -> None:
         return None
 
-    monkeypatch.setattr(katzen, "QStandardItem", Item)
+    monkeypatch.setattr(katzen, "ContactsItem", Item)
     monkeypatch.setattr(
         katzen, "QTimer", SimpleNamespace(singleShot=single_shot),
     )
@@ -51,8 +55,17 @@ async def test_every_added_member_is_rendered(
 
     window._wait_and_open_with_retries = added
     window._voucher_join_tasks = {}
-    window._run_voucher_join = lambda c: katzen.MainWindow._run_voucher_join(window, c)
-    await katzen.MainWindow._await_voucher_join(window, convo)
+
+    def run_join(c: "ConversationUIState") -> "Coroutine[object, object, None]":
+        return katzen.MainWindow._run_voucher_join(
+            cast("katzen.MainWindow", window), c,
+        )
+
+    window._run_voucher_join = run_join
+    await katzen.MainWindow._await_voucher_join(
+        cast("katzen.MainWindow", window),
+        cast("ConversationUIState", convo),
+    )
 
     assert [r.name for r in rows] == ["alice", "bob"]
     assert infos, "no join confirmation was shown"

@@ -11,11 +11,15 @@ import asyncio
 import threading
 import uuid
 from types import SimpleNamespace
+from typing import cast, TYPE_CHECKING
 
 import pytest
 
 from katzenqt import models, network, persistent, voucher
-from sqlmodel import Session, select
+from sqlmodel import col, Session, select
+
+if TYPE_CHECKING:
+    from katzenqt._thinclient import ThinClient
 
 
 async def _make_conversation(name: str = "demo", own: str = "me") -> int:
@@ -74,7 +78,8 @@ async def _add_pending(conversation_id: int) -> uuid.UUID:
     async with persistent.asession() as sess:
         pv = persistent.PendingVoucher(
             role="joiner", conversation_id=conversation_id,
-            step="awaiting", voucher=b"v" * 32,
+            step="awaiting", voucher=b"v" * 32, box1_index=bytes(104),
+            voucher_read_cap=bytes(136),
         )
         sess.add(pv)
         await sess.commit()
@@ -83,58 +88,58 @@ async def _add_pending(conversation_id: int) -> uuid.UUID:
 
 
 @pytest.mark.asyncio
-async def test_fresh_conversation_is_not_joined():
+async def test_fresh_conversation_is_not_joined() -> None:
     conv_id = await _make_conversation()
     assert await voucher.conversation_is_joined(conv_id) is False
 
 
 @pytest.mark.asyncio
-async def test_active_member_counts_as_joined():
+async def test_active_member_counts_as_joined() -> None:
     conv_id = await _make_conversation()
     await _add_peer(conv_id, "alice")
     assert await voucher.conversation_is_joined(conv_id) is True
 
 
 @pytest.mark.asyncio
-async def test_paused_member_still_counts_as_joined():
+async def test_paused_member_still_counts_as_joined() -> None:
     conv_id = await _make_conversation()
     await _add_peer(conv_id, "alice", active=False)
     assert await voucher.conversation_is_joined(conv_id) is True
 
 
 @pytest.mark.asyncio
-async def test_substream_peer_does_not_count_as_joined():
+async def test_substream_peer_does_not_count_as_joined() -> None:
     conv_id = await _make_conversation()
     await _add_peer(conv_id, f"{network._SUBSTREAM_NAME_PREFIX}1:ab")
     assert await voucher.conversation_is_joined(conv_id) is False
 
 
 @pytest.mark.asyncio
-async def test_mint_refuses_when_already_joined():
+async def test_mint_refuses_when_already_joined() -> None:
     conv_id = await _make_conversation()
     await _add_peer(conv_id, "alice")
     with pytest.raises(voucher.AlreadyJoinedError):
-        await voucher.mint_and_publish(None, conv_id, "me")
+        await voucher.mint_and_publish(cast("ThinClient", None), conv_id, "me")
 
 
 @pytest.mark.asyncio
-async def test_mint_refuses_when_the_only_member_is_paused():
+async def test_mint_refuses_when_the_only_member_is_paused() -> None:
     conv_id = await _make_conversation()
     await _add_peer(conv_id, "alice", active=False)
     with pytest.raises(voucher.AlreadyJoinedError):
-        await voucher.mint_and_publish(None, conv_id, "me")
+        await voucher.mint_and_publish(cast("ThinClient", None), conv_id, "me")
 
 
 @pytest.mark.asyncio
-async def test_mint_refuses_when_voucher_pending():
+async def test_mint_refuses_when_voucher_pending() -> None:
     conv_id = await _make_conversation()
     await _add_pending(conv_id)
     with pytest.raises(voucher.PendingVoucherExistsError):
-        await voucher.mint_and_publish(None, conv_id, "me")
+        await voucher.mint_and_publish(cast("ThinClient", None), conv_id, "me")
 
 
 @pytest.mark.asyncio
-async def test_pending_lookup_list_and_cancel():
+async def test_pending_lookup_list_and_cancel() -> None:
     conv_id = await _make_conversation()
     assert await voucher.pending_voucher_for(conv_id) is None
     pv_id = await _add_pending(conv_id)
@@ -145,7 +150,7 @@ async def test_pending_lookup_list_and_cancel():
 
 
 @pytest.mark.asyncio
-async def test_resume_picks_awaiting_joiner_only():
+async def test_resume_picks_awaiting_joiner_only() -> None:
     """A restart resumes precisely the joiner handshakes the DB can still
     continue: ``awaiting`` ones (box-1 index persisted). A ``minted`` one has
     no box-1 index yet (and its box 0 is already written, so re-minting would
@@ -163,6 +168,7 @@ async def test_resume_picks_awaiting_joiner_only():
                     "minted" if conv_id == minted else "done"
                 ),
                 voucher=b"v" * 32,
+                voucher_read_cap=bytes(136),
                 box1_index=b"\x00" * 104 if conv_id in (awaiting, done) else None,
             )
             sess.add(pv)
@@ -177,13 +183,15 @@ async def test_resume_picks_awaiting_joiner_only():
 
 
 @pytest.mark.asyncio
-async def test_resume_empty_when_no_join_in_flight():
+async def test_resume_empty_when_no_join_in_flight() -> None:
     await _make_conversation()
     assert voucher.pending_joiner_join_conversation_ids() == []
 
 
 @pytest.mark.asyncio
-async def test_intro_announcement_emits_increment(monkeypatch):
+async def test_intro_announcement_emits_increment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The sender's own 'alice added bob' row must signal the UI tally.
 
     ConversationLogModel grows ``row_count`` by one per ``False`` update
@@ -194,7 +202,7 @@ async def test_intro_announcement_emits_increment(monkeypatch):
     """
     conversation_id = await _make_conversation()
 
-    async def _noop():
+    async def _noop() -> None:
         return None
 
     monkeypatch.setattr(voucher, "check_for_new", _noop)
@@ -212,6 +220,7 @@ async def test_intro_announcement_emits_increment(monkeypatch):
 
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
+        assert conv is not None
         rows = (await sess.exec(
             select(persistent.ConversationLog).where(
                 persistent.ConversationLog.conversation_id == conversation_id,
@@ -232,6 +241,7 @@ async def _append_log_row_async(conversation_id: int, tag: bytes) -> int:
     with Session(persistent._engine_sync) as sess:
         async with persistent.conversation_log_order_lock(conversation_id):
             conv = sess.get(persistent.Conversation, conversation_id)
+            assert conv is not None
             row = persistent.ConversationLog(
                 conversation_id=conversation_id,
                 conversation_peer_id=conv.own_peer_id,
@@ -245,7 +255,7 @@ async def _append_log_row_async(conversation_id: int, tag: bytes) -> int:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_append_orders_are_unique():
+async def test_concurrent_append_orders_are_unique() -> None:
     """Two threads (each with its own event loop, as GUI vs. io really are)
     appending to the same conversation must never stamp the same
     conversation_order.
@@ -290,7 +300,7 @@ async def test_concurrent_append_orders_are_unique():
 
 
 @pytest.mark.asyncio
-async def test_same_loop_contention_does_not_deadlock():
+async def test_same_loop_contention_does_not_deadlock() -> None:
     """Two tasks on the same event loop appending to the same conversation
     must not deadlock, even when the lock holder suspends at a genuine await
     (standing in for `await sess.commit()`) before releasing.
@@ -317,11 +327,13 @@ async def test_same_loop_contention_does_not_deadlock():
             await asyncio.sleep(hold_s)  # stand-in for `await sess.commit()`
             async with persistent.asession() as sess:
                 conv = await sess.get(persistent.Conversation, conversation_id)
+                assert conv is not None
                 order = (await sess.exec(
                     select(persistent.count())
                     .select_from(persistent.ConversationLog)
                     .where(persistent.ConversationLog.conversation_id == conversation_id)
                 )).first()
+                assert order is not None
                 sess.add(persistent.ConversationLog(
                     conversation_id=conversation_id,
                     conversation_peer_id=conv.own_peer_id,
@@ -341,7 +353,7 @@ async def test_same_loop_contention_does_not_deadlock():
 
 class TestPeerHasReadCap:
     @pytest.mark.asyncio
-    async def test_distinct_cap_is_not_held(self):
+    async def test_distinct_cap_is_not_held(self) -> None:
         conversation_id = await _make_conversation()
         async with persistent.asession() as sess:
             assert await persistent.peer_has_read_cap(
@@ -349,7 +361,7 @@ class TestPeerHasReadCap:
             ) is False
 
     @pytest.mark.asyncio
-    async def test_active_peers_cap_is_held(self):
+    async def test_active_peers_cap_is_held(self) -> None:
         conversation_id = await _make_conversation()
         await _add_peer(conversation_id, "alice")
         async with persistent.asession() as sess:
@@ -358,7 +370,7 @@ class TestPeerHasReadCap:
             ) is True
 
     @pytest.mark.asyncio
-    async def test_own_peers_cap_is_held(self):
+    async def test_own_peers_cap_is_held(self) -> None:
         conversation_id = await _make_conversation()
         async with persistent.asession() as sess:
             assert await persistent.peer_has_read_cap(
@@ -366,7 +378,7 @@ class TestPeerHasReadCap:
             ) is True
 
     @pytest.mark.asyncio
-    async def test_same_cap_in_another_conversation_is_not_held(self):
+    async def test_same_cap_in_another_conversation_is_not_held(self) -> None:
         conv_a = await _make_conversation("a")
         conv_b = await _make_conversation("b")
         await _add_peer(conv_a, "alice")
@@ -376,7 +388,7 @@ class TestPeerHasReadCap:
             ) is False
 
     @pytest.mark.asyncio
-    async def test_same_public_key_different_index_state_is_held(self):
+    async def test_same_public_key_different_index_state_is_held(self) -> None:
         """A member's stream can be held under caps sharing the public key but
         differing in the salt-derived index state (a joiner's un-mutated cap,
         the salt-mutated cap the group inducted, or a re-induction's fresh
@@ -392,7 +404,7 @@ class TestPeerHasReadCap:
             ) is True
 
     @pytest.mark.asyncio
-    async def test_different_public_key_is_not_held(self):
+    async def test_different_public_key_is_not_held(self) -> None:
         conversation_id = await _make_conversation()
         await _add_peer_with_cap(
             conversation_id, "carol", b"\x07" * 32 + b"\x01" * 104,
@@ -403,7 +415,7 @@ class TestPeerHasReadCap:
             ) is False
 
     @pytest.mark.asyncio
-    async def test_short_cap_is_not_held(self):
+    async def test_short_cap_is_not_held(self) -> None:
         conversation_id = await _make_conversation()
         await _add_peer(conversation_id, "alice")
         async with persistent.asession() as sess:
@@ -414,7 +426,9 @@ class TestPeerHasReadCap:
 
 class TestAlreadyInductedGuard:
     @pytest.mark.asyncio
-    async def test_derive_rerun_does_not_duplicate_member(self, monkeypatch):
+    async def test_derive_rerun_does_not_duplicate_member(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """A re-run of the induction (naive retry after a failed post-commit
         ack) must not add a second peer for the same read cap, must not
         re-send the INTRODUCTION announcement, and must report the retry to
@@ -426,15 +440,17 @@ class TestAlreadyInductedGuard:
             mutated_message_read_cap = b"\x03" * 136
             sealed_reply = b"sealed_reply"
 
-        async def fake_read_box(*_a, **_k):
+        async def fake_read_box(*_a: object, **_k: object) -> tuple[bytes, bytes]:
             return (b"voucher_payload", b"\x00" * 104)
 
-        async def fake_publish_box(*_a, **_k):
+        async def fake_publish_box(*_a: object, **_k: object) -> bytes:
             return b"\x00" * 104
 
-        sent_announcements: list = []
+        sent_announcements: list[tuple[int, str, bytes]] = []
 
-        async def fake_send_intro(cid, display_name, read_cap):
+        async def fake_send_intro(
+            cid: int, display_name: str, read_cap: bytes,
+        ) -> None:
             sent_announcements.append((cid, display_name, read_cap))
 
         monkeypatch.setattr(voucher, "_read_box", fake_read_box)
@@ -442,16 +458,21 @@ class TestAlreadyInductedGuard:
         monkeypatch.setattr(voucher, "send_introduction_message", fake_send_intro)
 
         class Connection:
-            async def voucher_derive_stream(self, *, voucher):
+            async def voucher_derive_stream(
+                self, *, voucher: bytes,
+            ) -> SimpleNamespace:
                 return SimpleNamespace(
                     voucher_write_cap=b"\x04" * 168,
                     voucher_read_cap=b"\x04" * 136,
                 )
 
-            async def voucher_induct(self, *, voucher, voucher_payload, who_reply):
+            async def voucher_induct(
+                self, *, voucher: bytes, voucher_payload: bytes,
+                who_reply: bytes,
+            ) -> Induct:
                 return Induct()
 
-        conn = Connection()
+        conn = cast("ThinClient", Connection())
         assert await voucher.derive_read_and_induct(
             conn, conversation_id, "bob", b"v" * 32,
         ) == "bob"
@@ -478,8 +499,8 @@ class TestAlreadyInductedGuard:
 
     @pytest.mark.asyncio
     async def test_await_and_open_rerun_does_not_duplicate_members(
-        self, monkeypatch,
-    ):
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         conversation_id = await _make_conversation()
         await _add_pending(conversation_id)
 
@@ -488,7 +509,7 @@ class TestAlreadyInductedGuard:
             models.GroupChatPleaseAdd(display_name="bob", read_cap=b"\x06" * 136),
         ])
 
-        async def fake_read_box(*_a, **_k):
+        async def fake_read_box(*_a: object, **_k: object) -> tuple[bytes, bytes]:
             return (b"sealed reply", b"\x00" * 104)
 
         monkeypatch.setattr(voucher, "_read_box", fake_read_box)
@@ -501,10 +522,13 @@ class TestAlreadyInductedGuard:
             mutated_message_write_cap = b"\x07" * 168
 
         class Connection:
-            async def voucher_open(self, *, voucher_secret_key, sealed_reply, message_write_cap):
+            async def voucher_open(
+                self, *, voucher_secret_key: bytes, sealed_reply: bytes,
+                message_write_cap: bytes,
+            ) -> Opened:
                 return Opened()
 
-        conn = Connection()
+        conn = cast("ThinClient", Connection())
         first_added = await voucher.await_and_open(conn, conversation_id)
         await _add_pending(conversation_id)
         rerun_added = await voucher.await_and_open(conn, conversation_id)
@@ -517,12 +541,12 @@ class TestAlreadyInductedGuard:
         async with persistent.asession() as sess:
             caps = (await sess.exec(
                 select(persistent.ReadCapWAL.read_cap).where(
-                    persistent.ReadCapWAL.read_cap.in_([b"\x05" * 136, b"\x06" * 136]),
+                    col(persistent.ReadCapWAL.read_cap).in_([b"\x05" * 136, b"\x06" * 136]),
                 )
             )).all()
             peers = (await sess.exec(
                 select(persistent.ConversationPeer).where(
-                    persistent.ConversationPeer.name.in_(["alice", "bob"]),
+                    col(persistent.ConversationPeer.name).in_(["alice", "bob"]),
                 )
             )).all()
             # The own peer's read cap must be the salt-mutated one (the write
@@ -530,9 +554,12 @@ class TestAlreadyInductedGuard:
             # before the handshake. Own voter identity and membership hash
             # both depend on it.
             conv = await sess.get(persistent.Conversation, conversation_id)
+            assert conv is not None
             own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
+            assert own_peer is not None
             own_rcw = await sess.get(persistent.ReadCapWAL, own_peer.read_cap_id)
-        assert sorted(caps) == sorted([
+            assert own_rcw is not None
+        assert sorted(cast("list[bytes]", caps)) == sorted([
             b"\x05" * 136, b"\x06" * 136,
         ])
         assert sorted(peer.name for peer in peers) == ["alice", "bob"]
@@ -545,25 +572,26 @@ async def _finish(conversation_id: int, pv_id: uuid.UUID) -> None:
     commit."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
+        assert conv is not None
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await voucher._finish_pending_voucher(sess, conv, row)
         await sess.commit()
 
 
 @pytest.mark.asyncio
-async def test_fresh_conversation_voucher_not_used():
+async def test_fresh_conversation_voucher_not_used() -> None:
     conv_id = await _make_conversation()
     assert await voucher.voucher_used_for(conv_id) is False
     assert await voucher.list_used_vouchers() == []
 
 
 @pytest.mark.asyncio
-async def test_unknown_conversation_voucher_not_used():
+async def test_unknown_conversation_voucher_not_used() -> None:
     assert await voucher.voucher_used_for(9999) is False
 
 
 @pytest.mark.asyncio
-async def test_pending_transitions_to_used_on_finish():
+async def test_pending_transitions_to_used_on_finish() -> None:
     conv_id = await _make_conversation()
     other_id = await _make_conversation(name="other")
     pv_id = await _add_pending(conv_id)
