@@ -14,11 +14,17 @@ matching the layout `hpqc/bacap/bacap.go` commits to.
 import asyncio
 import struct
 import uuid
+from typing import cast, TYPE_CHECKING
 
 import pytest
 from sqlmodel import Session, SQLModel, select
 
 from katzenqt import network, persistent
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from katzenqt._thinclient import ThinClient
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +60,9 @@ def mbi(idx: int, blinding: bytes = b"") -> bytes:
     return struct.pack("<Q", idx) + tail
 
 
-def _insert_write_stream(*, bacap_stream: uuid.UUID, next_idx: int):
+def _insert_write_stream(
+    *, bacap_stream: uuid.UUID, next_idx: int,
+) -> tuple[persistent.WriteCapWAL, persistent.PlaintextWAL]:
     """Insert a (WriteCapWAL, linked PlaintextWAL) pair ready for mark_sent().
 
     Returns detached but attribute-populated Python objects (via
@@ -110,7 +118,7 @@ def _make_mw(
 # Invariant 1: WriteCapWAL.next_index advances by exactly one per mark_sent.
 # ---------------------------------------------------------------------------
 
-def test_mark_sent_advances_by_exactly_one():
+def test_mark_sent_advances_by_exactly_one() -> None:
     """After mark_sent, wcw.next_index must equal mw.next_message_index."""
     bacap_stream = uuid.uuid4()
     wcw, pwal = _insert_write_stream(bacap_stream=bacap_stream, next_idx=42)
@@ -121,16 +129,19 @@ def test_mark_sent_advances_by_exactly_one():
     )
     _insert_mw(mw)
 
-    resend_queue: set = {bacap_stream}
+    resend_queue: set[uuid.UUID] = {bacap_stream}
 
-    async def _do():
-        await persistent.SentLog.mark_sent(_FakeConnection(), mw, resend_queue)
+    async def _do() -> None:
+        await persistent.SentLog.mark_sent(
+            cast("ThinClient", _FakeConnection()), mw, resend_queue,
+        )
 
     asyncio.run(_do())
 
     with Session(persistent._engine_sync) as sess:
         reloaded = sess.get(persistent.WriteCapWAL, bacap_stream)
         assert reloaded is not None
+        assert reloaded.next_index is not None
         got_idx = struct.unpack("<Q", reloaded.next_index[:8])[0]
         assert got_idx == 43, (
             f"mark_sent should advance wcw.next_index to Idx64=43, got {got_idx}"
@@ -145,7 +156,7 @@ def test_mark_sent_advances_by_exactly_one():
 # Invariant 2: mark_sent refuses to regress wcw.next_index.
 # ---------------------------------------------------------------------------
 
-def test_mark_sent_refuses_regression_on_pwal_present_path():
+def test_mark_sent_refuses_regression_on_pwal_present_path() -> None:
     """If another drain has already advanced wcw.next_index past the MW's
     next_message_index, mark_sent must NOT clobber it back to the stale value.
 
@@ -181,16 +192,19 @@ def test_mark_sent_refuses_regression_on_pwal_present_path():
     )
     _insert_mw(mw)
 
-    resend_queue: set = {bacap_stream}
+    resend_queue: set[uuid.UUID] = {bacap_stream}
 
-    async def _do():
-        return await persistent.SentLog.mark_sent(_FakeConnection(), mw, resend_queue)
+    async def _do() -> "int | None":
+        return await persistent.SentLog.mark_sent(
+            cast("ThinClient", _FakeConnection()), mw, resend_queue,
+        )
 
     conv_id = asyncio.run(_do())
 
     with Session(persistent._engine_sync) as sess:
         reloaded = sess.get(persistent.WriteCapWAL, bacap_stream)
         assert reloaded is not None
+        assert reloaded.next_index is not None
         got_idx = struct.unpack("<Q", reloaded.next_index[:8])[0]
         assert got_idx == 44, (
             f"mark_sent must not regress wcw.next_index from 44 to 43; "
@@ -202,6 +216,7 @@ def test_mark_sent_refuses_regression_on_pwal_present_path():
         sent = sess.get(persistent.SentLog, pwal.id)
         assert sent is not None
         reloaded_cl = sess.get(persistent.ConversationLog, convlog_id)
+        assert reloaded_cl is not None
         assert reloaded_cl.network_status == 2
     assert conv_id == 1
     assert bacap_stream not in resend_queue
@@ -211,7 +226,7 @@ def test_mark_sent_refuses_regression_on_pwal_present_path():
 # Invariant 7: find_resendable's resend_queue filter targets bacap_stream.
 # ---------------------------------------------------------------------------
 
-def test_find_resendable_filter_targets_bacap_stream_not_pwal_id():
+def test_find_resendable_filter_targets_bacap_stream_not_pwal_id() -> None:
     """__resend_queue holds bacap_stream UUIDs. The SQL filter in
     find_resendable must exclude PWALs whose bacap_stream is in the queue.
 
@@ -268,7 +283,7 @@ def test_find_resendable_filter_targets_bacap_stream_not_pwal_id():
         )
 
 
-def test_find_resendable_skips_a_paused_stream():
+def test_find_resendable_skips_a_paused_stream() -> None:
     """A paused outbound substream (WriteCapWAL.paused) is withheld from the
     sweep entirely; an unpaused stream is still returned."""
     paused_stream = uuid.uuid4()
@@ -329,7 +344,7 @@ def test_send_resendable_plaintexts_has_no_late_bound_lambda():
 # ---------------------------------------------------------------------------
 
 
-def test_find_resendable_after_stream_gate_releases_when_substream_drained():
+def test_find_resendable_after_stream_gate_releases_when_substream_drained() -> None:
     """Stage a multi-box send fixture: three substream chunks and one
     indirection PWAL on the parent stream with after_stream=substream_uuid.
     While any substream chunk remains in plaintextwal the indirection
@@ -409,13 +424,13 @@ def test_find_resendable_after_stream_gate_releases_when_substream_drained():
         )
 
 
-def test_late_binding_pattern_is_really_a_python_hazard():
+def test_late_binding_pattern_is_really_a_python_hazard() -> None:
     """Demonstrate the late-binding semantics so the test above is
     calibrated. If this ever fails, Python's loop-variable binding rules
     have changed and the fix in send_resendable_plaintexts may no longer
     be needed.
     """
-    lambdas = []
+    lambdas: list[Callable[..., str]] = []
     for item in ("a", "b", "c"):
         lambdas.append(lambda: item)  # noqa: B023 — intentional
     assert [fn() for fn in lambdas] == ["c", "c", "c"]

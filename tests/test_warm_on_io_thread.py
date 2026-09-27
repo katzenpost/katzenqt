@@ -11,7 +11,7 @@ import gc
 import logging
 import threading
 import warnings
-from types import SimpleNamespace
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -20,20 +20,20 @@ from katzenqt import katzen, network
 _HANG_DEADLINE_S = 10
 
 
-async def _finishes(coro) -> None:
+async def _finishes(coro: Awaitable[object]) -> None:
     await asyncio.wait_for(coro, _HANG_DEADLINE_S)
 
 
-async def _until(predicate) -> None:
+async def _until(predicate: Callable[[], object]) -> None:
     while not predicate():
         await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
-async def test_the_engine_is_warmed_before_the_io_thread_connects(monkeypatch, caplog):
-    seen = []
+async def test_the_engine_is_warmed_before_the_io_thread_connects(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    seen: list[bool] = []
 
-    async def reconnect_pending():
+    async def reconnect_pending() -> None:
         seen.append(thread.engine_warmed.is_set())
         await asyncio.Event().wait()
 
@@ -51,8 +51,8 @@ async def test_the_engine_is_warmed_before_the_io_thread_connects(monkeypatch, c
 
 
 @pytest.mark.asyncio
-async def test_a_dead_io_thread_does_not_block_startup(monkeypatch, caplog):
-    async def reconnect_fails():
+async def test_a_dead_io_thread_does_not_block_startup(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    async def reconnect_fails() -> None:
         raise FileNotFoundError(2, "No such file or directory")
 
     monkeypatch.setattr(network, "reconnect", reconnect_fails)
@@ -74,8 +74,8 @@ async def test_a_dead_io_thread_does_not_block_startup(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_a_failing_warm_up_does_not_block_startup(monkeypatch):
-    async def warm_fails():
+async def test_a_failing_warm_up_does_not_block_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def warm_fails() -> None:
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(katzen.persistent, "warm_async_engine", warm_fails)
@@ -90,10 +90,8 @@ async def test_a_failing_warm_up_does_not_block_startup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_thread_dead_before_warming_does_not_block_startup(caplog):
-    thread = SimpleNamespace(
-        engine_warmed=threading.Event(), is_alive=lambda: False,
-    )
+async def test_a_thread_dead_before_warming_does_not_block_startup(caplog: pytest.LogCaptureFixture) -> None:
+    thread = katzen.AsyncioThread(daemon=True)
 
     with caplog.at_level(logging.ERROR, logger="katzen"):
         await _finishes(katzen._wait_for_engine_warmed(thread))

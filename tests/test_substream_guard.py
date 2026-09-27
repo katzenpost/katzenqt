@@ -69,6 +69,7 @@ async def test_add_peer_sanitises_a_hostile_name() -> None:
     conv_id = await _make_conversation()
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         voucher._add_peer(sess, conv, ":substream:5:aa", b"\x02" * 136)
         await sess.commit()
     async with persistent.asession() as sess:
@@ -105,6 +106,7 @@ async def test_substream_parent_resolves_an_existing_peer() -> None:
         peer = (await sess.exec(
             select(persistent.ConversationPeer)
         )).first()
+        assert peer is not None
         parent = await network._substream_parent(
             sess, f":substream:{peer.id}:aa",
         )

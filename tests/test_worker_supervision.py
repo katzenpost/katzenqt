@@ -1,8 +1,10 @@
 import asyncio
 import uuid
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from katzenpost_thinclient import ThinClient
 
 from katzenqt import network
 
@@ -33,7 +35,7 @@ async def test_a_failing_worker_is_paced_before_restart(
     monkeypatch.setattr(
         network, "_wait_for_connection_or_shutdown", immediate,
     )
-    await network._supervised(flaky, object())
+    await network._supervised(flaky, cast("ThinClient", object()))
     assert len(calls) == 2
     assert slept and slept[0] >= network._SUPERVISOR_RETRY_S
 
@@ -60,7 +62,7 @@ async def test_an_early_clean_return_restarts_rather_than_exits(
     monkeypatch.setattr(
         network, "_wait_for_connection_or_shutdown", immediate,
     )
-    await network._supervised(returns_early, object())
+    await network._supervised(returns_early, cast("ThinClient", object()))
     assert len(calls) == 3
 
 
@@ -72,7 +74,7 @@ async def test_drain_mixwal_no_longer_swallows(
 
     monkeypatch.setattr(network, "drain_mixwal2", boom)
     with pytest.raises(RuntimeError, match="drain failed"):
-        await network.drain_mixwal(object())
+        await network.drain_mixwal(cast("ThinClient", object()))
 
 
 def test_failure_reason_drops_peer_chosen_text() -> None:
@@ -187,7 +189,7 @@ async def test_backoff_resets_after_a_healthy_run(
     monkeypatch.setattr(
         network, "_wait_for_connection_or_shutdown", immediate,
     )
-    await network._supervised(worker, object())
+    await network._supervised(worker, cast("ThinClient", object()))
     assert slept[1] > slept[0], "consecutive failures must back off"
     assert slept[2] == network._SUPERVISOR_RETRY_S, (
         "a long healthy run must reset the delay, not keep the ratchet"

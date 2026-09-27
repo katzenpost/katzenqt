@@ -1,5 +1,3 @@
-from typing import cast
-from uuid import UUID
 
 import pytest
 from sqlmodel import select
@@ -17,9 +15,9 @@ async def test_missing_substream_box_then_data_uses_the_same_cursor(
     setup = await _set_up_read_flow(
         fake_thinclient, peer_name=":substream:99:test", plaintext=b"Cdata",
     )
-    stream = cast(UUID, setup["bacap_stream"])
-    read_cap = cast(bytes, setup["read_cap"])
-    mw_id = cast(UUID, setup["mw_id"])
+    stream = setup["bacap_stream"]
+    read_cap = setup["read_cap"]
+    mw_id = setup["mw_id"]
     fake_thinclient.inject_error(
         "start_resending_encrypted_message", BoxIDNotFoundError("not yet"),
     )

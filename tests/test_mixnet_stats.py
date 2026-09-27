@@ -7,6 +7,7 @@ encrypt_read/encrypt_write/start_resending_encrypted_message.
 import asyncio
 import os
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -21,27 +22,35 @@ from katzenpost_thinclient import (  # noqa: E402
 
 from katzenqt import katzen, network  # noqa: E402
 
+if TYPE_CHECKING:
+    from katzenqt._thinclient import ThinClient as _ThinClientBase
+else:
+    _ThinClientBase = object
 
-class _StubConnection:
+
+class _StubConnection(_ThinClientBase):
     """Minimal stand-in for the ThinClient surface the wrappers touch."""
 
     def __init__(self, *, read_plaintext: bytes = b"", boxnotfound: bool = False,
-                 link_down: bool = False, gate=None):
+                 link_down: bool = False,
+                 gate: "asyncio.Event | None" = None) -> None:
         self.read_plaintext = read_plaintext
         self.boxnotfound = boxnotfound
         self.link_down = link_down
         self.gate = gate
-        self.calls: "list[tuple[str, dict]]" = []
+        self.calls: "list[tuple[str, dict[str, object]]]" = []
 
-    async def encrypt_read(self, **kwargs):
+    async def encrypt_read(self, **kwargs: object) -> SimpleNamespace:
         self.calls.append(("encrypt_read", kwargs))
         return SimpleNamespace(read_cap=b"r")
 
-    async def encrypt_write(self, **kwargs):
+    async def encrypt_write(self, **kwargs: object) -> SimpleNamespace:
         self.calls.append(("encrypt_write", kwargs))
         return SimpleNamespace(write_cap=b"w")
 
-    async def start_resending_encrypted_message(self, **kwargs):
+    async def start_resending_encrypted_message(
+        self, **kwargs: object,
+    ) -> SimpleNamespace:
         self.calls.append(("send", kwargs))
         if self.gate is not None:
             await self.gate.wait()
@@ -55,7 +64,7 @@ class _StubConnection:
 
 
 @pytest.mark.asyncio
-async def test_counters_cover_prepared_sent_payload_ack_and_boxnotfound():
+async def test_counters_cover_prepared_sent_payload_ack_and_boxnotfound() -> None:
     network.reset_stats()
     conn = _StubConnection()
     network.install_stats_counters(conn)
@@ -80,7 +89,7 @@ async def test_counters_cover_prepared_sent_payload_ack_and_boxnotfound():
 
 
 @pytest.mark.asyncio
-async def test_read_with_payload_is_counted():
+async def test_read_with_payload_is_counted() -> None:
     network.reset_stats()
     conn = _StubConnection(read_plaintext=b"hello")
     network.install_stats_counters(conn)
@@ -91,7 +100,7 @@ async def test_read_with_payload_is_counted():
 
 
 @pytest.mark.asyncio
-async def test_boxnotfound_is_counted_and_reraised():
+async def test_boxnotfound_is_counted_and_reraised() -> None:
     network.reset_stats()
     conn = _StubConnection(boxnotfound=True)
     network.install_stats_counters(conn)
@@ -106,7 +115,7 @@ async def test_boxnotfound_is_counted_and_reraised():
 
 
 @pytest.mark.asyncio
-async def test_a_write_boxnotfound_is_not_a_read_boxnotfound():
+async def test_a_write_boxnotfound_is_not_a_read_boxnotfound() -> None:
     network.reset_stats()
     conn = _StubConnection(boxnotfound=True)
     network.install_stats_counters(conn)
@@ -122,7 +131,7 @@ async def test_a_write_boxnotfound_is_not_a_read_boxnotfound():
 
 
 @pytest.mark.asyncio
-async def test_install_is_idempotent():
+async def test_install_is_idempotent() -> None:
     network.reset_stats()
     conn = _StubConnection()
     network.install_stats_counters(conn)
@@ -132,7 +141,7 @@ async def test_install_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_packets_in_flight_gauge_tracks_a_pending_send():
+async def test_packets_in_flight_gauge_tracks_a_pending_send() -> None:
     network.reset_stats()
     gate = asyncio.Event()
     conn = _StubConnection(gate=gate)
@@ -151,7 +160,7 @@ async def test_packets_in_flight_gauge_tracks_a_pending_send():
 
 
 @pytest.mark.asyncio
-async def test_link_down_is_counted_and_reraised():
+async def test_link_down_is_counted_and_reraised() -> None:
     network.reset_stats()
     conn = _StubConnection(link_down=True)
     network.install_stats_counters(conn)
@@ -165,11 +174,13 @@ async def test_link_down_is_counted_and_reraised():
 
 
 @pytest.mark.asyncio
-async def test_lost_race_counts_a_timeout_only_when_asked():
-    async def _hang():
+async def test_lost_race_counts_a_timeout_only_when_asked() -> None:
+    async def _hang() -> None:
         await asyncio.Event().wait()
 
-    async def _run(packet_context) -> None:
+    async def _run(
+        packet_context: "network.PacketContext | None",
+    ) -> None:
         with pytest.raises(network.ConnectionLifeInterruptedError):
             await network._rpc_racing_connection_life(
                 bacap_uuid="test",
@@ -190,7 +201,7 @@ async def test_lost_race_counts_a_timeout_only_when_asked():
     assert network.stats_snapshot()["packets_timed_out"] == 1
 
 
-def test_stats_dialog_shows_the_snapshot_and_timeout_percentage():
+def test_stats_dialog_shows_the_snapshot_and_timeout_percentage() -> None:
     app = QApplication.instance() or QApplication([])
     network.reset_stats()
     network.stats.reads_sent = 1234
@@ -205,7 +216,7 @@ def test_stats_dialog_shows_the_snapshot_and_timeout_percentage():
     _ = app
 
 
-def test_stats_dialog_timeout_percentage_with_no_sends():
+def test_stats_dialog_timeout_percentage_with_no_sends() -> None:
     app = QApplication.instance() or QApplication([])
     network.reset_stats()
     dialog = katzen.StatsDialog(None)
