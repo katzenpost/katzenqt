@@ -3,6 +3,7 @@ wrapper's status recording, and the Qt table/retention controls."""
 import asyncio
 import os
 import uuid
+from typing import cast
 
 import cbor2
 import pytest
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from katzenpost_thinclient import (  # noqa: E402
     BoxIDNotFoundError,
+    ThinClient,
     ThinClientOfflineError,
 )
 
@@ -23,19 +25,20 @@ from katzenqt.qt_models import PacketsModel  # noqa: E402
 
 class _StubConnection:
     def __init__(self, *, read_plaintext: bytes = b"", boxnotfound: bool = False,
-                 link_down: bool = False, gate=None):
+                 link_down: bool = False,
+                 gate: "asyncio.Event | None" = None) -> None:
         self.read_plaintext = read_plaintext
         self.boxnotfound = boxnotfound
         self.link_down = link_down
         self.gate = gate
 
-    async def encrypt_read(self, **kwargs):
+    async def encrypt_read(self, **kwargs: object) -> object:
         return object()
 
-    async def encrypt_write(self, **kwargs):
+    async def encrypt_write(self, **kwargs: object) -> object:
         return object()
 
-    async def start_resending_encrypted_message(self, **kwargs):
+    async def start_resending_encrypted_message(self, **kwargs: object) -> object:
         if self.gate is not None:
             await self.gate.wait()
         if self.link_down:
@@ -47,7 +50,7 @@ class _StubConnection:
         return type("R", (), {"plaintext": self.read_plaintext})()
 
 
-def _only_record() -> dict:
+def _only_record() -> "network._PacketRow":
     snapshot = network.packets_snapshot()
     assert len(snapshot) == 1
     return snapshot[0]
@@ -64,7 +67,7 @@ async def _wait_in_flight() -> None:
     raise AssertionError("packet never became in-flight")
 
 
-def test_registry_prunes_finished_to_the_limit():
+def test_registry_prunes_finished_to_the_limit() -> None:
     network.reset_packets()
     network.set_packet_finished_limit(2)
     ids = [network.packet_begin(network.PacketContext("write")) for _ in range(3)]
@@ -75,7 +78,7 @@ def test_registry_prunes_finished_to_the_limit():
     assert ids[1] in live and ids[2] in live
 
 
-def test_registry_keeps_in_flight_even_at_zero_limit():
+def test_registry_keeps_in_flight_even_at_zero_limit() -> None:
     network.reset_packets()
     network.set_packet_finished_limit(0)
     inflight = network.packet_begin(network.PacketContext("write"))
@@ -86,7 +89,7 @@ def test_registry_keeps_in_flight_even_at_zero_limit():
     assert finished not in live
 
 
-def test_clear_finished_keeps_in_flight():
+def test_clear_finished_keeps_in_flight() -> None:
     network.reset_packets()
     network.set_packet_finished_limit(5)
     inflight = network.packet_begin(network.PacketContext("write"))
@@ -96,7 +99,7 @@ def test_clear_finished_keeps_in_flight():
     assert {r["id"] for r in network.packets_snapshot()} == {inflight}
 
 
-def test_attempts_count_retries_per_box():
+def test_attempts_count_retries_per_box() -> None:
     network.reset_packets()
     stream = uuid.uuid4()
     first = network.packet_begin(network.PacketContext(
@@ -111,7 +114,7 @@ def test_attempts_count_retries_per_box():
     assert by_id[other]["attempt"] == 1  # a different box
 
 
-def test_box_position_from_cap():
+def test_box_position_from_cap() -> None:
     first = 1000
     index = first.to_bytes(8, "little") + b"\x00" * (104 - 8)
     read_cap = b"\x00" * 32 + index
@@ -123,11 +126,11 @@ def test_box_position_from_cap():
 
 
 @pytest.mark.asyncio
-async def test_wrapper_records_a_read_payload():
+async def test_wrapper_records_a_read_payload() -> None:
     network.reset_packets()
     network.reset_stats()
     conn = _StubConnection(read_plaintext=b"Cdata")
-    network.install_stats_counters(conn)
+    network.install_stats_counters(cast("ThinClient", conn))
     context = network.PacketContext(
         "contact_read", stream_id=uuid.uuid4(), box_index=7,
         box_position=3, timeout_s=1200,
@@ -144,11 +147,11 @@ async def test_wrapper_records_a_read_payload():
 
 
 @pytest.mark.asyncio
-async def test_wrapper_records_boxnotfound_and_link_down():
+async def test_wrapper_records_boxnotfound_and_link_down() -> None:
     network.reset_packets()
     network.reset_stats()
     conn = _StubConnection(boxnotfound=True)
-    network.install_stats_counters(conn)
+    network.install_stats_counters(cast("ThinClient", conn))
     with pytest.raises(BoxIDNotFoundError):
         await conn.start_resending_encrypted_message(
             read_cap=b"r", write_cap=None,
@@ -158,7 +161,7 @@ async def test_wrapper_records_boxnotfound_and_link_down():
 
     network.reset_packets()
     conn = _StubConnection(link_down=True)
-    network.install_stats_counters(conn)
+    network.install_stats_counters(cast("ThinClient", conn))
     with pytest.raises(ThinClientOfflineError):
         await conn.start_resending_encrypted_message(
             read_cap=b"r", write_cap=None,
@@ -168,11 +171,11 @@ async def test_wrapper_records_boxnotfound_and_link_down():
 
 
 @pytest.mark.asyncio
-async def test_wrapper_records_a_write_ack():
+async def test_wrapper_records_a_write_ack() -> None:
     network.reset_packets()
     network.reset_stats()
     conn = _StubConnection()
-    network.install_stats_counters(conn)
+    network.install_stats_counters(cast("ThinClient", conn))
     await conn.start_resending_encrypted_message(
         read_cap=None, write_cap=b"w",
         _packet_context=network.PacketContext("write"),
@@ -181,10 +184,10 @@ async def test_wrapper_records_a_write_ack():
 
 
 @pytest.mark.asyncio
-async def test_wrapper_distinguishes_timeout_from_cancel():
+async def test_wrapper_distinguishes_timeout_from_cancel() -> None:
     network.reset_packets()
     conn = _StubConnection(gate=asyncio.Event())
-    network.install_stats_counters(conn)
+    network.install_stats_counters(cast("ThinClient", conn))
     context = network.PacketContext("write")
     task = asyncio.create_task(conn.start_resending_encrypted_message(
         read_cap=None, write_cap=b"w", _packet_context=context,
@@ -199,7 +202,7 @@ async def test_wrapper_distinguishes_timeout_from_cancel():
     network.reset_packets()
     gate = asyncio.Event()
     conn = _StubConnection(gate=gate)
-    network.install_stats_counters(conn)
+    network.install_stats_counters(cast("ThinClient", conn))
     context = network.PacketContext("write")
     task = asyncio.create_task(conn.start_resending_encrypted_message(
         read_cap=None, write_cap=b"w", _packet_context=context,
@@ -211,7 +214,7 @@ async def test_wrapper_distinguishes_timeout_from_cancel():
     assert _only_record()["status"] == network.PACKET_STATUS_CANCELLED
 
 
-def test_packets_model_lists_in_flight_first_and_clear_works():
+def test_packets_model_lists_in_flight_first_and_clear_works() -> None:
     app = QApplication.instance() or QApplication([])
     network.reset_packets()
     network.set_packet_finished_limit(5)
@@ -235,7 +238,7 @@ def test_packets_model_lists_in_flight_first_and_clear_works():
     _ = app
 
 
-def test_packets_dialog_retention_combo_and_clear():
+def test_packets_dialog_retention_combo_and_clear() -> None:
     app = QApplication.instance() or QApplication([])
     network.reset_packets()
     dialog = katzen.PacketsDialog(None)
@@ -253,7 +256,7 @@ def test_packets_dialog_retention_combo_and_clear():
     _ = app
 
 
-def test_packets_dialog_keeps_the_selected_packet_across_refresh():
+def test_packets_dialog_keeps_the_selected_packet_across_refresh() -> None:
     """In-flight churn resets the model; the dialog reselects by packet id so
     the user's selection survives the tick."""
     app = QApplication.instance() or QApplication([])
@@ -279,7 +282,7 @@ def test_packets_dialog_keeps_the_selected_packet_across_refresh():
     _ = app
 
 
-def _seed_conversation_streams():
+def _seed_conversation_streams() -> "tuple[uuid.UUID, uuid.UUID, uuid.UUID]":
     """One conversation with a main write stream, a contact peer, and an agg
     substream (25 chunks). Returns (main, contact_rcw_id, agg)."""
     main = uuid.uuid4()
@@ -337,7 +340,7 @@ def _seed_conversation_streams():
     return main, contact_rcw, agg
 
 
-def test_file_marker_basename():
+def test_file_marker_basename() -> None:
     marker = b"F" + cbor2.dumps({
         "kind": "file_outgoing", "basename": "x.jpg",
     })
@@ -349,7 +352,7 @@ def test_file_marker_basename():
     assert network._file_marker_basename(b"hello") is None
 
 
-def test_stream_info_labels_and_substream_total():
+def test_stream_info_labels_and_substream_total() -> None:
     app = QApplication.instance() or QApplication([])
     main, contact_rcw, agg = _seed_conversation_streams()
     model = PacketsModel()
@@ -362,7 +365,7 @@ def test_stream_info_labels_and_substream_total():
     _ = app
 
 
-def test_upload_label_captured_at_send_time_wins():
+def test_upload_label_captured_at_send_time_wins() -> None:
     app = QApplication.instance() or QApplication([])
     network.reset_packets()
     stream = uuid.uuid4()
@@ -380,7 +383,7 @@ def test_upload_label_captured_at_send_time_wins():
     _ = app
 
 
-def test_position_over_total_for_substream_packets():
+def test_position_over_total_for_substream_packets() -> None:
     app = QApplication.instance() or QApplication([])
     main, _contact_rcw, agg = _seed_conversation_streams()
     network.reset_packets()
@@ -402,7 +405,7 @@ def test_position_over_total_for_substream_packets():
     _ = app
 
 
-def test_retry_column_counts_retries():
+def test_retry_column_counts_retries() -> None:
     app = QApplication.instance() or QApplication([])
     network.reset_packets()
     network.set_packet_finished_limit(5)

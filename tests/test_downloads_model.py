@@ -3,7 +3,7 @@ row management (start/piece/complete/pause), role exposure, and the
 startup seeding from persistent ReadCapWAL rows."""
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 
@@ -38,7 +38,7 @@ def _qt_app() -> Iterator[QCoreApplication]:
     yield app
 
 
-def test_start_transfer_inserts_a_row():
+def test_start_transfer_inserts_a_row() -> None:
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
     assert model.rowCount() == 0
@@ -56,7 +56,7 @@ def test_start_transfer_inserts_a_row():
     assert model.data(idx, ROLE_TRANSFER_ACTIVE) is True
 
 
-def test_start_transfer_refreshes_denominator_when_total_becomes_known():
+def test_start_transfer_refreshes_denominator_when_total_becomes_known() -> None:
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
     model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=None)
@@ -68,7 +68,7 @@ def test_start_transfer_refreshes_denominator_when_total_becomes_known():
     assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == "0/5"
 
 
-def test_notify_piece_updates_progress():
+def test_notify_piece_updates_progress() -> None:
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
     model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=4)
@@ -78,13 +78,13 @@ def test_notify_piece_updates_progress():
     assert model.data(idx, ROLE_TRANSFER_PIECES) == 2
 
 
-def test_notify_piece_unknown_row_is_ignored():
+def test_notify_piece_unknown_row_is_ignored() -> None:
     model = DownloadsModel()
     model.notify_piece(uuid.uuid4(), pieces=1)  # must not raise
     assert model.rowCount() == 0
 
 
-def test_complete_transfer_removes_the_row():
+def test_complete_transfer_removes_the_row() -> None:
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
     model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
@@ -94,7 +94,7 @@ def test_complete_transfer_removes_the_row():
     assert model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole) is None
 
 
-def test_set_paused_toggles_state_column():
+def test_set_paused_toggles_state_column() -> None:
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
     model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
@@ -106,7 +106,7 @@ def test_set_paused_toggles_state_column():
     assert model.data(model.index(0, 0), ROLE_TRANSFER_ACTIVE) is True
 
 
-def test_set_paused_announces_display_role():
+def test_set_paused_announces_display_role() -> None:
     """Pausing changes the State text as well as the active flag, so the
     dataChanged roles must include DisplayRole or the view keeps the old
     'Uploading'/'Downloading' label."""
@@ -120,7 +120,7 @@ def test_set_paused_announces_display_role():
     assert ROLE_TRANSFER_ACTIVE in seen[-1]
 
 
-def test_fail_transfer_keeps_row_visible_with_reason():
+def test_fail_transfer_keeps_row_visible_with_reason() -> None:
     """A failed transfer stays visible in the model with state
     'Failed: {reason}' so the user can see what went wrong."""
     model = DownloadsModel()
@@ -140,14 +140,14 @@ def test_fail_transfer_keeps_row_visible_with_reason():
     assert model.data(model.index(0, 0), ROLE_TRANSFER_FAILURE_REASON) == "MalformedChunkError: invalid CRC"
 
 
-def test_fail_transfer_unknown_row_is_ignored():
+def test_fail_transfer_unknown_row_is_ignored() -> None:
     """Calling fail_transfer on a non-existent row must not raise."""
     model = DownloadsModel()
     model.fail_transfer(uuid.uuid4(), "some error")  # must not raise
     assert model.rowCount() == 0
 
 
-def test_remove_transfer_deletes_row():
+def test_remove_transfer_deletes_row() -> None:
     """Remove a transfer row from the model (user-dismissal of failed/complete)."""
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
@@ -162,14 +162,14 @@ def test_remove_transfer_deletes_row():
     assert model.rowCount() == 0
 
 
-def test_remove_transfer_unknown_row_is_ignored():
+def test_remove_transfer_unknown_row_is_ignored() -> None:
     """Calling remove_transfer on a non-existent row must not raise."""
     model = DownloadsModel()
     model.remove_transfer(uuid.uuid4())  # must not raise
     assert model.rowCount() == 0
 
 
-def test_column_and_role_metadata():
+def test_column_and_role_metadata() -> None:
     model = DownloadsModel()
     assert model.columnCount() == 4
     assert model.headerData(0, Qt.Orientation.Horizontal) == "Contact"
@@ -185,7 +185,7 @@ def test_column_and_role_metadata():
 
 
 @pytest.mark.asyncio
-async def test_seed_from_db_lists_active_and_partial_transfers():
+async def test_seed_from_db_lists_active_and_partial_transfers() -> None:
     """A resumable substream (active peer, or paused with received pieces)
     shows up as a Transfers row named after its parent conversation peer;
     a fully-completed substream (inactive, zero pieces) does not."""
@@ -290,11 +290,13 @@ async def test_seed_from_db_lists_active_and_partial_transfers():
             assert model.data(model.index(r, 1), ROLE_TRANSFER_PIECES) == 1
 
 
-def test_seed_from_db_uses_only_the_sync_engine(monkeypatch):
+def test_seed_from_db_uses_only_the_sync_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """seed_from_db runs on the Qt loop and must never open the async engine:
     the two loops sharing it is what produced the "Lock is bound to a
     different event loop" startup crash. Fail loudly if asession is touched."""
-    async def _boom():
+    async def _boom() -> AsyncIterator[None]:
         raise AssertionError("seed_from_db opened the async engine")
         yield  # pragma: no cover
 
@@ -304,7 +306,7 @@ def test_seed_from_db_uses_only_the_sync_engine(monkeypatch):
     assert model.rowCount() == 0
 
 
-def test_direction_defaults_to_download_and_drives_state_text():
+def test_direction_defaults_to_download_and_drives_state_text() -> None:
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
     model.start_transfer(rcw_id, conversation_id=7, parent_name="alice", total=2)
@@ -314,7 +316,7 @@ def test_direction_defaults_to_download_and_drives_state_text():
     assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Paused"
 
 
-def test_upload_direction_renders_uploading_state():
+def test_upload_direction_renders_uploading_state() -> None:
     model = DownloadsModel()
     rcw_id = uuid.uuid4()
     model.start_transfer(
@@ -387,7 +389,7 @@ async def _make_conversation_with_upload(
 
 
 @pytest.mark.asyncio
-async def test_seed_from_db_lists_in_flight_upload():
+async def test_seed_from_db_lists_in_flight_upload() -> None:
     conv_id, rcw_id = await _make_conversation_with_upload(
         remaining_chunks=1, total_chunks=3,
     )
@@ -404,7 +406,7 @@ async def test_seed_from_db_lists_in_flight_upload():
 
 
 @pytest.mark.asyncio
-async def test_seed_from_db_skips_completed_upload():
+async def test_seed_from_db_skips_completed_upload() -> None:
     """A substream with no remaining C/F PWALs has finished uploading (the
     gated I-chunk is now dispatchable), so it gets no Transfers row; the chat
     bubble still shows pending until the I-chunk is ACK'd."""
@@ -415,7 +417,7 @@ async def test_seed_from_db_skips_completed_upload():
 
 
 @pytest.mark.asyncio
-async def test_seed_from_db_marks_a_paused_upload_paused():
+async def test_seed_from_db_marks_a_paused_upload_paused() -> None:
     await _make_conversation_with_upload(
         remaining_chunks=2, total_chunks=3, paused=True,
     )
@@ -440,7 +442,7 @@ def _rate(model: DownloadsModel) -> object:
     return model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole)
 
 
-def test_rate_is_a_placeholder_before_one_second(monkeypatch):
+def test_rate_is_a_placeholder_before_one_second(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _Clock()
     monkeypatch.setattr(qt_models, "time", clock)
     model = DownloadsModel()
@@ -452,7 +454,7 @@ def test_rate_is_a_placeholder_before_one_second(monkeypatch):
     assert _rate(model) == "—"
 
 
-def test_rate_reports_average_bytes_since_start(monkeypatch):
+def test_rate_reports_average_bytes_since_start(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _Clock()
     monkeypatch.setattr(qt_models, "time", clock)
     model = DownloadsModel()
@@ -463,7 +465,7 @@ def test_rate_reports_average_bytes_since_start(monkeypatch):
     assert _rate(model) == "2.0 KiB/s"
 
 
-def test_rate_is_zero_while_paused_and_resets_on_unpause(monkeypatch):
+def test_rate_is_zero_while_paused_and_resets_on_unpause(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _Clock()
     monkeypatch.setattr(qt_models, "time", clock)
     model = DownloadsModel()
@@ -485,7 +487,7 @@ def test_rate_is_zero_while_paused_and_resets_on_unpause(monkeypatch):
     assert _rate(model) == "2.0 KiB/s"  # (8192-4096)/2
 
 
-def test_upload_rate_counts_sent_bytes_from_the_remaining_total(monkeypatch):
+def test_upload_rate_counts_sent_bytes_from_the_remaining_total(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _Clock()
     monkeypatch.setattr(qt_models, "time", clock)
     model = DownloadsModel()
@@ -499,7 +501,7 @@ def test_upload_rate_counts_sent_bytes_from_the_remaining_total(monkeypatch):
     assert _rate(model) == "2.0 KiB/s"  # 2000 B/s
 
 
-def test_failed_transfer_rate_is_zero(monkeypatch):
+def test_failed_transfer_rate_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _Clock()
     monkeypatch.setattr(qt_models, "time", clock)
     model = DownloadsModel()
@@ -512,7 +514,7 @@ def test_failed_transfer_rate_is_zero(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_seed_from_db_upload_rate_starts_at_zero(monkeypatch):
+async def test_seed_from_db_upload_rate_starts_at_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """Seeding sets the rate baseline to the bytes still on disk, so a resumed
     transfer's rate counts only bytes sent after the relaunch."""
     clock = _Clock()

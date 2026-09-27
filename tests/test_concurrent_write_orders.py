@@ -74,7 +74,7 @@ async def _orders(conversation_id: int) -> list[int]:
 
 @pytest.mark.real_sleeps
 @pytest.mark.asyncio
-async def test_concurrent_appends_same_conversation_do_not_deadlock():
+async def test_concurrent_appends_same_conversation_do_not_deadlock() -> None:
     conversation_id, peer_id = await _make_conversation()
     n = 8
 
@@ -91,7 +91,7 @@ async def test_concurrent_appends_same_conversation_do_not_deadlock():
 
 
 @pytest.mark.asyncio
-async def test_append_outbound_chat_honours_a_preassigned_log_id():
+async def test_append_outbound_chat_honours_a_preassigned_log_id() -> None:
     """The file/voice send path pre-assigns ConversationLog.id so cached
     side-data keys to the rendered row; append_outbound_chat (the io-loop
     writer the Qt send path now routes through) must carry it through."""
@@ -112,7 +112,7 @@ async def test_append_outbound_chat_honours_a_preassigned_log_id():
     assert row.payload == b"voice-note"
 
 
-def test_lock_blocks_a_genuinely_different_thread():
+def test_lock_blocks_a_genuinely_different_thread() -> None:
     # The single-loop test above only exercises the same-thread deadlock
     # this lock was fixed to avoid; it says nothing about the cross-thread
     # case (GUI loop vs. io loop) the lock's own docstring claims to
@@ -125,8 +125,8 @@ def test_lock_blocks_a_genuinely_different_thread():
     other_acquired = threading.Event()
     other_thread_done = threading.Event()
 
-    def other_thread_body():
-        async def acquire_once():
+    def other_thread_body() -> None:
+        async def acquire_once() -> None:
             # Deterministic ordering: never even try until the main thread
             # has confirmed it holds the lock, so this is never a race.
             main_holds_it.wait(timeout=5)
@@ -135,7 +135,7 @@ def test_lock_blocks_a_genuinely_different_thread():
         asyncio.run(acquire_once())
         other_thread_done.set()
 
-    async def hold_it():
+    async def hold_it() -> None:
         async with persistent.conversation_log_order_lock(conversation_id):
             main_holds_it.set()
             await asyncio.sleep(0.2)
