@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: live
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */12 * * *'
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.1.0
+      - run: make check-live

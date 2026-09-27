@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
+when:
+  event: [manual, cron]
+
 steps:
-  - name: test
+  - name: live
     image: ghcr.io/astral-sh/uv:python3.12-trixie
     commands:
-      - make test
+      - make check-live

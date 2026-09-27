@@ -19,6 +19,11 @@ CI_LOCAL_IMAGE ?= localhost/katzenqt-act:latest
 CI_LOCAL_SHELL_ARGS ?= --rm -it
 ACT_ARGS ?=
 
+.PHONY: check-migrations
+check-migrations:
+	uv run alembic -c config/alembic.ini upgrade head
+	uv run alembic -c config/alembic.ini check
+
 .PHONY: check-live
 check-live:
 	python3 -m pytest tests/integration -q
