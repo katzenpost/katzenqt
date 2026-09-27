@@ -6,6 +6,9 @@ ci_make=$(MAKE) -f $(firstword $(MAKEFILE_LIST))
 RUNNER ?=
 CI_RUNNERS ?= act forgejo-runner woodpecker-cli
 CI_WORKFLOWS_WOODPECKER ?= .woodpecker
+CI_WOODPECKER_BACKEND ?= docker
+CI_WOODPECKER_ARGS ?= --local --backend-engine $(CI_WOODPECKER_BACKEND)
+CI_WORKFLOW ?=
 CI_IMAGE_NAME ?= katzenqt-ci
 CI_IMAGE_TAG ?= latest
 CI_REGISTRIES ?=
@@ -24,6 +27,11 @@ CI_IMAGE_PULL ?=
 CI_IMAGE ?= $(if $(CI_IMAGE_DIGEST),$(CI_IMAGE_DIGEST),$(CI_IMAGE_LOCAL))
 CI_LOCAL_SHELL_ARGS ?= --rm -it
 ACT_ARGS ?=
+
+.PHONY: ci-unit
+ci-unit:
+	uv sync --all-extras --dev --locked --python 3.12
+	uv run pytest
 
 .PHONY: check-migrations
 check-migrations:
@@ -198,4 +206,6 @@ ci-local: ci-local-image
 .PHONY: ci-local-woodpecker
 ci-local-woodpecker:
 	@command -v "$(WOODPECKER)" >/dev/null || { printf '%s\n' '$(WOODPECKER) is required' >&2; exit 1; }
-	"$(WOODPECKER)" exec $(CI_WORKFLOWS_WOODPECKER)/ci.yaml
+	@set -e; for pipeline in $(if $(CI_WORKFLOW),$(CI_WORKFLOWS_WOODPECKER)/$(CI_WORKFLOW),$(CI_WORKFLOWS_WOODPECKER)/*.yaml); do \
+		DOCKER_HOST="unix://$(CI_SOCKET)" "$(WOODPECKER)" exec $(CI_WOODPECKER_ARGS) \
+			--repo-path "$(CURDIR)" "$$pipeline"; done

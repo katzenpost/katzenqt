@@ -4,4 +4,4 @@ steps:
   - name: test
     image: localhost/katzenqt-ci:latest
     commands:
-      - make test
+      - make ci-unit
