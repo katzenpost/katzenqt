@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 from katzenqt.tally import engine, schema, sync
+from katzenqt.tally.engine import TallyResult
 from katzenqt.tally.schema import Mode
 
 
-def _norm(result):
+def _norm(result: TallyResult) -> "list[tuple[str, int, int, int]]":
     return [(s.slot_id, s.yes, s.maybe, s.no) for s in result.slots]
 
 
-def test_late_joiner_catches_up_via_state_vector():
+def test_late_joiner_catches_up_via_state_vector() -> None:
     a = schema.new_survey_doc(b"sid", "x", Mode.APPROVAL, ["p", "q"])
     engine.apply_vote(a, b"alice", {"s0": "yes"})
 
@@ -27,7 +28,7 @@ def test_late_joiner_catches_up_via_state_vector():
     assert _norm(engine.tally(a)) == _norm(engine.tally(b))
 
 
-def test_concurrent_edits_merge_symmetrically():
+def test_concurrent_edits_merge_symmetrically() -> None:
     base = sync.full_state(schema.new_survey_doc(b"sid", "x", Mode.AVAILABILITY, ["p", "q"]))
     a = sync.load_doc(base)
     b = sync.load_doc(base)
