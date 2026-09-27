@@ -34,26 +34,26 @@ def _imports_pyside6(snippet: str) -> bool:
     raise AssertionError(f"sentinel not found in subprocess stdout:\n{out}")
 
 
-def test_plain_import_katzenqt_does_not_load_pyside6():
+def test_plain_import_katzenqt_does_not_load_pyside6() -> None:
     assert not _imports_pyside6("import katzenqt")
 
 
-def test_import_katzenqt_persistent_does_not_load_pyside6():
+def test_import_katzenqt_persistent_does_not_load_pyside6() -> None:
     assert not _imports_pyside6("import katzenqt.persistent")
 
 
-def test_import_katzenqt_network_does_not_load_pyside6():
+def test_import_katzenqt_network_does_not_load_pyside6() -> None:
     assert not _imports_pyside6("import katzenqt.network")
 
 
-def test_import_katzenqt_models_does_not_load_pyside6():
+def test_import_katzenqt_models_does_not_load_pyside6() -> None:
     # ConversationUIState used to live here and dragged in Qt via its
     # ConversationLogModel/QStandardItem/QQmlPropertyMap fields. It now
     # lives in katzenqt.qt_models so this module can stay headless.
     assert not _imports_pyside6("import katzenqt.models")
 
 
-def test_integration_runner_imports_do_not_load_pyside6():
+def test_integration_runner_imports_do_not_load_pyside6() -> None:
     # Regression guard for the precise import set the docker-integration
     # subprocess pulls in. If a future contributor adds a top-level
     # PySide6-touching import to integration_runner (or to one of its
@@ -66,7 +66,7 @@ def test_integration_runner_imports_do_not_load_pyside6():
     )
 
 
-def test_cli_attribute_still_resolves_and_loads_pyside6():
+def test_cli_attribute_still_resolves_and_loads_pyside6() -> None:
     # The console script `katzenqt = katzenqt:cli` resolves cli via
     # `getattr(katzenqt_module, 'cli')`. That MUST still work AND it
     # MUST drag PySide6 in (the GUI lives there).

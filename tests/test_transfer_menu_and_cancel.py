@@ -4,9 +4,10 @@ import io
 import inspect
 import textwrap
 import uuid
+from typing import TYPE_CHECKING, cast
 
 import pytest
-from sqlmodel import select
+from sqlmodel import col, select
 
 from katzenqt import katzen, network, persistent
 from tests.test_membership_hash import _make_conversation
@@ -25,7 +26,7 @@ def _write_mixwal(stream: uuid.UUID, *, plaintextwal: uuid.UUID | None = None,
     )
 
 
-async def _seed_upload(conv_id: int, agg: uuid.UUID, rcw_id: uuid.UUID):
+async def _seed_upload(conv_id: int, agg: uuid.UUID, rcw_id: uuid.UUID) -> None:
     async with persistent.asession() as sess:
         sess.add(persistent.WriteCapWAL(
             id=agg, write_cap=b"\x02" * 168, next_index=b"\x00" * 104,
@@ -91,7 +92,9 @@ async def test_cancel_upload_removes_the_i_chunk_mixwal_row() -> None:
     async with persistent.asession() as sess:
         assert (await sess.exec(select(persistent.MixWAL))).all() == []
         assert (await sess.exec(select(persistent.PlaintextWAL).where(
-            persistent.PlaintextWAL.bacap_stream.in_((agg, main_stream)),
+            col(persistent.PlaintextWAL.bacap_stream).in_(
+                (agg, main_stream),
+            ),
         ))).all() == []
         assert await sess.get(persistent.ReadCapWAL, rcw_id) is None
         assert await sess.get(persistent.WriteCapWAL, agg) is None
