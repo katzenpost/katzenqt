@@ -883,17 +883,19 @@ async def test_a_peer_row_naming_no_database_row_removes_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _shown(window, peers=("bob",))
-    bob = peer_named(window, "bob")
+    stale = katzen.QStandardItem("ghost")
+    setattr(stale, "peer_is_own", False)
+    setattr(stale, "peer_read_cap_id", uuid.uuid4())
+    conversation_row(window).appendRow(stale)
     asked: list[str] = []
-    monkeypatch.setattr(window, "_peer_id_of", returning(None))
 
     async def record(text: str) -> bool:
         asked.append(text)
         return True
 
     monkeypatch.setattr(window, "_confirm", record)
-    chosen(by_text("Remove bob from this group chat..."))
-    await window.peer_context_menu(peer_position(window, bob))
+    chosen(by_text("Remove ghost from this group chat..."))
+    await window.peer_context_menu(peer_position(window, stale))
 
     assert asked == []
 

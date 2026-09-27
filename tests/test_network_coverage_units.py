@@ -14,6 +14,7 @@ import pytest
 from sqlmodel import select
 
 from katzenqt import models, network, persistent
+from tests import transfer_events
 
 if TYPE_CHECKING:
     from katzenpost_thinclient import ThinClient
@@ -550,9 +551,7 @@ class TestSubstreamMiss:
             ).all()
             assert [p.active for p in peers] == [False]
         assert network.substream_progress_queue.get_nowait() == (
-            "failed",
-            sub,
-            "A required box is tombstoned",
+            transfer_events.failed(sub, "A required box is tombstoned")
         )
 
     @pytest.mark.asyncio
@@ -583,9 +582,7 @@ class TestSubstreamMiss:
                 rcw.substream_failure == "A required box remained unavailable"
             )
         assert network.substream_progress_queue.get_nowait() == (
-            "failed",
-            sub,
-            "A required box remained unavailable",
+            transfer_events.failed(sub, "A required box remained unavailable")
         )
 
 
@@ -791,8 +788,7 @@ class TestUploadControls:
             assert wcw is not None
             assert wcw.paused is True
         assert network.substream_progress_queue.get_nowait() == (
-            "upload_paused",
-            rcw_id,
+            transfer_events.paused(rcw_id, "upload", True)
         )
 
     @pytest.mark.asyncio
@@ -1173,8 +1169,7 @@ class TestCancelUpload:
             assert await sess.get(persistent.ReadCapWAL, rcw_id) is None
             assert await sess.get(persistent.WriteCapWAL, agg) is None
         assert network.substream_progress_queue.get_nowait() == (
-            "upload_cancelled",
-            rcw_id,
+            transfer_events.completed(rcw_id, "upload", cancelled=True)
         )
 
     @pytest.mark.asyncio

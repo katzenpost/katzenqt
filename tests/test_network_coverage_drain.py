@@ -17,6 +17,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from katzenqt import conversation_handlers, models, network, persistent
+from tests import transfer_events
 from katzenqt.tally import events, sync
 from katzenqt.tally.controller import INSTANCE as TALLY
 from katzenqt.tally.schema import Mode
@@ -253,8 +254,8 @@ async def _load_mw(mw_id: uuid.UUID) -> persistent.MixWAL:
         return mw
 
 
-def _drain_progress() -> list[tuple[object, ...]]:
-    events_seen: list[tuple[object, ...]] = []
+def _drain_progress() -> list[object]:
+    events_seen: list[object] = []
     while not network.substream_progress_queue.empty():
         events_seen.append(network.substream_progress_queue.get_nowait())
     return events_seen
@@ -535,8 +536,7 @@ class TestReadSubstreamFailures:
                 await sess.exec(select(persistent.ReceivedPiece))
             ).all() == []
         assert _drain_progress() == [
-            (
-                "failed",
+            transfer_events.failed(
                 flow.stream,
                 "The transfer contains an invalid chunk prefix",
             )
@@ -581,11 +581,9 @@ class TestReadSubstreamFailures:
             assert (
                 await sess.exec(select(persistent.ConversationLog))
             ).all() == []
-        assert (
-            "failed",
-            flow.stream,
-            "The transfer parent no longer exists",
-        ) in (_drain_progress())
+        assert transfer_events.failed(
+            flow.stream, "The transfer parent no longer exists",
+        ) in _drain_progress()
 
     @pytest.mark.asyncio
     async def test_a_fatal_database_error_on_commit_is_not_swallowed(

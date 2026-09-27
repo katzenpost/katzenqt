@@ -18,6 +18,7 @@ from katzenqt import katzen, network, persistent  # noqa: E402
 from katzenqt.tally import presenter as tally_presenter  # noqa: E402
 from katzenqt.tally import schema as tally_schema  # noqa: E402
 
+from tests import transfer_events  # noqa: E402
 from tests.test_katzen_gui_common import (  # noqa: E402,F401
     FakeMessageBox,
     add_seeded_conversation,
@@ -222,10 +223,10 @@ async def test_the_transfers_listener_tracks_a_download(
 ) -> None:
     stream = uuid.uuid4()
     for event in (
-        ("started", stream, 1, 3, "bob"),
-        ("piece", stream, 2, 3),
-        ("paused", stream),
-        ("resumed", stream),
+        transfer_events.started(stream, 1, 3, "bob"),
+        transfer_events.piece(stream, 2, 3),
+        transfer_events.paused(stream, "download", True),
+        transfer_events.paused(stream, "download", False),
     ):
         network.substream_progress_queue.put_nowait(event)
     await run_briefly(window.transfers_listener)
@@ -235,7 +236,9 @@ async def test_the_transfers_listener_tracks_a_download(
     assert row["total"] == 3
     assert row["active"] is True
 
-    network.substream_progress_queue.put_nowait(("completed", stream))
+    network.substream_progress_queue.put_nowait(
+        transfer_events.completed(stream, "download"),
+    )
     await run_briefly(window.transfers_listener)
     assert window.transfers_model.rowCount() == 0
 
@@ -246,9 +249,11 @@ async def test_the_transfers_listener_tracks_an_upload(
 ) -> None:
     stream = uuid.uuid4()
     for event in (
-        ("upload_started", stream, 1, 2, 4096, "bob", "pic.png"),
-        ("upload_piece", stream, 1, 2),
-        ("upload_paused", stream),
+        transfer_events.upload_started(
+            stream, 1, 2, 4096, "bob", "pic.png",
+        ),
+        transfer_events.upload_piece(stream, 1, 2),
+        transfer_events.paused(stream, "upload", True),
     ):
         network.substream_progress_queue.put_nowait(event)
     await run_briefly(window.transfers_listener)
@@ -257,11 +262,15 @@ async def test_the_transfers_listener_tracks_an_upload(
     assert row["parent_name"] == "pic.png (in bob)"
     assert row["active"] is False
 
-    network.substream_progress_queue.put_nowait(("upload_resumed", stream))
+    network.substream_progress_queue.put_nowait(
+        transfer_events.paused(stream, "upload", False),
+    )
     await run_briefly(window.transfers_listener)
     assert window.transfers_model._rows[stream]["active"] is True
 
-    network.substream_progress_queue.put_nowait(("upload_cancelled", stream))
+    network.substream_progress_queue.put_nowait(
+        transfer_events.completed(stream, "upload", cancelled=True),
+    )
     await run_briefly(window.transfers_listener)
     assert window.transfers_model.rowCount() == 0
 
@@ -272,12 +281,14 @@ async def test_an_upload_without_a_basename_uses_the_parent_name(
 ) -> None:
     stream = uuid.uuid4()
     network.substream_progress_queue.put_nowait(
-        ("upload_started", stream, 1, 2, 4096, "bob", ""),
+        transfer_events.upload_started(stream, 1, 2, 4096, "bob", ""),
     )
     await run_briefly(window.transfers_listener)
     assert window.transfers_model._rows[stream]["parent_name"] == "bob"
 
-    network.substream_progress_queue.put_nowait(("upload_completed", stream))
+    network.substream_progress_queue.put_nowait(
+        transfer_events.completed(stream, "upload"),
+    )
     await run_briefly(window.transfers_listener)
     assert window.transfers_model.rowCount() == 0
 
@@ -288,10 +299,10 @@ async def test_a_failed_transfer_keeps_its_reason(
 ) -> None:
     stream = uuid.uuid4()
     network.substream_progress_queue.put_nowait(
-        ("started", stream, 1, 3, "bob"),
+        transfer_events.started(stream, 1, 3, "bob"),
     )
     network.substream_progress_queue.put_nowait(
-        ("failed", stream, "missing box"),
+        transfer_events.failed(stream, "missing box"),
     )
     await run_briefly(window.transfers_listener)
     assert window.transfers_model._rows[stream]["failed"] is True
@@ -303,7 +314,7 @@ async def test_the_transfers_listener_survives_a_bad_event(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
-    network.substream_progress_queue.put_nowait(("started",))
+    network.substream_progress_queue.put_nowait(cast(Any, ("started",)))
     await run_briefly(window.transfers_listener)
     assert "transfers_listener: dropping an item after" in caplog.text
 
