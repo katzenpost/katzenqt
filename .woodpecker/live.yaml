@@ -5,6 +5,6 @@ when:
 
 steps:
   - name: live
-    image: ghcr.io/astral-sh/uv:python3.12-trixie
+    image: localhost/katzenqt-ci:latest
     commands:
       - make check-live

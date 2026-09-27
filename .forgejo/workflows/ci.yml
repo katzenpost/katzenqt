@@ -10,7 +10,8 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.CI_IMAGE }}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10.1.0
       - run: make ci-unit

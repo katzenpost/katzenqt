@@ -11,7 +11,8 @@ jobs:
   live:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    container:
+      image: ${{ vars.CI_IMAGE }}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10.1.0
       - run: make check-live

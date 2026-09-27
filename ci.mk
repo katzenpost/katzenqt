@@ -10,12 +10,18 @@ CI_IMAGE_NAME ?= katzenqt-ci
 CI_IMAGE_TAG ?= latest
 CI_REGISTRIES ?=
 CI_WORKFLOWS_FORGEJO ?= .forgejo/workflows
-CI_FORGEJO_ARGS ?= --bind
+CI_FORGEJO_ARGS ?=
+CI_SOCKET ?= /run/user/$(shell id -u)/podman/podman.sock
 CI_RUN_OPTIONS ?= --volume "$(CURDIR)/.ci-local:$(CURDIR)/.ci-local"
 
 ACT ?= act
 CONTAINER_ENGINE ?= podman
-CI_LOCAL_IMAGE ?= localhost/katzenqt-act:latest
+CI_IMAGE_DOCKERFILE ?= .ci/Dockerfile
+CI_IMAGE_TMPDIR ?= /var/tmp
+CI_IMAGE_LOCAL ?= localhost/$(CI_IMAGE_NAME):$(CI_IMAGE_TAG)
+CI_IMAGE_DIGEST ?=
+CI_IMAGE_PULL ?=
+CI_IMAGE ?= $(if $(CI_IMAGE_DIGEST),$(CI_IMAGE_DIGEST),$(CI_IMAGE_LOCAL))
 CI_LOCAL_SHELL_ARGS ?= --rm -it
 ACT_ARGS ?=
 
@@ -30,10 +36,15 @@ check-live:
 
 .PHONY: ci-local-image
 ci-local-image:
-	$(CONTAINER_ENGINE) build \
-		-f .github/act/Dockerfile \
-		-t $(CI_LOCAL_IMAGE) \
-		.
+	@if [ -n "$(CI_IMAGE_DIGEST)" ]; then \
+		$(CONTAINER_ENGINE) pull $(CI_IMAGE_DIGEST); \
+		$(CONTAINER_ENGINE) tag $(CI_IMAGE_DIGEST) $(CI_IMAGE_LOCAL); \
+	elif [ -n "$(CI_IMAGE_PULL)" ]; then \
+		$(CONTAINER_ENGINE) pull $(CI_IMAGE_PULL); \
+		$(CONTAINER_ENGINE) tag $(CI_IMAGE_PULL) $(CI_IMAGE_LOCAL); \
+	else \
+		TMPDIR=$(CI_IMAGE_TMPDIR) $(CONTAINER_ENGINE) build -f $(CI_IMAGE_DOCKERFILE) -t $(CI_IMAGE_LOCAL) .; \
+	fi
 
 .PHONY: ci-local-image-shell
 ci-local-image-shell:
@@ -42,7 +53,7 @@ ci-local-image-shell:
 		--volume "$(CURDIR):$(CURDIR)" \
 		--workdir "$(CURDIR)" \
 		--entrypoint /bin/bash \
-		$(CI_LOCAL_IMAGE)
+		$(CI_IMAGE_LOCAL)
 
 .PHONY: ci-local-act
 ci-local-act:
@@ -140,8 +151,8 @@ ci-local-act:
 	trap 'status=$$?; trap - EXIT INT TERM; cleanup; exit $$status' EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
-	"$(ACT)" -P "ubuntu-24.04=$(CI_LOCAL_IMAGE)" --rm --concurrent-jobs 1 --network host \
-		-P ubuntu-latest=$(CI_LOCAL_IMAGE) \
+	"$(ACT)" -P "ubuntu-24.04=$(CI_IMAGE)" --rm --concurrent-jobs 1 --network host \
+		-P ubuntu-latest=$(CI_IMAGE) --pull=false --var CI_IMAGE=$(CI_IMAGE) \
 		--container-daemon-socket "$$endpoint" \
 		--container-options '--volume "$(CURDIR)/.ci-local:$(CURDIR)/.ci-local"' \
 		--env "UV_CACHE_DIR=$(CURDIR)/.ci-local/uv-cache" \
@@ -156,18 +167,20 @@ ci-local-act:
 ci-local-image-push: ci-local-image
 	@test -n "$(CI_REGISTRIES)" || { printf '%s\n' 'set CI_REGISTRIES to one or more registry prefixes' >&2; exit 1; }
 	@set -e; for registry in $(CI_REGISTRIES); do \
-		$(CONTAINER_ENGINE) tag $(CI_LOCAL_IMAGE) $$registry/$(CI_IMAGE_NAME):$(CI_IMAGE_TAG); \
+		$(CONTAINER_ENGINE) tag $(CI_IMAGE_LOCAL) $$registry/$(CI_IMAGE_NAME):$(CI_IMAGE_TAG); \
 		$(CONTAINER_ENGINE) push $$registry/$(CI_IMAGE_NAME):$(CI_IMAGE_TAG); \
 	done
 
 .PHONY: ci-local-forgejo
 ci-local-forgejo: ci-local-image
 	@command -v "$(FORGEJO_RUNNER)" >/dev/null || { printf '%s\n' '$(FORGEJO_RUNNER) is required' >&2; exit 1; }
-	"$(FORGEJO_RUNNER)" exec $(CI_FORGEJO_ARGS) -P "ubuntu-latest=$(CI_LOCAL_IMAGE)" \
-		--container-options '$(CI_RUN_OPTIONS)' -W $(CI_WORKFLOWS_FORGEJO)
+	DOCKER_HOST="unix://$(CI_SOCKET)" "$(FORGEJO_RUNNER)" exec $(CI_FORGEJO_ARGS) \
+		-i $(CI_IMAGE) --var CI_IMAGE=$(CI_IMAGE) \
+		--container-daemon-socket "unix://$(CI_SOCKET)" \
+		--container-opts '$(CI_RUN_OPTIONS)' -W $(CI_WORKFLOWS_FORGEJO)
 
 .PHONY: ci-local
-ci-local:
+ci-local: ci-local-image
 	@runner="$(RUNNER)"; \
 	if [ -z "$$runner" ]; then \
 		for candidate in $(CI_RUNNERS); do \
