@@ -11,6 +11,7 @@ Pins three invariants for commit 5:
   rather than the legacy runner module.
 """
 from __future__ import annotations
+import pytest
 
 import tomllib
 from pathlib import Path
@@ -21,11 +22,11 @@ from katzenqt import headless, integration_runner, persistent
 _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 
-def test_headless_has_cli_function():
+def test_headless_has_cli_function() -> None:
     assert callable(headless.cli)
 
 
-def test_pyproject_declares_katzenqt_headless_script():
+def test_pyproject_declares_katzenqt_headless_script() -> None:
     data = tomllib.loads(_PYPROJECT.read_text())
     scripts = data["project"]["scripts"]
     assert scripts.get("katzenqt-headless") == "katzenqt.headless:cli", (
@@ -33,7 +34,7 @@ def test_pyproject_declares_katzenqt_headless_script():
     )
 
 
-def test_actions_module_exists_with_parser_builder():
+def test_actions_module_exists_with_parser_builder() -> None:
     """The plan moves the action dispatch table out of
     integration_runner and into katzenqt.headless._actions. Pin the
     new home so it does not drift back."""
@@ -49,7 +50,7 @@ def test_actions_module_exists_with_parser_builder():
     assert callable(_actions._action_chat_session)
 
 
-def test_cli_dispatches_read_against_missing_conv(monkeypatch, capsys):
+def test_cli_dispatches_read_against_missing_conv(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(persistent, "init_and_migrate", lambda: None)
     rc = headless.cli(["read", "no-such-conv", "0.1", "--address", "127.0.0.1:64331"])
     captured = capsys.readouterr()
@@ -57,7 +58,7 @@ def test_cli_dispatches_read_against_missing_conv(monkeypatch, capsys):
     assert "conversation 'no-such-conv' not found" in captured.out + captured.err
 
 
-def test_main_is_thin_shim_for_cli(monkeypatch, capsys):
+def test_main_is_thin_shim_for_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """integration_runner.main and headless.cli must produce the same
     exit code and the same result for the same argv; the legacy runner
     is now a thin shim. (Output is compared by content, not byte-for-byte,

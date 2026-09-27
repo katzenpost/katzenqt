@@ -25,7 +25,7 @@ from katzenqt import network
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KATZENQT_THINCLIENT_CONFIG", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
@@ -36,7 +36,7 @@ def _make_toml(path: Path, marker: str) -> Path:
     return path
 
 
-def test_explicit_path_wins_over_everything(tmp_path, monkeypatch):
+def test_explicit_path_wins_over_everything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     explicit = _make_toml(tmp_path / "explicit.toml", "explicit")
     monkeypatch.setenv(
         "KATZENQT_THINCLIENT_CONFIG", str(tmp_path / "env.toml"),
@@ -49,7 +49,7 @@ def test_explicit_path_wins_over_everything(tmp_path, monkeypatch):
     assert resolved == explicit
 
 
-def test_env_wins_when_no_explicit(tmp_path, monkeypatch):
+def test_env_wins_when_no_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = _make_toml(tmp_path / "env.toml", "env")
     monkeypatch.setenv("KATZENQT_THINCLIENT_CONFIG", str(env_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
@@ -59,7 +59,7 @@ def test_env_wins_when_no_explicit(tmp_path, monkeypatch):
     assert resolved == env_path
 
 
-def test_xdg_used_when_no_explicit_or_env(tmp_path, monkeypatch):
+def test_xdg_used_when_no_explicit_or_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     xdg_path = _make_toml(
         tmp_path / "xdg" / "katzenqt" / "thinclient.toml", "xdg",
@@ -69,7 +69,7 @@ def test_xdg_used_when_no_explicit_or_env(tmp_path, monkeypatch):
     assert resolved == xdg_path
 
 
-def test_xdg_default_when_xdg_unset(tmp_path, monkeypatch):
+def test_xdg_default_when_xdg_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without ``XDG_CONFIG_HOME``, the resolver consults
     ``~/.config/katzenqt/thinclient.toml``. We redirect ``HOME`` to
     keep the test hermetic."""
@@ -82,7 +82,7 @@ def test_xdg_default_when_xdg_unset(tmp_path, monkeypatch):
     assert resolved == xdg_path
 
 
-def test_falls_back_to_bundled_package_data(tmp_path, monkeypatch):
+def test_falls_back_to_bundled_package_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without explicit / env / XDG, we fall back to the bundled copy
     shipped at ``src/katzenqt/data/thinclient.toml``. The test pins
     ``HOME`` to a sterile tmp so no user XDG file accidentally satisfies
@@ -97,7 +97,7 @@ def test_falls_back_to_bundled_package_data(tmp_path, monkeypatch):
     assert resolved.name == "thinclient.toml"
 
 
-def test_missing_path_raises_filenotfounderror(tmp_path, monkeypatch):
+def test_missing_path_raises_filenotfounderror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-existent explicit path should not silently fall through
     to a later tier; the caller asked for this file specifically."""
     explicit = tmp_path / "does-not-exist.toml"

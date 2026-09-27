@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlmodel import select
 
-from katzenqt import persistent
+from katzenqt import network, persistent
 from katzenqt.headless import _actions, _cli
 
 
 @pytest.mark.parametrize("command", ["send", "send-file"])
-def test_send_timeout_default_and_override(command):
+def test_send_timeout_default_and_override(command: str) -> None:
     argv = [command, "demo", "payload", "--address", "127.0.0.1:64331"]
     assert _cli.parse(argv).args.timeout is None
     assert _cli.parse([*argv, "--timeout", "600"]).args.timeout == 600
@@ -20,7 +20,7 @@ def test_send_timeout_default_and_override(command):
 
 @pytest.mark.parametrize("command", ["send", "send-file"])
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "1e999", "bad"])
-def test_send_timeout_rejects_invalid_values(command, value):
+def test_send_timeout_rejects_invalid_values(command: str, value: str) -> None:
     with pytest.raises(SystemExit) as exc:
         _cli.parse([
             command, "demo", "payload", "--address", "127.0.0.1:64331", f"--timeout={value}",
@@ -73,7 +73,7 @@ async def test_unacknowledged_send_expires_and_preserves_pending(
     start = AsyncMock(return_value=(connection, background))
     monkeypatch.setattr(_actions, "_connect_and_start", start)
     monkeypatch.setattr(_actions, "_shutdown", shutdown)
-    monkeypatch.setattr(_actions.network, "check_for_new", AsyncMock())
+    monkeypatch.setattr(network, "check_for_new", AsyncMock())
 
     payload = "hello"
     if command == "send-file":

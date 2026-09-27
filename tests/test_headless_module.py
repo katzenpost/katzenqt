@@ -9,11 +9,13 @@ The Qt GUI's collaborator runs in another process. This module pins:
   exception.
 """
 from __future__ import annotations
+from tests.fakes.thinclient import FakeThinClient
 
 import asyncio
 import inspect
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -21,7 +23,7 @@ import pytest_asyncio
 from katzenqt import headless, network
 
 
-def test_public_api_is_what_we_claim():
+def test_public_api_is_what_we_claim() -> None:
     """The plan promises five symbols. Each must be present and have
     the expected callable shape."""
     assert callable(headless.resolve_thinclient_config)
@@ -52,7 +54,7 @@ def test_public_api_is_what_we_claim():
     assert "config_path" in sess_sig.parameters
 
 
-def test_import_katzenqt_headless_does_not_load_pyside6():
+def test_import_katzenqt_headless_does_not_load_pyside6() -> None:
     """The headless module must remain importable without Qt."""
     code = (
         "import katzenqt.headless\n"
@@ -71,7 +73,7 @@ def test_import_katzenqt_headless_does_not_load_pyside6():
 
 
 @pytest.mark.asyncio
-async def test_start_then_stop_with_fake_client(fake_thinclient):
+async def test_start_then_stop_with_fake_client(fake_thinclient: FakeThinClient) -> None:
     """``start`` produces a live background task; ``stop`` shuts it
     down within the timeout and closes the ThinClient. The fake
     stands in for the real ``ThinClient`` so neither kpclientd nor
@@ -92,10 +94,14 @@ async def test_start_then_stop_with_fake_client(fake_thinclient):
 
 
 @pytest_asyncio.fixture
-async def _patched_connect(monkeypatch, fake_thinclient):
+async def _patched_connect(
+    monkeypatch: pytest.MonkeyPatch, fake_thinclient: FakeThinClient,
+) -> FakeThinClient:
     """Make ``headless.connect`` return the fake without touching the
     real ``network.reconnect`` (which would try to dial kpclientd)."""
-    async def fake_connect(config_path=None):
+    async def fake_connect(
+        config_path: "str | Path | None" = None,
+    ) -> FakeThinClient:
         await network.on_connection_status({"is_connected": True, "err": None})
         return fake_thinclient
     monkeypatch.setattr(headless, "connect", fake_connect)
@@ -103,7 +109,9 @@ async def _patched_connect(monkeypatch, fake_thinclient):
 
 
 @pytest.mark.asyncio
-async def test_session_context_manager_round_trip(_patched_connect):
+async def test_session_context_manager_round_trip(
+    _patched_connect: FakeThinClient,
+) -> None:
     """``async with headless.session()`` yields the connection,
     triggers the network shutdown signal on exit, and closes the
     ThinClient so kpclientd reaps its ARQ state."""
@@ -121,7 +129,9 @@ async def test_session_context_manager_round_trip(_patched_connect):
 
 
 @pytest.mark.asyncio
-async def test_session_cleans_up_when_body_raises(_patched_connect):
+async def test_session_cleans_up_when_body_raises(
+    _patched_connect: FakeThinClient,
+) -> None:
     """An exception inside the ``async with`` body must still trigger
     the same cleanup as a clean exit (including the ThinClient close)."""
     fake = _patched_connect
