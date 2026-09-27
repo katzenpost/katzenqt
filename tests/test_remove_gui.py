@@ -1,16 +1,29 @@
+from collections.abc import Coroutine
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import asyncio
+import uuid
+
 import pytest
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtGui import QStandardItemModel
 from sqlmodel import select
 
 from katzenqt import katzen, persistent
 from tests.test_membership_hash import _make_conversation
 
+if TYPE_CHECKING:
+    from katzenqt.qt_models import ConversationUIState
+
+_T = TypeVar("_T")
+
+
+def _as_window(window: SimpleNamespace) -> "katzen.MainWindow":
+    return cast("katzen.MainWindow", window)
+
 
 class _Loop:
-    async def run_in_io(self, coro):
+    async def run_in_io(self, coro: "Coroutine[object, object, _T]") -> _T:
         return await coro
 
 
@@ -25,9 +38,9 @@ class _Model:
 
 class _Root:
     def __init__(self) -> None:
-        self.props: dict = {}
+        self.props: "dict[str, object]" = {}
 
-    def setProperty(self, name, value) -> None:
+    def setProperty(self, name: str, value: object) -> None:
         self.props[name] = value
 
 
@@ -39,20 +52,37 @@ class _Panel:
         self.closed = True
 
 
-def _conversation_item(conversation_id: int, name: str) -> QStandardItem:
-    item = QStandardItem(name)
+def _conversation_item(conversation_id: int, name: str) -> "katzen.ContactsItem":
+    item = katzen.ContactsItem(name)
     item.conversation_id = conversation_id
     return item
 
 
-def _window(
-    model: QStandardItemModel, states: dict, current=None, answer=True
-) -> SimpleNamespace:
-    async def confirm(text: str) -> bool:
-        confirm.asked.append(text)
-        return answer
+def _peer_item(name: str, read_cap_id: "uuid.UUID | None" = None) -> "katzen.ContactsItem":
+    item = katzen.ContactsItem(name)
+    if read_cap_id is not None:
+        item.peer_read_cap_id = read_cap_id
+    return item
 
-    confirm.asked = []
+
+class _Confirm:
+    def __init__(self, answer: bool) -> None:
+        self.answer = answer
+        self.asked: "list[str]" = []
+
+    async def __call__(self, text: str) -> bool:
+        self.asked.append(text)
+        return self.answer
+
+
+def _window(
+    model: QStandardItemModel,
+    states: "dict[int, SimpleNamespace]",
+    current: "SimpleNamespace | None" = None,
+    answer: bool = True,
+) -> SimpleNamespace:
+    confirm = _Confirm(answer)
+    root = _Root()
     window = SimpleNamespace(
         all_contacts=model,
         conversation_state_by_id=states,
@@ -65,9 +95,9 @@ def _window(
         _confirm=confirm,
         convo_state_or_none=lambda: current,
         ui=SimpleNamespace(
-            qml_ChatLines=SimpleNamespace(rootObject=lambda: window.root)
+            qml_ChatLines=SimpleNamespace(rootObject=lambda: root)
         ),
-        root=_Root(),
+        root=root,
     )
     window._clear_chat_view = lambda: setattr(
         window, "cleared", window.cleared + 1
@@ -83,10 +113,10 @@ def _state(log_model: _Model) -> SimpleNamespace:
     )
 
 
-def test_drop_peer_ui_removes_the_row_and_refreshes_the_chat():
+def test_drop_peer_ui_removes_the_row_and_refreshes_the_chat() -> None:
     model = QStandardItemModel()
     conv = _conversation_item(1, "demo")
-    alice, bob = QStandardItem("alice"), QStandardItem("bob")
+    alice, bob = _peer_item("alice"), _peer_item("bob")
     conv.appendRow(alice)
     conv.appendRow(bob)
     model.appendRow(conv)
@@ -94,29 +124,29 @@ def test_drop_peer_ui_removes_the_row_and_refreshes_the_chat():
     state = _state(log_model)
     window = _window(model, {1: state}, current=state)
 
-    katzen.MainWindow._drop_peer_ui(window, conv, alice)
+    katzen.MainWindow._drop_peer_ui(_as_window(window), conv, alice)
 
     assert [conv.child(r).text() for r in range(conv.rowCount())] == ["bob"]
     assert log_model.refreshed == 1
     assert window.root.props == {"ctx": "ctx"}
 
 
-def test_drop_peer_ui_leaves_an_unselected_chat_view_alone():
+def test_drop_peer_ui_leaves_an_unselected_chat_view_alone() -> None:
     model = QStandardItemModel()
     conv = _conversation_item(1, "demo")
-    alice = QStandardItem("alice")
+    alice = _peer_item("alice")
     conv.appendRow(alice)
     model.appendRow(conv)
     log_model = _Model()
     window = _window(model, {1: _state(log_model)}, current=None)
 
-    katzen.MainWindow._drop_peer_ui(window, conv, alice)
+    katzen.MainWindow._drop_peer_ui(_as_window(window), conv, alice)
 
     assert log_model.refreshed == 1
     assert window.root.props == {}
 
 
-def test_drop_conversation_ui_forgets_state_and_closes_its_polls():
+def test_drop_conversation_ui_forgets_state_and_closes_its_polls() -> None:
     model = QStandardItemModel()
     gone, kept = _conversation_item(1, "gone"), _conversation_item(2, "kept")
     model.appendRow(gone)
@@ -126,7 +156,7 @@ def test_drop_conversation_ui_forgets_state_and_closes_its_polls():
     mine, theirs = _Panel(), _Panel()
     window._poll_windows = {(1, b"a"): mine, (2, b"b"): theirs}
 
-    katzen.MainWindow._drop_conversation_ui(window, gone)
+    katzen.MainWindow._drop_conversation_ui(_as_window(window), gone)
 
     assert model.rowCount() == 1 and model.item(0).text() == "kept"
     assert list(states) == [2]
@@ -135,7 +165,7 @@ def test_drop_conversation_ui_forgets_state_and_closes_its_polls():
 
 
 @pytest.mark.asyncio
-async def test_drop_conversation_ui_cancels_its_voucher_join():
+async def test_drop_conversation_ui_cancels_its_voucher_join() -> None:
     model = QStandardItemModel()
     gone = _conversation_item(1, "gone")
     model.appendRow(gone)
@@ -143,51 +173,62 @@ async def test_drop_conversation_ui_cancels_its_voucher_join():
     task = asyncio.create_task(asyncio.Event().wait())
     window._voucher_join_tasks = {1: task}
 
-    katzen.MainWindow._drop_conversation_ui(window, gone)
+    katzen.MainWindow._drop_conversation_ui(_as_window(window), gone)
     await asyncio.gather(task, return_exceptions=True)
 
     assert task.cancelled()
     assert window._voucher_join_tasks == {}
 
 
-def test_drop_last_conversation_clears_the_chat_view():
+def test_drop_last_conversation_clears_the_chat_view() -> None:
     model = QStandardItemModel()
     only = _conversation_item(1, "only")
     model.appendRow(only)
     window = _window(model, {1: _state(_Model())}, current=None)
 
-    katzen.MainWindow._drop_conversation_ui(window, only)
+    katzen.MainWindow._drop_conversation_ui(_as_window(window), only)
 
     assert model.rowCount() == 0
     assert window.cleared == 1
 
 
-async def _wired_peer(answer: bool):
+async def _wired_peer(
+    answer: bool,
+) -> "tuple[SimpleNamespace, katzen.ContactsItem, katzen.ContactsItem, int]":
     conv_id = await _make_conversation()
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         alice = next(p for p in conv.peers if p.name == "alice")
         read_cap_id = alice.read_cap_id
     model = QStandardItemModel()
     conv_item = _conversation_item(conv_id, "demo")
-    item = QStandardItem("alice")
-    item.peer_read_cap_id = read_cap_id
+    item = _peer_item("alice", read_cap_id)
     conv_item.appendRow(item)
     model.appendRow(conv_item)
     state = _state(_Model())
     window = _window(model, {conv_id: state}, current=state, answer=answer)
-    window._drop_peer_ui = lambda *a: katzen.MainWindow._drop_peer_ui(
-        window, *a
-    )
-    window._peer_id_of = lambda it: katzen.MainWindow._peer_id_of(window, it)
+
+    def drop_peer_ui(
+        conversation_item: "katzen.ContactsItem", peer: "katzen.ContactsItem",
+    ) -> None:
+        katzen.MainWindow._drop_peer_ui(
+            _as_window(window), conversation_item, peer,
+        )
+
+    def peer_id_of(peer: "katzen.ContactsItem") -> "int | None":
+        return katzen.MainWindow._peer_id_of(_as_window(window), peer)
+
+    window._drop_peer_ui = drop_peer_ui
+    window._peer_id_of = peer_id_of
     return window, conv_item, item, conv_id
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_confirmed_deletes_state_and_the_row():
+async def test_remove_peer_confirmed_deletes_state_and_the_row() -> None:
     window, conv_item, item, conv_id = await _wired_peer(answer=True)
 
-    await katzen.MainWindow._remove_peer(window, item)
+    await katzen.MainWindow._remove_peer(_as_window(window), item)
 
     assert conv_item.rowCount() == 0
     async with persistent.asession() as sess:
@@ -205,10 +246,10 @@ async def test_remove_peer_confirmed_deletes_state_and_the_row():
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_declined_changes_nothing():
+async def test_remove_peer_declined_changes_nothing() -> None:
     window, conv_item, item, _ = await _wired_peer(answer=False)
 
-    await katzen.MainWindow._remove_peer(window, item)
+    await katzen.MainWindow._remove_peer(_as_window(window), item)
 
     assert conv_item.rowCount() == 1
     async with persistent.asession() as sess:
@@ -219,17 +260,21 @@ async def test_remove_peer_declined_changes_nothing():
 
 
 @pytest.mark.asyncio
-async def test_remove_conversation_confirmed_deletes_it_and_drops_the_row():
+async def test_remove_conversation_confirmed_deletes_it_and_drops_the_row() -> None:
     conv_id = await _make_conversation()
     model = QStandardItemModel()
     item = _conversation_item(conv_id, "demo")
     model.appendRow(item)
     window = _window(model, {conv_id: _state(_Model())}, current=None)
-    window._drop_conversation_ui = lambda it: (
-        katzen.MainWindow._drop_conversation_ui(window, it)
-    )
 
-    await katzen.MainWindow._remove_conversation(window, item)
+    def drop_conversation_ui(conversation_item: "katzen.ContactsItem") -> None:
+        katzen.MainWindow._drop_conversation_ui(
+            _as_window(window), conversation_item,
+        )
+
+    window._drop_conversation_ui = drop_conversation_ui
+
+    await katzen.MainWindow._remove_conversation(_as_window(window), item)
 
     assert model.rowCount() == 0 and window.conversation_state_by_id == {}
     async with persistent.asession() as sess:
@@ -237,30 +282,31 @@ async def test_remove_conversation_confirmed_deletes_it_and_drops_the_row():
 
 
 @pytest.mark.asyncio
-async def test_remove_conversation_failure_is_reported_and_the_row_kept():
+async def test_remove_conversation_failure_is_reported_and_the_row_kept() -> None:
     model = QStandardItemModel()
     item = _conversation_item(424242, "ghost")
     model.appendRow(item)
     window = _window(model, {424242: _state(_Model())}, current=None)
 
-    await katzen.MainWindow._remove_conversation(window, item)
+    await katzen.MainWindow._remove_conversation(_as_window(window), item)
 
     assert model.rowCount() == 1
     assert len(window.failures) == 1
 
 
 @pytest.mark.asyncio
-async def test_voucher_join_is_tracked_while_it_runs():
+async def test_voucher_join_is_tracked_while_it_runs() -> None:
     started = asyncio.Event()
 
-    async def run(convo) -> None:
+    async def run(convo: object) -> None:
         started.set()
         await asyncio.Event().wait()
 
     window = SimpleNamespace(_voucher_join_tasks={}, _run_voucher_join=run)
     task = asyncio.create_task(
         katzen.MainWindow._await_voucher_join(
-            window, SimpleNamespace(conversation_id=7)
+            _as_window(window),
+            cast("ConversationUIState", SimpleNamespace(conversation_id=7)),
         ),
     )
     await asyncio.wait_for(started.wait(), timeout=2)

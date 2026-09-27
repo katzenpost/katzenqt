@@ -574,7 +574,7 @@ class TransferRemoved:
 # wire/framing overhead excluded).
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
-substream_progress_queue: "asyncio.Queue[tuple[object, ...] | TransferRemoved]" = asyncio.Queue()
+substream_progress_queue: "asyncio.Queue[Any]" = asyncio.Queue()
 
 __resend_queue: "set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
@@ -2569,7 +2569,8 @@ async def stop_stream(stream: uuid.UUID) -> None:
         try:
             await task
         except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
                 raise
         except Exception:
             logger.exception("Task failed while stopping %s", stream)

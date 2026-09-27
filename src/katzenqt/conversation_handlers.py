@@ -124,7 +124,7 @@ async def _handle_chat(
     full_payload: bytes,
 ) -> DispatchResult:
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
-    return DispatchResult(True, False, False, False)
+    return DispatchResult(True, False, None, False)
 
 
 async def _handle_introduction(

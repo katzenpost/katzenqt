@@ -2091,16 +2091,18 @@ class MainWindow(QMainWindow):
         item.appendRow(new_item)
         logger.debug("added announced contact %r to conversation %d", name, conversation_id)
 
-    def _contact_item_at(self, pos: QPoint) -> "QStandardItem | None":
+    def _contact_item_at(self, pos: QPoint) -> "ContactsItem | None":
         tree = self.ui.contacts_treeWidget
         idx = tree.indexAt(pos)
         if not idx.isValid():
             return None
         # The contacts tree shows a FilterProxyModel over all_contacts.
-        src_idx = tree.model().mapToSource(idx)
+        src_idx = cast(FilterProxyModel, tree.model()).mapToSource(idx)
         if not src_idx.isValid():
             return None
-        return self.all_contacts.itemFromIndex(src_idx)
+        return cast(
+            "ContactsItem | None", self.all_contacts.itemFromIndex(src_idx),
+        )
 
     @async_cb
     async def peer_context_menu(self, pos: QPoint) -> None:
@@ -2116,13 +2118,17 @@ class MainWindow(QMainWindow):
         else:
             await self._peer_menu(item, global_pos)
 
-    async def _conversation_menu(self, item: QStandardItem, global_pos: QPoint) -> None:
+    async def _conversation_menu(
+        self, item: "ContactsItem", global_pos: QPoint,
+    ) -> None:
         api = QMenu(self.ui.contacts_treeWidget)
         remove = api.addAction("Remove group chat...")
         if await _menu_chosen(api, global_pos) is remove:
             await self._remove_conversation(item)
 
-    async def _peer_menu(self, item: QStandardItem, global_pos: QPoint) -> None:
+    async def _peer_menu(
+        self, item: "ContactsItem", global_pos: QPoint,
+    ) -> None:
         # Skip rows tagged as our own (or untagged, e.g. an own row).
         if getattr(item, "peer_is_own", True):
             return
@@ -2174,7 +2180,7 @@ class MainWindow(QMainWindow):
             f"Removal failed: {_error_detail(exc)}",
         ))
 
-    async def _remove_conversation(self, item: QStandardItem) -> None:
+    async def _remove_conversation(self, item: "ContactsItem") -> None:
         conversation_id = item.conversation_id
         if not await self._confirm(
             f"Remove the group chat \"{item.text()}\" from this device?\n\n"
@@ -2192,7 +2198,7 @@ class MainWindow(QMainWindow):
             return
         self._drop_conversation_ui(item)
 
-    def _drop_conversation_ui(self, item: QStandardItem) -> None:
+    def _drop_conversation_ui(self, item: "ContactsItem") -> None:
         conversation_id = item.conversation_id
         join = self._voucher_join_tasks.pop(conversation_id, None)
         if join is not None:
@@ -2217,24 +2223,25 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(False)
 
-    def _peer_id_of(self, item: QStandardItem) -> "int | None":
+    def _peer_id_of(self, item: "ContactsItem") -> "int | None":
         with persistent.Session(persistent._engine_sync) as sess:
             return sess.exec(
                 select(persistent.ConversationPeer.id)
                 .join(
                     persistent.ConversationPeerLink,
-                    persistent.ConversationPeerLink.conversation_peer_id ==
-                    persistent.ConversationPeer.id,
+                    col(persistent.ConversationPeerLink.conversation_peer_id)
+                    == col(persistent.ConversationPeer.id),
                 )
                 .where(
-                    persistent.ConversationPeerLink.conversation_id ==
-                    item.parent().conversation_id,
-                    persistent.ConversationPeer.read_cap_id == item.peer_read_cap_id,
+                    col(persistent.ConversationPeerLink.conversation_id)
+                    == cast("ContactsItem", item.parent()).conversation_id,
+                    col(persistent.ConversationPeer.read_cap_id)
+                    == item.peer_read_cap_id,
                 )
             ).first()
 
-    async def _remove_peer(self, item: QStandardItem) -> None:
-        conversation_item = item.parent()
+    async def _remove_peer(self, item: "ContactsItem") -> None:
+        conversation_item = cast("ContactsItem", item.parent())
         conversation_id = conversation_item.conversation_id
         peer_id = self._peer_id_of(item)
         if peer_id is None:
@@ -2255,7 +2262,9 @@ class MainWindow(QMainWindow):
             return
         self._drop_peer_ui(conversation_item, item)
 
-    def _drop_peer_ui(self, conversation_item: QStandardItem, item: QStandardItem) -> None:
+    def _drop_peer_ui(
+        self, conversation_item: "ContactsItem", item: "ContactsItem",
+    ) -> None:
         conversation_item.removeRow(item.row())
         state = self.conversation_state_by_id.get(conversation_item.conversation_id)
         if state is None:
@@ -2647,21 +2656,32 @@ class MainWindow(QMainWindow):
             selected = selected.parent()
         if old is not None and old.parent().isValid():
             old = old.parent()
-        selected_qmi = selected.model().mapToSource(selected)
-        selected_item = self.all_contacts.item(selected_qmi.row(), selected_qmi.column())
-        if selected_item is None or selected_item.conversation_id not in self.conversation_state_by_id:
+        selected_qmi = cast(
+            FilterProxyModel, selected.model(),
+        ).mapToSource(selected)
+        selected_item = cast("ContactsItem | None", self.all_contacts.item(
+            selected_qmi.row(), selected_qmi.column(),
+        ))
+        if (
+            selected_item is None
+            or selected_item.conversation_id not in self.conversation_state_by_id
+        ):
             # A row removal left this index stale; the tree's current index
             # has already moved on and its own signal follows.
             return
-        selected = selected_item.text()
+        selected_name = selected_item.text()
         #old = getattr(old, "parent", lambda: None)() or old
         old_convo = None
-        if old and old.model():
-            old = old.model().mapToSource(old)
-            old_item = self.all_contacts.item(old.row(), 0)
+        if old is not None and (old_model := old.model()) is not None:
+            old = cast(FilterProxyModel, old_model).mapToSource(old)
+            old_item = cast(
+                "ContactsItem | None", self.all_contacts.item(old.row(), 0),
+            )
             if old_item is not None:
-                old_convo = self.conversation_state_by_id.get(old_item.conversation_id)
-        print("conversation selected", selected)
+                old_convo = self.conversation_state_by_id.get(
+                    old_item.conversation_id,
+                )
+        print("conversation selected", selected_name)
         ### TODO this was how far we got
 
         if old_convo:
