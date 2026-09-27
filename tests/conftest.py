@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, Iterator
 
 import katzenpost_thinclient
 import pytest
@@ -21,9 +21,12 @@ from katzenqt import network, persistent
 
 from tests.fakes.thinclient import FakeThinClient
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 @pytest.fixture(autouse=True)
-def _fresh_tables(request):
+def _fresh_tables(request: pytest.FixtureRequest) -> Iterator[None]:
     """Drop + recreate all tables before every test.
 
     We skip alembic (it would try to read the repo's migrations/) and use
@@ -48,7 +51,7 @@ def _fresh_tables(request):
 
 
 @pytest.fixture(autouse=True)
-def _reset_network_module_state():
+def _reset_network_module_state() -> Iterator[None]:
     """Re-create `network`'s module-level events fresh for each test and
     reset queues. asyncio.Event in 3.10+ binds to the loop on first
     `.wait()`, so an event used in a previous test's now-defunct loop
@@ -114,7 +117,9 @@ def _reset_network_module_state():
 
 
 @pytest.fixture(autouse=True)
-def fast_asyncio_sleep(request, monkeypatch):
+def fast_asyncio_sleep(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Replace `asyncio.sleep` with an instant `asyncio.sleep(0)` so the
     defensive long sleeps inside `network.drain_mixwal_read_single`
     (5s on decryption failure, 500s on courier-vanished) do not slow
@@ -125,14 +130,14 @@ def fast_asyncio_sleep(request, monkeypatch):
         return
     real = asyncio.sleep
 
-    async def instant(delay, result=None):
+    async def instant(delay: float, result: object = None) -> object:
         return await real(0, result)
 
     monkeypatch.setattr(asyncio, "sleep", instant)
 
 
 @pytest.fixture
-def fake_thinclient(monkeypatch) -> FakeThinClient:
+def fake_thinclient(monkeypatch: pytest.MonkeyPatch) -> FakeThinClient:
     """A fresh `FakeThinClient`. Also rebinds
     `katzenpost_thinclient.find_services` so `network.py`'s qualified
     calls reach the fake's controllable courier list rather than the
@@ -146,7 +151,7 @@ def fake_thinclient(monkeypatch) -> FakeThinClient:
 
 
 @pytest_asyncio.fixture
-async def live_network(fake_thinclient) -> AsyncIterator["LiveNetwork"]:
+async def live_network(fake_thinclient: FakeThinClient) -> AsyncIterator["LiveNetwork"]:
     """Run `network.start_background_threads(fake_thinclient)` inside an
     asyncio task while the test holds the fixture; cleanly shut it down
     on exit.
@@ -177,11 +182,13 @@ class LiveNetwork:
     """Handle returned by the `live_network` fixture so tests can reach
     the fake and the background task without juggling tuples."""
 
-    def __init__(self, *, fake: FakeThinClient, task: asyncio.Task) -> None:
+    def __init__(self, *, fake: FakeThinClient, task: asyncio.Task[None]) -> None:
         self.fake = fake
         self.task = task
 
-    async def wait_for(self, predicate, *, timeout: float = 5.0) -> None:
+    async def wait_for(
+        self, predicate: Callable[[], object], *, timeout: float = 5.0,
+    ) -> None:
         """Poll ``predicate()`` until it returns truthy or ``timeout``
         elapses. Use this in place of arbitrary sleeps when a test
         waits for a background loop to take effect."""
@@ -196,7 +203,9 @@ class LiveNetwork:
 
 
 @pytest.fixture
-def recorded_sleeps(fast_asyncio_sleep, monkeypatch):
+def recorded_sleeps(
+    fast_asyncio_sleep: None, monkeypatch: pytest.MonkeyPatch,
+) -> list[float]:
     """Every delay the code under test asks `asyncio.sleep` for, in order.
 
     Depends on `fast_asyncio_sleep` so this patch is applied on top of it and
@@ -205,7 +214,7 @@ def recorded_sleeps(fast_asyncio_sleep, monkeypatch):
     delays: "list[float]" = []
     real = asyncio.sleep
 
-    async def recording(delay, result=None):
+    async def recording(delay: float, result: object = None) -> object:
         delays.append(delay)
         return await real(0, result)
 
