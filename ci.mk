@@ -222,7 +222,7 @@ ruff: setup
 		exit 1; \
 	fi
 
-ruff-uv: setup
+ruff-uv:
 	@$(UV) run ruff check src tests
 	@$(UV) run ruff format --check src tests
 
