@@ -275,7 +275,7 @@ jobs:
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
-          KQT_INTEGRATION_PARALLEL: "4"
+          KQT_INTEGRATION_PARALLEL: "2"
         run: |
           mkdir -p integration-results
           bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
