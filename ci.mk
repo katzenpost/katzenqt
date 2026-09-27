@@ -209,3 +209,23 @@ ci-local-woodpecker:
 	@set -e; for pipeline in $(if $(CI_WORKFLOW),$(CI_WORKFLOWS_WOODPECKER)/$(CI_WORKFLOW),$(CI_WORKFLOWS_WOODPECKER)/*.yaml); do \
 		DOCKER_HOST="unix://$(CI_SOCKET)" "$(WOODPECKER)" exec $(CI_WOODPECKER_ARGS) \
 			--repo-path "$(CURDIR)" "$$pipeline"; done
+
+.PHONY: ruff ruff-uv ruff-pip
+ruff: setup
+	@if [[ -e "$(BACKEND_UV)" ]]; then \
+		$(ci_make) ruff-uv; \
+	elif [[ -e "$(BACKEND_PIP)" ]]; then \
+		$(ci_make) ruff-pip; \
+	else \
+		printf '%s\n' "error: no backend selected"; \
+		printf '%s\n' "run: make setup-uv OR make setup-pip"; \
+		exit 1; \
+	fi
+
+ruff-uv: setup
+	@$(UV) run ruff check src tests
+	@$(UV) run ruff format --check src tests
+
+ruff-pip: setup
+	@$(VENV)/bin/ruff check src tests
+	@$(VENV)/bin/ruff format --check src tests
