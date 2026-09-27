@@ -313,11 +313,8 @@ def test_find_resendable_skips_a_paused_stream() -> None:
 # Invariant 6: late-binding lambda in send_resendable_plaintexts is fixed.
 # ---------------------------------------------------------------------------
 
-def test_send_resendable_plaintexts_has_no_late_bound_lambda():
-    """The on_error callback `lambda: __resend_queue.discard(pwal.bacap_stream)`
-    captures the loop variable by reference, so if an earlier iteration's
-    task errors, the lambda fired at that iteration will discard the LAST
-    iteration's bacap_stream instead.
+def test_send_resendable_plaintexts_has_no_late_bound_lambda() -> None:
+    """A lambda passed to on_error must not close over the loop variable.
 
     This test is a source-level regression guard: the broken pattern must
     not be present in network.py. The fix (default-arg capture) is:

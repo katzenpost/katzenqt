@@ -287,3 +287,9 @@ def test_refresh_row_count_reports_a_reset_on_deletion() -> None:
         sess.commit()
 
     assert model.refresh_row_count() is True
+
+
+def test_the_model_reports_its_own_parent_when_asked_without_a_child() -> None:
+    model = ConversationLogModel(convo_id=1)
+
+    assert model.parent() is None

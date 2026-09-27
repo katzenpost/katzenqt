@@ -50,9 +50,7 @@ def test_send_operation_empty() -> None:
     bacap_stream = uuid.uuid4()
     s = models.SendOperation(messages=[],bacap_stream=bacap_stream)
     res = s.serialize(chunk_size=1400, conversation_id=123)
-    assert res is not None
-    assert type(res) is tuple
-    assert res != []
+    assert res == ([], [])
 
 @given(st.integers(min_value=2), st.text())
 def test_send_operation_preserves_1(chunk_size: int, text: str) -> None:

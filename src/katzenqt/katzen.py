@@ -2773,7 +2773,9 @@ class MainWindow(QMainWindow):
         # Restore new single line input buffer
         self.ui.chat_lineEdit.setText(convo_state.chat_lineEdit_buffer)
         # Update the label we display at the top left corner of the chat view:
-        self.ui.ContactName.setText(f"{selected} (your name: {convo_state.own_peer_name})")
+        self.ui.ContactName.setText(
+            f"{selected_name} (your name: {convo_state.own_peer_name})",
+        )
 
         # The whole attach-file tab and its key children start disabled in the
         # generated UI; enable them once a real conversation is in scope.
