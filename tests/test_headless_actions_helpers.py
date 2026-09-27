@@ -13,6 +13,7 @@ import pytest
 
 from katzenqt import network, persistent
 from katzenqt.headless import _actions, _cli
+from katzenqt.tally import controller as tally_controller
 from katzenqt.tally import engine as tally_engine
 from katzenqt.tally import schema as tally_schema
 
@@ -267,7 +268,7 @@ async def test_connect_and_start_reconciles_the_tally_when_asked(
 ) -> None:
     reconciled: "list[int]" = []
 
-    async def fake_reconcile(controller: object) -> None:
+    async def fake_reconcile() -> None:
         reconciled.append(1)
 
     async def fake_reconnect(
@@ -280,7 +281,7 @@ async def test_connect_and_start_reconciles_the_tally_when_asked(
 
     monkeypatch.setattr(network, "reconnect", fake_reconnect)
     monkeypatch.setattr(
-        type(_actions.tally_instance),
+        tally_controller.INSTANCE,
         "reconcile_from_log",
         fake_reconcile,
     )
@@ -327,8 +328,11 @@ async def test_shutdown_warns_when_the_join_overruns_its_budget(
     async def hang(tasks: object) -> None:
         await stuck.wait()
 
+    async def _forever() -> None:
+        await asyncio.Event().wait()
+
     monkeypatch.setattr(network, "_cancel_and_join", hang)
-    bg = asyncio.ensure_future(asyncio.Event().wait())
+    bg: "asyncio.Task[None]" = asyncio.ensure_future(_forever())
     connection = StubConnection()
     with caplog.at_level(logging.WARNING):
         await _actions._shutdown(bg, connection, timeout=0.05)

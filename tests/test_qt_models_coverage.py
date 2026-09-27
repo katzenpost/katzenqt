@@ -4,6 +4,7 @@ import os
 import time
 import uuid
 from collections.abc import Iterator
+from typing import TYPE_CHECKING, cast
 
 import cbor2
 import pytest
@@ -28,6 +29,9 @@ from PySide6.QtWidgets import (  # noqa: E402
     QMainWindow,
     QTreeView,
 )
+
+if TYPE_CHECKING:
+    from katzenqt.katzen import MainWindow
 
 from katzenqt import models, network, persistent, qt_models  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
@@ -139,7 +143,7 @@ def _contacts_tree() -> QStandardItemModel:
 
 def test_filter_accepts_a_directly_matching_top_level_row() -> None:
     window = _FilterWindow()
-    proxy = FilterProxyModel(window)
+    proxy = FilterProxyModel(cast("MainWindow", window))
     proxy.setSourceModel(_contacts_tree())
 
     window.ui.contactFilterLineEdit.setText("ALI")
@@ -149,7 +153,7 @@ def test_filter_accepts_a_directly_matching_top_level_row() -> None:
 
 def test_filter_keeps_children_of_a_matching_parent() -> None:
     window = _FilterWindow()
-    proxy = FilterProxyModel(window)
+    proxy = FilterProxyModel(cast("MainWindow", window))
     source = _contacts_tree()
     proxy.setSourceModel(source)
 
@@ -163,7 +167,7 @@ def test_filter_keeps_children_of_a_matching_parent() -> None:
 
 def test_filter_keeps_a_parent_whose_child_matches() -> None:
     window = _FilterWindow()
-    proxy = FilterProxyModel(window)
+    proxy = FilterProxyModel(cast("MainWindow", window))
     proxy.setSourceModel(_contacts_tree())
 
     window.ui.contactFilterLineEdit.setText("bo")
@@ -173,7 +177,9 @@ def test_filter_keeps_a_parent_whose_child_matches() -> None:
 
 def test_invalidate_re_expands_the_contacts_tree() -> None:
     window = _FilterWindow()
-    proxy: QSortFilterProxyModel = FilterProxyModel(window)
+    proxy: QSortFilterProxyModel = FilterProxyModel(
+        cast("MainWindow", window),
+    )
     proxy.setSourceModel(_contacts_tree())
     window.ui.contacts_treeWidget.setModel(proxy)
     window.ui.contacts_treeWidget.collapseAll()

@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import click
 import pytest
 
 from katzenqt import network, persistent
+
+if TYPE_CHECKING:
+    from katzenpost_thinclient import ThinClient
 from katzenqt.headless import _cli
 from tests.stubs import ignore
 
@@ -58,7 +61,7 @@ async def test_get_pki_document_comes_from_the_connection() -> None:
         def pki_document(self) -> "dict[str, int]":
             return doc
 
-    assert await network.get_pki_document(cast("object", Conn())) == doc
+    assert await network.get_pki_document(cast("ThinClient", Conn())) == doc
 
 
 def test_cli_tolerates_a_loop_without_signal_handlers(

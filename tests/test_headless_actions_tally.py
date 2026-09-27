@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import uuid
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,6 +12,8 @@ from sqlmodel import select
 
 from katzenqt import network, persistent
 from katzenqt.headless import _actions
+from katzenqt.headless import _args
+from katzenqt.tally import controller as tally_controller
 from katzenqt.tally import schema as tally_schema
 from katzenqt.tally import sync as tally_sync
 
@@ -36,8 +39,8 @@ def _logger_into_caplog(
 
 @pytest.fixture(autouse=True)
 def _isolated_tally_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_actions.tally_instance, "_docs", {})
-    monkeypatch.setattr(_actions.tally_instance, "_pending", {})
+    monkeypatch.setattr(tally_controller.INSTANCE, "_docs", {})
+    monkeypatch.setattr(tally_controller.INSTANCE, "_pending", {})
 
 
 @pytest.fixture
@@ -133,7 +136,9 @@ async def test_tally_create_rejects_an_unknown_mode(
         slot=["a"],
         timeout=1.0,
     )
-    assert int(await _actions._action_tally_create(args)) == 2
+    assert int(await _actions._action_tally_create(
+        cast("_args.TallyCreate", args),
+    )) == 2
     assert "unknown mode 'sortition'" in caplog.text
 
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from katzenqt import network
+
+if TYPE_CHECKING:
+    from katzenpost_thinclient import ThinClient
 
 
 @pytest.mark.asyncio
@@ -22,7 +25,7 @@ async def test_resend_loop_retries_when_the_connection_gate_says_no(
 
     monkeypatch.setattr(network, "_wait_for_connection_or_shutdown", gate)
     await asyncio.wait_for(
-        network.send_resendable_plaintexts(cast("object", None)),
+        network.send_resendable_plaintexts(cast("ThinClient", None)),
         timeout=5,
     )
     assert len(calls) >= 2

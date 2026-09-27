@@ -25,9 +25,12 @@ from tests.test_katzen_gui_common import (  # noqa: E402,F401
     audio,
     boxes,
     instant_timer,
+    is_own,
     loaded_window,
+    proxy_of,
     qt_app,
     seed_conversation,
+    systray_of,
     window,
 )
 from tests.stubs import appending_from, first_argument, ignore, returning
@@ -305,7 +308,7 @@ async def test_selecting_a_conversation_fills_the_chat_view(
     assert loaded_window.ui.attach_file_button.isEnabled() is True
     assert loaded_window.ui.poll_tab.isEnabled() is True
     assert loaded_window.ui.new_poll_button.isEnabled() is True
-    assert loaded_window.systray.read_messages >= 1
+    assert systray_of(loaded_window).read_messages >= 1
     assert loaded_window.ui.qml_ChatLines.rootObject() is not None
 
 
@@ -345,9 +348,9 @@ async def test_selecting_a_peer_row_selects_its_conversation(
         for r in range(convo_item.rowCount())
         if convo_item.child(r).text() == "bob"
     )
-    assert bob.peer_is_own is False
+    assert is_own(bob) is False
     source = window.all_contacts.indexFromItem(bob)
-    proxy = window.ui.contacts_treeWidget.model().mapFromSource(source)
+    proxy = proxy_of(window).mapFromSource(source)
     window.ui.contacts_treeWidget.setCurrentIndex(proxy)
     for _ in range(80):
         await asyncio.sleep(0)

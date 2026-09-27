@@ -5,6 +5,7 @@ import os
 import uuid
 from pathlib import Path
 from collections.abc import Callable, Coroutine
+from typing import Any, cast
 
 import cbor2
 import pytest
@@ -16,11 +17,13 @@ from PySide6.QtCore import QModelIndex, QPoint  # noqa: E402
 from PySide6.QtGui import QAction  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
+    QDialog,
     QMenu,
     QMessageBox,
 )
 
-from katzenqt import katzen, network, persistent  # noqa: E402
+from katzenqt import katzen, network, persistent, removal  # noqa: E402
+from katzenqt.qt_models import FilterProxyModel  # noqa: E402
 from katzenqt.tally import schema as tally_schema  # noqa: E402
 
 from tests.test_katzen_gui_common import (  # noqa: E402,F401
@@ -70,12 +73,26 @@ def peer_position(
 ) -> QPoint:
     tree = win.ui.contacts_treeWidget
     source = win.all_contacts.indexFromItem(item)
-    proxy = tree.model().mapFromSource(source)
+    proxy = cast(FilterProxyModel, tree.model()).mapFromSource(source)
     parent = proxy.parent()
     if parent.isValid():
         tree.expand(parent)
     point: QPoint = tree.visualRect(proxy).center()
     return point
+
+
+def cap_of(item: katzen.QStandardItem) -> uuid.UUID:
+    """The read cap the contacts tree tagged a peer row with."""
+    cap = getattr(item, "peer_read_cap_id")
+    assert isinstance(cap, uuid.UUID)
+    return cap
+
+
+def is_own(item: katzen.QStandardItem) -> bool:
+    """Whether the contacts tree tagged a row as our own peer."""
+    own = getattr(item, "peer_is_own")
+    assert isinstance(own, bool)
+    return own
 
 
 def peer_named(win: katzen.MainWindow, name: str) -> katzen.QStandardItem:
@@ -202,7 +219,7 @@ async def test_pausing_a_peer_stops_reading_its_stream(
     bob = peer_named(window, "bob")
     chosen(by_text("Do not read from bob any more"))
     await window.peer_context_menu(peer_position(window, bob))
-    assert pauses["pause_read"] == [bob.peer_read_cap_id]
+    assert pauses["pause_read"] == [cap_of(bob)]
     assert pauses["resume_read"] == []
 
 
@@ -220,14 +237,14 @@ async def test_resuming_a_paused_peer_restarts_its_stream(
     window.resize(900, 600)
     bob = peer_named(window, "bob")
     with persistent.Session(persistent._engine_sync) as sess:
-        rcw = sess.get(persistent.ReadCapWAL, bob.peer_read_cap_id)
+        rcw = sess.get(persistent.ReadCapWAL, cap_of(bob))
         assert rcw is not None
         rcw.paused = True
         sess.add(rcw)
         sess.commit()
     chosen(by_text("Resume reading from bob"))
     await window.peer_context_menu(peer_position(window, bob))
-    assert pauses["resume_read"] == [bob.peer_read_cap_id]
+    assert pauses["resume_read"] == [cap_of(bob)]
     assert pauses["pause_read"] == []
 
 
@@ -535,7 +552,7 @@ async def test_the_join_loop_waits_for_the_daemon_connection(
         return ["zoe"]
 
     def connect_later() -> None:
-        window.iothread.kp_client = object()
+        window.iothread.kp_client = cast(Any, object())
 
     monkeypatch.setattr(katzen, "await_and_open", open_it)
     asyncio.get_running_loop().call_soon(connect_later)
@@ -670,8 +687,8 @@ async def test_a_joined_member_already_in_the_database_is_tagged(
     item = convo.contacts_standard_item
     tagged = item.child(item.rowCount() - 1)
     assert tagged.text() == "carol"
-    assert tagged.peer_is_own is False
-    assert isinstance(tagged.peer_read_cap_id, uuid.UUID)
+    assert is_own(tagged) is False
+    assert isinstance(cap_of(tagged), uuid.UUID)
 
 
 @pytest.mark.asyncio
@@ -707,8 +724,8 @@ async def test_an_inducted_member_already_in_the_database_is_tagged(
     item = window.convo_state().contacts_standard_item
     tagged = item.child(item.rowCount() - 1)
     assert tagged.text() == "carol"
-    assert tagged.peer_is_own is False
-    assert isinstance(tagged.peer_read_cap_id, uuid.UUID)
+    assert is_own(tagged) is False
+    assert isinstance(cap_of(tagged), uuid.UUID)
 
 
 @pytest.mark.asyncio
@@ -803,7 +820,7 @@ async def test_a_failed_group_chat_removal_is_reported(
     async def explode(*, conversation_id: int) -> None:
         raise RuntimeError("no")
 
-    monkeypatch.setattr(katzen.removal, "remove_conversation", explode)
+    monkeypatch.setattr(removal, "remove_conversation", explode)
     confirms(True)
     chosen(by_text("Remove group chat..."))
     await window.peer_context_menu(
@@ -896,7 +913,7 @@ async def test_a_failed_peer_removal_is_reported(
     async def explode(*, conversation_id: int, peer_id: int) -> None:
         raise RuntimeError("no")
 
-    monkeypatch.setattr(katzen.removal, "remove_peer", explode)
+    monkeypatch.setattr(removal, "remove_peer", explode)
     confirms(True)
     chosen(by_text("Remove bob from this group chat..."))
     await window.peer_context_menu(peer_position(window, bob))
@@ -926,7 +943,7 @@ async def test_dropping_a_peer_row_of_an_unknown_chat_touches_no_model(
     conversation = conversation_row(window)
     window.conversation_state_by_id.clear()
 
-    window._drop_peer_ui(conversation, bob)
+    window._drop_peer_ui(cast(Any, conversation), cast(Any, bob))
 
     remaining = [
         conversation.child(row).text()
@@ -942,7 +959,7 @@ async def test_selecting_a_row_whose_chat_is_gone_is_ignored(
     await _shown(window)
     tree = window.ui.contacts_treeWidget
     source = window.all_contacts.indexFromItem(conversation_row(window))
-    proxy = tree.model().mapFromSource(source)
+    proxy = cast(FilterProxyModel, tree.model()).mapFromSource(source)
     window.conversation_state_by_id.clear()
 
     await window.conversation_selected(proxy, QModelIndex())

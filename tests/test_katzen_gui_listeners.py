@@ -6,6 +6,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable, Coroutine
+from typing import Any, cast
 
 import pytest
 
@@ -21,11 +22,14 @@ from tests.test_katzen_gui_common import (  # noqa: E402,F401
     FakeMessageBox,
     add_seeded_conversation,
     boxes,
+    cap_of,
     fresh_queues,
     instant_timer,
+    is_own,
     loaded_window,
     qt_app,
     seed_conversation,
+    systray_of,
     window,
 )
 
@@ -105,9 +109,9 @@ async def test_a_redraw_only_update_only_restyles_the_rows(
     loaded_window: katzen.MainWindow,
 ) -> None:
     convo_id = loaded_window.convo_state().conversation_id
-    before = loaded_window.systray.new_messages
+    before = systray_of(loaded_window).new_messages
     await loaded_window._process_conversation_update(convo_id, True)
-    assert loaded_window.systray.new_messages == before
+    assert systray_of(loaded_window).new_messages == before
 
 
 @pytest.mark.asyncio
@@ -129,7 +133,7 @@ async def test_an_update_for_a_background_conversation_bumps_the_scroll(
         False,
     )
     assert first.chat_lines_scroll_idx == before + 1.0
-    assert loaded_window.systray.new_messages == 1
+    assert systray_of(loaded_window).new_messages == 1
 
 
 @pytest.mark.asyncio
@@ -138,7 +142,7 @@ async def test_the_receive_listener_survives_a_bad_queue_item(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
-    await network.conversation_update_queue.put("not a pair")
+    await network.conversation_update_queue.put(cast(Any, "not a pair"))
     await run_briefly(loaded_window.receive_msg_listener)
     assert "receive_msg_listener: dropping an item after" in caplog.text
 
@@ -183,8 +187,8 @@ async def test_an_announced_peer_carries_its_read_cap_tag(
     await window._process_peer_added(seeded.conversation_id, "hank")
     added = state.contacts_standard_item.child(0)
     assert added.text() == "hank"
-    assert added.peer_is_own is False
-    assert isinstance(added.peer_read_cap_id, uuid.UUID)
+    assert is_own(added) is False
+    assert isinstance(cap_of(added), uuid.UUID)
 
 
 @pytest.mark.asyncio
@@ -207,7 +211,7 @@ async def test_the_peer_listener_survives_a_bad_queue_item(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
-    await network.peer_added_queue.put(None)
+    await network.peer_added_queue.put(cast(Any, None))
     await run_briefly(loaded_window.peer_added_listener)
     assert "peer_added_listener: dropping an item after" in caplog.text
 
@@ -320,7 +324,7 @@ async def test_the_tally_listener_survives_a_bad_item(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.ERROR, logger="katzen")
-    await network.tally_update_queue.put(["unhashable"])
+    await network.tally_update_queue.put(cast(Any, ["unhashable"]))
     await run_briefly(window.tally_listener)
     assert "tally_listener: dropping an item after" in caplog.text
 

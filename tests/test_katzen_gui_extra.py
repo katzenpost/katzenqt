@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from typing import Any, cast
 
 import pytest
 
@@ -25,8 +26,10 @@ from tests.test_katzen_gui_common import (  # noqa: E402,F401
     boxes,
     fresh_queues,
     loaded_window,
+    proxy_of,
     qt_app,
     seed_conversation,
+    systray_of,
     window,
 )
 from tests.stubs import appending, ignore
@@ -57,7 +60,7 @@ def io_thread_startup(
 
     async def async_main() -> None:
         order.append("async_main")
-        thread.kp_client = "the client"
+        thread.kp_client = cast(Any, "the client")
 
     async def background(client: object) -> None:
         order.append(f"start_background_threads:{client}")
@@ -70,7 +73,7 @@ def io_thread_startup(
     handler = thread.loop.get_exception_handler()
     assert handler is not None
     try:
-        yield IoThreadStartup(order, handler)
+        yield IoThreadStartup(order, cast(Any, handler))
     finally:
         thread.loop.close()
 
@@ -174,7 +177,7 @@ async def test_a_source_that_settles_while_connecting_needs_no_wait() -> None:
     widget = SettlingQuickWidget(
         [QQuickWidget.Status.Loading, QQuickWidget.Status.Ready],
     )
-    await katzen._qml_source_ready(widget)
+    await katzen._qml_source_ready(cast(QQuickWidget, widget))
     assert widget.statuses == []
     assert widget.statusChanged.slots == []
 
@@ -250,7 +253,9 @@ def popped(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 def peer_position(win: katzen.MainWindow, item: QStandardItem) -> QPoint:
     tree = win.ui.contacts_treeWidget
-    proxy = tree.model().mapFromSource(win.all_contacts.indexFromItem(item))
+    proxy = proxy_of(win).mapFromSource(
+        win.all_contacts.indexFromItem(item),
+    )
     parent = proxy.parent()
     if parent.isValid():
         tree.expand(parent)
@@ -355,9 +360,7 @@ def conversation_index(
 ) -> QModelIndex:
     state = win.conversation_state_by_id[conversation_id]
     source = win.all_contacts.indexFromItem(state.contacts_standard_item)
-    index: QModelIndex = win.ui.contacts_treeWidget.model().mapFromSource(
-        source,
-    )
+    index: QModelIndex = proxy_of(win).mapFromSource(source)
     return index
 
 
@@ -372,9 +375,7 @@ def peer_index(
         child = item.child(row)
         if child.text() == name:
             source = win.all_contacts.indexFromItem(child)
-            index: QModelIndex = (
-                win.ui.contacts_treeWidget.model().mapFromSource(source)
-            )
+            index: QModelIndex = proxy_of(win).mapFromSource(source)
             return index
     raise AssertionError(f"no peer row named {name}")
 
@@ -417,14 +418,14 @@ async def test_a_selection_with_no_conversation_state_stops_early(
 ) -> None:
     first_id = loaded_window.convo_state().conversation_id
     before = loaded_window.ui.ContactName.text()
-    read_before = loaded_window.systray.read_messages
+    read_before = systray_of(loaded_window).read_messages
     selected = conversation_index(loaded_window, first_id)
     monkeypatch.setattr(loaded_window, "convo_state", ignore)
 
     await loaded_window.conversation_selected(selected, QModelIndex())
 
     assert loaded_window.ui.ContactName.text() == before
-    assert loaded_window.systray.read_messages == read_before
+    assert systray_of(loaded_window).read_messages == read_before
 
 
 @pytest.mark.asyncio

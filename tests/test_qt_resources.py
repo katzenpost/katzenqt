@@ -1,4 +1,5 @@
 import os
+from typing import Any, cast
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -14,9 +15,9 @@ def test_the_bundled_resources_are_registered() -> None:
 
 
 def test_cleanup_unregisters_and_init_puts_them_back() -> None:
-    resources_rc.qCleanupResources()
+    cast(Any, resources_rc.qCleanupResources)()
     try:
         assert not QFile(A_BUNDLED_FILE).exists()
     finally:
-        resources_rc.qInitResources()
+        cast(Any, resources_rc.qInitResources)()
     assert QFile(A_BUNDLED_FILE).exists()

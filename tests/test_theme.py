@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Iterator
+from typing import cast
 from pathlib import Path
 
 import pytest
@@ -162,7 +163,9 @@ class _Harness:
         self.window.ui = ui
         widgets = ui.widgets() if isinstance(ui, _FakeUi) else [self.witness]
         self.app = _FakeApp(style, widgets)
-        self.manager = ThemeManager(self.app, self.window)
+        self.manager = ThemeManager(
+            cast(QApplication, self.app), self.window,
+        )
 
     @property
     def ui(self) -> _FakeUi:

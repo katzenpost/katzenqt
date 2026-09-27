@@ -6,12 +6,13 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QObject, QPoint, Qt  # noqa: E402
 from PySide6.QtGui import QCloseEvent, QFont, QIcon, QKeyEvent  # noqa: E402
 from PySide6.QtNetwork import (  # noqa: E402
     QHostAddress,
@@ -33,11 +34,15 @@ from katzenqt import katzen, network, persistent, theme  # noqa: E402
 from tests.test_katzen_gui_common import (  # noqa: E402,F401
     FakeIoThread,
     FakeMessageBox,
+    FakeSystray,
     boxes,
     qt_app,
     window,
 )
 from tests.stubs import appending, call_now, returning
+
+if TYPE_CHECKING:
+    from katzenqt.katzen import AsyncioThread
 
 
 class FakeFontDialog:
@@ -310,7 +315,8 @@ def test_the_close_event_hides_the_window_into_the_tray(
     window.closeEvent(event)
     assert event.isAccepted() is False
     assert window.isVisible() is False
-    assert window.systray.messages == [
+    systray = cast(FakeSystray, window.systray)
+    assert systray.messages == [
         ("Still running", f"{katzen.APP_NAME} running in background."),
     ]
 
@@ -378,7 +384,7 @@ def test_the_firewall_access_manager_refuses_to_connect(
     engine = QQmlEngine()
     factory = katzen.FirewallNetworkAccessManagerFactory()
     engine.setNetworkAccessManagerFactory(factory)
-    parent = katzen.QObject()
+    parent = QObject()
     manager = factory.create(parent)
     try:
         assert engine.networkAccessManagerFactory() is factory
@@ -397,12 +403,12 @@ def test_the_firewall_access_manager_refuses_to_connect(
             time.sleep(0.002)
         assert accepted == [1]
 
-        assert manager.connectToHost("127.0.0.1", port) is None
-        assert manager.connectToHostEncrypted("127.0.0.1", port) is None
+        manager.connectToHost("127.0.0.1", port)
+        manager.connectToHostEncrypted("127.0.0.1", port)
         _pump(qt_app, 0.3)
         assert accepted == [1]
     finally:
-        engine.setNetworkAccessManagerFactory(None)
+        engine.setNetworkAccessManagerFactory(cast(Any, None))
         server.close()
         parent.deleteLater()
 
@@ -418,8 +424,9 @@ def test_the_key_press_filter_never_eats_an_event(
         " ",
     )
     other = katzen.QEvent(katzen.QEvent.Type.None_)
-    assert filt.eventFilter(None, key) is False
-    assert filt.eventFilter(None, other) is False
+    detached = QObject()
+    assert filt.eventFilter(detached, key) is False
+    assert filt.eventFilter(detached, other) is False
 
 
 def test_the_placeholder_helpers_are_inert(qt_app: QApplication) -> None:
@@ -784,7 +791,7 @@ async def test_waiting_gives_up_on_a_dead_io_thread(
     thread.engine_warmed.clear()
     thread.alive = False
     caplog.set_level(logging.ERROR, logger="katzen")
-    await katzen._wait_for_engine_warmed(thread)
+    await katzen._wait_for_engine_warmed(cast("AsyncioThread", thread))
     assert "io thread exited before it warmed the async engine" in caplog.text
 
 

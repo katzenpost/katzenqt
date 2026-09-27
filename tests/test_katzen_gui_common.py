@@ -6,7 +6,7 @@ import threading
 import uuid
 from collections.abc import Callable, Coroutine, Iterator
 from pathlib import Path
-from typing import ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, cast
 
 import pytest
 import pytest_asyncio
@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from katzenqt import katzen, network, persistent  # noqa: E402
+
+if TYPE_CHECKING:
+    from katzenqt.audio_ptt import PttAudioBridge
+    from katzenqt.qt_models import FilterProxyModel
+    from katzenqt.katzen import AsyncioThread, MixSystrayIcon
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -298,8 +303,8 @@ def window(
     palette = QPalette(qt_app.palette())
     main_window = katzen.MainWindow(qt_app)
     main_window.settings = {}
-    main_window.iothread = FakeIoThread()
-    main_window.systray = FakeSystray()
+    main_window.iothread = cast("AsyncioThread", FakeIoThread())
+    main_window.systray = cast("MixSystrayIcon", FakeSystray())
     yield main_window
     main_window.push_to_talk_watchdog.stop()
     main_window._playback_error_timer.stop()
@@ -328,7 +333,7 @@ def audio(
     tmp_path: Path,
 ) -> FakeAudio:
     bridge = FakeAudio(tmp_path / "audio")
-    window._ptt_audio = bridge
+    window._ptt_audio = cast("PttAudioBridge", bridge)
     return bridge
 
 
@@ -449,3 +454,29 @@ async def drain_tasks() -> None:
             await task
         except (asyncio.CancelledError, Exception):  # noqa: B014
             pass
+
+
+def systray_of(win: katzen.MainWindow) -> FakeSystray:
+    """The fake systray the window fixture installed."""
+    return cast(FakeSystray, win.systray)
+
+
+def proxy_of(win: katzen.MainWindow) -> "FilterProxyModel":
+    """The contacts tree's proxy model, which the view types as its base."""
+    from katzenqt.qt_models import FilterProxyModel
+
+    return cast(FilterProxyModel, win.ui.contacts_treeWidget.model())
+
+
+def cap_of(item: katzen.QStandardItem) -> uuid.UUID:
+    """The read cap the contacts tree tagged a peer row with."""
+    cap = getattr(item, "peer_read_cap_id")
+    assert isinstance(cap, uuid.UUID)
+    return cap
+
+
+def is_own(item: katzen.QStandardItem) -> bool:
+    """Whether the contacts tree tagged a row as our own peer."""
+    own = getattr(item, "peer_is_own")
+    assert isinstance(own, bool)
+    return own

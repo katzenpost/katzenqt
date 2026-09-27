@@ -90,8 +90,8 @@ def test_mark_sent_txn_reaps_the_mixwal_when_the_pwal_is_gone() -> None:
         missing_pwal,
         False,
         b"\x02" * 104,
-        b"\x02" * 104,
-        b"\x01" * 104,
+        2,
+        1,
     )
     assert result is None
     with Session(persistent._engine_sync) as sess:
@@ -142,8 +142,8 @@ def test_mark_sent_txn_logs_a_missing_write_cap_and_a_stream_mismatch(
             pwal_id,
             False,
             b"\x02" * 104,
-            b"\x02" * 104,
-            b"\x01" * 104,
+            2,
+            1,
         )
     assert "no WriteCapWAL for bacap_stream" in caplog.text
     assert "doesn't match pwal.bacap_stream" in caplog.text

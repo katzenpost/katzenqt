@@ -5,6 +5,7 @@ import hashlib
 import os
 import uuid
 from pathlib import Path
+from typing import cast
 
 import cbor2
 import pytest
@@ -74,7 +75,7 @@ def test_the_window_builds_its_attachment_controls(
     assert window.ui.action_theme.isEnabled() is True
     assert window.ui.menuMixnetStatus.isEnabled() is True
     assert window.push_to_talk_started is False
-    assert window.playingMessageId == ""
+    assert playing_id(window) == ""
     assert window._poll_windows == {}
 
 
@@ -114,6 +115,11 @@ def test_an_item_without_a_stored_path_resolves_to_none(
     window.ui.attached_files_QListWidget.setCurrentItem(item)
     assert window._selected_attachment_item() is item
     assert window._selected_attachment_path() is None
+
+
+def playing_id(win: katzen.MainWindow) -> str:
+    """The QML-visible playing-message property, as QML reads it."""
+    return cast(str, win.playingMessageId)
 
 
 @pytest.mark.asyncio
@@ -294,7 +300,7 @@ def test_the_playing_message_id_property_notifies_on_change(
     window._set_playing_message_id("abc")
     window._set_playing_message_id("")
     assert seen == ["abc", ""]
-    assert window.playingMessageId == ""
+    assert playing_id(window) == ""
 
 
 def test_an_unavailable_audio_engine_is_reported_once(
@@ -362,7 +368,7 @@ def test_a_playback_error_is_reported_and_stops_the_monitor(
     assert boxes.seen[0].text == (
         "Failed to play the received voice note.\n\ndevice lost"
     )
-    assert window.playingMessageId == ""
+    assert playing_id(window) == ""
     assert window._playback_error_timer.isActive() is False
 
 
@@ -394,7 +400,7 @@ def test_finished_playback_quietly_stops_the_monitor(
     window._set_playing_message_id("m9")
     window._poll_playback_error()
     assert boxes.seen == []
-    assert window.playingMessageId == ""
+    assert playing_id(window) == ""
     assert window._playback_error_timer.isActive() is False
 
 
@@ -473,7 +479,7 @@ def test_stopping_playback_clears_the_monitor(
     window._set_playing_message_id("m2")
     window.stopAudioPlayback()
     assert audio.stops == 1
-    assert window.playingMessageId == ""
+    assert playing_id(window) == ""
     assert window._playback_error_timer.isActive() is False
 
 
@@ -602,7 +608,7 @@ def test_playing_a_received_voice_note_caches_and_plays_it(
     window.playReceivedMessage(message_id)
     assert len(audio.played) == 1
     assert audio.played[0].read_bytes() == b"opus bytes"
-    assert window.playingMessageId == message_id
+    assert playing_id(window) == message_id
     assert window._playback_error_timer.isActive() is True
 
 
@@ -616,12 +622,12 @@ def test_playing_without_an_audio_engine_does_nothing(
     window.playReceivedMessage(message_id)
     assert audio.played == []
     assert boxes.seen == []
-    assert window.playingMessageId == ""
+    assert playing_id(window) == ""
 
     window._ptt_audio_failed = False
     window.playReceivedMessage(message_id)
     assert len(audio.played) == 1
-    assert window.playingMessageId == message_id
+    assert playing_id(window) == message_id
 
 
 def test_playing_a_missing_attachment_warns(
@@ -665,7 +671,7 @@ def test_a_failing_playback_start_is_reported(
 ) -> None:
     audio.raise_on.add("play_received")
     window.playReceivedMessage(spill_received_marker("note.opus", b"opus"))
-    assert window.playingMessageId == ""
+    assert playing_id(window) == ""
     assert boxes.seen[0].text == (
         "Failed to play the received voice note.\n\nplay_received failed"
     )
@@ -1123,5 +1129,5 @@ def test_the_key_press_stubs_run(
         Qt.KeyboardModifier.NoModifier,
         " ",
     )
-    assert window.X_keyPressEvent(event) is None
-    assert window.X_keyReleaseEvent(event) is None
+    window.X_keyPressEvent(event)
+    window.X_keyReleaseEvent(event)

@@ -6,7 +6,7 @@ import sys
 import pytest
 
 import katzenqt
-from katzenqt import integration_runner
+from katzenqt import headless, integration_runner
 
 
 def test_cli_is_exposed_lazily() -> None:
@@ -28,7 +28,7 @@ def test_integration_runner_delegates_to_headless(
         seen.append(argv)
         return 7
 
-    monkeypatch.setattr(integration_runner.headless, "cli", fake_cli)
+    monkeypatch.setattr(headless, "cli", fake_cli)
     assert integration_runner.main(["info"]) == 7
     assert seen == [["info"]]
 
@@ -42,7 +42,7 @@ def test_integration_runner_passes_none_through(
         seen.append(argv)
         return 0
 
-    monkeypatch.setattr(integration_runner.headless, "cli", fake_cli)
+    monkeypatch.setattr(headless, "cli", fake_cli)
     assert integration_runner.main() == 0
     assert seen == [None]
 
@@ -53,7 +53,7 @@ def test_headless_module_entry_point_exits_with_the_cli_status(
     def fake_cli(argv: "list[str] | None" = None) -> int:
         return 7
 
-    monkeypatch.setattr(integration_runner.headless, "cli", fake_cli)
+    monkeypatch.setattr(headless, "cli", fake_cli)
     monkeypatch.setattr(sys, "argv", ["katzenqt-headless"])
     with pytest.raises(SystemExit) as caught:
         runpy.run_module("katzenqt.headless", run_name="__main__")
@@ -67,7 +67,7 @@ def test_integration_runner_module_entry_point_exits(
     def fake_cli(argv: "list[str] | None" = None) -> int:
         return 7
 
-    monkeypatch.setattr(integration_runner.headless, "cli", fake_cli)
+    monkeypatch.setattr(headless, "cli", fake_cli)
     monkeypatch.setattr(sys, "argv", ["katzenqt.integration_runner"])
     with pytest.raises(SystemExit) as caught:
         runpy.run_module("katzenqt.integration_runner", run_name="__main__")

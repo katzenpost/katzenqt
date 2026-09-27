@@ -7,13 +7,16 @@ import pathlib
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import cbor2
 import pytest
 from sqlmodel import select
 
 from katzenqt import models, network, persistent
+
+if TYPE_CHECKING:
+    from katzenpost_thinclient import ThinClient
 from tests.stubs import ignore, returning
 
 
@@ -165,7 +168,9 @@ class TestPacketTelemetryCaps:
         fake_thinclient: _Fake,
     ) -> None:
         network.reset_packets()
-        network.install_stats_counters(fake_thinclient)
+        network.install_stats_counters(
+            cast("ThinClient", fake_thinclient),
+        )
         fake_thinclient.inject_error(
             "start_resending_encrypted_message",
             ValueError("bad envelope"),
@@ -413,7 +418,12 @@ class TestTryAssemble:
         async with persistent.asession() as sess:
             assembled = await network._try_assemble(sess, stream, _idx(2)[:8])
         assert assembled is not None
-        kind, chunks, chain, parsed = assembled
+        assert assembled[0] == "F"
+        kind, chunks, chain, parsed = cast(
+            "tuple[str, list[tuple[bytes, bytes]], "
+            "list[persistent.ReceivedPiece], models.GroupChatMessage]",
+            assembled,
+        )
         assert kind == "F"
         assert len(chain) == 2
         assert [rp.chunk_type for rp in chain] == [b"C", b"F"]

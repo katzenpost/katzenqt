@@ -80,6 +80,7 @@ async def test_an_inactive_peer_is_left_out_of_the_hash() -> None:
     conv_id = await _seed("bob", False)
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
         got = await conversation_handlers.local_membership_hash(sess, convo)
     assert got == _expected_without_extra()
 
@@ -90,6 +91,7 @@ async def test_a_substream_peer_is_left_out_of_the_hash() -> None:
     conv_id = await _seed(name, True)
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
         got = await conversation_handlers.local_membership_hash(sess, convo)
     assert got == _expected_without_extra()
 
@@ -99,6 +101,7 @@ async def test_an_active_ordinary_peer_does_change_the_hash() -> None:
     conv_id = await _seed("bob", True)
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
         got = await conversation_handlers.local_membership_hash(sess, convo)
     assert got != _expected_without_extra()
     assert got == models.canonical_membership_hash(
