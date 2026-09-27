@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 CI_LOCAL_OWN=1
-include ci.mk
+include $(dir $(lastword $(MAKEFILE_LIST)))ci.mk
 .ONESHELL:
 .SHELLFLAGS := -eu -o pipefail -c
 

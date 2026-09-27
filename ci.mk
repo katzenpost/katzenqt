@@ -2,6 +2,7 @@
 
 FORGEJO_RUNNER ?= forgejo-runner
 WOODPECKER ?= woodpecker-cli
+ci_make=$(MAKE) -f $(firstword $(MAKEFILE_LIST))
 RUNNER ?=
 CI_RUNNERS ?= act forgejo-runner woodpecker-cli
 CI_WORKFLOWS_WOODPECKER ?= .woodpecker
@@ -169,9 +170,9 @@ ci-local:
 		done; \
 	fi; \
 	case "$$runner" in \
-		act) $(MAKE) ci-local-act;; \
-		forgejo|forgejo-runner) $(MAKE) ci-local-forgejo;; \
-		woodpecker|woodpecker-cli) $(MAKE) ci-local-woodpecker;; \
+		act) $(ci_make) ci-local-act;; \
+		forgejo|forgejo-runner) $(ci_make) ci-local-forgejo;; \
+		woodpecker|woodpecker-cli) $(ci_make) ci-local-woodpecker;; \
 		"") printf '%s\n' 'no local ci runner found; install one of: $(CI_RUNNERS)' >&2; exit 1;; \
 		*) printf '%s\n' 'RUNNER must be act, forgejo or woodpecker' >&2; exit 1;; \
 	esac

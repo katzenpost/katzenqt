@@ -58,9 +58,9 @@ class _Run:
     def socket(self) -> Path:
         return self.runtime / "podman/podman.sock"
 
-    def make(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def make(self, *args: str, target: str = "ci-local-act") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [MAKE, "-f", str(ROOT / "Makefile"), "ci-local", *args],
+            [MAKE, "-f", str(ROOT / "Makefile"), target, *args],
             cwd=self.directory, env=self.env, text=True,
             capture_output=True, timeout=15,
         )
