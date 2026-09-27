@@ -749,7 +749,6 @@ async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     if epoch is None or epoch == _last_epoch:
         return
     previous, _last_epoch = _last_epoch, epoch
-    epochs.remember_period(derive_epoch_period_seconds(epoch))
     logger.info("PKI epoch advanced to %s (from %s)", epoch, previous)
     old_event, _epoch_event = _epoch_event, asyncio.Event()
     old_event.set()
@@ -3733,6 +3732,19 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
     raise FileNotFoundError(
         "Could not locate thinclient.toml in: "
         + ", ".join(str(c) for c in candidates)
+    )
+
+
+def epoch_period_seconds(now: "datetime | None" = None) -> float:
+    """The epoch period in seconds, 0.0 while no PKI document has landed.
+
+    Derived from the epoch the last document reported, so it is a reading
+    of current state rather than a value anything stored. KQT_EPOCH_DURATION_S
+    answers for a network the PKI has not described yet.
+    """
+    return epochs.period_s(
+        derive_epoch_period_seconds(_last_epoch, now),
+        os.environ.get("KQT_EPOCH_DURATION_S"),
     )
 
 
