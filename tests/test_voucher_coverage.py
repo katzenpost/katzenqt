@@ -330,7 +330,7 @@ async def test_an_unacked_introduction_is_reported_not_raised(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def never_sent(
-        pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float = 0.0,
+        pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float,
     ) -> bool:
         return False
 

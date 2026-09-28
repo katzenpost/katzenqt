@@ -737,7 +737,7 @@ async def own_read_cap(
 
 
 async def wait_for_sent(
-    pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float = 0.0,
+    pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float,
     poll_s: float = 0.25,
 ) -> bool:
     """Poll SentLog for ``pwal_id`` until ``epoch_s`` plus ``deadline_s``

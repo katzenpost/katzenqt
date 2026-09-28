@@ -3736,16 +3736,16 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
 
 
 def epoch_period_seconds(now: "datetime | None" = None) -> float:
-    """The epoch period in seconds, 0.0 while no PKI document has landed.
-
-    Derived from the epoch the last document reported, so it is a reading
-    of current state rather than a value anything stored. KQT_EPOCH_DURATION_S
-    answers for a network the PKI has not described yet.
-    """
-    return epochs.period_s(
-        derive_epoch_period_seconds(_last_epoch, now),
-        os.environ.get("KQT_EPOCH_DURATION_S"),
+    override = os.environ.get("KQT_EPOCH_DURATION_S")
+    period = epochs.period_s(
+        derive_epoch_period_seconds(_last_epoch, now), override,
     )
+    if period == 0.0 and override:
+        logger.warning(
+            "ignoring KQT_EPOCH_DURATION_S=%r: not a period between 0 and "
+            "a week", override,
+        )
+    return period
 
 
 # from katzenpost_thinclient import ThinClient, Config

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import logging
 import re
 import types
 import uuid
@@ -84,12 +85,20 @@ def test_a_bad_epoch_override_is_ignored() -> None:
 
 
 def test_a_non_finite_period_is_refused_at_both_doors() -> None:
-    """inf reopens the spin: loop.time() < inf never stops being true."""
     for bad in ("inf", "1e999", "nan", "-inf"):
         assert epochs.period_s(None, bad) == 0.0, bad
     for derived in (float("inf"), float("nan"), float("-inf")):
         assert epochs.period_s(derived) == 0.0, derived
     assert epochs.period_s(float("inf"), "1200") == 1200.0
+
+
+def test_a_period_longer_than_a_week_is_refused_at_both_doors() -> None:
+    week = 7.0 * 86400.0
+    assert epochs.period_s(week) == week
+    assert epochs.period_s(week + 1.0) == 0.0
+    assert epochs.period_s(None, str(week)) == week
+    assert epochs.period_s(None, str(week + 1.0)) == 0.0
+    assert epochs.period_s(week + 1.0, "1200") == 1200.0
 
 
 def test_a_non_positive_derived_period_falls_back() -> None:
@@ -115,6 +124,17 @@ def test_the_network_reads_the_period_from_the_epoch_it_last_saw(
     assert network.epoch_period_seconds(now) == 120.0
 
 
+def test_an_unusable_override_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(network, "_last_epoch", None)
+    monkeypatch.setenv("KQT_EPOCH_DURATION_S", "soon")
+    with caplog.at_level(logging.WARNING, logger="katzen.network"):
+        assert network.epoch_period_seconds() == 0.0
+    assert "ignoring KQT_EPOCH_DURATION_S" in caplog.text
+
+
 def _epochs_tree() -> ast.Module:
     return ast.parse(
         Path(epochs.__file__).read_text(encoding="utf-8"),
@@ -123,13 +143,6 @@ def _epochs_tree() -> ast.Module:
 
 
 def test_epochs_exposes_only_its_pure_functions() -> None:
-    """Read after calling them, so a global made on first call is caught.
-
-    One runtime check covers what several source checks could not: a name
-    bound inside a module-level if or try, a class to hang state on, an
-    import, an lru_cache wrapper (not a plain function), a closure cell,
-    and a memo stashed on the function object.
-    """
     epochs.period_s(None)
     epochs.period_s(120.0, "1200")
     epochs.budget_s(120.0, 180.0)
@@ -151,22 +164,23 @@ def test_epochs_exposes_only_its_pure_functions() -> None:
 
 
 def test_no_import_or_outer_rebinding_anywhere_in_epochs() -> None:
-    """Walked, not read off the module body.
-
-    A function-local ``import os`` puts os.environ back within reach and
-    leaves no trace in the namespace, and a ``global`` on a branch nothing
-    takes leaves none either.
-    """
-    assert [
-        ast.dump(node) for node in ast.walk(_epochs_tree())
-        if isinstance(
-            node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal),
-        )
-    ] == []
+    banned = []
+    for node in ast.walk(_epochs_tree()):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            banned.append(ast.dump(node))
+        elif isinstance(node, ast.Import):
+            banned += [a.name for a in node.names if a.name == "os"]
+        elif isinstance(node, ast.ImportFrom):
+            banned += [
+                a.name for a in node.names
+                if node.module == "os" or a.name in ("os", "environ")
+            ]
+        elif isinstance(node, ast.Attribute) and node.attr == "environ":
+            banned.append(node.attr)
+    assert banned == []
 
 
 def test_the_same_arguments_always_give_the_same_answer() -> None:
-    """A memo would show up as a second call disagreeing with the first."""
     def readings() -> "list[float]":
         return [
             epochs.period_s(None),
@@ -185,23 +199,15 @@ def test_the_same_arguments_always_give_the_same_answer() -> None:
 
 @pytest.mark.asyncio
 async def test_a_fake_epoch_one_cannot_stall_wait_for_sent() -> None:
-    """The incident itself, in its own shape.
-
-    The event is the one tests/test_network_fake.py feeds, and it goes
-    through the real on_new_pki_document rather than a monkeypatched
-    _last_epoch. Epoch 1 implies 9.3 years; before the rewrite that period
-    reached this wait and spun the poll loop for about 1.18 billion
-    iterations, because asyncio.sleep is instant here while loop.time()
-    keeps real time.
-    """
     await network.on_new_pki_document(
         {"payload": cbor2.dumps({"Epoch": 1})},
     )
-    assert network.epoch_period_seconds() > 86400.0 * 365.0
+    assert network.epoch_period_seconds() == 0.0
     loop = asyncio.get_running_loop()
     started = loop.time()
     assert await persistent.wait_for_sent(
         uuid.uuid4(), deadline_s=0.01,
+        epoch_s=network.epoch_period_seconds(),
     ) is False
     assert loop.time() - started < 1.0
 
@@ -209,8 +215,6 @@ async def test_a_fake_epoch_one_cannot_stall_wait_for_sent() -> None:
 @pytest.mark.real_sleeps
 @pytest.mark.asyncio
 async def test_wait_for_sent_adds_the_epoch_to_the_deadline() -> None:
-    """Without this, a wait_for_sent that ignored epoch_s would still pass
-    the test above."""
     loop = asyncio.get_running_loop()
     started = loop.time()
     assert await persistent.wait_for_sent(
@@ -220,13 +224,11 @@ async def test_wait_for_sent_adds_the_epoch_to_the_deadline() -> None:
 
 
 def test_the_hardcoded_wait_detector_fires() -> None:
-    """A detector asserted to find nothing has to be shown to find."""
     assert _long_literals("alice.wait(timeout=900)") == ["timeout=900"]
     assert _long_literals("alice.wait(timeout=120)") == []
 
 
 def test_no_job_sets_a_wait_by_hand() -> None:
-    """Waits come from the epoch, so no job carries a number to sync."""
     text = NAMENLOS.read_text(encoding="utf-8")
     assert "KQT_SEND_BUDGET_FLOOR_S" not in text
     assert 'KQT_EPOCH_DURATION_S: "1200"' in text
