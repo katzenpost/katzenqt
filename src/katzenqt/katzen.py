@@ -2223,27 +2223,15 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(False)
 
-    def _peer_id_of(self, item: "ContactsItem") -> "int | None":
-        with persistent.Session(persistent._engine_sync) as sess:
-            return sess.exec(
-                select(persistent.ConversationPeer.id)
-                .join(
-                    persistent.ConversationPeerLink,
-                    col(persistent.ConversationPeerLink.conversation_peer_id)
-                    == col(persistent.ConversationPeer.id),
-                )
-                .where(
-                    col(persistent.ConversationPeerLink.conversation_id)
-                    == cast("ContactsItem", item.parent()).conversation_id,
-                    col(persistent.ConversationPeer.read_cap_id)
-                    == item.peer_read_cap_id,
-                )
-            ).first()
-
     async def _remove_peer(self, item: "ContactsItem") -> None:
         conversation_item = cast("ContactsItem", item.parent())
         conversation_id = conversation_item.conversation_id
-        peer_id = self._peer_id_of(item)
+        peer_id = await self.iothread.run_in_io(
+            persistent.peer_id_by_read_cap(
+                conversation_id=conversation_id,
+                read_cap_id=item.peer_read_cap_id,
+            ),
+        )
         if peer_id is None:
             return
         if not await self._confirm(

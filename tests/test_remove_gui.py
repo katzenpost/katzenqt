@@ -216,11 +216,7 @@ async def _wired_peer(
             _as_window(window), conversation_item, peer,
         )
 
-    def peer_id_of(peer: "katzen.ContactsItem") -> "int | None":
-        return katzen.MainWindow._peer_id_of(_as_window(window), peer)
-
     window._drop_peer_ui = drop_peer_ui
-    window._peer_id_of = peer_id_of
     return window, conv_item, item, conv_id
 
 

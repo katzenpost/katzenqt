@@ -1124,6 +1124,23 @@ async def peer_named_in_conversation(
     return peers[0] if len(peers) == 1 else None
 
 
+async def peer_id_by_read_cap(
+    *, conversation_id: int, read_cap_id: uuid.UUID,
+) -> "int | None":
+    """The ConversationPeer id of the member in this conversation whose read
+    cap is ``read_cap_id``, or None when no such member is there. Read
+    through the async engine: the GUI reaches it via run_in_io, never the
+    sync engine on the Qt thread."""
+    async with asession() as sess:
+        return (await sess.exec(
+            select(ConversationPeer.id)
+            .where(col(ConversationPeer.id)
+                   == ConversationPeerLink.conversation_peer_id)
+            .where(ConversationPeerLink.conversation_id == conversation_id)
+            .where(ConversationPeer.read_cap_id == read_cap_id)
+        )).first()
+
+
 class ConversationLog(SQLModel, table=True):
     """CBOR messages in a conversation.
 
