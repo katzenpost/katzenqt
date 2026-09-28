@@ -43,4 +43,4 @@ async def test_missing_substream_box_then_data_uses_the_same_cursor(
     events = []
     while not network.substream_progress_queue.empty():
         events.append(network.substream_progress_queue.get_nowait())
-    assert [event[0] for event in events] == ["piece"]
+    assert [type(event) for event in events] == [network.TransferPiece]

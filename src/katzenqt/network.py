@@ -555,26 +555,72 @@ class TransferRemoved:
 
 
 # Substream file-transfer progress for the GUI Transfers panel.
-# Download events are ``(kind, rcw_id, *extra)``:
-#   ("started", rcw_id, conversation_id, total_or_None, parent_name)
-#   ("piece",    rcw_id, count, received_bytes)  # pieces and effective bytes so far
-#   ("completed", rcw_id)
-#   ("paused",   rcw_id)
-#   ("resumed",  rcw_id)
-#   ("failed",   rcw_id, reason_str)         # unprocessable chunk
-# Upload events mirror them under distinct kinds, keyed by the indirection
-# ReadCapWAL id:
-#   ("upload_started",   rcw_id, conversation_id, total_or_None, total_bytes, name)
-#   ("upload_piece",     rcw_id, sent_count, remaining_bytes)
-#   ("upload_completed", rcw_id)             # last C/F chunk ACK'd
-#   ("upload_paused",    rcw_id)
-#   ("upload_resumed",   rcw_id)
-# A removed transfer is a TransferRemoved(rcw_id) instance instead of a tuple.
 # Byte counts are effective payload bytes (the chunk-type prefix and any
 # wire/framing overhead excluded).
 # Pushed on the io loop where the substream's ReceivedPiece/ReadCapWAL rows are
 # written; the GUI's transfers_listener drains it and updates DownloadsModel.
-substream_progress_queue: "asyncio.Queue[Any]" = asyncio.Queue()
+TransferDirection = Literal["download", "upload"]
+
+
+@dataclasses.dataclass(frozen=True)
+class TransferStarted:
+    rcw_id: uuid.UUID
+    conversation_id: int
+    total: int | None
+    parent_name: str
+
+
+@dataclasses.dataclass(frozen=True)
+class UploadStarted:
+    rcw_id: uuid.UUID
+    conversation_id: int
+    total: int | None
+    total_bytes: int
+    parent_name: str
+    basename: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class TransferPiece:
+    rcw_id: uuid.UUID
+    pieces: int
+    received_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class UploadPiece:
+    rcw_id: uuid.UUID
+    sent: int
+    remaining_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class TransferPaused:
+    rcw_id: uuid.UUID
+    direction: TransferDirection
+    paused: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class TransferCompleted:
+    rcw_id: uuid.UUID
+    direction: TransferDirection
+    cancelled: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class TransferFailed:
+    rcw_id: uuid.UUID
+    reason: str
+
+
+TransferEvent = (
+    TransferStarted | UploadStarted | TransferPiece | UploadPiece
+    | TransferPaused | TransferCompleted | TransferFailed
+    | TransferRemoved
+)
+
+substream_progress_queue: "asyncio.Queue[TransferEvent]" = asyncio.Queue()
 
 __resend_queue: "set[uuid.UUID]" = set()  # tracks bacap_streams currently in MixWAL
 __resend_queue_populated = asyncio.Event() # set after existing MixWAL loaded from disk
@@ -641,10 +687,13 @@ async def notify_outbound_chat_sent(
             if basename else upload.parent_name
         )
         set_upload_label(upload.stream_id, label)
-        substream_progress_queue.put_nowait((
-            "upload_started", upload.rcw_id, upload.conversation_id,
-            upload.total_chunks, upload.total_bytes, upload.parent_name,
-            basename,
+        substream_progress_queue.put_nowait(UploadStarted(
+            rcw_id=upload.rcw_id,
+            conversation_id=upload.conversation_id,
+            total=upload.total_chunks,
+            total_bytes=upload.total_bytes,
+            parent_name=upload.parent_name,
+            basename=basename,
         ))
     await check_for_new()
 
@@ -1279,12 +1328,14 @@ async def drain_mixwal_write_single(connection:ThinClient, mw: persistent.MixWAL
         # panel; the row is done when the last C/F chunk is ACK'd, which is
         # when the gated I-chunk becomes dispatchable.
         if progress.sent >= progress.total:
-            substream_progress_queue.put_nowait(("upload_completed", progress.rcw_id))
+            substream_progress_queue.put_nowait(TransferCompleted(
+                rcw_id=progress.rcw_id, direction="upload", cancelled=False,
+            ))
         else:
-            substream_progress_queue.put_nowait(
-                ("upload_piece", progress.rcw_id, progress.sent,
-                 progress.remaining_bytes),
-            )
+            substream_progress_queue.put_nowait(UploadPiece(
+                rcw_id=progress.rcw_id, sent=progress.sent,
+                remaining_bytes=progress.remaining_bytes,
+            ))
 
 _SUBSTREAM_NAME_PREFIX = models.SUBSTREAM_NAME_PREFIX
 
@@ -1946,7 +1997,9 @@ async def _record_substream_miss(
                 await sess.delete(row)
         await sess.commit()
     if failure is not None:
-        substream_progress_queue.put_nowait(("failed", bacap_stream, failure))
+        substream_progress_queue.put_nowait(
+            TransferFailed(rcw_id=bacap_stream, reason=failure),
+        )
         return True
     return False
 
@@ -2249,7 +2302,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       await sess.delete(mw)
       await sess.commit()
       if failure is not None:
-          substream_progress_queue.put_nowait(("failed", bacap_uuid, failure))
+          substream_progress_queue.put_nowait(
+              TransferFailed(rcw_id=bacap_uuid, reason=failure),
+          )
       draining_right_now.discard(bacap_uuid)  # otherwise this stream is wedged forever with no exception needed
       __mixwal_updated.set()
       return
@@ -2269,7 +2324,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     # panel shows. The byte sum is the effective payload (ReceivedPiece.chunk
     # has the 1-byte chunk-type prefix already stripped), used for the rate
     # column.
-    substream_progress: "list[tuple[object, ...]]" = []
+    substream_progress: "list[TransferEvent]" = []
     if cp.name.startswith(_SUBSTREAM_NAME_PREFIX):
         piece_count, received_bytes = (await sess.exec(
             select(
@@ -2283,8 +2338,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             ).select_from(persistent.ReceivedPiece)
             .where(persistent.ReceivedPiece.read_cap == mw.bacap_stream)
         )).one()
-        substream_progress.append((
-            "piece", mw.bacap_stream, int(piece_count), int(received_bytes),
+        substream_progress.append(TransferPiece(
+            rcw_id=mw.bacap_stream, pieces=int(piece_count),
+            received_bytes=int(received_bytes),
         ))
 
     assembled = await _try_assemble(
@@ -2341,8 +2397,8 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 rcw.substream_failure = "The transfer parent no longer exists"
                 sess.add(cp)
                 sess.add(rcw)
-                substream_progress.append((
-                    "failed", mw.bacap_stream, rcw.substream_failure,
+                substream_progress.append(TransferFailed(
+                    rcw_id=mw.bacap_stream, reason=rcw.substream_failure,
                 ))
             else:
                 if gcm.file_upload is not None:
@@ -2373,7 +2429,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     convlog_added = added
                     # The transfer is complete (terminal F
                     # assembled and routed). Held until commit.
-                    substream_progress.append(("completed", mw.bacap_stream))
+                    substream_progress.append(TransferCompleted(
+                        rcw_id=mw.bacap_stream, direction="download",
+                        cancelled=False,
+                    ))
                 else:
                     # Top-level F (single-box or contiguous on the parent stream):
                     # route by message type, chat into the log, tally into the
@@ -2441,14 +2500,13 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 )
                 sess.add(substream_peer)
                 # Announce the new download. Held until commit.
-                substream_progress.append((
-                    "started", new_rcw.id, cp.conversation.id,
-                    new_rcw.substream_total_chunks,
-                    cp.name,
+                substream_progress.append(TransferStarted(
+                    rcw_id=new_rcw.id, conversation_id=cp.conversation.id,
+                    total=new_rcw.substream_total_chunks, parent_name=cp.name,
                 ))
                 if over_cap:
-                    substream_progress.append((
-                        "failed", new_rcw.id, _OVER_CAP_FAILURE,
+                    substream_progress.append(TransferFailed(
+                        rcw_id=new_rcw.id, reason=_OVER_CAP_FAILURE,
                     ))
 
         await sess.delete(mw)
@@ -2499,8 +2557,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
               if mw_row is not None:
                   await drop_sess.delete(mw_row)
               await drop_sess.commit()
-          substream_progress_queue.put_nowait(
-              ("failed", str(mw.bacap_stream), _failure_reason(e)))
+          substream_progress_queue.put_nowait(TransferFailed(
+              rcw_id=mw.bacap_stream, reason=_failure_reason(e),
+          ))
           give_up()
           return
       else:
@@ -2629,7 +2688,11 @@ async def pause_peer_reads(*, bacap_stream: uuid.UUID) -> None:
     readables_to_mixwal_event.set()
     __mixwal_updated.set()
     if is_substream:
-        substream_progress_queue.put_nowait(("paused", bacap_stream))
+        substream_progress_queue.put_nowait(
+            TransferPaused(
+                rcw_id=bacap_stream, direction="download", paused=True,
+            ),
+        )
 
 
 async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
@@ -2658,7 +2721,11 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         await sess.commit()
     readables_to_mixwal_event.set()
     if is_substream:
-        substream_progress_queue.put_nowait(("resumed", bacap_stream))
+        substream_progress_queue.put_nowait(
+            TransferPaused(
+                rcw_id=bacap_stream, direction="download", paused=False,
+            ),
+        )
 
 
 async def pause_upload(*, rcw_id: uuid.UUID) -> None:
@@ -2699,7 +2766,9 @@ async def pause_upload(*, rcw_id: uuid.UUID) -> None:
     _inflight_writes.pop(agg, None)
     resendable_event.set()
     __mixwal_updated.set()
-    substream_progress_queue.put_nowait(("upload_paused", rcw_id))
+    substream_progress_queue.put_nowait(
+        TransferPaused(rcw_id=rcw_id, direction="upload", paused=True),
+    )
 
 
 async def resume_upload(*, rcw_id: uuid.UUID) -> None:
@@ -2717,7 +2786,9 @@ async def resume_upload(*, rcw_id: uuid.UUID) -> None:
             await sess.commit()
     resendable_event.set()
     __mixwal_updated.set()
-    substream_progress_queue.put_nowait(("upload_resumed", rcw_id))
+    substream_progress_queue.put_nowait(
+        TransferPaused(rcw_id=rcw_id, direction="upload", paused=False),
+    )
 
 
 async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
@@ -2815,7 +2886,9 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
             await sess.delete(wcw)
         await sess.commit()
     __mixwal_updated.set()
-    substream_progress_queue.put_nowait(("upload_cancelled", rcw_id))
+    substream_progress_queue.put_nowait(
+        TransferCompleted(rcw_id=rcw_id, direction="upload", cancelled=True),
+    )
     if conv_id is not None:
         await conversation_update_queue.put((conv_id, False))
 
@@ -3794,9 +3867,18 @@ __all__ = [
     "ThinClientConfig",
     "ThinClientOfflineError",
     "TombstoneError",
+    "TransferCompleted",
+    "TransferDirection",
+    "TransferEvent",
+    "TransferFailed",
+    "TransferPaused",
+    "TransferPiece",
+    "TransferStarted",
     "TypeVar",
     "TypedDict",
     "Unpack",
+    "UploadPiece",
+    "UploadStarted",
     "asyncio",
     "attachment_images",
     "cancel_upload",

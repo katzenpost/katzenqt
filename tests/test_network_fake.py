@@ -1394,12 +1394,10 @@ class TestDrainMixwalReadSingle:
             assert peers[0].name.startswith(network._SUBSTREAM_NAME_PREFIX)
             assert peers[0].active is True
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "started"
-        _, started_rcw, conv_id, total, parent_name = event
-        assert started_rcw == rcw.id
-        assert conv_id == setup["conversation_id"]
-        assert total == 7
-        assert parent_name == "parent_alice"
+        assert event == network.TransferStarted(
+            rcw_id=rcw.id, conversation_id=setup["conversation_id"],
+            total=7, parent_name="parent_alice",
+        )
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
@@ -1430,8 +1428,8 @@ class TestDrainMixwalReadSingle:
             assert len(substreams) == 1
             assert substreams[0].substream_total_chunks is None
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "started"
-        assert event[3] is None
+        assert isinstance(event, network.TransferStarted)
+        assert event.total is None
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
@@ -1470,7 +1468,8 @@ class TestDrainMixwalReadSingle:
         events = []
         while not network.substream_progress_queue.empty():
             events.append(network.substream_progress_queue.get_nowait())
-        assert any(e[0] == "failed" for e in events), events
+        failed = [e for e in events if isinstance(e, network.TransferFailed)]
+        assert failed, events
 
     @pytest.mark.asyncio
     async def test_substream_piece_read_fires_piece_event(
@@ -1491,10 +1490,11 @@ class TestDrainMixwalReadSingle:
             mw=mw, draining_right_now={setup["bacap_stream"]},
         )
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "piece"
-        assert event[1] == setup["bacap_stream"]
-        assert event[2] == 1  # the C-chunk just stored counts as one piece
-        assert event[3] == 5  # b"chunk": payload after the type byte
+        assert event == network.TransferPiece(
+            rcw_id=setup["bacap_stream"],
+            pieces=1,  # the C-chunk just stored counts as one piece
+            received_bytes=5,  # b"chunk": payload after the type byte
+        )
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
@@ -1564,12 +1564,13 @@ class TestDrainMixwalReadSingle:
             mw=mw, draining_right_now={setup["bacap_stream"]},
         )
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "piece"
-        assert event[1] == setup["bacap_stream"]
-        assert event[2] == 1
+        assert isinstance(event, network.TransferPiece)
+        assert event.rcw_id == setup["bacap_stream"]
+        assert event.pieces == 1
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "completed"
-        assert event[1] == setup["bacap_stream"]
+        assert event == network.TransferCompleted(
+            setup["bacap_stream"], "download", cancelled=False,
+        )
         assert network.substream_progress_queue.empty()
 
         async with persistent.asession() as sess:
@@ -1977,10 +1978,10 @@ class TestDrainMixwalReadSingle:
         # The dispatch fails, so the "piece" event is never fired (the
         # ReceivedPiece add is rolled back). Only the "failed" event appears.
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "failed"
-        assert event[1] == str(setup["bacap_stream"])
-        assert event[2] == "ValueError"
-        assert "malformed chunk data" not in event[2]
+        assert event == network.TransferFailed(
+            setup["bacap_stream"], "ValueError",
+        )
+        assert "malformed chunk data" not in event.reason
         assert network.substream_progress_queue.empty()
         
         # Verify peer deactivated
@@ -2324,8 +2325,9 @@ class TestPauseResumePeerReads:
             assert await sess.get(persistent.MixWAL, setup["mw_id"]) is None
         # The pause announces itself to the Transfers panel.
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "paused"
-        assert event[1] == setup["bacap_stream"]
+        assert event == network.TransferPaused(
+            setup["bacap_stream"], "download", paused=True,
+        )
         # Resume must run on a paused stream even though the drain loop
         # re-arms it (fresh MW) only when a connection is present.
         await network.resume_peer_reads(bacap_stream=setup["bacap_stream"])
@@ -2335,8 +2337,9 @@ class TestPauseResumePeerReads:
             ))).one()
             assert cp.active is True
         event = network.substream_progress_queue.get_nowait()
-        assert event[0] == "resumed"
-        assert event[1] == setup["bacap_stream"]
+        assert event == network.TransferPaused(
+            setup["bacap_stream"], "download", paused=False,
+        )
 
     @pytest.mark.asyncio
     async def test_resume_rearms_read_from_saved_index(self, fake_thinclient: FakeThinClient) -> None:
@@ -3992,9 +3995,9 @@ class TestUploadTransferEvents:
         # chunk payload is b"Cx": one effective payload byte after the
         # 1-byte chunk-type prefix. The local payload is not a file marker,
         # so there is no basename.
-        assert event == (
-            "upload_started", rcw_id, setup["conversation_id"], 3, 1,
-            "carol-conv", None,
+        assert event == network.UploadStarted(
+            rcw_id=rcw_id, conversation_id=setup["conversation_id"], total=3,
+            total_bytes=1, parent_name="carol-conv", basename=None,
         )
         assert network.substream_progress_queue.empty()
 
@@ -4013,7 +4016,9 @@ class TestUploadTransferEvents:
         event = network.substream_progress_queue.get_nowait()
         # each b"Cchunk" payload is 5 effective bytes (6 minus the type byte);
         # one of the two present chunks was ACK'd, leaving 5 bytes outstanding.
-        assert event == ("upload_piece", setup["rcw_id"], 2, 5)
+        assert event == network.UploadPiece(
+            setup["rcw_id"], sent=2, remaining_bytes=5,
+        )
         assert network.substream_progress_queue.empty()
 
     @pytest.mark.asyncio
@@ -4029,7 +4034,9 @@ class TestUploadTransferEvents:
             fake_thinclient, mw, {setup["agg"]},
         )
         event = network.substream_progress_queue.get_nowait()
-        assert event == ("upload_completed", setup["rcw_id"])
+        assert event == network.TransferCompleted(
+            setup["rcw_id"], "upload", cancelled=False,
+        )
 
     @pytest.mark.asyncio
     async def test_main_stream_ack_emits_no_upload_event(self, fake_thinclient: FakeThinClient) -> None:
@@ -4067,7 +4074,7 @@ class TestUploadTransferEvents:
             )).all()
             assert len(remaining) == 2
         assert network.substream_progress_queue.get_nowait() == (
-            "upload_paused", setup["rcw_id"],
+            network.TransferPaused(setup["rcw_id"], "upload", paused=True)
         )
 
     @pytest.mark.asyncio
@@ -4084,7 +4091,7 @@ class TestUploadTransferEvents:
             assert wcw is not None
             assert wcw.paused is False
         assert network.substream_progress_queue.get_nowait() == (
-            "upload_resumed", setup["rcw_id"],
+            network.TransferPaused(setup["rcw_id"], "upload", paused=False)
         )
 
     @pytest.mark.asyncio
@@ -4133,7 +4140,9 @@ class TestUploadTransferEvents:
             )).all()
             assert convlogs == []
         assert network.substream_progress_queue.get_nowait() == (
-            "upload_cancelled", setup["rcw_id"],
+            network.TransferCompleted(
+                setup["rcw_id"], "upload", cancelled=True,
+            )
         )
 
     @pytest.mark.asyncio

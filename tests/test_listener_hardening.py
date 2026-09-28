@@ -283,21 +283,25 @@ class TestTransfersListenerDrainsEvents:
         return _FakeTransfersModel(boom_on)
 
     @pytest.mark.asyncio
-    async def test_events_are_dispatched_to_the_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_events_are_dispatched_to_the_model(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         rcw = __import__("uuid").uuid4()
         up_rcw = __import__("uuid").uuid4()
         queue = _FakeQueue([
-            ("started", rcw, 7, 3, "alice"),
-            ("piece", rcw, 1, 1529),
-            ("piece", rcw, 2, 3058),
-            ("paused", rcw),
-            ("resumed", rcw),
-            ("completed", rcw),
-            ("upload_started", up_rcw, 7, 25, 25000, "bob-conv", "photo.jpg"),
-            ("upload_piece", up_rcw, 6, 30000),
-            ("upload_paused", up_rcw),
-            ("upload_resumed", up_rcw),
-            ("upload_completed", up_rcw),
+            network.TransferStarted(rcw, 7, 3, "alice"),
+            network.TransferPiece(rcw, 1, 1529),
+            network.TransferPiece(rcw, 2, 3058),
+            network.TransferPaused(rcw, "download", paused=True),
+            network.TransferPaused(rcw, "download", paused=False),
+            network.TransferCompleted(rcw, "download", cancelled=False),
+            network.UploadStarted(
+                up_rcw, 7, 25, 25000, "bob-conv", "photo.jpg",
+            ),
+            network.UploadPiece(up_rcw, 6, 30000),
+            network.TransferPaused(up_rcw, "upload", paused=True),
+            network.TransferPaused(up_rcw, "upload", paused=False),
+            network.TransferCompleted(up_rcw, "upload", cancelled=False),
         ])
         monkeypatch.setattr(network, "substream_progress_queue", queue)
         model = self._fake_transfers_model(boom_on=None)
@@ -327,8 +331,8 @@ class TestTransfersListenerDrainsEvents:
     ) -> None:
         rcw = __import__("uuid").uuid4()
         queue = _FakeQueue([
-            ("started", rcw, 7, 3, "alice"),  # boom
-            ("piece", rcw, 1, 1529),          # must still get through
+            network.TransferStarted(rcw, 7, 3, "alice"),  # boom
+            network.TransferPiece(rcw, 1, 1529),  # must still get through
         ])
         monkeypatch.setattr(network, "substream_progress_queue", queue)
         window = _fake_window(

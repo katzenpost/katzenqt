@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import NamedTuple, Optional, TYPE_CHECKING, cast
+from typing import NamedTuple, Optional, TYPE_CHECKING, assert_never, cast
 
 import cbor2
 import click
@@ -2370,60 +2370,43 @@ class MainWindow(QMainWindow):
                 event = await self.iothread.run_in_io(
                     network.substream_progress_queue.get(),
                 )
-                if isinstance(event, network.TransferRemoved):
-                    self.transfers_model.remove_transfer(event.rcw_id)
-                    continue
-                kind = event[0]
-                raw_id = event[1]
-                rcw_id = (
-                    uuid.UUID(raw_id) if isinstance(raw_id, str)
-                    else cast(uuid.UUID, raw_id)
-                )
-                if kind == "started":
-                    _, _, conv_id, total, parent_name = event
+                if isinstance(event, network.TransferStarted):
                     self.transfers_model.start_transfer(
-                        rcw_id, cast(int, conv_id), cast(str, parent_name),
-                        cast("int | None", total),
+                        event.rcw_id, event.conversation_id,
+                        event.parent_name, event.total,
                     )
-                elif kind == "upload_started":
-                    _, _, conv_id, total, total_bytes, parent_name, basename = event
+                elif isinstance(event, network.UploadStarted):
                     label = (
-                        f"{basename} (in {parent_name})"
-                        if basename else cast(str, parent_name)
+                        f"{event.basename} (in {event.parent_name})"
+                        if event.basename else event.parent_name
                     )
                     self.transfers_model.start_transfer(
-                        rcw_id, cast(int, conv_id), label,
-                        cast("int | None", total),
-                        direction="upload", raw_bytes=cast(int, total_bytes),
+                        event.rcw_id, event.conversation_id, label,
+                        event.total, direction="upload",
+                        raw_bytes=event.total_bytes,
                     )
-                elif kind == "piece":
+                elif isinstance(event, network.TransferPiece):
                     self.transfers_model.notify_piece(
-                        rcw_id, cast(int, event[2]),
-                        cast("int | None", event[3]),
+                        event.rcw_id, event.pieces, event.received_bytes,
                     )
-                elif kind == "upload_piece":
+                elif isinstance(event, network.UploadPiece):
                     self.transfers_model.notify_piece(
-                        rcw_id, cast(int, event[2]),
-                        cast("int | None", event[3]),
+                        event.rcw_id, event.sent, event.remaining_bytes,
                     )
-                elif kind == "completed":
-                    self.transfers_model.complete_transfer(rcw_id)
-                elif kind == "upload_completed":
-                    self.transfers_model.complete_transfer(rcw_id)
-                elif kind == "upload_cancelled":
-                    self.transfers_model.complete_transfer(rcw_id)
-                elif kind == "paused":
-                    self.transfers_model.set_paused(rcw_id, paused=True)
-                elif kind == "resumed":
-                    self.transfers_model.set_paused(rcw_id, paused=False)
-                elif kind == "upload_paused":
-                    self.transfers_model.set_paused(rcw_id, paused=True)
-                elif kind == "upload_resumed":
-                    self.transfers_model.set_paused(rcw_id, paused=False)
-                elif kind == "failed":
+                elif isinstance(event, network.TransferCompleted):
+                    self.transfers_model.complete_transfer(event.rcw_id)
+                elif isinstance(event, network.TransferPaused):
+                    self.transfers_model.set_paused(
+                        event.rcw_id, paused=event.paused,
+                    )
+                elif isinstance(event, network.TransferFailed):
                     self.transfers_model.fail_transfer(
-                        rcw_id, cast(str, event[2]),
+                        event.rcw_id, event.reason,
                     )
+                elif isinstance(event, network.TransferRemoved):
+                    self.transfers_model.remove_transfer(event.rcw_id)
+                else:
+                    assert_never(event)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
