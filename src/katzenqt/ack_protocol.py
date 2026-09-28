@@ -3,7 +3,7 @@
 No Qt, no SQLModel, no ThinClient, no asyncio: every state machine and
 function here is plain data in, plain data out, so it is testable without a
 session, a connection, or a docker mixnet. See "Opportunistic
-acknowledgements and backfill" and "Optimistic resync" in the group chat
+acknowledgements and backfill" and "Rewrite and scan" in the group chat
 protocol spec.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ Sent-box retention window)."""
 
 
 class ScanState(enum.Enum):
-    """States of the reader's scan state machine (see "Optimistic resync",
+    """States of the reader's scan state machine (see "Rewrite and scan",
     item 2, in the group chat spec)."""
 
     READING = "reading"
@@ -39,7 +39,7 @@ class ReaderScan:
 # BoxIDNotFound means exactly "nothing has ever been written here", which
 # is indistinguishable from an ordinarily quiet stream, forever -- no
 # threshold on how long that has continued turns it into reliable
-# detection (see "Optimistic resync" in the spec). So `ReadNotFound` in
+# detection (see "Rewrite and scan" in the spec). So `ReadNotFound` in
 # `READING` is never itself escalated by this function; only an explicit
 # `ScanRequested`, sourced from the user asking their client to scan, does.
 
@@ -159,8 +159,8 @@ class SentBoxRecord:
 def select_backfill(
     journal: "list[SentBoxRecord]", current_epoch: int,
 ) -> "list[SentBoxRecord]":
-    """Rows due for the periodic refresh's rewrite: whatever has not
-    already been rewritten this replica epoch. This is the sweep's only
-    eligibility check (Part 4); an ACK never narrows it (see "Backfill is
-    not ACK-triggered" in the plan)."""
+    """Rows due for the periodic rewrite: whatever has not already been
+    rewritten this replica epoch. This is the sweep's only eligibility
+    check (Part 4); an ACK never narrows it (see "Backfill is not
+    ACK-triggered" in the plan)."""
     return [row for row in journal if row.written_epoch < current_epoch]

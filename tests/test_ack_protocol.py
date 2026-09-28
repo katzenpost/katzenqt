@@ -13,7 +13,7 @@ from katzenqt import ack_protocol as ap
 
 # ---------------------------------------------------------------------------
 # ReaderScan.step: one case per row of the group chat spec's transition
-# table ("Optimistic resync", item 2). ack_protocol.step is total over every
+# table ("Rewrite and scan", item 2). ack_protocol.step is total over every
 # (state, event) pair (2 states x 4 events); this table is the executable
 # form of that claim.
 # ---------------------------------------------------------------------------
@@ -240,16 +240,16 @@ def test_select_backfill_handles_extreme_epoch_ids(journal, current_epoch):
 # Joint simulation: Alice authors a channel, subject to simplified replica
 # GC and her own periodic sweep; Bob reads it with a real ReaderScan, and at
 # some point his user requests a scan. This is the closest a pure-Python
-# property test gets to the cross-member liveness claim in "Optimistic
-# resync": given Alice keeps her own sweep going (online at least once per
+# property test gets to the cross-member liveness claim in "Rewrite and
+# scan": given Alice keeps her own sweep going (online at least once per
 # epoch), does a single, deliberate, user-triggered scan always recover
 # everything -- no matter how long Bob was offline, and with no assumption
 # at all about how often Bob himself checks in?
 #
 # This is deliberately a small abstraction, not a rebuild of the real GC or
-# sweep code: a position "exists" if it was written or swept within the
+# sweep code: a position "exists" if it was written or rewritten within the
 # current or immediately preceding epoch (mirroring WipeStaleBoxes), and
-# Alice's sweep refreshes every position she is online to run it against.
+# Alice's sweep rewrites every position she is online to run it against.
 # Bob uses the real ap.step for his own side.
 # ---------------------------------------------------------------------------
 
@@ -260,13 +260,13 @@ def _run_joint_simulation(
     # already gone stale by tick 0 -- the interesting case is recovering
     # from a gap that already exists, not merely keeping up with new
     # writes (which ordinary reading, unmodified, already handles).
-    last_refresh_epoch = [-1_000_000] * n_positions
+    last_rewrite_epoch = [-1_000_000] * n_positions
 
     def epoch_of(tick):
         return tick // epoch_length
 
     def exists(i, tick):
-        return epoch_of(tick) - last_refresh_epoch[i] <= 1
+        return epoch_of(tick) - last_rewrite_epoch[i] <= 1
 
     scan = ap.ReaderScan(ap.ScanState.READING)
     next_index = 0
@@ -277,8 +277,8 @@ def _run_joint_simulation(
         e = epoch_of(tick)
         if alice_online[tick]:
             for i in range(n_positions):
-                if last_refresh_epoch[i] < e:
-                    last_refresh_epoch[i] = e
+                if last_rewrite_epoch[i] < e:
+                    last_rewrite_epoch[i] = e
 
         if not bob_online[tick]:
             continue
@@ -291,7 +291,7 @@ def _run_joint_simulation(
 
         # Once actively Scanning, race through the backlog within this
         # same tick: deriving and probing the next index needs no network
-        # round trip (see "Optimistic resync"), so it is not paced the way
+        # round trip (see "Rewrite and scan"), so it is not paced the way
         # an ordinary ReadNotFound retry is. While merely READING, one
         # ordinary read attempt per online tick, exactly as always.
         while True:
@@ -325,7 +325,7 @@ def _run_joint_simulation(
 
 def _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs):
     """One online tick per epoch, guaranteed, plus whatever extra ticks
-    Hypothesis wants to add. Used for Alice's side: her periodic refresh
+    Hypothesis wants to add. Used for Alice's side: her periodic rewrite
     still needs this to guarantee anything survives to be found."""
     schedule = data.draw(st.lists(
         st.booleans(), min_size=total_ticks, max_size=total_ticks,
@@ -349,7 +349,7 @@ def test_a_single_requested_scan_recovers_everything_given_alice_stayed_fair(
     # scan is requested and completes (Scanning races through the whole
     # backlog in one tick -- see _run_joint_simulation): there is no
     # assumption at all about how often Bob himself checks in, only that
-    # Alice's own refresh has been keeping things alive.
+    # Alice's own periodic rewrite has been keeping things alive.
     slack_epochs = data.draw(st.integers(min_value=3, max_value=20))
     total_epochs = slack_epochs
     total_ticks = total_epochs * epoch_length
@@ -366,8 +366,8 @@ def test_a_single_requested_scan_recovers_everything_given_alice_stayed_fair(
     note(f"final scan={scan!r} next_index={next_index} received={received}")
     assert received == set(range(n_positions)), (
         "a single requested scan did not recover every position Alice ever "
-        "wrote, even though her own refresh was online at least once per "
-        "epoch throughout"
+        "wrote, even though her own periodic rewrite was online at least "
+        "once per epoch throughout"
     )
 
 
