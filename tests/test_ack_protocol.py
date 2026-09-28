@@ -13,216 +13,88 @@ from katzenqt import ack_protocol as ap
 
 # ---------------------------------------------------------------------------
 # ReaderScan.step: one case per row of the group chat spec's transition
-# table ("Optimistic resync", item 2), plus the no-op rows that table omits
-# because nothing changes there. ack_protocol.step is total over every
-# (state, event) pair; this table is the executable form of that claim.
+# table ("Optimistic resync", item 2). ack_protocol.step is total over every
+# (state, event) pair (2 states x 4 events); this table is the executable
+# form of that claim.
 # ---------------------------------------------------------------------------
 
-_WAITING = ap.ReaderScan(ap.ScanState.WAITING)
-_STALLED_AT_10 = ap.ReaderScan(ap.ScanState.STALLED, stalled_since=10.0)
-_SCANNING_AT_10 = ap.ReaderScan(ap.ScanState.SCANNING, stalled_since=10.0)
+_READING = ap.ReaderScan(ap.ScanState.READING)
+_SCANNING = ap.ReaderScan(ap.ScanState.SCANNING)
 
 _PAYLOAD = b"a real message"
 
 _CASES = [
-    ("waiting/data ingests and advances",
-     _WAITING, ap.ReadOk(_PAYLOAD), 0.0, 100.0,
-     ap.ReaderScan(ap.ScanState.WAITING),
-     [ap.Ingest(_PAYLOAD), ap.AdvanceExpected()]),
-    ("waiting/tombstone advances, nothing to ingest",
-     _WAITING, ap.ReadTombstoned(), 0.0, 100.0,
-     ap.ReaderScan(ap.ScanState.WAITING),
-     [ap.AdvanceExpected()]),
-    ("waiting/not-found starts the stall clock",
-     _WAITING, ap.ReadNotFound(), 5.0, 100.0,
-     ap.ReaderScan(ap.ScanState.STALLED, stalled_since=5.0),
-     []),
-    ("stalled/data resolves it back to waiting",
-     _STALLED_AT_10, ap.ReadOk(_PAYLOAD), 20.0, 100.0,
-     ap.ReaderScan(ap.ScanState.WAITING),
-     [ap.Ingest(_PAYLOAD), ap.AdvanceExpected()]),
-    ("stalled/tombstone resolves it back to waiting",
-     _STALLED_AT_10, ap.ReadTombstoned(), 20.0, 100.0,
-     ap.ReaderScan(ap.ScanState.WAITING),
-     [ap.AdvanceExpected()]),
-    ("stalled/not-found well before threshold is a no-op",
-     _STALLED_AT_10, ap.ReadNotFound(), 60.0, 100.0,
-     _STALLED_AT_10,
-     []),
-    ("stalled/not-found exactly at threshold does not escalate (strict >)",
-     _STALLED_AT_10, ap.ReadNotFound(), 110.0, 100.0,
-     _STALLED_AT_10,
-     []),
-    ("stalled/not-found past threshold escalates to scanning",
-     _STALLED_AT_10, ap.ReadNotFound(), 111.0, 100.0,
-     ap.ReaderScan(ap.ScanState.SCANNING, stalled_since=10.0),
-     [ap.ProbeBackward(), ap.ProbeForward()]),
+    ("reading/data ingests and advances",
+     _READING, ap.ReadOk(_PAYLOAD),
+     _READING, [ap.Ingest(_PAYLOAD), ap.AdvanceExpected()]),
+    ("reading/tombstone advances, nothing to ingest",
+     _READING, ap.ReadTombstoned(),
+     _READING, [ap.AdvanceExpected()]),
+    ("reading/not-found is a no-op: indistinguishable from an ordinarily quiet stream",
+     _READING, ap.ReadNotFound(),
+     _READING, []),
+    ("reading/a scan request starts scanning",
+     _READING, ap.ScanRequested(),
+     _SCANNING, [ap.ProbeBackward(), ap.ProbeForward()]),
     ("scanning/data ingests and keeps scanning",
-     _SCANNING_AT_10, ap.ReadOk(_PAYLOAD), 200.0, 100.0,
-     _SCANNING_AT_10,
-     [ap.Ingest(_PAYLOAD), ap.ProbeForward()]),
+     _SCANNING, ap.ReadOk(_PAYLOAD),
+     _SCANNING, [ap.Ingest(_PAYLOAD), ap.ProbeForward()]),
     ("scanning/tombstone keeps scanning, nothing to ingest",
-     _SCANNING_AT_10, ap.ReadTombstoned(), 200.0, 100.0,
-     _SCANNING_AT_10,
-     [ap.ProbeForward()]),
+     _SCANNING, ap.ReadTombstoned(),
+     _SCANNING, [ap.ProbeForward()]),
     ("scanning/not-found is the true frontier",
-     _SCANNING_AT_10, ap.ReadNotFound(), 200.0, 100.0,
-     ap.ReaderScan(ap.ScanState.WAITING),
-     [ap.AdoptFrontier()]),
+     _SCANNING, ap.ReadNotFound(),
+     _READING, [ap.AdoptFrontier()]),
+    ("scanning/a repeated scan request is a no-op: already scanning",
+     _SCANNING, ap.ScanRequested(),
+     _SCANNING, []),
 ]
 
 
 @pytest.mark.parametrize(
-    "start, event, now, threshold, expected_state, expected_effects",
+    "start, event, expected_state, expected_effects",
     [case[1:] for case in _CASES],
     ids=[case[0] for case in _CASES],
 )
-def test_reader_scan_transition_table(
-    start, event, now, threshold, expected_state, expected_effects,
-):
-    new_state, effects = ap.step(start, event, now=now, stall_threshold_s=threshold)
+def test_reader_scan_transition_table(start, event, expected_state, expected_effects):
+    new_state, effects = ap.step(start, event)
     assert new_state == expected_state
     assert effects == expected_effects
 
 
 # ---------------------------------------------------------------------------
-# Property-based tests: invariants that must hold across arbitrary inputs,
-# including replica-epoch-scale durations, not just the hand-picked cases
-# above.
-# ---------------------------------------------------------------------------
-
-_DURATION = st.floats(
-    min_value=0, max_value=10 * ap.REPLICA_EPOCH_SECONDS,
-    allow_nan=False, allow_infinity=False,
-)
-_TIMESTAMP = st.floats(
-    min_value=-1e9, max_value=1e9, allow_nan=False, allow_infinity=False,
-)
-
-
-@settings(max_examples=200, deadline=None)
-@given(
-    stalled_since=_TIMESTAMP,
-    delta=st.floats(
-        min_value=-10, max_value=10 * ap.REPLICA_EPOCH_SECONDS,
-        allow_nan=False, allow_infinity=False,
-    ),
-    threshold=_DURATION,
-)
-def test_stalled_not_found_escalates_iff_strictly_past_threshold(
-    stalled_since, delta, threshold,
-):
-    # `elapsed` is recomputed as `now - stalled_since`, exactly the
-    # expression `step` itself evaluates, rather than compared against
-    # `delta` directly: for a large `stalled_since` a tiny `delta` can be
-    # lost to float rounding in `stalled_since + delta`, so `now -
-    # stalled_since` is not always bit-identical to `delta` -- and it is
-    # `step`'s own arithmetic this property means to check, not `delta`.
-    scan = ap.ReaderScan(ap.ScanState.STALLED, stalled_since=stalled_since)
-    now = stalled_since + delta
-    elapsed = now - stalled_since
-    new_scan, effects = ap.step(scan, ap.ReadNotFound(), now=now, stall_threshold_s=threshold)
-    if elapsed > threshold:
-        assert new_scan == ap.ReaderScan(ap.ScanState.SCANNING, stalled_since=stalled_since)
-        assert effects == [ap.ProbeBackward(), ap.ProbeForward()]
-    else:
-        assert new_scan == scan
-        assert effects == []
-
-
-@settings(max_examples=100, deadline=None)
-@given(now=_TIMESTAMP, threshold=_DURATION)
-def test_waiting_not_found_stamps_stall_start_at_now(now, threshold):
-    new_scan, effects = ap.step(
-        ap.ReaderScan(ap.ScanState.WAITING), ap.ReadNotFound(),
-        now=now, stall_threshold_s=threshold,
-    )
-    assert new_scan == ap.ReaderScan(ap.ScanState.STALLED, stalled_since=now)
-    assert effects == []
-
-
-@settings(max_examples=100, deadline=None)
-@given(stalled_since=_TIMESTAMP, now=_TIMESTAMP, threshold=_DURATION)
-def test_data_or_tombstone_always_clears_the_stall(stalled_since, now, threshold):
-    for scan, event, expected_effects in (
-        (ap.ReaderScan(ap.ScanState.STALLED, stalled_since=stalled_since), ap.ReadOk(_PAYLOAD),
-         [ap.Ingest(_PAYLOAD), ap.AdvanceExpected()]),
-        (ap.ReaderScan(ap.ScanState.STALLED, stalled_since=stalled_since), ap.ReadTombstoned(),
-         [ap.AdvanceExpected()]),
-    ):
-        new_scan, effects = ap.step(scan, event, now=now, stall_threshold_s=threshold)
-        assert new_scan == ap.ReaderScan(ap.ScanState.WAITING)
-        assert effects == expected_effects
-
-
-@settings(max_examples=100, deadline=None)
-@given(stalled_since=_TIMESTAMP, now=_TIMESTAMP, threshold=_DURATION)
-def test_scanning_never_reintroduces_a_stall(stalled_since, now, threshold):
-    """Scanning always resolves straight to a fresh (unstalled) WAITING;
-    the stall clock cannot leak forward into the next expected position."""
-    for event, expected_effects in (
-        (ap.ReadNotFound(), [ap.AdoptFrontier()]),
-    ):
-        scan = ap.ReaderScan(ap.ScanState.SCANNING, stalled_since=stalled_since)
-        new_scan, effects = ap.step(scan, event, now=now, stall_threshold_s=threshold)
-        assert new_scan == ap.ReaderScan(ap.ScanState.WAITING)
-        assert new_scan.stalled_since is None
-        assert effects == expected_effects
-
-
-# ---------------------------------------------------------------------------
-# Stateful/invariant hunting: arbitrary sequences of events (not just one
-# step), checking a structural invariant after every single step, rather
-# than only the specific scenarios above.
+# Stateful/invariant hunting: arbitrary sequences of events, checking a
+# structural invariant after every single step, rather than only the
+# specific scenarios above.
 # ---------------------------------------------------------------------------
 
 _EVENTS = st.one_of(
     st.builds(ap.ReadOk, payload=st.binary(max_size=8)),
     st.builds(ap.ReadTombstoned),
     st.builds(ap.ReadNotFound),
+    st.builds(ap.ScanRequested),
 )
 
 
 @settings(max_examples=300, deadline=None)
-@given(
-    steps=st.lists(
-        st.tuples(_EVENTS, _DURATION),
-        min_size=1, max_size=50,
-    ),
-    threshold=_DURATION,
-)
-def test_stalled_since_is_none_iff_waiting(steps, threshold):
-    """Across an arbitrary sequence of events (with a monotonic clock),
-    `stalled_since is None` holds exactly when `state is WAITING`, in
-    every state `step` ever returns -- never a WAITING with a leftover
-    timestamp, never a STALLED/SCANNING with none."""
-    scan = ap.ReaderScan(ap.ScanState.WAITING)
-    now = 0.0
-    for event, dt in steps:
-        now += dt  # clock never goes backward
-        scan, effects = ap.step(scan, event, now=now, stall_threshold_s=threshold)
-        note(f"now={now} event={event!r} -> {scan!r} {effects!r}")
-        assert (scan.stalled_since is None) == (scan.state is ap.ScanState.WAITING)
+@given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
+def test_state_is_always_one_of_the_two(steps):
+    scan = ap.ReaderScan(ap.ScanState.READING)
+    for event in steps:
+        scan, effects = ap.step(scan, event)
+        note(f"event={event!r} -> {scan!r} {effects!r}")
         assert scan.state in ap.ScanState
 
 
 @settings(max_examples=300, deadline=None)
-@given(
-    steps=st.lists(
-        st.tuples(_EVENTS, _DURATION),
-        min_size=1, max_size=50,
-    ),
-    threshold=_DURATION,
-)
-def test_ingest_effects_only_accompany_read_ok(steps, threshold):
+@given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
+def test_ingest_effects_only_accompany_read_ok(steps):
     """An `Ingest` effect only ever appears when the triggering event was
-    `ReadOk`, and always carries that exact payload -- `step` never
-    invents or drops a payload."""
-    scan = ap.ReaderScan(ap.ScanState.WAITING)
-    now = 0.0
-    for event, dt in steps:
-        now += dt
-        scan, effects = ap.step(scan, event, now=now, stall_threshold_s=threshold)
+    `ReadOk`, and always carries that exact payload -- `step` never invents
+    or drops a payload."""
+    scan = ap.ReaderScan(ap.ScanState.READING)
+    for event in steps:
+        scan, effects = ap.step(scan, event)
         ingests = [e for e in effects if isinstance(e, ap.Ingest)]
         if isinstance(event, ap.ReadOk):
             assert ingests in ([], [ap.Ingest(event.payload)])
@@ -231,53 +103,66 @@ def test_ingest_effects_only_accompany_read_ok(steps, threshold):
 
 
 @settings(max_examples=300, deadline=None)
-@given(
-    steps=st.lists(
-        st.tuples(_EVENTS, _DURATION),
-        min_size=1, max_size=50,
-    ),
-    threshold=_DURATION,
-)
-def test_step_is_deterministic(steps, threshold):
-    """Replaying the exact same sequence of (event, now) pairs from the
-    same starting state always reaches the same final state: `step` has no
-    hidden state and no randomness."""
+@given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
+def test_step_is_deterministic(steps):
+    """Replaying the exact same sequence of events from the same starting
+    state always reaches the same final state: `step` has no hidden state,
+    no clock, and no randomness."""
     def run():
-        scan = ap.ReaderScan(ap.ScanState.WAITING)
-        now = 0.0
+        scan = ap.ReaderScan(ap.ScanState.READING)
         history = []
-        for event, dt in steps:
-            now += dt
-            scan, effects = ap.step(scan, event, now=now, stall_threshold_s=threshold)
+        for event in steps:
+            scan, effects = ap.step(scan, event)
             history.append((scan, tuple(effects)))
         return history
 
     assert run() == run()
 
 
-# A clock that can also go backward (clock skew), to see whether `step`
-# still behaves sanely -- no crash, and the same structural invariant
-# holds -- even though the "correctly escalates" semantic guarantee is not
-# expected to survive a clock running backward.
 @settings(max_examples=300, deadline=None)
-@given(
-    steps=st.lists(
-        st.tuples(_EVENTS, st.floats(
-            min_value=-10 * ap.REPLICA_EPOCH_SECONDS,
-            max_value=10 * ap.REPLICA_EPOCH_SECONDS,
-            allow_nan=False, allow_infinity=False,
-        )),
-        min_size=1, max_size=50,
-    ),
-    threshold=_DURATION,
-)
-def test_no_crash_and_invariant_holds_even_under_clock_skew(steps, threshold):
-    scan = ap.ReaderScan(ap.ScanState.WAITING)
-    now = 0.0
-    for event, dt in steps:
-        now += dt
-        scan, effects = ap.step(scan, event, now=now, stall_threshold_s=threshold)
-        assert (scan.stalled_since is None) == (scan.state is ap.ScanState.WAITING)
+@given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
+def test_scanning_is_only_ever_entered_by_scan_requested(steps):
+    """The only transition that can move the state to SCANNING is
+    ScanRequested; a bare ReadNotFound, however many arrive in a row,
+    never does -- there is no elapsed-time path into SCANNING at all."""
+    scan = ap.ReaderScan(ap.ScanState.READING)
+    for event in steps:
+        before = scan
+        scan, effects = ap.step(scan, event)
+        if scan.state is ap.ScanState.SCANNING and before.state is ap.ScanState.READING:
+            assert isinstance(event, ap.ScanRequested)
+
+
+@settings(max_examples=300, deadline=None)
+@given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
+def test_leaving_scanning_only_via_not_found(steps):
+    """The only transition that can move the state from SCANNING back to
+    READING is a ReadNotFound (the true frontier); ScanRequested while
+    already scanning changes nothing, and Data/Tombstone keep scanning."""
+    scan = ap.ReaderScan(ap.ScanState.READING)
+    for event in steps:
+        before = scan
+        scan, effects = ap.step(scan, event)
+        if before.state is ap.ScanState.SCANNING and scan.state is ap.ScanState.READING:
+            assert isinstance(event, ap.ReadNotFound)
+            assert effects == [ap.AdoptFrontier()]
+
+
+@settings(max_examples=300, deadline=None)
+@given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
+def test_reading_not_found_never_changes_anything(steps):
+    """ReadNotFound while READING is always a pure no-op, however many of
+    them arrive in a row: it is exactly as indistinguishable from an
+    ordinarily quiet stream as the spec says it is, and step() does not
+    pretend otherwise by accumulating any hidden state across them."""
+    scan = ap.ReaderScan(ap.ScanState.READING)
+    for event in steps:
+        if scan.state is ap.ScanState.READING and isinstance(event, ap.ReadNotFound):
+            new_scan, effects = ap.step(scan, event)
+            assert new_scan == scan
+            assert effects == []
+        else:
+            scan, _ = ap.step(scan, event)
 
 
 # ---------------------------------------------------------------------------
@@ -353,12 +238,13 @@ def test_select_backfill_handles_extreme_epoch_ids(journal, current_epoch):
 
 # ---------------------------------------------------------------------------
 # Joint simulation: Alice authors a channel, subject to simplified replica
-# GC and her own periodic sweep; Bob reads it with a real ReaderScan. This
-# is the closest a pure-Python property test gets to the cross-member
-# liveness claim in "Optimistic resync": given weak fairness (each side
-# comes back online at least once per replica epoch), does Bob always
-# eventually reach Alice's true frontier, no matter how long he started out
-# stalled behind a since-garbage-collected gap?
+# GC and her own periodic sweep; Bob reads it with a real ReaderScan, and at
+# some point his user requests a scan. This is the closest a pure-Python
+# property test gets to the cross-member liveness claim in "Optimistic
+# resync": given Alice keeps her own sweep going (online at least once per
+# epoch), does a single, deliberate, user-triggered scan always recover
+# everything -- no matter how long Bob was offline, and with no assumption
+# at all about how often Bob himself checks in?
 #
 # This is deliberately a small abstraction, not a rebuild of the real GC or
 # sweep code: a position "exists" if it was written or swept within the
@@ -368,7 +254,7 @@ def test_select_backfill_handles_extreme_epoch_ids(journal, current_epoch):
 # ---------------------------------------------------------------------------
 
 def _run_joint_simulation(
-    n_positions, epoch_length, total_ticks, alice_online, bob_online, stall_threshold_s,
+    n_positions, epoch_length, total_ticks, alice_online, bob_online, scan_request_ticks,
 ):
     # Alice wrote everything long before the simulation starts, and it has
     # already gone stale by tick 0 -- the interesting case is recovering
@@ -382,7 +268,7 @@ def _run_joint_simulation(
     def exists(i, tick):
         return epoch_of(tick) - last_refresh_epoch[i] <= 1
 
-    scan = ap.ReaderScan(ap.ScanState.WAITING)
+    scan = ap.ReaderScan(ap.ScanState.READING)
     next_index = 0
     scan_cursor = 0
     received: "set[int]" = set()  # positions genuinely ingested via ReadOk
@@ -397,15 +283,19 @@ def _run_joint_simulation(
         if not bob_online[tick]:
             continue
 
-        # One ordinary read attempt per online tick while Waiting/Stalled.
+        if tick in scan_request_ticks and scan.state is ap.ScanState.READING:
+            scan, _ = ap.step(scan, ap.ScanRequested())
+            # The scan's forward probe starts at the position ordinary
+            # reading was already stuck on.
+            scan_cursor = next_index
+
         # Once actively Scanning, race through the backlog within this
         # same tick: deriving and probing the next index needs no network
         # round trip (see "Optimistic resync"), so it is not paced the way
-        # an ordinary ReadNotFound retry is.
+        # an ordinary ReadNotFound retry is. While merely READING, one
+        # ordinary read attempt per online tick, exactly as always.
         while True:
-            probe_index = next_index if scan.state in (
-                ap.ScanState.WAITING, ap.ScanState.STALLED,
-            ) else scan_cursor
+            probe_index = next_index if scan.state is ap.ScanState.READING else scan_cursor
 
             if probe_index >= n_positions:
                 event = ap.ReadNotFound()
@@ -415,9 +305,7 @@ def _run_joint_simulation(
                 event = ap.ReadNotFound()
 
             was_scanning = scan.state is ap.ScanState.SCANNING
-            scan, effects = ap.step(
-                scan, event, now=float(tick), stall_threshold_s=stall_threshold_s,
-            )
+            scan, effects = ap.step(scan, event)
             for effect in effects:
                 if isinstance(effect, ap.Ingest):
                     received.add(int(effect.payload.decode()))
@@ -437,7 +325,8 @@ def _run_joint_simulation(
 
 def _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs):
     """One online tick per epoch, guaranteed, plus whatever extra ticks
-    Hypothesis wants to add."""
+    Hypothesis wants to add. Used for Alice's side: her periodic refresh
+    still needs this to guarantee anything survives to be found."""
     schedule = data.draw(st.lists(
         st.booleans(), min_size=total_ticks, max_size=total_ticks,
     ))
@@ -453,42 +342,32 @@ def _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs):
     epoch_length=st.integers(min_value=1, max_value=8),
     data=st.data(),
 )
-def test_mutual_resync_eventually_completes_given_weak_fairness(
+def test_a_single_requested_scan_recovers_everything_given_alice_stayed_fair(
     n_positions, epoch_length, data,
 ):
-    # Ordinary reading (no stall ever triggered) advances at most one
-    # position per Bob-ONLINE tick, and weak fairness only guarantees one
-    # online tick per EPOCH -- so a reader who happens to succeed every
-    # time it checks, but only checks once an epoch, genuinely progresses
-    # at only one position per epoch: Scanning's same-tick backlog race
-    # never engages, because nothing ever came back not-found for it to
-    # react to. (An earlier version of this margin scaled by
-    # n_positions/epoch_length, assuming once-per-TICK throughput, and
-    # Hypothesis found the counterexample: n_positions=11, epoch_length=3,
-    # Bob online once an epoch, never stalling, capped at one position per
-    # epoch.) So the needed floor is n_positions epochs, not ticks, plus
-    # slack for the stall-detection/escalation machinery on top of that.
-    slack_epochs = data.draw(st.integers(min_value=6, max_value=20))
-    total_epochs = n_positions + slack_epochs
+    # Bob is deliberately online nowhere except the single tick where his
+    # scan is requested and completes (Scanning races through the whole
+    # backlog in one tick -- see _run_joint_simulation): there is no
+    # assumption at all about how often Bob himself checks in, only that
+    # Alice's own refresh has been keeping things alive.
+    slack_epochs = data.draw(st.integers(min_value=3, max_value=20))
+    total_epochs = slack_epochs
     total_ticks = total_epochs * epoch_length
-    stall_threshold_s = float(epoch_length)
+    scan_tick = total_ticks - 1
 
     alice_online = _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs)
-    bob_online = _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs)
+    bob_online = [False] * total_ticks
+    bob_online[scan_tick] = True
 
     scan, next_index, received = _run_joint_simulation(
         n_positions, epoch_length, total_ticks,
-        alice_online, bob_online, stall_threshold_s,
+        alice_online, bob_online, {scan_tick},
     )
     note(f"final scan={scan!r} next_index={next_index} received={received}")
-    # Not just "the index counter reached n_positions" (which a reader can
-    # satisfy by giving up on a permanently-lost position and adopting
-    # whatever it finds next, per "advances its own expected position past
-    # the stalled one" -- see the no-fairness test below for exactly that
-    # happening): every position Alice ever wrote was genuinely delivered.
     assert received == set(range(n_positions)), (
-        "Bob did not genuinely receive every position Alice wrote, even "
-        "though both sides were online at least once per epoch throughout"
+        "a single requested scan did not recover every position Alice ever "
+        "wrote, even though her own refresh was online at least once per "
+        "epoch throughout"
     )
 
 
@@ -498,28 +377,25 @@ def test_mutual_resync_eventually_completes_given_weak_fairness(
     epoch_length=st.integers(min_value=1, max_value=8),
     data=st.data(),
 )
-def test_resync_is_not_vacuously_satisfied_without_fairness(n_positions, epoch_length, data):
-    """The converse of the property above, hunted rather than assumed: with
-    Alice never online at all (fairness violated on her side), Bob's scan
-    still runs to completion and his own index bookkeeping still advances
-    -- "advances past the stalled one" is exactly what it is designed to
-    do, and it does not know position 0 was ever supposed to hold
-    anything. What must NOT happen is content silently counting as
-    delivered when it never was: `received` stays empty. This is what
-    makes the property above non-vacuous -- the mechanism does not
-    unconditionally launder a genuine loss into an apparent success."""
-    total_epochs = data.draw(st.integers(min_value=6, max_value=14))
+def test_a_requested_scan_is_not_vacuously_satisfied_without_alice(
+    n_positions, epoch_length, data,
+):
+    """The converse of the property above, hunted rather than assumed:
+    with Alice never online at all, a requested scan still runs to
+    completion, but recovers nothing -- confirming the mechanism does not
+    unconditionally launder a genuine loss into an apparent success just
+    because the user asked."""
+    total_epochs = data.draw(st.integers(min_value=3, max_value=20))
     total_ticks = total_epochs * epoch_length
-    stall_threshold_s = float(epoch_length)
+    scan_tick = total_ticks - 1
 
-    # Alice is online nowhere at all: nothing is ever refreshed, so nothing
-    # ever exists for Bob to find.
     alice_online = [False] * total_ticks
-    bob_online = _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs)
+    bob_online = [False] * total_ticks
+    bob_online[scan_tick] = True
 
     scan, next_index, received = _run_joint_simulation(
         n_positions, epoch_length, total_ticks,
-        alice_online, bob_online, stall_threshold_s,
+        alice_online, bob_online, {scan_tick},
     )
     note(f"final scan={scan!r} next_index={next_index} received={received}")
     assert received == set()
