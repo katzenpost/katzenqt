@@ -240,47 +240,37 @@ class TestPeerAddedDedups:
         assert len(_State.contacts_standard_item.rows) == 1
 
 
-class _FakeTransfersModel:
-    def __init__(self, boom_on: "str | None" = "started") -> None:
-        self.boom_on = boom_on
-        self.calls: list[tuple[object, ...]] = []
-
-    def start_transfer(self, rcw_id: uuid.UUID, conv_id: int,
-                       parent_name: str, total: int | None,
-                       direction: str = "download",
-                       raw_bytes: int = 0) -> None:
-        self.calls.append(
-            ("start", rcw_id, conv_id, parent_name, total, direction,
-             raw_bytes),
-        )
-        if self.boom_on == "started":
-            raise RuntimeError("boom")
-
-    def notify_piece(self, rcw_id: uuid.UUID, pieces: int,
-                     raw_bytes: int | None = None) -> None:
-        self.calls.append(("piece", rcw_id, pieces, raw_bytes))
-        if self.boom_on == "piece":
-            raise RuntimeError("boom")
-
-    def complete_transfer(self, rcw_id: uuid.UUID) -> None:
-        self.calls.append(("complete", rcw_id))
-
-    def set_paused(self, rcw_id: uuid.UUID, paused: bool) -> None:
-        self.calls.append(("paused", rcw_id, paused))
-
-    def remove_transfer(self, rcw_id: uuid.UUID) -> None:
-        self.calls.append(("removed", rcw_id))
-
-
 class TestTransfersListenerDrainsEvents:
     """The Transfers listener turns each substream_progress_queue
     event into a DownloadsModel call, and survives a per-item error via
     log-and-continue like the other UI listeners."""
 
-    def _fake_transfers_model(
-        self, boom_on: "str | None" = "started",
-    ) -> "_FakeTransfersModel":
-        return _FakeTransfersModel(boom_on)
+    def _fake_transfers_model(self, boom_on="started"):
+        class _Model:
+            def __init__(self):
+                self.calls = []
+
+            def start_transfer(self, rcw_id, conv_id, parent_name, total,
+                               direction="download", raw_bytes=0):
+                self.calls.append(
+                    ("start", rcw_id, conv_id, parent_name, total, direction,
+                     raw_bytes),
+                )
+                if boom_on == "started":
+                    raise RuntimeError("boom")
+
+            def notify_piece(self, rcw_id, pieces, raw_bytes=None):
+                self.calls.append(("piece", rcw_id, pieces, raw_bytes))
+                if boom_on == "piece":
+                    raise RuntimeError("boom")
+
+            def complete_transfer(self, rcw_id):
+                self.calls.append(("complete", rcw_id))
+
+            def set_paused(self, rcw_id, paused):
+                self.calls.append(("paused", rcw_id, paused))
+
+        return _Model()
 
     @pytest.mark.asyncio
     async def test_events_are_dispatched_to_the_model(
