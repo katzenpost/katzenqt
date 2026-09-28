@@ -163,7 +163,7 @@ jobs:
 
   docker-integration:
     needs: [namenlos-integration]
-    if: ${{ !cancelled() && (needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
     permissions:
       contents: read
       packages: write
@@ -483,7 +483,8 @@ jobs:
           LIVE: ${{ needs.namenlos-integration.outputs.verdict }}
           DOCKER: ${{ needs.docker-integration.result }}
           EPOCH: ${{ needs.epoch-integration.result }}
+          REQUIRE_DOCKER: ${{ github.event_name == 'merge_group' && '--require-docker' || '' }}
         run: |
           python3 -m tools.integration_result final \
             --live-job="$LIVE_JOB" --live="$LIVE" \
-            --docker="$DOCKER" --epoch="$EPOCH"
+            --docker="$DOCKER" --epoch="$EPOCH" $REQUIRE_DOCKER

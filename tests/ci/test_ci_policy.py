@@ -68,6 +68,29 @@ def test_all_final_job_combinations() -> None:
                  or (live == "deadline" and docker == "success"))
         )
         assert integration_passed(live_job, live, docker, epoch) == expected
+        assert integration_passed(
+            live_job, live, docker, epoch, True,
+        ) == (expected and docker == "success")
+
+
+def test_the_queue_never_accepts_a_skipped_docker_job() -> None:
+    assert integration_passed("success", "passed", "skipped", "success")
+    assert not integration_passed(
+        "success", "passed", "skipped", "success", True,
+    )
+    assert integration_passed("success", "passed", "success", "success", True)
+
+
+def test_the_workflow_requires_docker_only_in_the_queue() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "github.event_name == 'merge_group'" in text.split(
+        "  docker-integration:", 1,
+    )[1].split("    permissions:", 1)[0]
+    assert (
+        "REQUIRE_DOCKER: ${{ github.event_name == 'merge_group' "
+        "&& '--require-docker' || '' }}" in text
+    )
+    assert '--epoch="$EPOCH" $REQUIRE_DOCKER' in text
 
 
 def test_hard_live_failure_cannot_be_overridden_by_docker() -> None:
