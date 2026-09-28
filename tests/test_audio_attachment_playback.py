@@ -245,3 +245,18 @@ def test_received_file_marker_without_sha256_is_refused() -> None:
 
     with pytest.raises(_AttachmentError):
         _resolve(message_id)
+
+
+def test_a_non_string_peer_basename_is_reported_as_unnamed() -> None:
+    payload = b"F" + cbor2.dumps({
+        "v": 0,
+        "kind": "file_oversized",
+        "basename": 5,
+        "filetype": "arbitrary",
+        "size": 250 * 1024 * 1024,
+        "membership_hash": b"TODO" * 8,
+    })
+    message_id = _insert_payload(payload)
+
+    with pytest.raises(_AttachmentError, match="unnamed"):
+        _resolve(message_id)

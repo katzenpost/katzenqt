@@ -24,8 +24,6 @@ def is_risky_attachment_extension(basename: str) -> bool:
     >>> is_risky_attachment_extension("noext")
     False
     """
-    if not isinstance(basename, str):
-        return False
     if not basename or "." not in basename:
         return False
     ext = basename.rsplit(".", 1)[-1].strip().lower()

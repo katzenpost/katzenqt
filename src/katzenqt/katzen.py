@@ -907,7 +907,9 @@ class MainWindow(QMainWindow):
 
         if isinstance(decoded, dict) and "kind" in decoded:
             kind = decoded.get("kind")
-            basename = decoded.get("basename") or "unnamed"
+            basename = decoded.get("basename")
+            if not isinstance(basename, str) or not basename:
+                basename = "unnamed"
             filetype = decoded.get("filetype")
 
             if kind == "file_oversized":
