@@ -268,6 +268,9 @@ class _FakeTransfersModel:
     def set_paused(self, rcw_id: uuid.UUID, paused: bool) -> None:
         self.calls.append(("paused", rcw_id, paused))
 
+    def remove_transfer(self, rcw_id: uuid.UUID) -> None:
+        self.calls.append(("removed", rcw_id))
+
 
 class TestTransfersListenerDrainsEvents:
     """The Transfers listener turns each substream_progress_queue

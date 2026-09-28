@@ -2434,7 +2434,9 @@ class TestPauseResumePeerReads:
 
 class TestStartResending:
     @pytest.mark.asyncio
-    async def test_creates_mixwal_matching_encrypt_write_reply(self, fake_thinclient: FakeThinClient) -> None:
+    async def test_creates_mixwal_matching_encrypt_write_reply(
+        self, fake_thinclient: FakeThinClient,
+    ) -> None:
         setup = await _insert_write_setup(fake_thinclient)
         async with persistent.asession() as sess:
             pwal = persistent.PlaintextWAL(

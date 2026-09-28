@@ -48,7 +48,9 @@ def appending(target: list[T], value: T) -> Callable[..., None]:
     return _append
 
 
-def appending_from(target: list[T], fn: Callable[..., T]) -> Callable[..., None]:
+def appending_from(
+    target: list[T], fn: Callable[..., T]
+) -> Callable[..., None]:
     """A callable that appends ``fn(*args, **kwargs)`` to ``target``.
 
     >>> seen: list[str] = []

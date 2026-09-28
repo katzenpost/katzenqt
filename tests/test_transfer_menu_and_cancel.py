@@ -19,7 +19,9 @@ def _write_mixwal(stream: uuid.UUID, *, plaintextwal: uuid.UUID | None = None,
     )
 
 
-async def _seed_upload(conv_id: int, agg: uuid.UUID, rcw_id: uuid.UUID) -> None:
+async def _seed_upload(
+    conv_id: int, agg: uuid.UUID, rcw_id: uuid.UUID,
+) -> None:
     async with persistent.asession() as sess:
         sess.add(persistent.WriteCapWAL(
             id=agg, write_cap=b"\x02" * 168, next_index=b"\x00" * 104,
@@ -163,7 +165,8 @@ async def test_the_write_dispatch_registers_the_task_for_cancellation(
     getattr(network, "__resend_queue_populated").set()
     getattr(network, "__mixwal_updated").set()
     getattr(network, "__mixnet_connected").set()
-    loop_task = asyncio.create_task(network.drain_mixwal2(object()))  # type: ignore[arg-type]
+    drain = network.drain_mixwal2(object())  # type: ignore[arg-type]
+    loop_task = asyncio.create_task(drain)
     try:
         await asyncio.wait_for(started.wait(), timeout=5.0)
         assert list(network._inflight_writes) == [stream]
