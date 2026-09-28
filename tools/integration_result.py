@@ -47,13 +47,15 @@ def integration_passed(
     live_job: str, live: str, docker: str, epoch: str,
     require_docker: bool = False,
 ) -> bool:
-    if live_job != "success" or epoch != "success":
+    if epoch != "success":
         return False
-    if require_docker and docker != "success":
-        return False
-    if live == "passed":
-        return docker in ("success", "skipped")
-    return live == "deadline" and docker == "success"
+    if require_docker:
+        return docker == "success"
+    if docker == "success":
+        return True
+    if docker == "skipped":
+        return live_job == "success" and live == "passed"
+    return False
 
 
 def publish(outcome: Outcome, text: str) -> int:

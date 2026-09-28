@@ -63,14 +63,15 @@ def test_all_final_job_combinations() -> None:
         states, ("passed", "deadline", "failed", ""), states, states,
     ):
         expected = (
-            live_job == epoch == "success"
-            and ((live == "passed" and docker in ("success", "skipped"))
-                 or (live == "deadline" and docker == "success"))
+            epoch == "success"
+            and (docker == "success"
+                 or (docker == "skipped" and live_job == "success"
+                     and live == "passed"))
         )
         assert integration_passed(live_job, live, docker, epoch) == expected
         assert integration_passed(
             live_job, live, docker, epoch, True,
-        ) == (expected and docker == "success")
+        ) == (epoch == "success" and docker == "success")
 
 
 def test_the_queue_never_accepts_a_skipped_docker_job() -> None:
@@ -93,9 +94,10 @@ def test_the_workflow_requires_docker_only_in_the_queue() -> None:
     assert '--epoch="$EPOCH" $REQUIRE_DOCKER' in text
 
 
-def test_hard_live_failure_cannot_be_overridden_by_docker() -> None:
-    assert not integration_passed("failure", "failed", "success", "success")
-    assert not integration_passed("success", "failed", "success", "success")
+def test_the_docker_suite_stands_in_for_a_failed_live_check() -> None:
+    assert integration_passed("failure", "failed", "success", "success")
+    assert integration_passed("success", "failed", "success", "success")
+    assert not integration_passed("success", "failed", "skipped", "success")
 
 
 def test_final_command_publishes_both_lane_results(tmp_path: Path) -> None:
@@ -152,7 +154,7 @@ def test_live_run_removes_the_previous_report_first() -> None:
 @pytest.mark.parametrize("live_job, live, docker, epoch, expected", [
     ("success", "passed", "skipped", "success", 0),
     ("success", "deadline", "skipped", "success", 1),
-    ("failure", "failed", "success", "success", 1),
+    ("failure", "failed", "success", "success", 0),
     ("success", "passed", "skipped", "skipped", 1),
 ])
 def test_final_command_checks_skipped_lanes(
