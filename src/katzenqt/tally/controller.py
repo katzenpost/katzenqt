@@ -278,7 +278,7 @@ class TallyController:
                 survey_id.hex(),
             )
             return
-        doc = self._docs.get((conversation_id, survey_id))
+        doc = await self._ensure_loaded(sess, conversation_id, survey_id)
         is_new = doc is None
         try:
             if doc is None:
