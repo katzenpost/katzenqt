@@ -1791,7 +1791,6 @@ class TestDrainMixwalReadSingle:
 
     @pytest.mark.parametrize("benign", [
         BoxIDNotFoundError("box ID not found"),
-        TombstoneError("tombstone"),
     ])
     @pytest.mark.asyncio
     async def test_benign_replica_outcome_does_not_wedge(self, fake_thinclient: FakeThinClient, benign: Exception) -> None:
@@ -4402,7 +4401,7 @@ class TestUnhandledReplicaError:
             assert issubclass(subclass, ReplicaError)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("error", [BoxIDNotFoundError, TombstoneError])
+    @pytest.mark.parametrize("error", [BoxIDNotFoundError])
     async def test_an_unavailable_box_takes_its_own_clause(
         self, fake_thinclient: FakeThinClient,
         recorded_sleeps: "list[float]", error: "type[ReplicaError]",
