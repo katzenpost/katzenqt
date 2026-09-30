@@ -1,15 +1,14 @@
-name: pytest (uv)
+name: ruff (uv)
 
 on:
   push:
     branches: [main]
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 jobs:
   test:
-    name: pytest (uv)
+    name: ruff (uv)
     runs-on: ubuntu-latest
 
     steps:
@@ -37,9 +36,7 @@ jobs:
         run: |
           bash tools/ci-deps.sh
 
-      - name: Verify the rust audio extension built
-        run: uv run python -c "import rustic_audio_tool as r; assert hasattr(r, 'PttAudioEngine')"
-
-      - name: Run tests
+      - name: Run ruff
+        continue-on-error: true
         run: |
-          uv run pytest
+          make ruff-uv

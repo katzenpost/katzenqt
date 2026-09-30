@@ -90,7 +90,7 @@ def test_result_job_runs_after_skipped_or_failed_dependencies() -> None:
     assert "continue-on-error" not in result
 
 
-def test_docker_is_optional_but_epoch_coverage_is_not() -> None:
+def test_docker_is_optional_outside_the_queue_only() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
     fallback = jobs["docker-integration"]
     condition = next(
@@ -99,7 +99,8 @@ def test_docker_is_optional_but_epoch_coverage_is_not() -> None:
     )
     assert condition == (
         "if: ${{ !cancelled() && "
-        "(needs.namenlos-integration.result != 'success' || "
+        "(github.event_name == 'merge_group' || "
+        "needs.namenlos-integration.result != 'success' || "
         "needs.namenlos-integration.outputs.verdict != 'passed') }}"
     )
     epoch = jobs["epoch-integration"]

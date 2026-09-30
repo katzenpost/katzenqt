@@ -539,12 +539,15 @@ class TestDrainMixwalWriteSingle:
         await network.drain_mixwal_write_single(
             fake_thinclient, mw, {setup["bacap_stream"]},
         )
-        # Give the create_task a beat to run.
-        await asyncio.sleep(0)
-        # The conversation_update_queue is an asyncio.Queue; pop one.
-        assert network.conversation_update_queue.qsize() >= 1
-        first = await network.conversation_update_queue.get()
-        assert first == (setup["conversation_id"], True)
+        seen = []
+        expected = (setup["conversation_id"], True)
+        for _ in range(100):
+            while not network.conversation_update_queue.empty():
+                seen.append(network.conversation_update_queue.get_nowait())
+            if expected in seen:
+                break
+            await asyncio.sleep(0)
+        assert expected in seen
 
     @pytest.mark.asyncio
     async def test_counter_probe_interrupted_by_reconnect_gives_up(

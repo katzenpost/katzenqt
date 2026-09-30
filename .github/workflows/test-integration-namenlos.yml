@@ -1,10 +1,13 @@
 name: Namenlos Integration Tests
 
 on:
+  merge_group:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: '0 */12 * * *'
   workflow_dispatch:
 
 jobs:
@@ -162,7 +165,7 @@ jobs:
 
   docker-integration:
     needs: [namenlos-integration]
-    if: ${{ !cancelled() && (needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
     permissions:
       contents: read
       packages: write
@@ -274,7 +277,7 @@ jobs:
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
-          KQT_INTEGRATION_PARALLEL: "4"
+          KQT_INTEGRATION_PARALLEL: "2"
         run: |
           mkdir -p integration-results
           bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
@@ -482,7 +485,8 @@ jobs:
           LIVE: ${{ needs.namenlos-integration.outputs.verdict }}
           DOCKER: ${{ needs.docker-integration.result }}
           EPOCH: ${{ needs.epoch-integration.result }}
+          REQUIRE_DOCKER: ${{ github.event_name == 'merge_group' && '--require-docker' || '' }}
         run: |
           python3 -m tools.integration_result final \
             --live-job="$LIVE_JOB" --live="$LIVE" \
-            --docker="$DOCKER" --epoch="$EPOCH"
+            --docker="$DOCKER" --epoch="$EPOCH" $REQUIRE_DOCKER
