@@ -1,9 +1,6 @@
 name: ruff (uv)
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -37,6 +34,5 @@ jobs:
           bash tools/ci-deps.sh
 
       - name: Run ruff
-        continue-on-error: true
         run: |
           make ruff-uv
