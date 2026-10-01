@@ -1972,7 +1972,9 @@ async def _advance_past_tombstone(mw_id: uuid.UUID) -> None:
     must advance past it exactly as it advances past data. A box that is
     merely not found may still arrive, so that one must not advance. The read
     index only moves while it still sits at this box, so a concurrent drain
-    that already advanced is left alone.
+    that already advanced is left alone. Substreams never reach here: a
+    tombstoned substream box is terminal, because the chunks it carried can
+    no longer be assembled.
     """
     async with persistent.asession() as sess:
         mw_row = await sess.get(persistent.MixWAL, mw_id)
@@ -2225,14 +2227,20 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     give_up()
     return
   except TombstoneError as e:
-    logger.info("tombstone at %s; advancing past it: %s", bacap_uuid, e)
     if is_substream:
+      logger.info("tombstoned substream box at %s: %s", bacap_uuid, e)
       await _record_substream_miss(
           bacap_uuid, terminal=True,
           now_s=time.time(), budget_s=read_watchdog_s,
       )
+      __resend_queue.discard(bacap_uuid)
+      _pacer.reset(bacap_uuid)
+      give_up()
+      return
+    logger.info("tombstone at %s; advancing past it: %s", bacap_uuid, e)
     await _advance_past_tombstone(mw.id)
     __resend_queue.discard(bacap_uuid)
+    _pacer.reset(bacap_uuid)
     give_up()
     return
   except BoxIDNotFoundError as e:

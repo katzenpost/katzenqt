@@ -1,8 +1,4 @@
-"""A tombstone consumes its position; a missing box does not.
-
-Kept in its own file so these cases do not share hunks with the large
-annotated test modules.
-"""
+"""A tombstone consumes its position; a missing box does not."""
 
 import uuid
 
@@ -82,4 +78,47 @@ async def test_a_missing_box_keeps_the_read_index(
         )
         assert after is not None
         assert after.next_index == before
+    assert setup["bacap_stream"] not in draining
+
+
+@pytest.mark.asyncio
+async def test_a_tombstoned_substream_box_fails_the_substream(
+    fake_thinclient: FakeThinClient,
+) -> None:
+    """A substream carries the chunks of one message, so a deleted box can
+    never be assembled; the substream is failed and its peer deactivated
+    rather than advanced past."""
+    setup = await _set_up_read_flow(
+        fake_thinclient,
+        peer_name=f"{network._SUBSTREAM_NAME_PREFIX}parent:aa",
+    )
+    fake_thinclient.inject_error(
+        "start_resending_encrypted_message",
+        TombstoneError("tombstone"),
+    )
+    async with persistent.asession() as sess:
+        mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        assert mw is not None
+        rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+        assert rcw is not None
+        before = rcw.next_index
+    draining: "set[uuid.UUID]" = {setup["bacap_stream"]}
+    await network.drain_mixwal_read_single(
+        connection=fake_thinclient,
+        rcw_read_cap=setup["read_cap"],
+        mw=mw,
+        draining_right_now=draining,
+    )
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+        assert rcw is not None
+        assert rcw.next_index == before
+        assert rcw.substream_failure == "A required box is tombstoned"
+        peers = (await sess.exec(
+            persistent.select(persistent.ConversationPeer).where(
+                persistent.ConversationPeer.read_cap_id
+                == setup["bacap_stream"],
+            )
+        )).all()
+        assert [peer.active for peer in peers] == [False]
     assert setup["bacap_stream"] not in draining
