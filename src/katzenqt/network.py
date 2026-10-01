@@ -1966,16 +1966,6 @@ def _substream_miss_state(
 
 
 async def _advance_past_tombstone(mw_id: uuid.UUID) -> None:
-    """Consume the position a tombstone emptied.
-
-    A tombstone is a position that was written and then deleted, so a reader
-    must advance past it exactly as it advances past data. A box that is
-    merely not found may still arrive, so that one must not advance. The read
-    index only moves while it still sits at this box, so a concurrent drain
-    that already advanced is left alone. Substreams never reach here: a
-    tombstoned substream box is terminal, because the chunks it carried can
-    no longer be assembled.
-    """
     async with persistent.asession() as sess:
         mw_row = await sess.get(persistent.MixWAL, mw_id)
         if mw_row is None:
@@ -1983,7 +1973,6 @@ async def _advance_past_tombstone(mw_id: uuid.UUID) -> None:
         rcw = await sess.get(persistent.ReadCapWAL, mw_row.bacap_stream)
         if rcw is not None and rcw.next_index == mw_row.current_message_index:
             rcw.next_index = mw_row.next_message_index
-            rcw.substream_missing_since = None
             sess.add(rcw)
         await sess.delete(mw_row)
         await sess.commit()
