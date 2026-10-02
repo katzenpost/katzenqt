@@ -208,7 +208,7 @@ ci-local-forgejo:
 		$(if $(CI_JOB),-j $(CI_JOB),)
 
 .PHONY: ci-local
-ci-local: ci-local-image
+ci-local:
 	@runner="$(RUNNER)"; \
 	if [ -z "$$runner" ]; then \
 		for candidate in $(CI_RUNNERS); do \
@@ -220,6 +220,7 @@ ci-local: ci-local-image
 		forgejo|forgejo-runner) $(ci_make) ci-local-forgejo;; \
 		woodpecker|woodpecker-cli) $(ci_make) ci-local-woodpecker;; \
 		"") printf '%s\n' 'no ci runner on this host; using the one in $(CI_IMAGE)'; \
+		  $(ci_make) ci-local-image || exit 1; \
 		  exec $(CONTAINER_ENGINE) run --rm --network host \
 		    --volume "$(CURDIR):$(CURDIR)" --workdir "$(CURDIR)" \
 		    --volume "$(CI_SOCKET):$(CI_SOCKET)" \
