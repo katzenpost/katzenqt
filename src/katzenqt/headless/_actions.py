@@ -647,7 +647,7 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
                 # which pushes per-step wall time well above the
                 # single-role baseline.
                 if not await persistent.wait_for_sent(
-                    final_pwal_id, headroom_s=600.0,
+                    final_pwal_id, deadline_s=600.0,
                 ):
                     logger.error(f"STEP_FAIL:{step_idx}:send-timeout:{payload}")
                     return 3

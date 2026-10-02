@@ -663,7 +663,7 @@ async def _wait_intro_acked(final_pwal_id, display_name: str, conversation_id: i
     Fire-and-forget: a timeout is logged, never raised, so the induction
     result stands even if the announcement never gets delivered.
     """
-    if not await persistent.wait_for_sent(final_pwal_id, headroom_s=180.0):
+    if not await persistent.wait_for_sent(final_pwal_id, deadline_s=180.0):
         logger.error(
             "introduction for %r not acked within 180s (conversation %d)",
             display_name, conversation_id,
