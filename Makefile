@@ -92,6 +92,16 @@ help:
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
 		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
 		'' \
+		'Continuous integration:' \
+		'  make ci-unit               Run the checks the forges run' \
+		'  make ci-local              Run a workflow locally with act,' \
+		'                             forgejo or woodpecker' \
+		'  make ci-local-image        Build the runner image' \
+		'  make check-live            Integration tests against a' \
+		'                             kpclientd already listening' \
+		'  Forgejo needs CI_IMAGE set on the forge; Woodpecker pulls' \
+		'  localhost/katzenqt-ci:latest from ci-local-image.' \
+		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \
 		'  make clean                 Remove .venv, stamps, and generated Qt files'
