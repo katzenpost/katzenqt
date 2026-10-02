@@ -85,13 +85,6 @@ help:
 		'  make alembic-revision-uv   Alembic revision using uv (requires ALEMBIC_MSG="msg")'\
 		'  make alembic-revision-pip  Alembic revision using pip (requires ALEMBIC_MSG="msg")'\
 		'' \
-		'Katzenpost / kpclientd:' \
-		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
-		'  make kpclientd             Build kpclientd (golang native build; falls back to podman)' \
-		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
-		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
-		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
-		'' \
 		'Continuous integration:' \
 		'  make ci-unit               Run the checks the forges run' \
 		'  make ci-local              Run a workflow locally with act,' \
@@ -101,6 +94,13 @@ help:
 		'                             kpclientd already listening' \
 		'  Forgejo needs CI_IMAGE set on the forge; Woodpecker pulls' \
 		'  localhost/katzenqt-ci:latest from ci-local-image.' \
+		'' \
+		'Katzenpost / kpclientd:' \
+		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
+		'  make kpclientd             Build kpclientd (golang native build; falls back to podman)' \
+		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
+		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
+		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
 		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \
