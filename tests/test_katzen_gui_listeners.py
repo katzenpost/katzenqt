@@ -250,7 +250,12 @@ async def test_the_transfers_listener_tracks_an_upload(
     stream = uuid.uuid4()
     for event in (
         transfer_events.upload_started(
-            stream, 1, 2, 4096, "bob", "pic.png",
+            stream,
+            1,
+            2,
+            4096,
+            "bob",
+            "pic.png",
         ),
         transfer_events.upload_piece(stream, 1, 2),
         transfer_events.paused(stream, "upload", True),

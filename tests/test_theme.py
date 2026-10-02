@@ -164,7 +164,8 @@ class _Harness:
         widgets = ui.widgets() if isinstance(ui, _FakeUi) else [self.witness]
         self.app = _FakeApp(style, widgets)
         self.manager = ThemeManager(
-            cast(QApplication, self.app), self.window,
+            cast(QApplication, self.app),
+            self.window,
         )
 
     @property

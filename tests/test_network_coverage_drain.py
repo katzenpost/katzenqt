@@ -581,9 +581,13 @@ class TestReadSubstreamFailures:
             assert (
                 await sess.exec(select(persistent.ConversationLog))
             ).all() == []
-        assert transfer_events.failed(
-            flow.stream, "The transfer parent no longer exists",
-        ) in _drain_progress()
+        assert (
+            transfer_events.failed(
+                flow.stream,
+                "The transfer parent no longer exists",
+            )
+            in _drain_progress()
+        )
 
     @pytest.mark.asyncio
     async def test_a_fatal_database_error_on_commit_is_not_swallowed(

@@ -523,9 +523,7 @@ async def test_generating_a_voucher_shows_the_code(
     assert voucher_flow == ["pending_voucher_for", f"mint:{name}"]
     texts = [box.text for box in boxes.seen] + shown
     assert any("dm91Y2hlci1ieXRlcw==" in t for t in texts)
-    assert any(
-        t.startswith(f"Here is your voucher, {name}.") for t in texts
-    )
+    assert any(t.startswith(f"Here is your voucher, {name}.") for t in texts)
     assert supervised == ["_await_voucher_join"]
 
 

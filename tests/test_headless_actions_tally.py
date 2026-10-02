@@ -136,9 +136,14 @@ async def test_tally_create_rejects_an_unknown_mode(
         slot=["a"],
         timeout=1.0,
     )
-    assert int(await _actions._action_tally_create(
-        cast("_args.TallyCreate", args),
-    )) == 2
+    assert (
+        int(
+            await _actions._action_tally_create(
+                cast("_args.TallyCreate", args),
+            )
+        )
+        == 2
+    )
     assert "unknown mode 'sortition'" in caplog.text
 
 

@@ -17,22 +17,31 @@ class _Peer:
 
 
 def test_ordinary_peer_is_displayable() -> None:
-    assert katzen._peer_is_displayable(
-        cast("persistent.ConversationPeer", _Peer("alice")),
-    ) is True
+    assert (
+        katzen._peer_is_displayable(
+            cast("persistent.ConversationPeer", _Peer("alice")),
+        )
+        is True
+    )
 
 
 def test_substream_peer_is_hidden() -> None:
     name = f"{network._SUBSTREAM_NAME_PREFIX}parent:00ff"
-    assert katzen._peer_is_displayable(
-        cast("persistent.ConversationPeer", _Peer(name)),
-    ) is False
+    assert (
+        katzen._peer_is_displayable(
+            cast("persistent.ConversationPeer", _Peer(name)),
+        )
+        is False
+    )
 
 
 def test_a_peer_named_like_a_substream_suffix_stays_visible() -> None:
-    assert katzen._peer_is_displayable(
-        cast("persistent.ConversationPeer", _Peer("not:substream:x")),
-    ) is True
+    assert (
+        katzen._peer_is_displayable(
+            cast("persistent.ConversationPeer", _Peer("not:substream:x")),
+        )
+        is True
+    )
 
 
 def test_duration_time_ns_reads_the_raw_monotonic_clock(

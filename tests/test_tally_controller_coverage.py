@@ -159,9 +159,7 @@ async def test_close_local_loads_a_survey_that_is_only_persisted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_loaded_refuses_another_conversations_survey() -> (
-    None
-):
+async def test_ensure_loaded_refuses_another_conversations_survey() -> None:
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
         convo_a, _pa = await _make_convo(sess, "a", OWN_CAP, {})
@@ -444,9 +442,7 @@ async def test_close_before_create_from_a_non_creator_is_discarded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_before_create_is_a_noop_when_closed() -> (
-    None
-):
+async def test_close_before_create_is_a_noop_when_closed() -> None:
     ctrl = TallyController()
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
@@ -695,9 +691,7 @@ async def test_an_unhandled_tally_kind_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_staging_a_chunked_message_registers_its_cap() -> (
-    None
-):
+async def test_staging_a_chunked_message_registers_its_cap() -> None:
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
         convo, _peers = await _make_convo(sess, "g", OWN_CAP, {})

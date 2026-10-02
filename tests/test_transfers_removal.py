@@ -3,6 +3,7 @@
 The removal arm is the one branch of ``transfers_listener`` no other test
 reaches, so it is pinned here with its own model stub.
 """
+
 from __future__ import annotations
 
 import uuid

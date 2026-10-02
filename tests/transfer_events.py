@@ -21,7 +21,10 @@ def _typed(name: str) -> "Callable[..., Any] | None":
 
 
 def started(
-    rcw_id: uuid.UUID, conversation_id: int, total: "int | None", name: str,
+    rcw_id: uuid.UUID,
+    conversation_id: int,
+    total: "int | None",
+    name: str,
 ) -> Any:
     """A download that just began, with the row count it expects."""
     typed = _typed("TransferStarted")
@@ -50,16 +53,28 @@ def upload_started(
     typed = _typed("UploadStarted")
     if typed is None:
         return (
-            "upload_started", rcw_id, conversation_id, total, total_bytes,
-            parent_name, basename,
+            "upload_started",
+            rcw_id,
+            conversation_id,
+            total,
+            total_bytes,
+            parent_name,
+            basename,
         )
     return typed(
-        rcw_id, conversation_id, total, total_bytes, parent_name, basename,
+        rcw_id,
+        conversation_id,
+        total,
+        total_bytes,
+        parent_name,
+        basename,
     )
 
 
 def upload_piece(
-    rcw_id: uuid.UUID, sent: int, remaining_bytes: int,
+    rcw_id: uuid.UUID,
+    sent: int,
+    remaining_bytes: int,
 ) -> Any:
     """One more sent piece of an upload."""
     typed = _typed("UploadPiece")
@@ -83,7 +98,9 @@ def paused(rcw_id: uuid.UUID, direction: str, value: bool) -> Any:
 
 
 def completed(
-    rcw_id: uuid.UUID, direction: str, cancelled: bool = False,
+    rcw_id: uuid.UUID,
+    direction: str,
+    cancelled: bool = False,
 ) -> Any:
     """A transfer that finished, or was cancelled when cancelled is True."""
     typed = _typed("TransferCompleted")

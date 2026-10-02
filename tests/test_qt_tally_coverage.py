@@ -109,9 +109,7 @@ def test_slot_totals_mentions_maybe_only_when_it_is_used() -> None:
     assert TallyPanel._slot_totals(without) == f"yes 2 {MIDDLE_DOT} no 3"
 
 
-def test_a_panel_with_no_survey_ignores_edit_and_submit() -> (
-    None
-):
+def test_a_panel_with_no_survey_ignores_edit_and_submit() -> None:
     panel = TallyPanel()
     fired: list[object] = []
     panel.voteSubmitted.connect(fired.append)
