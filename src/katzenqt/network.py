@@ -42,9 +42,9 @@ import cbor2
 
 from .katzen_util import create_task
 from ._thinclient import ThinClient
+from . import epochs
 from pydantic.dataclasses import dataclass
 from . import attachment_images, conversation_handlers, models, persistent
-from . import epochs
 from sqlmodel import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
