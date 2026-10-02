@@ -538,6 +538,7 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
             )
         else:
             raise ValueError(f"unknown chunk type: {kind!r}")
+    return None
 
 
 # ConversationUIState moved to katzenqt.qt_models; see banner near the

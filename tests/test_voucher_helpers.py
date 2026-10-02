@@ -150,6 +150,9 @@ class TestOwnReadCapDedupe:
             assert conv is not None
             sess.expire(conv, attribute_names=["own_peer"])
             assert await persistent.own_read_cap(sess, conv) == b"\xaa" * 136
+_Staged = persistent.PlaintextWAL | persistent.ReadCapWAL
+
+
 class TestOversizedIntroduction:
     @pytest.mark.asyncio
     async def test_a_spilled_introduction_stages_its_new_write_caps(
@@ -163,7 +166,7 @@ class TestOversizedIntroduction:
         async def spilling(
             self: models.SendOperation,
             **kwargs: object,
-        ) -> "tuple[list[uuid.UUID], list[persistent.SQLModel]]":
+        ) -> "tuple[list[uuid.UUID], list[_Staged]]":
             _, entries = await real(self, **kwargs)  # type: ignore[arg-type]
             return [cap_id], entries
 
