@@ -5,9 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from katzenqt import persistent
 from tests.integration import _bounce_helpers as helpers
 
 INTEGRATION = Path(__file__).resolve().parent / "integration"
+NAMENLOS = (
+    Path(__file__).resolve().parents[1]
+    / ".github"
+    / "workflows"
+    / "test-integration-namenlos.yml"
+)
 LITERAL = re.compile(
     r"timeout=\s*(\d+(?:\.\d+)?)|_s = (\d+(?:\.\d+)?)|\"(\d{3,4})\"",
 )
@@ -48,3 +55,32 @@ def test_no_integration_wait_longer_than_a_docker_epoch_is_hardcoded() -> (
         if (hits := _long_literals(path.read_text(encoding="utf-8")))
     }
     assert offenders == {}
+
+
+def test_the_voucher_bootstrap_waits_are_epoch_derived() -> None:
+    text = (INTEGRATION / "_bounce_helpers.py").read_text(encoding="utf-8")
+    body = text.split("def bootstrap_voucher", 1)[1].split("\ndef ", 1)[0]
+    assert "budget_s(" in body
+    assert _long_literals(body) == []
+
+
+def test_the_ack_deadline_takes_the_send_budget_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KQT_SEND_BUDGET_FLOOR_S", raising=False)
+    assert persistent.ack_deadline_s(180.0) == 180.0
+    monkeypatch.setenv("KQT_SEND_BUDGET_FLOOR_S", "1500")
+    assert persistent.ack_deadline_s(180.0) == 1500.0
+    assert persistent.ack_deadline_s(1800.0) == 1800.0
+
+
+def test_every_job_floors_its_acks_above_its_own_epoch() -> None:
+    text = NAMENLOS.read_text(encoding="utf-8")
+    floors = [
+        float(v)
+        for v in re.findall(r'KQT_SEND_BUDGET_FLOOR_S: "(\d+)"', text)
+    ]
+    live = float(re.search(r'KQT_EPOCH_DURATION_S: "(\d+)"', text).group(1))
+    assert len(floors) == 4
+    assert max(floors) > live
+    assert min(floors) > 120.0
