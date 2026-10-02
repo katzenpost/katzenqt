@@ -101,6 +101,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import _args
+from .. import epochs
 from .. import conversation_handlers, models, network, persistent, removal
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
@@ -319,14 +320,12 @@ async def _send_one_gcm(
 
     Serialises ``gcm`` into the conversation's outgoing BACAP stream,
     spawns the headless background loops, and waits for the final
-    PlaintextWAL to land in SentLog. The budget scales with the
-    number of chunks so a multi-box attachment is given enough time
-    to clear (sixty seconds per chunk on the local docker mixnet,
-    one-hundred-twenty seconds minimum by default). KQT_SEND_BUDGET_FLOOR_S
-    overrides the floor for slower environments, e.g. CI's 4-way
-    concurrent load on a shared kpclientd (see test-integration-docker.yml)
-    -- left as an opt-in override rather than a raised default so a real
-    send failure isn't detected twice as slowly for every caller.
+    PlaintextWAL to land in SentLog. The budget is one epoch plus
+    headroom, and the headroom scales with the number of chunks so a
+    multi-box attachment is given enough time to clear. Nothing needs
+    setting per network: the epoch comes from the PKI document, so the
+    same code waits two minutes longer on the local mixnet and twenty
+    minutes longer on a live one.
     """
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -365,8 +364,8 @@ async def _send_one_gcm(
             sess.add(obj)
         await sess.commit()
 
-    budget_floor_s = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0"))
-    budget_s = max(budget_floor_s, num_pwals * 60.0) if timeout is None else timeout
+    headroom_s = max(120.0, num_pwals * 60.0)
+    budget_s = epochs.budget_s(headroom_s) if timeout is None else timeout
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
@@ -647,7 +646,7 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
                 # the two compete for daemon CPU on a loaded CI runner,
                 # which pushes per-step wall time well above the
                 # single-role baseline.
-                if not await persistent.wait_for_sent(final_pwal_id, deadline_s=600.0):
+                if not await persistent.wait_for_sent(final_pwal_id, headroom_s=600.0):
                     logger.error(f"STEP_FAIL:{step_idx}:send-timeout:{payload}")
                     return 3
                 logger.info(f"STEP_OK:{step_idx}:SEND:{payload}:ts={time.time():.3f}")

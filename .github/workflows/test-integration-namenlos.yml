@@ -116,7 +116,6 @@ jobs:
           KQT_EPOCH_DURATION_S: "1200"
           KATZENQT_DOCKER_INTEGRATION: "1"
           KQT_INTEGRATION_PARALLEL: "4"
-          KQT_SEND_BUDGET_FLOOR_S: "1500"
         run: |
           mkdir -p integration-results
           rm -f integration-results/namenlos.json
@@ -277,7 +276,6 @@ jobs:
         working-directory: katzenqt
         timeout-minutes: 90
         env:
-          KQT_SEND_BUDGET_FLOOR_S: "420"
           KATZENQT_DOCKER_INTEGRATION: "1"
           KQT_INTEGRATION_PARALLEL: "2"
         run: |
@@ -292,7 +290,6 @@ jobs:
         if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' }}
         timeout-minutes: 90
         env:
-          KQT_SEND_BUDGET_FLOOR_S: "420"
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
@@ -438,7 +435,6 @@ jobs:
       - name: Run the epoch-driven integration tests
         working-directory: katzenqt
         env:
-          KQT_SEND_BUDGET_FLOOR_S: "420"
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results

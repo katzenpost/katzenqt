@@ -44,6 +44,7 @@ from .katzen_util import create_task
 from ._thinclient import ThinClient
 from pydantic.dataclasses import dataclass
 from . import attachment_images, conversation_handlers, models, persistent
+from . import epochs
 from sqlmodel import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -590,6 +591,7 @@ async def on_new_pki_document(event: "Dict[str, Any]") -> None:
     if epoch is None or epoch == _last_epoch:
         return
     previous, _last_epoch = _last_epoch, epoch
+    epochs.remember_period(derive_epoch_period_seconds(epoch))
     logger.info("PKI epoch advanced to %s (from %s)", epoch, previous)
     old_event, _epoch_event = _epoch_event, asyncio.Event()
     old_event.set()
