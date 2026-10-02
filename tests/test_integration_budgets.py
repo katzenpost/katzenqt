@@ -80,7 +80,9 @@ def test_every_job_floors_its_acks_above_its_own_epoch() -> None:
         float(v)
         for v in re.findall(r'KQT_SEND_BUDGET_FLOOR_S: "(\d+)"', text)
     ]
-    live = float(re.search(r'KQT_EPOCH_DURATION_S: "(\d+)"', text).group(1))
+    match = re.search(r'KQT_EPOCH_DURATION_S: "(\d+)"', text)
+    assert match is not None
+    live = float(match.group(1))
     assert len(floors) == 4
     assert max(floors) > live
     assert min(floors) > 120.0
