@@ -14,14 +14,17 @@ from tests.stubs import appending
 @pytest.mark.real_sleeps
 @pytest.mark.asyncio
 async def test_shutdown_overrun_warns_on_the_module_logger(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def slow_join(_tasks: object) -> None:
         await asyncio.sleep(30)
 
     monkeypatch.setattr(network, "_cancel_and_join", slow_join)
     monkeypatch.setattr(
-        logging.getLogger("katzen.headless"), "propagate", True,
+        logging.getLogger("katzen.headless"),
+        "propagate",
+        True,
     )
 
     async def idle() -> None:
@@ -32,13 +35,15 @@ async def test_shutdown_overrun_warns_on_the_module_logger(
     connection = type("C", (), {"stop": appending(stopped, True)})()
     with caplog.at_level(logging.WARNING):
         await _actions._shutdown(
-            bg, cast("object", connection),
+            bg,
+            cast("object", connection),
             timeout=0.01,
         )
     bg.cancel()
     assert stopped == [True]
     overruns = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "did not finish cancelling" in r.getMessage()
     ]
     assert overruns, "the overrun warning was not emitted at all"
