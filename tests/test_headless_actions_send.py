@@ -227,17 +227,18 @@ async def test_send_reports_sent_once_the_plaintext_clears(
 
 
 @pytest.mark.asyncio
-async def test_send_honours_the_budget_floor_override(
+async def test_send_gives_up_after_its_whole_budget(
     monkeypatch: pytest.MonkeyPatch,
     stub_session: StubConnection,
 ) -> None:
+    """One chunk waits the two-minute floor and then reports a timeout."""
     await make_conversation("floored")
-    monkeypatch.setenv("KQT_SEND_BUDGET_FLOOR_S", "100.0")
+    monkeypatch.delenv("KQT_SEND_BUDGET_FLOOR_S", raising=False)
     monkeypatch.setattr(network, "check_for_new", AsyncMock())
     clock = FakeClock()
     clock.install(monkeypatch)
     assert await run_action(["send", "floored", "hello", *ADDRESS]) == 3
-    assert clock.now == 100.0
+    assert clock.now == 120.0
 
 
 @pytest.mark.asyncio

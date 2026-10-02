@@ -900,5 +900,7 @@ def test_abstract_item_model_contract_is_usable_by_a_view() -> None:
     reason="__index__ asks its parent for a method Qt does not define",
 )
 def test_a_filter_proxy_model_reports_an_index_value() -> None:
-    proxy = qt_models.FilterProxyModel(None)
+    proxy = qt_models.FilterProxyModel(
+        cast("katzen.MainWindow", object()),
+    )
     proxy.__index__()

@@ -430,19 +430,19 @@ def test_the_key_press_filter_never_eats_an_event(
 
 
 def test_the_placeholder_helpers_are_inert(qt_app: QApplication) -> None:
-    assert katzen.todo_keys_push_to_talk() is None
-    assert katzen.todo_settings() is None
-    assert katzen.rebuild_pydantic_models() is None
+    katzen.todo_keys_push_to_talk()
+    katzen.todo_settings()
+    katzen.rebuild_pydantic_models()
 
 
 def test_todo_keys_builds_every_sequence_it_names(
     qt_app: QApplication,
 ) -> None:
-    assert katzen.todo_keys() is None
+    katzen.todo_keys()
 
 
 def test_todo_unicode_builds_its_sequence(qt_app: QApplication) -> None:
-    assert katzen.todo_unicode() is None
+    katzen.todo_unicode()
 
 
 def test_unread_tracking_is_not_implemented_yet(

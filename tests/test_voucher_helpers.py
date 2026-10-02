@@ -163,7 +163,7 @@ class TestOversizedIntroduction:
         async def spilling(
             self: models.SendOperation,
             **kwargs: object,
-        ) -> "tuple[list[uuid.UUID], list[object]]":
+        ) -> "tuple[list[uuid.UUID], list[persistent.SQLModel]]":
             _, entries = await real(self, **kwargs)  # type: ignore[arg-type]
             return [cap_id], entries
 
