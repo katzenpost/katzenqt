@@ -129,7 +129,8 @@ def install_service() -> bool:
         unit.write_bytes(wanted)
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     subprocess.run(
-        ["systemctl", "--user", "enable", "--now", "kpclientd"], check=True,
+        ["systemctl", "--user", "enable", "--now", "kpclientd"],
+        check=True,
     )
     return True
 

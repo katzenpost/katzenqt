@@ -13,7 +13,8 @@ import pytest
 
 @pytest.fixture
 def launcher(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> Iterator[ModuleType]:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -39,7 +40,8 @@ def test_thin_configs(launcher: ModuleType) -> None:
 
 
 def test_endpoint_prefers_host(
-    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         Path, "exists", lambda path: path in (launcher.HOST, launcher.SOCKET)
@@ -49,7 +51,8 @@ def test_endpoint_prefers_host(
 
 
 def test_endpoint_uses_private_fallback(
-    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(Path, "exists", lambda path: path == launcher.SOCKET)
     monkeypatch.setattr(launcher, "alive", lambda path: True)
@@ -75,7 +78,8 @@ def test_status_reports_all_endpoints(
 
 
 def test_unavailable_daemon_never_starts_gui(
-    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(launcher, "FLATPAK", False)
     monkeypatch.setattr(launcher, "endpoint", lambda: None)
@@ -89,7 +93,8 @@ def test_unavailable_daemon_never_starts_gui(
 
 
 def test_running_daemon_launches_gui(
-    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     launched: list[tuple[object, ...]] = []
 
@@ -106,7 +111,8 @@ def test_running_daemon_launches_gui(
 
 
 def test_generated_configs_live_in_runtime_dir(
-    launcher: ModuleType, tmp_path: Path,
+    launcher: ModuleType,
+    tmp_path: Path,
 ) -> None:
     thin = launcher.thin("/run/test.sock")
     assert launcher.ROOT in thin.parents
@@ -114,7 +120,8 @@ def test_generated_configs_live_in_runtime_dir(
 
 
 def test_endpoint_reaches_default_abstract_socket(
-    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(Path, "exists", lambda _: False)
     monkeypatch.setattr(
@@ -221,7 +228,9 @@ def test_install_service_writes_plain_unit_and_starts(
     monkeypatch.setenv("HOME", str(tmp_path))
     _seed_daemon(tmp_path, "hand-tuned\n")
     monkeypatch.setattr(
-        launcher.shutil, "which", lambda name: "/usr/bin/systemctl",
+        launcher.shutil,
+        "which",
+        lambda name: "/usr/bin/systemctl",
     )
     ran: list[object] = []
     monkeypatch.setattr(
@@ -246,7 +255,9 @@ def test_install_service_keeps_a_matching_unit(
     monkeypatch.setenv("HOME", str(tmp_path))
     _seed_daemon(tmp_path, "hand-tuned\n")
     monkeypatch.setattr(
-        launcher.shutil, "which", lambda name: "/usr/bin/systemctl",
+        launcher.shutil,
+        "which",
+        lambda name: "/usr/bin/systemctl",
     )
     unit = tmp_path / ".config/systemd/user/kpclientd.service"
     unit.parent.mkdir(parents=True)
@@ -271,7 +282,9 @@ def test_install_service_skips_without_binary(
     monkeypatch.setenv("HOME", str(tmp_path))
     called = []
     monkeypatch.setattr(
-        launcher.subprocess, "run", lambda *a, **k: called.append(a),
+        launcher.subprocess,
+        "run",
+        lambda *a, **k: called.append(a),
     )
     assert launcher.install_service() is False
     assert called == []
@@ -283,7 +296,9 @@ def test_install_service_mode_reports_blocker(
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["launcher", "--install-service"])
     monkeypatch.setattr(
-        launcher, "service_blocker", lambda: "run: make install-kpclient",
+        launcher,
+        "service_blocker",
+        lambda: "run: make install-kpclient",
     )
     monkeypatch.setattr(
         launcher, "install_service", lambda: pytest.fail("should not install")
