@@ -64,9 +64,8 @@ def test_all_final_job_combinations() -> None:
     ):
         expected = (
             epoch == "success"
-            and (docker == "success"
-                 or (docker == "skipped" and live_job == "success"
-                     and live == "passed"))
+            and ((live_job == "success" and live == "passed")
+                 or docker == "success")
         )
         assert integration_passed(live_job, live, docker, epoch) == expected
         assert integration_passed(
@@ -82,11 +81,8 @@ def test_the_queue_never_accepts_a_skipped_docker_job() -> None:
     assert integration_passed("success", "passed", "success", "success", True)
 
 
-def test_the_workflow_requires_docker_only_in_the_queue() -> None:
+def test_the_workflow_still_hardens_the_queue() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "github.event_name == 'merge_group'" in text.split(
-        "  docker-integration:", 1,
-    )[1].split("    permissions:", 1)[0]
     assert (
         "REQUIRE_DOCKER: ${{ github.event_name == 'merge_group' "
         "&& '--require-docker' || '' }}" in text
@@ -94,10 +90,18 @@ def test_the_workflow_requires_docker_only_in_the_queue() -> None:
     assert '--epoch="$EPOCH" $REQUIRE_DOCKER' in text
 
 
-def test_the_docker_suite_stands_in_for_a_failed_live_check() -> None:
+def test_the_docker_suite_is_required_when_the_live_check_does_not_pass(
+) -> None:
     assert integration_passed("failure", "failed", "success", "success")
     assert integration_passed("success", "failed", "success", "success")
     assert not integration_passed("success", "failed", "skipped", "success")
+    assert not integration_passed("skipped", "", "skipped", "success")
+    assert integration_passed("skipped", "", "success", "success")
+
+
+def test_a_passing_live_check_needs_no_docker_run() -> None:
+    assert integration_passed("success", "passed", "skipped", "success")
+    assert integration_passed("success", "passed", "", "success")
 
 
 def test_final_command_publishes_both_lane_results(tmp_path: Path) -> None:

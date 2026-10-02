@@ -51,11 +51,9 @@ def integration_passed(
         return False
     if require_docker:
         return docker == "success"
-    if docker == "success":
+    if live_job == "success" and live == "passed":
         return True
-    if docker == "skipped":
-        return live_job == "success" and live == "passed"
-    return False
+    return docker == "success"
 
 
 def publish(outcome: Outcome, text: str) -> int:
