@@ -715,6 +715,16 @@ async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
     return own_cap
 
 
+def ack_deadline_s(deadline_s: float) -> float:
+    """``deadline_s``, raised to KQT_SEND_BUDGET_FLOOR_S when that is larger.
+
+    >>> ack_deadline_s(180.0) >= 180.0
+    True
+    """
+    floor_s = os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "0")
+    return max(deadline_s, float(floor_s))
+
+
 async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25) -> bool:
     """Poll SentLog for ``pwal_id`` until it appears or ``deadline_s``
     elapses. Returns True if acked in time, False on timeout.
@@ -722,8 +732,13 @@ async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float 
     Shared by every caller that needs to block until an outbound
     plaintext's ACK lands (voucher.py's introduction wait, the headless
     SEND step); each decides for itself what a timeout means (log and
-    move on, vs. fail the whole action)."""
-    deadline = asyncio.get_event_loop().time() + deadline_s
+    move on, vs. fail the whole action).
+
+    KQT_SEND_BUDGET_FLOOR_S raises every one of those waits, the same floor
+    the headless send verb already takes its own budget from. A network
+    whose epoch is twenty minutes needs it; the callers' own defaults are
+    sized for one whose epoch is two."""
+    deadline = asyncio.get_event_loop().time() + ack_deadline_s(deadline_s)
     while asyncio.get_event_loop().time() < deadline:
         async with asession() as sess:
             hit = (await sess.exec(

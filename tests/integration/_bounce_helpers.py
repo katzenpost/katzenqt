@@ -231,14 +231,23 @@ def bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
     cap) and replies with her read cap, and Bob joins (gaining hers). Both can
     then read each other, the bidirectional state the restart tests exercise."""
     for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = run_role(state, "create-conv", "demo", name, timeout=450.0)
+        create = run_role(
+            state, "create-conv", "demo", name, timeout=budget_s(330.0),
+        )
         assert create.returncode == 0, create.stdout + create.stderr
-    mint = run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
+    mint = run_role(
+        bob_state, "voucher-mint", "demo", "bob", timeout=budget_s(630.0),
+    )
     assert mint.returncode == 0, mint.stdout + mint.stderr
     voucher = expect_token(mint, "VOUCHER=")
-    induct = run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
+    induct = run_role(
+        alice_state, "voucher-induct", "demo", "bob", voucher,
+        timeout=budget_s(630.0),
+    )
     assert induct.returncode == 0, induct.stdout + induct.stderr
-    joined = run_role(bob_state, "voucher-await", "demo", timeout=750.0)
+    joined = run_role(
+        bob_state, "voucher-await", "demo", timeout=budget_s(630.0),
+    )
     assert joined.returncode == 0, joined.stdout + joined.stderr
 
 
