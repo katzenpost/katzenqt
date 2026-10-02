@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 from alembic import context
 import logging
 import os
+
+from . import epochs
 from threading import Lock
 
 logger = logging.getLogger("katzen.persistent")
@@ -715,15 +717,24 @@ async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
     return own_cap
 
 
-async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25) -> bool:
-    """Poll SentLog for ``pwal_id`` until it appears or ``deadline_s``
+
+
+async def wait_for_sent(
+    pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25,
+) -> bool:
+    """Poll SentLog for ``pwal_id`` until one epoch plus ``deadline_s``
     elapses. Returns True if acked in time, False on timeout.
 
     Shared by every caller that needs to block until an outbound
     plaintext's ACK lands (voucher.py's introduction wait, the headless
     SEND step); each decides for itself what a timeout means (log and
-    move on, vs. fail the whole action)."""
-    deadline = asyncio.get_event_loop().time() + deadline_s
+    move on, vs. fail the whole action).
+
+    ``deadline_s`` is slack on top of one epoch, not the whole wait: an ack
+    may have to ride out a PKI rollover, and an epoch is two minutes on the
+    local mixnet and twenty on a live one. The period comes from the PKI
+    document, so nothing needs setting per network."""
+    deadline = asyncio.get_event_loop().time() + epochs.budget_s(deadline_s)
     while asyncio.get_event_loop().time() < deadline:
         async with asession() as sess:
             hit = (await sess.exec(

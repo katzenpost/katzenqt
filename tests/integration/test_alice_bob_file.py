@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.integration._bounce_helpers import bootstrap_voucher as _bootstrap_voucher
+from tests.integration._bounce_helpers import budget_s, deadline_arg
 from tests.integration._process import run_logged
 
 
@@ -47,7 +48,7 @@ def _run_role(
     role_state: Path,
     *cli_args: str,
     timeout: float = 180.0,
-) -> subprocess.CompletedProcess:
+) -> "subprocess.CompletedProcess[str]":
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
@@ -56,11 +57,13 @@ def _run_role(
     )
 
 
-def _output(proc: subprocess.CompletedProcess) -> str:
+def _output(proc: "subprocess.CompletedProcess[str]") -> str:
     return proc.stdout + proc.stderr
 
 
-def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+def _expect_token(
+    proc: "subprocess.CompletedProcess[str]", token: str,
+) -> str:
     """Find a logged line containing token; return the text after it. Results
     are emitted through logging (stderr) with a level/name prefix, so match by
     substring rather than line start."""
@@ -98,8 +101,9 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
 
     t0 = time.monotonic()
     send = _run_role(
-        alice_state, "send-file", "demo", str(src), "--timeout", "900",
-        timeout=1200.0,
+        alice_state, "send-file", "demo", str(src),
+        "--timeout", deadline_arg(780.0),
+        timeout=budget_s(1080.0),
     )
     assert send.returncode == 0 and "SENT" in _output(send), (
         f"send-file failed:\nstdout:\n{send.stdout}\nstderr:\n{send.stderr}"
@@ -110,8 +114,8 @@ def test_file_roundtrip(kpclientd_endpoint, tmp_path_factory):
     read = _run_role(
         bob_state, "read-file", "demo",
         "--to-dir", str(dst_dir),
-        "--timeout", "900",
-        timeout=1000.0,
+        "--timeout", deadline_arg(780.0),
+        timeout=budget_s(880.0),
     )
     assert read.returncode == 0, (
         f"read-file failed:\nstdout tail:\n{read.stdout[-2000:]}\n"

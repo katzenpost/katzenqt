@@ -42,7 +42,7 @@ def test_serial_phase_runs_after_parallel_failure_only() -> None:
     assert "success()" not in condition
 
 
-def test_live_failure_is_classified_before_allowing_fallback() -> None:
+def test_live_failure_is_classified_before_the_verdict() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
     live = jobs["namenlos-integration"]
     assert "continue-on-error: true" in _step(live, "Run integration tests")
@@ -52,11 +52,6 @@ def test_live_failure_is_classified_before_allowing_fallback() -> None:
     assert "steps.tests.outputs.exit_code" in classification
     assert "--report=integration-results/namenlos.json" in classification
     assert "steps.result.outputs.verdict" in live
-    fallback = jobs["docker-integration"]
-    assert "!cancelled()" in fallback
-    assert (
-        "needs.namenlos-integration.outputs.verdict != 'passed'" in fallback
-    )
 
 
 def test_listener_configuration_errors_are_not_advisory() -> None:
@@ -82,7 +77,7 @@ def test_live_tests_declare_epoch_without_docker() -> None:
 def test_result_job_runs_after_skipped_or_failed_dependencies() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
     result = jobs["integration-result"]
-    assert re.search(r"^    if: always\(\)\s*$", result, re.M)
+    assert re.search(r"^    if: \$\{\{ always\(\)", result, re.M)
     assert (
         "needs: [namenlos-integration, docker-integration, epoch-integration]"
         in result
@@ -90,20 +85,21 @@ def test_result_job_runs_after_skipped_or_failed_dependencies() -> None:
     assert "continue-on-error" not in result
 
 
-def test_docker_is_optional_but_epoch_coverage_is_not() -> None:
+def test_no_mixnet_runs_on_a_pull_request() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
-    fallback = jobs["docker-integration"]
-    condition = next(
-        line.strip() for line in fallback.splitlines()
-        if line.startswith("    if:")
-    )
-    assert condition == (
-        "if: ${{ !cancelled() && "
-        "(needs.namenlos-integration.result != 'success' || "
-        "needs.namenlos-integration.outputs.verdict != 'passed') }}"
-    )
+    for name in (
+        "namenlos-integration",
+        "docker-integration",
+        "epoch-integration",
+        "integration-result",
+    ):
+        body = jobs[name].split("    runs-on:", 1)[0]
+        assert "github.event_name == 'merge_group'" in body, name
+        assert "github.event_name == 'schedule'" in body, name
+        assert "pull_request" not in body, name
+    assert "!cancelled()" in jobs["docker-integration"]
     epoch = jobs["epoch-integration"]
-    assert not re.search(r"^    (if|needs|continue-on-error):", epoch, re.M)
+    assert not re.search(r"^    (needs|continue-on-error):", epoch, re.M)
     assert "-m epoch_driven" in epoch
 
 

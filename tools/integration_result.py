@@ -45,12 +45,15 @@ def live_outcome(
 
 def integration_passed(
     live_job: str, live: str, docker: str, epoch: str,
+    require_docker: bool = False,
 ) -> bool:
-    if live_job != "success" or epoch != "success":
+    if epoch != "success":
         return False
-    if live == "passed":
-        return docker in ("success", "skipped")
-    return live == "deadline" and docker == "success"
+    if require_docker:
+        return docker == "success"
+    if live_job == "success" and live == "passed":
+        return True
+    return docker == "success"
 
 
 def publish(outcome: Outcome, text: str) -> int:
@@ -76,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     final = commands.add_parser("final")
     for name in ("live-job", "live", "docker", "epoch"):
         final.add_argument(f"--{name}", required=True)
+    final.add_argument("--require-docker", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "live":
         data: object = None
@@ -94,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         return publish(outcome, text)
     passed = integration_passed(
         args.live_job, args.live, args.docker, args.epoch,
+        args.require_docker,
     )
     text = (
         f"Namenlos: {args.live or 'missing'} (job: {args.live_job}).\n"

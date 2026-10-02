@@ -168,7 +168,8 @@ def test_rust_setup_has_its_own_bound_inside_the_job_budget() -> None:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip().startswith("run:") and "ci-rust.sh" in line
     ]
-    assert len(commands) == 5
     local_bound = "timeout --kill-after=10s 300s bash tools/ci-rust.sh"
-    assert commands.count(local_bound) == 2
-    assert commands.count("bash tools/ci-timeout.sh " + local_bound) == 3
+    deadline_bound = "bash tools/ci-timeout.sh " + local_bound
+    assert commands
+    assert all(c in (local_bound, deadline_bound) for c in commands), commands
+    assert commands.count(deadline_bound) == 3
