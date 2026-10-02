@@ -26,4 +26,4 @@ def test_filter_proxy_model_is_not_pretending_to_be_an_integer() -> None:
     # widget, which aborts when another test has left a Qt loop running.
     model = FilterProxyModel(cast("MainWindow", object()))
     with pytest.raises(TypeError):
-        operator.index(model)  # type: ignore[arg-type]
+        operator.index(model)

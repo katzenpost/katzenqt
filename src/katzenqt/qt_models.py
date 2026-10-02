@@ -39,12 +39,14 @@ from functools import lru_cache
 
 class FilterProxyModel(QtCore.QSortFilterProxyModel):
     # recursiveFilteringEnabled show parents when child matches
-    def __index__(self) -> int:
-        raise TypeError("a filter proxy model has no index value")
     def __init__(self, window: "katzen.MainWindow"):
         self.window = window
         super().__init__(recursiveFilteringEnabled=False)
+
         # self.setAutoAcceptChildRows(True)
+
+    def __index__(self) -> int:
+        raise TypeError("a filter proxy model has no index value")
 
     def invalidate(self) -> None:
         super().invalidate()

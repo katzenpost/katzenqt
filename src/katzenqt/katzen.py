@@ -3210,8 +3210,9 @@ class MixSystrayIcon(QSystemTrayIcon):
         # has a chance to run here, but it should only do that when we actually resume
         # to the conversation that has the new messages.
 
-    
-    def messageClicked(self, *args: object, **kwargs: object) -> None:
+    def messageClicked(  # type: ignore[override]
+        self, *args: object, **kwargs: object,
+    ) -> None:
         print("Someone clicked message", args, kwargs)
 
 async def _stage_local_tally(
