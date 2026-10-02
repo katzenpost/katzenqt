@@ -2019,6 +2019,11 @@ class MainWindow(QMainWindow):
             # TODO we should flash the contact entry somehow
             # TODO we should bump "unread message" counter
 
+        if await self.iothread.run_in_io(
+            persistent.is_muted(conversation_id),
+        ):
+            return
+
         # if the main window is not in focus, we should issue a notification:
         if not self.app.focusWidget():
             self.app.alert(self)
@@ -2122,9 +2127,23 @@ class MainWindow(QMainWindow):
         self, item: "ContactsItem", global_pos: QPoint,
     ) -> None:
         api = QMenu(self.ui.contacts_treeWidget)
+        conversation_id = getattr(item, "conversation_id", None)
+        mute = api.addAction("Mute notifications")
+        mute.setCheckable(True)
+        mute.setEnabled(conversation_id is not None)
+        was_muted = conversation_id is not None and await (
+            self.iothread.run_in_io(persistent.is_muted(conversation_id))
+        )
+        mute.setChecked(was_muted)
+        api.addSeparator()
         remove = api.addAction("Remove group chat...")
-        if await _menu_chosen(api, global_pos) is remove:
+        chosen = await _menu_chosen(api, global_pos)
+        if chosen is remove:
             await self._remove_conversation(item)
+        elif chosen is mute and conversation_id is not None:
+            await self.iothread.run_in_io(
+                persistent.set_muted(conversation_id, muted=not was_muted),
+            )
 
     async def _peer_menu(
         self, item: "ContactsItem", global_pos: QPoint,
