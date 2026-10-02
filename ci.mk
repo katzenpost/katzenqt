@@ -46,7 +46,15 @@ check-migrations:
 
 .PHONY: check-live
 check-live:
-	python3 -m pytest tests/integration -q
+	@host="$${KATZENQT_KPCLIENTD_HOST:-127.0.0.1}"; \
+	port="$${KATZENQT_KPCLIENTD_PORT:-64331}"; \
+	seen=$$($(UV) run python -c "import socket; \
+s=socket.socket(); s.settimeout(5); \
+print(s.connect_ex(('$$host',int('$$port'))))") \
+		|| { echo "check-live: uv could not run python" >&2; exit 1; }; \
+	[ "$$seen" = 0 ] \
+		|| { echo "check-live: no kpclientd on $$host:$$port" >&2; exit 1; }; \
+	KATZENQT_DOCKER_INTEGRATION=1 $(UV) run pytest tests/integration -q
 
 .PHONY: ci-local-image
 ci-local-image:
