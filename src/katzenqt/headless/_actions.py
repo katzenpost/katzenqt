@@ -646,7 +646,9 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
                 # the two compete for daemon CPU on a loaded CI runner,
                 # which pushes per-step wall time well above the
                 # single-role baseline.
-                if not await persistent.wait_for_sent(final_pwal_id, headroom_s=600.0):
+                if not await persistent.wait_for_sent(
+                    final_pwal_id, headroom_s=600.0,
+                ):
                     logger.error(f"STEP_FAIL:{step_idx}:send-timeout:{payload}")
                     return 3
                 logger.info(f"STEP_OK:{step_idx}:SEND:{payload}:ts={time.time():.3f}")

@@ -719,7 +719,9 @@ async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
 
 
 
-async def wait_for_sent(pwal_id: uuid.UUID, *, headroom_s: float, poll_s: float = 0.25) -> bool:
+async def wait_for_sent(
+    pwal_id: uuid.UUID, *, headroom_s: float, poll_s: float = 0.25,
+) -> bool:
     """Poll SentLog for ``pwal_id`` until one epoch plus ``headroom_s``
     elapses. Returns True if acked in time, False on timeout.
 
