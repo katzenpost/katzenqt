@@ -19,8 +19,7 @@ from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python3"
-_PYTHON = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
+_PYTHON = sys.executable
 _HELPER = Path(__file__).with_name("_helper.py")
 
 
