@@ -77,7 +77,7 @@ def test_live_tests_declare_epoch_without_docker() -> None:
 def test_result_job_runs_after_skipped_or_failed_dependencies() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
     result = jobs["integration-result"]
-    assert re.search(r"^    if: always\(\)\s*$", result, re.M)
+    assert re.search(r"^    if: \$\{\{ always\(\)", result, re.M)
     assert (
         "needs: [namenlos-integration, docker-integration, epoch-integration]"
         in result
@@ -85,20 +85,21 @@ def test_result_job_runs_after_skipped_or_failed_dependencies() -> None:
     assert "continue-on-error" not in result
 
 
-def test_docker_always_runs_and_the_live_check_is_scheduled() -> None:
+def test_no_mixnet_runs_on_a_pull_request() -> None:
     jobs = _jobs(WORKFLOW.read_text(encoding="utf-8"))
-    docker = jobs["docker-integration"]
-    condition = next(
-        line.strip() for line in docker.splitlines()
-        if line.startswith("    if:")
-    )
-    assert condition == "if: ${{ !cancelled() }}"
-    live = jobs["namenlos-integration"]
-    for event in ("schedule", "workflow_dispatch", "merge_group"):
-        assert f"github.event_name == '{event}'" in live
-    assert "pull_request" not in live.split("    runs-on:", 1)[0]
+    for name in (
+        "namenlos-integration",
+        "docker-integration",
+        "epoch-integration",
+        "integration-result",
+    ):
+        body = jobs[name].split("    runs-on:", 1)[0]
+        assert "github.event_name == 'merge_group'" in body, name
+        assert "github.event_name == 'schedule'" in body, name
+        assert "pull_request" not in body, name
+    assert "!cancelled()" in jobs["docker-integration"]
     epoch = jobs["epoch-integration"]
-    assert not re.search(r"^    (if|needs|continue-on-error):", epoch, re.M)
+    assert not re.search(r"^    (needs|continue-on-error):", epoch, re.M)
     assert "-m epoch_driven" in epoch
 
 
