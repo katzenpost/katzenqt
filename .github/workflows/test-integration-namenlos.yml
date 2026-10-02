@@ -12,6 +12,9 @@ on:
 
 jobs:
   namenlos-integration:
+    if: ${{ github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -165,7 +168,7 @@ jobs:
 
   docker-integration:
     needs: [namenlos-integration]
-    if: ${{ !cancelled() && (github.event_name == 'merge_group' || needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
       packages: write
