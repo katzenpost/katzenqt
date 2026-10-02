@@ -435,12 +435,14 @@ def test_the_placeholder_helpers_are_inert(qt_app: QApplication) -> None:
     assert katzen.rebuild_pydantic_models() is None
 
 
-def test_todo_keys_still_names_a_key_that_pyside_dropped(
+def test_todo_keys_builds_every_sequence_it_names(
     qt_app: QApplication,
 ) -> None:
-    with pytest.raises(AttributeError) as caught:
-        katzen.todo_keys()
-    assert "FindNextPrevious" in str(caught.value)
+    assert katzen.todo_keys() is None
+
+
+def test_todo_unicode_builds_its_sequence(qt_app: QApplication) -> None:
+    assert katzen.todo_unicode() is None
 
 
 def test_unread_tracking_is_not_implemented_yet(

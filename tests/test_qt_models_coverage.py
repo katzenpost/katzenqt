@@ -893,3 +893,12 @@ def test_abstract_item_model_contract_is_usable_by_a_view() -> None:
     base: QAbstractItemModel = model
     assert base.roleNames()[ROLE_CHAT_AUTHOR] == b"author"
     assert base.rowCount(QModelIndex()) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="__index__ asks its parent for a method Qt does not define",
+)
+def test_a_filter_proxy_model_reports_an_index_value() -> None:
+    proxy = qt_models.FilterProxyModel(None)
+    proxy.__index__()

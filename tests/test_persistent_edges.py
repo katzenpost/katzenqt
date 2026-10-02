@@ -206,3 +206,20 @@ async def test_asession_finishes_the_acquire_when_cancelled_mid_acquire(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_a_read_cap_row_is_fetched_by_its_stream() -> None:
+    stream = uuid.uuid4()
+    async with persistent.asession() as sess:
+        sess.add(
+            persistent.ReadCapWAL(
+                id=stream,
+                write_cap_id=stream,
+                next_index=b"\x00" * 104,
+            )
+        )
+        await sess.commit()
+    async with persistent.asession() as sess:
+        row = await persistent.ReadCapWAL.get_by_bacap_stream(sess, stream)
+        assert row.id == stream
