@@ -343,6 +343,49 @@ async def _qml_source_ready(widget: "QQuickWidget") -> None:
         widget.statusChanged.disconnect(_on_status)
 
 
+class VoucherDialog(QDialog):
+    def __init__(
+        self,
+        parent: "QWidget",
+        code: str,
+        *,
+        display_name: "str | None" = None,
+    ) -> None:
+        super().__init__(parent)
+        self.code = code
+        self.setWindowTitle(f"Voucher: {APP_NAME}")
+        intro = (
+            f"Here is your voucher, {display_name}."
+            if display_name else "Here is your voucher."
+        )
+        self.label = QLabel(
+            f"{intro}\nHand it out of band to an existing member, who will "
+            f"induct you. Reopen this from the contacts menu to copy it "
+            f"again:\n\n{code}",
+            self,
+        )
+        self.label.setWordWrap(True)
+        self.label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard,
+        )
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close, self,
+        )
+        self.copy_button = buttons.addButton(
+            "Copy voucher", QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        self.copy_button.clicked.connect(self.copy_code)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.label)
+        layout.addWidget(buttons)
+
+    def copy_code(self) -> None:
+        QApplication.clipboard().setText(self.code)
+        self.copy_button.setText("Copied")
+
+
 async def _commit_new_conversation(
     wcapwal: persistent.WriteCapWAL,
     rcapwal: persistent.ReadCapWAL,
@@ -2873,17 +2916,9 @@ class MainWindow(QMainWindow):
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
-        display_dialog = QInputDialog(self)
-        display_dialog.setWindowTitle("Generate voucher")
-        display_dialog.setLabelText(
-            "Choose (your) name shown to the contact who inducts you:",
-        )
-        if not await _dialog_finished(display_dialog):
-            return
-        display_name = display_dialog.textValue().strip()
+        display_name = convo.own_peer_name
         if not display_name:
             return
-
         try:
             client = self.iothread.kp_client
             assert client is not None
@@ -2899,11 +2934,9 @@ class MainWindow(QMainWindow):
             return
 
         code = b64encode(voucher).decode()
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Voucher: {APP_NAME}",
-            f"Here is your voucher, {display_name}.\nHand it out of band to an "
-            f"existing member, who will induct you:\n\n{code}",
-        ))
+        await _dialog_finished(
+            VoucherDialog(self, code, display_name=display_name),
+        )
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
