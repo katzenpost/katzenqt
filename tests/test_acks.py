@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, cast
 
 import cbor2
 import pytest
+from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from katzenqt import (
@@ -791,6 +792,33 @@ async def test_acknowledgements_left_by_a_dropped_message_are_cleared(
     again = models.GroupChatMessage(version=0, text="hi")
     await chat.queue(again)
     assert again.acks is not None
+
+
+@pytest.mark.asyncio
+async def test_looking_for_what_is_owed_writes_only_to_clear_a_dropped_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat, _ = await _two_members(read_to=6)
+    queued = await chat.queue(models.GroupChatMessage(version=0, text="hi"))
+
+    async def sent(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
+        return True
+
+    monkeypatch.setattr(persistent, "wait_for_sent", sent)
+    with persistent._engine_sync.connect() as writer:
+        writer.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            assert await acks.wait_for_outgoing(
+                chat.conversation_id, deadline_s=1.0
+            )
+            # The other writer does shut out anything that writes.
+            async with persistent.asession() as sess:
+                pwal = await sess.get(persistent.PlaintextWAL, queued)
+                await sess.delete(pwal)
+                with pytest.raises(OperationalError, match="locked"):
+                    await sess.commit()
+        finally:
+            writer.exec_driver_sql("ROLLBACK")
 
 
 @pytest.mark.asyncio
