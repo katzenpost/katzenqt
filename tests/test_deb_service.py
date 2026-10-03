@@ -7,11 +7,15 @@ SMOKE = ROOT / "packaging" / "debian" / "smoke.sh"
 
 
 def test_service_installed_as_user_unit_but_not_enabled() -> None:
+    """The unit ships with kpclientd now, so katzenqt must not ship one
+    of its own; smoke.sh still proves the dependency delivered it."""
     rules = (DEBIAN / "rules").read_text()
-    assert "usr/lib/systemd/user" in rules
-    assert "/usr/bin/kpclientd" in rules
-    assert "/etc/kpclientd/client.toml" in rules
-    assert "dh_installsystemduser --no-enable" in rules
+    assert "usr/lib/systemd/user" not in rules
+    assert "dh_installsystemduser" not in rules
+    smoke = SMOKE.read_text()
+    assert "test -f /usr/lib/systemd/user/kpclientd.service" in smoke
+    assert "test -x /usr/bin/kpclientd" in smoke
+    assert "test -f /etc/kpclientd/client.toml" in smoke
 
 
 def test_no_user_preset_ships() -> None:

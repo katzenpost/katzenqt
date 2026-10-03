@@ -22,7 +22,7 @@ apt install -y \
     "$debs"/python3-pycrdt_*.deb \
     "$debs"/python3-rustic-audio-tool_*.deb \
     "$debs"/python3-katzenpost-thinclient_*.deb \
-    "$debs"/kpclientd_0.0.1_*.deb \
+    "$debs"/katzenpost_*.deb \
     "$debs"/katzenqt_0.0.1_all.deb
 
 packaging/debian/smoke.sh
