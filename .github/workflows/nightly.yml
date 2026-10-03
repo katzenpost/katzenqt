@@ -1,20 +1,20 @@
-name: pytest (uv)
+name: nightly (uv)
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-  merge_group:
+  schedule:
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 jobs:
   test:
-    name: pytest (uv)
+    name: nightly (uv)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -38,8 +38,10 @@ jobs:
           bash tools/ci-deps.sh
 
       - name: Verify the rust audio extension built
-        run: uv run python -c "import rustic_audio_tool as r; assert hasattr(r, 'PttAudioEngine')"
+        run: >
+          uv run python -c "import rustic_audio_tool as r;
+          assert hasattr(r, 'PttAudioEngine')"
 
-      - name: Run tests
+      - name: Run the full-size cases
         run: |
-          make test-uv
+          make test-nightly-uv

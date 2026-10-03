@@ -12,7 +12,7 @@ import uuid
 
 import pytest
 
-from katzenqt import persistent, voucher
+from katzenqt import models, persistent, voucher
 
 
 async def _make_conversation(*, own_write_cap: "bytes | None" = b"\x00" * 168,
@@ -150,3 +150,27 @@ class TestOwnReadCapDedupe:
             assert conv is not None
             sess.expire(conv, attribute_names=["own_peer"])
             assert await persistent.own_read_cap(sess, conv) == b"\xaa" * 136
+_Staged = persistent.PlaintextWAL | persistent.ReadCapWAL
+
+
+class TestOversizedIntroduction:
+    @pytest.mark.asyncio
+    async def test_a_spilled_introduction_stages_its_new_write_caps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        conv_id = await _make_conversation(own_write_cap=b"\xaa" * 168)
+        cap_id = uuid.uuid4()
+        real = models.SendOperation.serialize_async
+
+        async def spilling(
+            self: models.SendOperation,
+            **kwargs: object,
+        ) -> "tuple[list[uuid.UUID], list[_Staged]]":
+            _, entries = await real(self, **kwargs)  # type: ignore[arg-type]
+            return [cap_id], entries
+
+        monkeypatch.setattr(models.SendOperation, "serialize_async", spilling)
+        await voucher._write_introduction_log(conv_id, "carol", b"\x03" * 136)
+        async with persistent.asession() as sess:
+            assert await sess.get(persistent.WriteCapWAL, cap_id) is not None

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from katzenqt import models, persistent  # noqa: E402
 from katzenqt.qt_models import (  # noqa: E402
+    ROLE_CHAT_AUTHOR,
     ROLE_CHAT_IS_TALLY,
     ROLE_CHAT_TALLY_KIND,
     ROLE_CHAT_TALLY_SURVEY_ID,
@@ -146,6 +147,7 @@ def test_create_row_renders_as_a_poll_line() -> None:
     assert m.data(idx, ROLE_CHAT_IS_TALLY) is True
     assert m.data(idx, ROLE_CHAT_TALLY_KIND) == "create"
     assert m.data(idx, ROLE_CHAT_TALLY_SURVEY_ID) == survey_id.hex()
+    assert m.data(idx, ROLE_CHAT_AUTHOR) == "me"
     assert m.data(idx, 0) == "me created [Poll] lunch? — open · no votes yet"
 
 

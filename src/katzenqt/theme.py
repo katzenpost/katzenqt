@@ -301,8 +301,15 @@ class ThemeManager(QObject):
         # re-resolve. The contacts list is styled above so it stays themed
         # despite the explicit palette. Theme switches are rare; the cost of
         # the sweep is irrelevant.
-        for widget in self._app.allWidgets():
-            widget.setPalette(themed)
+        # Only this window's own tree: QApplication.allWidgets() builds a
+        # wrapper for every widget in the process, and this sync is deferred
+        # into the middle of a palette change, where that enumeration walks
+        # widgets Qt is already destroying and segfaults.
+        from PySide6.QtWidgets import QWidget
+        window = self._window
+        if isinstance(window, QWidget):
+            for widget in [window, *window.findChildren(QWidget)]:
+                widget.setPalette(themed)
 
     def _sync_themed_stylesheets(self, ui: object, pal: QPalette) -> None:
         """Re-style the generated widgets that pin light colours in their

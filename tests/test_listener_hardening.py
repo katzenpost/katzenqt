@@ -245,8 +245,8 @@ class _FakeTransfersModel:
         self.boom_on = boom_on
         self.calls: list[tuple[object, ...]] = []
 
-    def start_transfer(self, rcw_id: uuid.UUID, conv_id: int,
-                       parent_name: str, total: int | None,
+    def start_transfer(self, rcw_id: "uuid.UUID", conv_id: int,
+                       parent_name: str, total: "int | None",
                        direction: str = "download",
                        raw_bytes: int = 0) -> None:
         self.calls.append(
@@ -256,19 +256,19 @@ class _FakeTransfersModel:
         if self.boom_on == "started":
             raise RuntimeError("boom")
 
-    def notify_piece(self, rcw_id: uuid.UUID, pieces: int,
-                     raw_bytes: int | None = None) -> None:
+    def notify_piece(self, rcw_id: "uuid.UUID", pieces: int,
+                     raw_bytes: "int | None" = None) -> None:
         self.calls.append(("piece", rcw_id, pieces, raw_bytes))
         if self.boom_on == "piece":
             raise RuntimeError("boom")
 
-    def complete_transfer(self, rcw_id: uuid.UUID) -> None:
+    def complete_transfer(self, rcw_id: "uuid.UUID") -> None:
         self.calls.append(("complete", rcw_id))
 
-    def set_paused(self, rcw_id: uuid.UUID, paused: bool) -> None:
+    def set_paused(self, rcw_id: "uuid.UUID", paused: bool) -> None:
         self.calls.append(("paused", rcw_id, paused))
 
-    def remove_transfer(self, rcw_id: uuid.UUID) -> None:
+    def remove_transfer(self, rcw_id: "uuid.UUID") -> None:
         self.calls.append(("removed", rcw_id))
 
 

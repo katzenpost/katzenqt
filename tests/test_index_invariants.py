@@ -316,29 +316,23 @@ def test_find_resendable_skips_a_paused_stream() -> None:
 def test_send_resendable_plaintexts_has_no_late_bound_lambda() -> None:
     """A lambda passed to on_error must not close over the loop variable.
 
-    This test is a source-level regression guard: the broken pattern must
-    not be present in network.py. The fix (default-arg capture) is:
-
-        on_error(t, lambda s=pwal.bacap_stream: __resend_queue.discard(s))
+    Closing over ``pwal`` means an inner iteration's failure discards the
+    LAST iteration's bacap_stream. The fix is a default-arg capture, so the
+    check is structural rather than a search for one spelling.
     """
+    import ast
     import inspect
-    src = inspect.getsource(network.send_resendable_plaintexts)
-    assert "lambda: __resend_queue.discard(pwal.bacap_stream)" not in src, (
-        "send_resendable_plaintexts uses a late-binding lambda that closes "
-        "over the loop variable `pwal`; if an inner iteration's task fails, "
-        "the WRONG bacap_stream is discarded from __resend_queue. Replace "
-        "with a default-arg capture:\n"
-        "    on_error(t, lambda s=pwal.bacap_stream: __resend_queue.discard(s))"
-    )
 
-
-# ---------------------------------------------------------------------------
-# Invariant 8: after_stream gate releases only when no PWAL remains on the
-# referenced bacap_stream. The previous SQL compared ``after_stream`` (a
-# bacap_stream UUID) against ``sent_cte`` (a set of PWAL IDs), two
-# disjoint identifier spaces, so the indirection PWAL of any multi-box
-# send was permanently un-resendable and the send timed out.
-# ---------------------------------------------------------------------------
+    source = inspect.getsource(network.send_resendable_plaintexts)
+    tree = ast.parse(source.lstrip())
+    for lam in (n for n in ast.walk(tree) if isinstance(n, ast.Lambda)):
+        free = {n.id for n in ast.walk(lam.body) if isinstance(n, ast.Name)}
+        bound = ({a.arg for a in lam.args.args}
+                 | {a.arg for a in lam.args.kwonlyargs})
+        assert "pwal" not in (free - bound), (
+            "late-binding closure over the loop variable `pwal`: "
+            + ast.unparse(lam)
+        )
 
 
 def test_find_resendable_after_stream_gate_releases_when_substream_drained() -> None:
