@@ -19,3 +19,9 @@ katzenpost/
 .demo-state/
 
 .ci-local/
+
+.flatpak-build/
+.flatpak-builder/
+.flatpak-export/
+.flatpak-repo/
+.flathub-dist/
