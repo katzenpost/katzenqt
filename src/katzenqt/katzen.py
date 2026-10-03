@@ -53,7 +53,7 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      pending_joiner_join_conversation_ids, pending_voucher_for)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
-from .models import (GroupChatFileUpload,
+from .models import (GROUP_CHAT_VERSION, GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
 # qt_models.py also re-exports ConversationUIState (moved here so the
@@ -1855,26 +1855,7 @@ class MainWindow(QMainWindow):
             self._restore_unsent_text(convo_state, msg)
             return
 
-        # Stamp the real membership hash before serialize.
-        # Computed on the io loop; never open asession on the Qt loop.
-        membership_hash = await self.iothread.run_in_io(
-            conversation_handlers.membership_hash_for(
-                convo_state.conversation_id
-            )
-        )
-        group_chat_message = GroupChatMessage(
-            version=0, membership_hash=membership_hash, text=msg
-        )
-
-        # TODO: this is general code that should live in a shared place:
-        send_op = SendOperation(
-            bacap_stream=convo_state.own_peer_bacap_uuid,
-            messages=[group_chat_message]
-        )
-        # TODO this code is duplicated in self.send_file
-        new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
-            conversation_id=convo_state.conversation_id)
+        group_chat_message = GroupChatMessage(version=GROUP_CHAT_VERSION, text=msg)
 
         # conversation_order is a count subquery evaluated at commit. The
         # receive/voucher paths append on the io loop; the send path funnels
@@ -1882,18 +1863,15 @@ class MainWindow(QMainWindow):
         # the per-conversation lock, so two transactions can never stamp the
         # same order and trip the unique constraint.
         #
-        # One run_in_io hop, not three: append, the queue-put that wakes
-        # receive_msg_listener, and check_for_new all happen inside the same
-        # io-loop coroutine instead of three separate cross-thread round trips.
+        # The message is serialized on the io loop too: its pending
+        # acknowledgements are attached and recorded in the transaction that
+        # queues it. One run_in_io hop covers that, the queue-put that wakes
+        # receive_msg_listener, and check_for_new.
         await self.iothread.run_in_io(
-            network.notify_outbound_chat_sent(
+            network.notify_outbound_text_sent(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
-                new_write_caps=new_write_caps,
-                db_entries=db_entries,
-                payload=b"F" + group_chat_message.to_cbor(),
-                # TODO massive hack here because we don't reassemble sendops yet
-                final_pwal_id=db_entries[-1].id,
+                gcm=group_chat_message,
             )
         )
 
@@ -2446,10 +2424,6 @@ class MainWindow(QMainWindow):
 
         voice_note_drafts = []
         audio = getattr(self, "_ptt_audio", None)
-        # Computed on the io loop; never open asession on the Qt loop.
-        membership_hash = await self.iothread.run_in_io(
-            conversation_handlers.membership_hash_for(convo.conversation_id)
-        )
         # One SendOperation per file; unserialize() only decodes one GCM.
         for fn in sorted(convo.attached_files):
             f_path = Path(fn)
@@ -2484,11 +2458,7 @@ class MainWindow(QMainWindow):
                 continue
 
             upload = GroupChatFileUpload.from_path(f_path)
-            gcm = GroupChatMessage(
-                version=0,
-                membership_hash=membership_hash,
-                file_upload=upload,
-            )
+            gcm = GroupChatMessage(version=GROUP_CHAT_VERSION, file_upload=upload)
 
             # Pre-assign the ConversationLog id so a voice-note draft (which is
             # discarded right after sending) can be cached for playback under

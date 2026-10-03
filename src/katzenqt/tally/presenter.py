@@ -302,7 +302,7 @@ def tally_row_text(
     >>> doc = new_survey_doc(bytes(16), "Lunch", Mode.APPROVAL, ["Mon"])
     >>> summary = summarize(doc, conversation_id=1)
     >>> recast = GroupChatMessage(
-    ...     version=0, membership_hash=bytes(32),
+    ...     version=0,
     ...     msg_type=GroupChatTypeEnum.TALLY_VOTE,
     ...     tally=GroupChatTally(
     ...         survey_id=bytes(16), choice={"s0": "yes"}, version=1),

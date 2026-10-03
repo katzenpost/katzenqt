@@ -377,14 +377,6 @@ def _tally_list(conv_name: str) -> "Plan[_args.TallyList]":
     ))
 
 
-@verbs.command("membership-hash")
-@click.argument("conv_name")
-def _membership_hash(conv_name: str) -> "Plan[_args.MembershipHash]":
-    return plan("_action_membership_hash", _args.MembershipHash(
-        action=verb(), conv_name=conv_name,
-    ))
-
-
 @verbs.command("remove-conv", help="delete a conversation and all local state for it")
 @click.argument("conv_name")
 def _remove_conv(conv_name: str) -> "Plan[_args.RemoveConv]":

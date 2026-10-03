@@ -89,7 +89,7 @@ class TestBuildWhoReplySkipsSubstreamPeers:
         await _add_active_peer(conv_id, "alice")
         await _add_active_peer(conv_id, f"{_SUBSTREAM_NAME_PREFIX}<demo>:<nonce>")
         reply = await voucher._build_who_reply(conv_id)
-        names = {p.display_name for p in reply.please_adds}
+        names = {p.display_name for p in reply.please_adds if p is not None}
         assert "alice" in names
         assert f"{_SUBSTREAM_NAME_PREFIX}<demo>:<nonce>" not in names
 
@@ -98,4 +98,6 @@ class TestBuildWhoReplySkipsSubstreamPeers:
         conv_id = await _make_conversation()
         await _add_active_peer(conv_id, "bob")
         reply = await voucher._build_who_reply(conv_id)
-        assert sorted(p.display_name for p in reply.please_adds) == ["bob", "me"]
+        assert sorted(
+            p.display_name for p in reply.please_adds if p is not None
+        ) == ["bob", "me"]

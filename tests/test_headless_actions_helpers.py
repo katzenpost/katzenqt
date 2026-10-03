@@ -369,34 +369,11 @@ async def test_action_info_reports_schema_conversations_and_wal_counts(
             "name": "reported",
             "peer_count": 2,
             "messages": 1,
+            "roster": None,
+            "acked": {},
         }
     ]
     assert payload["wal"] == {"plaintext": 0, "mix": 0, "received_piece": 0}
-
-
-@pytest.mark.asyncio
-async def test_action_membership_hash_prints_a_digest(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
-    await make_conversation("hashed", peers=("bob",))
-    with caplog.at_level(logging.INFO):
-        assert await run_action(["membership-hash", "hashed"]) == 0
-    line = caplog.records[-1].getMessage()
-    assert line.startswith("MEMBERSHIP_HASH=")
-    assert len(line.split("=", 1)[1]) == 64
-
-
-@pytest.mark.asyncio
-async def test_action_membership_hash_refuses_an_unknown_conversation(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setattr(_actions, "logger", logging.getLogger(__name__))
-    with caplog.at_level(logging.ERROR):
-        assert await run_action(["membership-hash", "ghost"]) == 2
-    assert "conversation 'ghost' not found" in caplog.text
 
 
 @pytest.mark.asyncio

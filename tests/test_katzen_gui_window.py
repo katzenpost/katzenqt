@@ -547,7 +547,7 @@ def test_a_message_without_a_file_upload_resolves_to_none(
     window: katzen.MainWindow,
 ) -> None:
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"h" * 32, text="hi"
+        version=0, text="hi"
     )
     assert window._resolve_attachment(
         insert_log_row(b"F" + gcm.to_cbor())
@@ -564,7 +564,6 @@ def test_a_legacy_inline_upload_is_spilled_to_a_cache_file(
     )
     gcm = models.GroupChatMessage(
         version=0,
-        membership_hash=b"h" * 32,
         file_upload=upload,
     )
     message_id = insert_log_row(b"F" + gcm.to_cbor())

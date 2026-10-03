@@ -551,8 +551,7 @@ class TestAlreadyInductedGuard:
             )).all()
             # The own peer's read cap must be the salt-mutated one (the write
             # cap's 32-byte-key + index), not the un-mutated cap provisioned
-            # before the handshake. Own voter identity and membership hash
-            # both depend on it.
+            # before the handshake. Own voter identity depends on it.
             conv = await sess.get(persistent.Conversation, conversation_id)
             assert conv is not None
             own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)

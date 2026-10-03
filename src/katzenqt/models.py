@@ -1,14 +1,11 @@
-import annotated_types
 import asyncio
-from typing_extensions import Annotated
-from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict, field_serializer, model_validator
+from pydantic import Field, BaseModel, SecretBytes, SecretStr, field_serializer, model_validator
 import cbor2
 from enum import Enum
 import uuid
 import secrets
 import io
 from . import persistent
-import hashlib
 from base64 import b64encode, b64decode
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, List, Tuple, Union
@@ -19,66 +16,21 @@ SerializedRow = Union[persistent.PlaintextWAL, persistent.ReadCapWAL]
 if TYPE_CHECKING:
     from pydantic import FieldSerializationInfo
 
-# --- membership hash (GROUP_CHAT_PROTOCOL.md section 6b) ------------------
-# The recipe is fixed so that independent implementations compute the same
-# 32-byte digest over the same member set.
-
 SUBSTREAM_NAME_PREFIX = ":substream:"
 
-MEMBERSHIP_DOMAIN = b"KP:membership:v1"
-
-MEMBERSHIP_SENTINELS = (b"TODO" * 8, bytes(32))
-
-
-def is_membership_sentinel(digest: bytes) -> bool:
-    """Whether ``digest`` is a 'no membership hash' sentinel accepted
-    without comparison during the migration window.
-
-    >>> is_membership_sentinel(b"TODO" * 8)
-    True
-    >>> is_membership_sentinel(bytes(32))
-    True
-    >>> is_membership_sentinel(canonical_membership_hash([bytes(136)]))
-    False
-    """
-    return digest in MEMBERSHIP_SENTINELS
+# Version 1 carries acknowledgements and drops the membership hash.
+GROUP_CHAT_VERSION = 1
 
 
-def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
-    """Order-independent membership hash of a set of member read caps:
-    take each cap's 32-byte public-key prefix, dedupe and sort those
-    byte-wise, concatenate, and SHA-256 under :data:`MEMBERSHIP_DOMAIN`.
+class UnsupportedVersion(ValueError):
+    """A message written by a newer client than this one."""
 
-    Hashing the prefix (not the whole cap) keeps the digest stable across
-    the index/mutation suffix variants of the same member's read cap — a
-    joiner's pre-mutation cap, the salt-mutated cap the group holds, and
-    future-only read caps starting at a later index all collapse to one
-    member. The caller represents itself as ``write_cap[32:]``.
-
-    >>> key_a = bytes(range(32))
-    >>> key_b = bytes(range(32, 64))
-    >>> cap_a = key_a + bytes(104)
-    >>> cap_b = key_b + bytes(104)
-    >>> len(cap_a)
-    136
-    >>> canonical_membership_hash([cap_a, cap_b]) == canonical_membership_hash(
-    ...     [cap_b, cap_a])
-    True
-    >>> canonical_membership_hash(
-    ...     [cap_a, key_a + bytes(103) + bytes([1])],
-    ... ) == canonical_membership_hash([cap_a])
-    True
-    >>> canonical_membership_hash([cap_a]) == canonical_membership_hash(
-    ...     [cap_a, cap_b])
-    False
-    >>> len(canonical_membership_hash([cap_a]))
-    32
-    """
-    digest = hashlib.sha256()
-    digest.update(MEMBERSHIP_DOMAIN)
-    for key in sorted({cap[:32] for cap in read_caps}):
-        digest.update(key)
-    return digest.digest()
+    def __init__(self, version: int) -> None:
+        super().__init__(
+            f"message version {version} is newer than version "
+            f"{GROUP_CHAT_VERSION}, the newest this client reads"
+        )
+        self.version = version
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
@@ -162,10 +114,27 @@ class GroupChatPleaseAdd(BaseModel):
         return cls(**cbor2.loads(b64decode(text.strip().encode()))) # TODO this can obv fail
 
 class GroupChatReplyWho(BaseModel):
+    """What an introducer tells a new member: who is in the group and, when
+    the group keeps rosters, how each of them numbers the others.
+
+    With rosters, ``please_adds`` is the introducer's own roster in order,
+    so that a member's place in the list is its roster index, followed by
+    any member the introducer has read of but not yet numbered. A place
+    whose member the introducer no longer reads is None. ``roster_size`` is
+    where the roster ends: the new member takes that roster index. The
+    remaining fields are a ``katzenqt.rosters.Handover``, with every member
+    written as its place in ``please_adds``. They are absent in a reply
+    from a client that keeps no rosters.
+    """
     model_config = {
         'validate_assignment': True
     }
-    please_adds : list[GroupChatPleaseAdd] = Field()
+    please_adds : list[GroupChatPleaseAdd | None] = Field()
+    roster_size: int | None = Field(default=None, ge=0)
+    rosters: list[bytes] | None = Field(default=None)
+    seen: list[int] | None = Field(default=None)
+    introductions: list[tuple[int, int, int]] | None = Field(default=None)
+    unsettled: list[tuple[int, int, dict[int, int]]] | None = Field(default=None)
     def to_cbor(self) -> bytes:
         """The CBOR encoding of the announced member list.
 
@@ -185,11 +154,15 @@ class GroupChatReplyWho(BaseModel):
         True
         >>> GroupChatReplyWho.from_cbor(who.to_cbor()).please_adds[0].display_name
         'alice'
+        >>> handed = GroupChatReplyWho(
+        ...     please_adds=[alice, None], roster_size=2,
+        ...     rosters=[bytes([0]), bytes()], seen=[4, -1],
+        ...     introductions=[(0, 1, 1)], unsettled=[(0, 2, {1: 7})],
+        ... )
+        >>> GroupChatReplyWho.from_cbor(handed.to_cbor()) == handed
+        True
         """
         return cls(**cbor2.loads(data))
-    def membership_hash(self) -> bytes:
-        return hashlib.blake2b(self.to_cbor(), digest_size=32).digest()
-    # the conversation hash should be available
     
 
 class GroupChatTypeEnum(Enum):
@@ -372,7 +345,6 @@ class GroupChatMessage(BaseModel):
     """
     model_config = {'validate_assignment': True}
     version: int = Field(ge=0,)
-    membership_hash : "Annotated[bytes, Strict(), annotated_types.Len(32, 32),]"
 
     # The message's type, made explicit so a conversation handler can route by
     # it rather than guessing from which optional field is set. Serialised as
@@ -387,6 +359,11 @@ class GroupChatMessage(BaseModel):
     who: str | None = Field(default=None)
     reply_who: str | None = Field(default=None)
     tally: GroupChatTally | None = Field(default=None)
+
+    # Who this sender acknowledges, by roster index, and one BACAP
+    # MessageBoxIndex for each; see ``katzenqt.ack_codec``. Absent when there
+    # is nothing to acknowledge.
+    acks: bytes | None = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -426,14 +403,10 @@ class GroupChatMessage(BaseModel):
         read-matching code paths.
 
         >>> intro = GroupChatPleaseAdd(display_name="alice", read_cap=bytes(136))
-        >>> announce = GroupChatMessage(
-        ...     version=0, membership_hash=bytes(32), introduction=intro,
-        ... )
+        >>> announce = GroupChatMessage(version=0, introduction=intro)
         >>> announce.as_introduction.display_name
         'alice'
-        >>> GroupChatMessage(
-        ...     version=0, membership_hash=bytes(32), text="hi",
-        ... ).as_introduction is None
+        >>> GroupChatMessage(version=0, text="hi").as_introduction is None
         True
         """
         if self.msg_type == GroupChatTypeEnum.INTRODUCTION and self.introduction is not None:
@@ -449,28 +422,46 @@ class GroupChatMessage(BaseModel):
 
         - The exception is that when we need to send more than one message at the same time,
 
-        >>> msg = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
+        >>> msg = GroupChatMessage(version=0, text="hi")
         >>> cbor2.loads(msg.to_cbor())["msg_type"]
         0
         >>> "introduction" in cbor2.loads(msg.to_cbor())
         False
+        >>> "acks" in cbor2.loads(msg.to_cbor())
+        False
+        >>> acked = GroupChatMessage(
+        ...     version=0, text="hi", acks=bytes([9]) + bytes(104))
+        >>> len(cbor2.loads(acked.to_cbor())["acks"])
+        105
         """
         return cbor2.dumps(self.model_dump(exclude_none=True))
 
     @classmethod
     def from_cbor(cls, cbor_bytes:bytes) -> "GroupChatMessage":
         """Decode a wire payload, inferring ``msg_type`` when it is absent.
+        A payload of a newer version than this client knows is refused
+        before anything else in it is looked at.
 
         >>> legacy = cbor2.dumps(
         ...     {"version": 0, "membership_hash": bytes(32), "who": "alice"},
         ... )
         >>> GroupChatMessage.from_cbor(legacy).msg_type
         <GroupChatTypeEnum.WHO: 3>
-        >>> msg = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
+        >>> msg = GroupChatMessage(version=GROUP_CHAT_VERSION, text="hi")
         >>> GroupChatMessage.from_cbor(msg.to_cbor()) == msg
         True
+        >>> newer = cbor2.dumps({"version": GROUP_CHAT_VERSION + 1})
+        >>> GroupChatMessage.from_cbor(newer)
+        Traceback (most recent call last):
+            ...
+        katzenqt.models.UnsupportedVersion: message version 2 is newer than version 1, the newest this client reads
         """
-        return cls(**cbor2.loads(cbor_bytes)) # TODO not at all what we want but here we go
+        fields = cbor2.loads(cbor_bytes)
+        if isinstance(fields, dict):
+            version = fields.get("version")
+            if isinstance(version, int) and version > GROUP_CHAT_VERSION:
+                raise UnsupportedVersion(version)
+        return cls(**fields) # TODO not at all what we want but here we go
 
 def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | None":
     """Reassemble a serialised ``SendOperation`` chain into a
@@ -498,9 +489,7 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
     original ``bacap_stream`` or from an indirection substream; the
     caller has already classified them by the time they reach here.
 
-    >>> blob = GroupChatMessage(
-    ...     version=0, membership_hash=bytes(32), text="hi there",
-    ... ).to_cbor()
+    >>> blob = GroupChatMessage(version=0, text="hi there").to_cbor()
     >>> unserialize([(b"C", blob[:5]), (b"F", blob[5:])]).text
     'hi there'
     >>> unserialize([(b"C", blob)]) is None

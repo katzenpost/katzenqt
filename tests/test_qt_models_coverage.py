@@ -114,7 +114,6 @@ def _seed_log(
 def _text_payload(text: str) -> bytes:
     body: bytes = models.GroupChatMessage(
         version=0,
-        membership_hash=bytes(32),
         text=text,
     ).to_cbor()
     return b"F" + body
@@ -734,7 +733,6 @@ def test_an_introduction_row_announces_the_added_peer() -> None:
         b"F"
         + models.GroupChatMessage(
             version=0,
-            membership_hash=bytes(32),
             introduction=intro,
         ).to_cbor()
     )
