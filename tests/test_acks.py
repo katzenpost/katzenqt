@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import secrets
 import uuid
+from typing import TYPE_CHECKING, cast
 
 import cbor2
 import pytest
@@ -19,9 +20,14 @@ from katzenqt import (
     models,
     network,
     persistent,
+    removal,
     rosters,
+    voucher,
 )
 from tests.fakes.thinclient import FakeThinClient
+
+if TYPE_CHECKING:
+    from katzenqt._thinclient import ThinClient
 from tests.test_network_fake import _set_up_read_flow, _set_up_write_flow
 
 
@@ -702,3 +708,298 @@ async def test_the_gui_path_queues_and_wakes_the_listeners() -> None:
         assert (
             len((await sess.exec(select(persistent.OutgoingAcks))).all()) == 1
         )
+
+
+async def _introducer() -> tuple[_Chat, bytes, bytes]:
+    """We hold bob in our roster, and have read bob's Introduction of carol
+    without yet numbering her. Bob has acknowledged our stream further than
+    we know we have written."""
+    chat, bob = await _two_members(read_to=9)
+    carol_cap = secrets.token_bytes(136)
+    intro = models.GroupChatMessage(
+        version=0,
+        msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+        introduction=models.GroupChatPleaseAdd(
+            display_name="carol",
+            read_cap=carol_cap,
+        ),
+    )
+    await chat.receive("bob", intro, position=9)
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        voucher._add_peer(sess, conv, "carol", carol_cap)
+        await sess.commit()
+    await chat.wrote(3)
+    ahead = models.GroupChatMessage(
+        version=0,
+        text="hi",
+        acks=ack_codec.encode({0: _index(5)}),
+    )
+    await chat.receive("bob", ahead, position=10)
+    return chat, bob, carol_cap[:32]
+
+
+async def _reply_from(chat: _Chat) -> models.GroupChatReplyWho:
+    reply = await voucher._build_who_reply(chat.conversation_id)
+    return models.GroupChatReplyWho.from_cbor(reply.to_cbor())
+
+
+@pytest.mark.asyncio
+async def test_the_reply_lists_our_roster_then_whoever_is_not_yet_numbered() -> (
+    None
+):
+    chat, bob, carol = await _introducer()
+    reply = await _reply_from(chat)
+
+    assert reply.roster_size == 2
+    listed = [entry for entry in reply.please_adds if entry is not None]
+    assert [entry.display_name for entry in listed] == ["me", "bob", "carol"]
+    assert [entry.read_cap[:32] for entry in listed] == [
+        chat.own_key,
+        bob,
+        carol,
+    ]
+    # Bob introduced carol, so his roster already holds her; ours does not.
+    assert reply.rosters == [
+        bytes([0, 1]),
+        bytes([0, 1, 2]),
+        bytes([0, 1, 2]),
+    ]
+    assert reply.seen == [3, 10, -1]
+    assert reply.introductions == [(1, 9, 2)]
+    assert reply.unsettled == [(1, 10, {0: 5})]
+
+
+@pytest.mark.asyncio
+async def test_a_new_member_carries_on_from_what_it_was_handed() -> None:
+    introducer, bob, carol = await _introducer()
+    reply = await _reply_from(introducer)
+
+    newcomer = await _Chat().create()
+    async with persistent.asession() as sess:
+        conv = await sess.get(
+            persistent.Conversation, newcomer.conversation_id
+        )
+        assert conv is not None
+        for entry in reply.please_adds:
+            assert entry is not None
+            voucher._add_peer(sess, conv, entry.display_name, entry.read_cap)
+        assert await acks.adopt(sess, conv, newcomer.own_key, reply)
+        assert await acks.enabled(sess, conv) == newcomer.own_key
+        await sess.commit()
+        ours = await acks.load_group(sess, newcomer.conversation_id)
+        theirs = await acks.load_group(sess, introducer.conversation_id)
+
+    me = introducer.own_key
+    assert rosters.roster_of(ours, newcomer.own_key) == (
+        me,
+        bob,
+        newcomer.own_key,
+    )
+    for member in (me, bob, carol):
+        assert rosters.follow(ours, member) == rosters.follow(theirs, member)
+    assert rosters.roster_of(ours, carol) == (me, bob, carol)
+    assert rosters.follow(ours, bob) == rosters.Followed(
+        (me, bob, carol), ((10, {0: 5}),)
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reply_without_rosters_leaves_the_conversation_without_them() -> (
+    None
+):
+    newcomer = await _Chat().create()
+    plain = models.GroupChatReplyWho(
+        please_adds=[
+            models.GroupChatPleaseAdd(
+                display_name="alice", read_cap=b"\x05" * 136
+            ),
+        ]
+    )
+    async with persistent.asession() as sess:
+        conv = await sess.get(
+            persistent.Conversation, newcomer.conversation_id
+        )
+        assert conv is not None
+        assert not await acks.adopt(sess, conv, newcomer.own_key, plain)
+        assert await acks.enabled(sess, conv) is None
+
+
+@pytest.mark.parametrize(
+    "broken", [{"rosters": [b""]}, {"seen": [1]}, {"roster_size": 9}]
+)
+@pytest.mark.asyncio
+async def test_a_reply_that_does_not_add_up_is_not_adopted(
+    broken: dict[str, object],
+) -> None:
+    introducer, _, _ = await _introducer()
+    reply = (await _reply_from(introducer)).model_copy(update=broken)
+    newcomer = await _Chat().create()
+    async with persistent.asession() as sess:
+        conv = await sess.get(
+            persistent.Conversation, newcomer.conversation_id
+        )
+        assert conv is not None
+        assert not await acks.adopt(sess, conv, newcomer.own_key, reply)
+        assert await acks.enabled(sess, conv) is None
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_already_lists_us_is_not_adopted() -> None:
+    introducer, bob, _ = await _introducer()
+    reply = await _reply_from(introducer)
+    newcomer = await _Chat().create()
+    async with persistent.asession() as sess:
+        conv = await sess.get(
+            persistent.Conversation, newcomer.conversation_id
+        )
+        assert conv is not None
+        assert not await acks.adopt(sess, conv, bob, reply)
+
+
+@pytest.mark.asyncio
+async def test_the_joiner_side_of_the_handshake_adopts_the_rosters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    introducer, bob, _ = await _introducer()
+    reply = await voucher._build_who_reply(introducer.conversation_id)
+
+    newcomer = await _Chat().create()
+    async with persistent.asession() as sess:
+        sess.add(
+            persistent.PendingVoucher(
+                role="joiner",
+                conversation_id=newcomer.conversation_id,
+                step="awaiting",
+                voucher=b"v" * 32,
+                voucher_read_cap=b"\x09" * 136,
+                box1_index=b"\x00" * 104,
+                voucher_secret_key=b"k",
+            )
+        )
+        await sess.commit()
+    mutated = secrets.token_bytes(168)
+
+    async def fake_read_box(*_a: object, **_k: object) -> tuple[bytes, bytes]:
+        return (b"sealed reply", b"\x00" * 104)
+
+    monkeypatch.setattr(voucher, "_read_box", fake_read_box)
+
+    class Opened:
+        who_reply = reply.to_cbor()
+        mutated_message_write_cap = mutated
+
+    class Connection:
+        async def voucher_open(
+            self,
+            *,
+            voucher_secret_key: bytes,
+            sealed_reply: bytes,
+            message_write_cap: bytes,
+        ) -> Opened:
+            return Opened()
+
+    added = await voucher.await_and_open(
+        cast("ThinClient", Connection()),
+        newcomer.conversation_id,
+    )
+    assert sorted(added) == ["bob", "carol", "me"]
+    async with persistent.asession() as sess:
+        group = await acks.load_group(sess, newcomer.conversation_id)
+    own = mutated[32:64]
+    assert rosters.roster_of(group, own) == (introducer.own_key, bob, own)
+
+
+@pytest.mark.asyncio
+async def test_an_introduction_of_ours_numbers_the_member_once_written() -> (
+    None
+):
+    chat, bob = await _two_members(read_to=None)
+    dave_cap = secrets.token_bytes(136)
+    final_pwal_id = await voucher._write_introduction_log(
+        chat.conversation_id,
+        "dave",
+        dave_cap,
+    )
+    async with persistent.asession() as sess:
+        queued = await acks.load_group(sess, chat.conversation_id)
+    assert rosters.roster_of(queued, chat.own_key) == (chat.own_key, bob)
+    assert queued.bases[dave_cap[:32]] == (chat.own_key, bob, dave_cap[:32])
+
+    held = models.GroupChatMessage(version=0, text="not yet")
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, chat.peers["bob"][1])
+        assert rcw is not None
+        rcw.last_read_index = _index(2)
+        sess.add(rcw)
+        await sess.commit()
+    await chat.queue(held)
+    assert held.acks is None
+
+    with persistent.Session(persistent._engine_sync) as sync:
+        pwal = sync.get(persistent.PlaintextWAL, final_pwal_id)
+        assert pwal is not None
+        persistent._record_sent_box(sync, _index(7), pwal)
+        sync.commit()
+    async with persistent.asession() as sess:
+        written = await acks.load_group(sess, chat.conversation_id)
+    assert written.introductions == {(chat.own_key, 7): dave_cap[:32]}
+    assert rosters.roster_of(written, chat.own_key) == (
+        chat.own_key,
+        bob,
+        dave_cap[:32],
+    )
+
+    released = models.GroupChatMessage(version=0, text="now")
+    await chat.queue(released)
+    assert released.acks is not None
+
+
+@pytest.mark.asyncio
+async def test_a_removed_member_keeps_its_place_and_loses_its_key() -> None:
+    chat, bob, carol = await _introducer()
+    peer_id = chat.peers["bob"][0]
+    await removal.remove_peer(
+        conversation_id=chat.conversation_id, peer_id=peer_id
+    )
+
+    token = rosters.placeholder(1)
+    async with persistent.asession() as sess:
+        group = await acks.load_group(sess, chat.conversation_id)
+        rows = (await sess.exec(select(persistent.RosterMember))).all()
+        seen = (await sess.exec(select(persistent.IntroductionSeen))).all()
+        levels = (await sess.exec(select(persistent.AckLevel))).all()
+    assert rosters.roster_of(group, chat.own_key) == (chat.own_key, token)
+    assert group.introductions == {(token, 9): carol}
+    assert group.bases[carol] == rosters.Inherited(token, 9)
+    stored = b"".join(
+        b"".join(
+            filter(
+                None, (row.member_key, row.base_roster, row.base_introducer)
+            )
+        )
+        for row in rows
+    ) + b"".join(row.introducer_key + row.member_key for row in seen)
+    assert bob not in stored
+    assert {level.acker_key for level in levels} == {token}
+
+    reply = await _reply_from(chat)
+    assert reply.roster_size == 2
+    assert reply.please_adds[1] is None
+    assert [e.display_name for e in reply.please_adds if e] == ["me", "carol"]
+
+
+@pytest.mark.asyncio
+async def test_a_removed_conversation_leaves_no_roster_behind() -> None:
+    chat, _, _ = await _introducer()
+    await removal.remove_conversation(conversation_id=chat.conversation_id)
+    async with persistent.asession() as sess:
+        for table in (
+            persistent.SentBox,
+            persistent.RosterMember,
+            persistent.IntroductionSeen,
+            persistent.AckLevel,
+            persistent.OutgoingAcks,
+        ):
+            assert (await sess.exec(select(table))).all() == []

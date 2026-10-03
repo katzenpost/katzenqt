@@ -100,10 +100,27 @@ class GroupChatPleaseAdd(BaseModel):
         return cls(**cbor2.loads(b64decode(text.strip().encode()))) # TODO this can obv fail
 
 class GroupChatReplyWho(BaseModel):
+    """What an introducer tells a new member: who is in the group and, when
+    the group keeps rosters, how each of them numbers the others.
+
+    With rosters, ``please_adds`` is the introducer's own roster in order,
+    so that a member's place in the list is its roster index, followed by
+    any member the introducer has read of but not yet numbered. A place
+    whose member the introducer no longer reads is None. ``roster_size`` is
+    where the roster ends: the new member takes that roster index. The
+    remaining fields are a ``katzenqt.rosters.Handover``, with every member
+    written as its place in ``please_adds``. They are absent in a reply
+    from a client that keeps no rosters.
+    """
     model_config = {
         'validate_assignment': True
     }
-    please_adds : list[GroupChatPleaseAdd] = Field()
+    please_adds : list[GroupChatPleaseAdd | None] = Field()
+    roster_size: int | None = Field(default=None, ge=0)
+    rosters: list[bytes] | None = Field(default=None)
+    seen: list[int] | None = Field(default=None)
+    introductions: list[tuple[int, int, int]] | None = Field(default=None)
+    unsettled: list[tuple[int, int, dict[int, int]]] | None = Field(default=None)
     def to_cbor(self) -> bytes:
         """The CBOR encoding of the announced member list.
 
@@ -123,6 +140,13 @@ class GroupChatReplyWho(BaseModel):
         True
         >>> GroupChatReplyWho.from_cbor(who.to_cbor()).please_adds[0].display_name
         'alice'
+        >>> handed = GroupChatReplyWho(
+        ...     please_adds=[alice, None], roster_size=2,
+        ...     rosters=[bytes([0]), bytes()], seen=[4, -1],
+        ...     introductions=[(0, 1, 1)], unsettled=[(0, 2, {1: 7})],
+        ... )
+        >>> GroupChatReplyWho.from_cbor(handed.to_cbor()) == handed
+        True
         """
         return cls(**cbor2.loads(data))
     

@@ -15,6 +15,7 @@ acknowledgements.
 from __future__ import annotations
 
 import logging
+import secrets
 import uuid
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -535,17 +536,323 @@ async def _accept(
     return True
 
 
+async def wait_for_outgoing(
+    conversation_id: int, *, deadline_s: float
+) -> bool:
+    """Wait until every queued message of ours that carries acknowledgements
+    has been written. Until then our roster may still grow by them, and a
+    reply to a new member cannot say where its roster index will be."""
+    async with persistent.asession() as sess:
+        owed = (
+            await sess.exec(
+                select(persistent.OutgoingAcks.pwal_id).where(
+                    persistent.OutgoingAcks.conversation_id == conversation_id
+                )
+            )
+        ).all()
+    for pwal_id in owed:
+        if not await persistent.wait_for_sent(pwal_id, deadline_s=deadline_s):
+            return False
+    return True
+
+
+async def hand_over(
+    sess: "AsyncSession", conv: persistent.Conversation
+) -> models.GroupChatReplyWho | None:
+    """The reply to a new member, for a conversation that keeps rosters:
+    our roster in order, then anyone we have read of but not yet numbered,
+    with what the new member needs to follow every roster from here on.
+    None when this conversation keeps no rosters."""
+    own = await ensure_own_roster(sess, conv)
+    own_cap = await persistent.own_read_cap(sess, conv)
+    if own is None or own_cap is None:
+        return None
+    group = await load_group(sess, conv.id)
+    roster = rosters.roster_of(group, own)
+    if roster is None:
+        return None
+    members = await _other_members(sess, conv)
+    unnumbered = sorted(
+        (key for key in members if key not in roster),
+        key=lambda key: members[key][0].id,
+    )
+    known = [*roster, *unnumbered]
+    please_adds: list[models.GroupChatPleaseAdd | None] = []
+    for key in known:
+        if key == own:
+            please_adds.append(
+                models.GroupChatPleaseAdd(
+                    display_name=conv.own_peer.name, read_cap=own_cap
+                )
+            )
+        elif key in members and members[key][1].read_cap is not None:
+            peer, rcw = members[key]
+            assert rcw.read_cap is not None
+            please_adds.append(
+                models.GroupChatPleaseAdd(
+                    display_name=peer.name, read_cap=rcw.read_cap
+                )
+            )
+        else:
+            please_adds.append(None)
+    handed = rosters.hand_over(group, known)
+    return models.GroupChatReplyWho(
+        please_adds=please_adds,
+        roster_size=len(roster),
+        rosters=handed.rosters,
+        seen=handed.seen,
+        introductions=handed.introductions,
+        unsettled=handed.unsettled,
+    )
+
+
+def _valid_position(position: int) -> bool:
+    return 0 <= position < 2**64
+
+
+async def adopt(
+    sess: "AsyncSession",
+    conv: persistent.Conversation,
+    own: bytes,
+    reply: models.GroupChatReplyWho,
+) -> bool:
+    """Start this conversation's rosters from the reply that let us in: our
+    own roster is the introducer's with ourselves after it, and every other
+    member's is as the introducer handed it over. False, and nothing stored,
+    when the reply carries no rosters or cannot be read."""
+    size = reply.roster_size
+    places = len(reply.please_adds)
+    if (
+        size is None
+        or reply.rosters is None
+        or reply.seen is None
+        or not size <= places <= rosters.ROSTER_MAX
+        or len(reply.rosters) != places
+        or len(reply.seen) != places
+    ):
+        return False
+    known = [
+        rosters.placeholder(place)
+        if entry is None
+        else member_key(entry.read_cap)
+        for place, entry in enumerate(reply.please_adds)
+    ]
+    if own in known or len(set(known)) != places:
+        return False
+    group = rosters.adopt(
+        known,
+        rosters.Handover(
+            rosters=reply.rosters,
+            seen=reply.seen,
+            introductions=[
+                (introducer, position, member)
+                for introducer, position, member in reply.introductions or ()
+                if _valid_position(position)
+            ],
+            unsettled=[
+                (sender, position, levels)
+                for sender, position, levels in reply.unsettled or ()
+                if _valid_position(position)
+                and all(
+                    0 <= index < rosters.ROSTER_MAX
+                    and _valid_position(reached)
+                    for index, reached in levels.items()
+                )
+            ],
+        ),
+    )
+    for table in (
+        persistent.RosterMember,
+        persistent.IntroductionSeen,
+        persistent.AckLevel,
+    ):
+        for row in await sess.exec(
+            select(table).where(table.conversation_id == conv.id)
+        ):
+            await sess.delete(row)
+    await sess.flush()
+    sess.add(
+        persistent.RosterMember(
+            conversation_id=conv.id,
+            member_key=own,
+            base_roster=cbor2.dumps([*known[:size], own]),
+        )
+    )
+    for key in known:
+        base = group.bases.get(key)
+        seen = group.seen.get(key, -1)
+        inherited = base if isinstance(base, rosters.Inherited) else None
+        sess.add(
+            persistent.RosterMember(
+                conversation_id=conv.id,
+                member_key=key,
+                seen=persistent.position_bytes(seen)
+                if _valid_position(seen)
+                else None,
+                base_roster=(
+                    cbor2.dumps(list(base))
+                    if isinstance(base, tuple)
+                    else None
+                ),
+                base_introducer=inherited.introducer if inherited else None,
+                base_position=(
+                    persistent.position_bytes(inherited.position)
+                    if inherited
+                    else None
+                ),
+            )
+        )
+    for (introducer, position), member in group.introductions.items():
+        sess.add(
+            persistent.IntroductionSeen(
+                conversation_id=conv.id,
+                introducer_key=introducer,
+                position=persistent.position_bytes(position),
+                member_key=member,
+            )
+        )
+    for (sender, position), levels in group.acks.items():
+        for index, reached in levels.items():
+            sess.add(
+                persistent.AckLevel(
+                    conversation_id=conv.id,
+                    acker_key=sender,
+                    position=persistent.position_bytes(position),
+                    roster_index=index,
+                    reached=persistent.position_bytes(reached),
+                )
+            )
+    await sess.flush()
+    return True
+
+
+async def introduced(
+    sess: "AsyncSession",
+    conv: persistent.Conversation,
+    read_cap: bytes,
+    pending_pwal: uuid.UUID,
+) -> None:
+    """We have queued an ``Introduction`` of the member read by
+    ``read_cap``. It takes the next place in our roster once that message is
+    written, and its own roster starts as ours with itself after it."""
+    own = await enabled(sess, conv)
+    if own is None:
+        return
+    member = member_key(read_cap)
+    roster = rosters.roster_of(await load_group(sess, conv.id), own)
+    if roster is None or member in roster:
+        return
+    sess.add(
+        persistent.IntroductionSeen(
+            conversation_id=conv.id,
+            introducer_key=own,
+            member_key=member,
+            pending_pwal=pending_pwal,
+        )
+    )
+    if await _roster_row(sess, conv.id, member) is None:
+        sess.add(
+            persistent.RosterMember(
+                conversation_id=conv.id,
+                member_key=member,
+                base_roster=cbor2.dumps([*roster, member]),
+            )
+        )
+    await sess.flush()
+
+
+async def forget_member(
+    sess: "AsyncSession", conv: persistent.Conversation, read_cap: bytes
+) -> None:
+    """A member is being removed. Every roster still counts from the place
+    it held, so the place is kept and only the key is forgotten: wherever
+    the key is stored it is replaced by a placeholder."""
+    own = await enabled(sess, conv)
+    if own is None:
+        return
+    key = member_key(read_cap)
+    roster = rosters.roster_of(await load_group(sess, conv.id), own)
+    if roster is not None and key in roster:
+        token = rosters.placeholder(roster.index(key))
+    else:
+        token = b"retired:" + secrets.token_bytes(8)
+    members = await sess.exec(
+        select(persistent.RosterMember).where(
+            persistent.RosterMember.conversation_id == conv.id
+        )
+    )
+    for row in members.all():
+        base = row.base_roster
+        if base is not None and key in (entries := cbor2.loads(base)):
+            base = cbor2.dumps([token if e == key else e for e in entries])
+        introducer = (
+            token if row.base_introducer == key else row.base_introducer
+        )
+        if row.member_key != key:
+            row.base_roster, row.base_introducer = base, introducer
+            sess.add(row)
+            continue
+        await sess.delete(row)
+        await sess.flush()
+        sess.add(
+            persistent.RosterMember(
+                conversation_id=conv.id,
+                member_key=token,
+                seen=row.seen,
+                base_roster=base,
+                base_introducer=introducer,
+                base_position=row.base_position,
+            )
+        )
+    introductions = await sess.exec(
+        select(persistent.IntroductionSeen).where(
+            persistent.IntroductionSeen.conversation_id == conv.id
+        )
+    )
+    for seen in introductions.all():
+        if key in (seen.introducer_key, seen.member_key):
+            if seen.introducer_key == key:
+                seen.introducer_key = token
+            if seen.member_key == key:
+                seen.member_key = token
+            sess.add(seen)
+    levels = await sess.exec(
+        select(persistent.AckLevel).where(
+            persistent.AckLevel.conversation_id == conv.id,
+            persistent.AckLevel.acker_key == key,
+        )
+    )
+    for level in levels.all():
+        await sess.delete(level)
+        await sess.flush()
+        sess.add(
+            persistent.AckLevel(
+                conversation_id=conv.id,
+                acker_key=token,
+                position=level.position,
+                roster_index=level.roster_index,
+                reached=level.reached,
+            )
+        )
+    await sess.flush()
+
+
 __all__ = [
+    "adopt",
     "append_outbound_text",
     "box_read",
     "claim",
     "enabled",
     "ensure_own_roster",
+    "forget_member",
+    "hand_over",
     "inducting",
+    "introduced",
     "load_group",
     "member_key",
     "on_message",
     "own_key",
     "serialize_with_acks",
     "settle",
+    "wait_for_outgoing",
 ]
