@@ -20,10 +20,10 @@ export SOURCE_DATE_EPOCH
   CGO_ENABLED=1 GOFLAGS=-trimpath go build -o "$work/kpclientd"
 )
 pkg="$work/pkg"
-mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/etc/kpclientd"
+mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/etc/katzenpost"
 install -m0755 "$work/kpclientd" "$pkg/usr/bin/kpclientd"
 install -m0644 "$root/config/client.toml" \
-  "$pkg/etc/kpclientd/client.toml"
+  "$pkg/etc/katzenpost/client.toml"
 sed "s/^Architecture: .*/Architecture: $arch/" \
 	"$root/packaging/debian/kpclientd/control" > "$pkg/DEBIAN/control"
 dpkg-deb --build --root-owner-group "$pkg" "$out/kpclientd_0.0.1_${arch}.deb"

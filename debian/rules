@@ -13,7 +13,7 @@ override_dh_auto_install:
 	dh_auto_install
 	install -d debian/katzenqt/usr/lib/systemd/user
 	sed -e 's|%h/.local/bin/kpclientd|/usr/bin/kpclientd|' \
-	    -e 's|%h/.local/katzenpost/client.toml|/etc/kpclientd/client.toml|' \
+	    -e 's|%h/.local/katzenpost/client.toml|/etc/katzenpost/client.toml|' \
 	    config/kpclientd.service \
 	    > debian/katzenqt/usr/lib/systemd/user/kpclientd.service
 

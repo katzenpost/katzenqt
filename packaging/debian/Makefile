@@ -3,10 +3,13 @@ DISTRO ?= ubuntu-26.04
 DISTROS ?= ubuntu-26.04 debian-13
 
 .PHONY: container container-kpclientd container-pydeps container-all \
-	container-clean repro
+	container-clean repro deb-image
 
 container:
 	@../container/build.sh $(DISTRO)
+
+deb-image:
+	@../container/deb-image.sh $(DISTRO)
 
 container-kpclientd:
 	@../container/build-kpclientd.sh $(DISTRO)

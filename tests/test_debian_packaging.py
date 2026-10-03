@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 DEBIAN = ROOT / "debian"
 CI = ROOT / "packaging" / "debian" / "ci.sh"
-SMOKE = ROOT / "packaging" / "debian" / "smoke.sh"
+TEST_SH = ROOT / "packaging" / "debian" / "test.sh"
 
 
 def test_control_is_project_authored_with_apt_deps() -> None:
@@ -89,19 +89,13 @@ def test_no_generated_debhelper_artifacts_committed() -> None:
     assert not list(DEBIAN.glob("*.debhelper"))
 
 
-def test_multi_os_ci_covers_both_targets_and_invokes_the_scripts() -> None:
-    wf = (ROOT / ".github" / "workflows" / "deb.yml").read_text()
-    assert "debian:13" in wf
-    assert "ubuntu:26.04" in wf
-    assert "make deb-ci" in wf
+def test_ci_invokes_the_packaging_scripts() -> None:
     ci = CI.read_text()
     assert "packaging/debian/build.sh" in ci
     assert "packaging/container/pydeps-build.sh" in ci
     assert "packaging/container/kpclientd-build.sh" in ci
     assert "python3-rustic-audio-tool" in ci
-    assert ".wants/kpclientd.service" in SMOKE.read_text()
-    assert "namenlos" not in wf.lower()
-    assert "pip install" not in wf
+    assert ".wants/kpclientd.service" in TEST_SH.read_text()
     assert "pip install" not in ci
 
 

@@ -22,14 +22,52 @@ permissions:
   contents: read
 
 jobs:
-  deb:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      ref_debian_13: ${{ steps.refs.outputs.ref_debian_13 }}
+      ref_debian_forky: ${{ steps.refs.outputs.ref_debian_forky }}
+      ref_ubuntu_26_04: ${{ steps.refs.outputs.ref_ubuntu_26_04 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - id: refs
+        run: make deb-image-refs >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
-        image: ["debian:13", "ubuntu:26.04"]
-    runs-on: ubuntu-latest
-    container: ${{ matrix.image }}
+        distro:
+          - debian-13
+          - debian-forky
+          - ubuntu-26.04
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends make git ca-certificates
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: make deb-image-push DISTRO=${{ matrix.distro }} PODMAN=docker
+
+  deb:
+    needs: [tag, image]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        key:
+          - ref_debian_13
+          - ref_debian_forky
+          - ref_ubuntu_26_04
+    container:
+      image: ${{ needs.tag.outputs[matrix.key] }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: make deb-ci

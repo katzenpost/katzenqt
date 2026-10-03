@@ -3,14 +3,14 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 DEBIAN = ROOT / "debian"
 CI = ROOT / "packaging" / "debian" / "ci.sh"
-SMOKE = ROOT / "packaging" / "debian" / "smoke.sh"
+TEST_SH = ROOT / "packaging" / "debian" / "test.sh"
 
 
 def test_service_installed_as_user_unit_but_not_enabled() -> None:
     rules = (DEBIAN / "rules").read_text()
     assert "usr/lib/systemd/user" in rules
     assert "/usr/bin/kpclientd" in rules
-    assert "/etc/kpclientd/client.toml" in rules
+    assert "/etc/katzenpost/client.toml" in rules
     assert "dh_installsystemduser --no-enable" in rules
 
 
@@ -36,7 +36,7 @@ def test_postinst_prompts_only_when_interactive() -> None:
 
 def test_ci_asserts_the_service_is_not_enabled() -> None:
     wf = (ROOT / ".github" / "workflows" / "deb.yml").read_text()
-    smoke = SMOKE.read_text()
+    smoke = TEST_SH.read_text()
     assert ".wants/kpclientd.service" in smoke
     assert "test -f /usr/lib/systemd/user/kpclientd.service" in smoke
-    assert "packaging/debian/smoke.sh" in CI.read_text()
+    assert "packaging/debian/test.sh" in CI.read_text()
