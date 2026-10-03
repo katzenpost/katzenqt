@@ -5,6 +5,8 @@ shape the GUI can encounter: plain text, inline GroupChatMessage (text +
 file upload), and the three CBOR attachment markers written by the network
 layer / GUI send path (``file_marker``, ``file_oversized``, ``file_outgoing``).
 """
+from typing import TypedDict, Unpack
+
 import cbor2
 
 from katzenqt.models import GroupChatFileUpload, GroupChatMessage
@@ -182,7 +184,11 @@ def test_file_outgoing_image_uses_thumbnail() -> None:
     assert info.rel_path is None
 
 
-def _inline(**kwargs: object) -> bytes:
+class _InlineFields(TypedDict, total=False):
+    file_upload: GroupChatFileUpload
+
+
+def _inline(**kwargs: Unpack[_InlineFields]) -> bytes:
     from katzenqt.models import GroupChatMessage
 
     gcm = GroupChatMessage(version=0, membership_hash=b"\x00" * 32, **kwargs)
@@ -236,7 +242,7 @@ def test_attachment_role_value_maps_each_role() -> None:
     assert q._attachment_role_value(info, 0x999) is None
 
 
-def test_oversized_inline_text_is_clamped_before_display():
+def test_oversized_inline_text_is_clamped_before_display() -> None:
     from katzenqt.models import MAX_MESSAGE_CHARS, _TEXT_TRUNCATION_MARKER
 
     huge = "q" * (MAX_MESSAGE_CHARS + 10000)
@@ -247,7 +253,7 @@ def test_oversized_inline_text_is_clamped_before_display():
     assert info.display.endswith(_TEXT_TRUNCATION_MARKER)
 
 
-def test_oversized_pre_protocol_text_is_clamped():
+def test_oversized_pre_protocol_text_is_clamped() -> None:
     from katzenqt.models import MAX_MESSAGE_CHARS, _TEXT_TRUNCATION_MARKER
 
     huge = ("p" * (MAX_MESSAGE_CHARS + 10000)).encode()

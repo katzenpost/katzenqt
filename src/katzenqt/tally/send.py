@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import uuid
 
+from typing import TYPE_CHECKING
+
 from .. import models, persistent
+
+if TYPE_CHECKING:
+    from sqlmodel.ext.asyncio.session import AsyncSession
 
 _CHUNK_SIZE = 1530
 
 
-async def stage_outbound(sess, conversation: "persistent.Conversation", gcm: "models.GroupChatMessage") -> uuid.UUID:
+async def stage_outbound(sess: "AsyncSession", conversation: "persistent.Conversation", gcm: "models.GroupChatMessage") -> uuid.UUID:
     """Serialise ``gcm`` and stage its rows in ``sess``. Returns the id of the
     final PlaintextWAL, which lands in SentLog once the message has cleared."""
     send_op = models.SendOperation(bacap_stream=conversation.write_cap, messages=[gcm])

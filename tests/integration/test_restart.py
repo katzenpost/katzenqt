@@ -108,7 +108,7 @@ def _snapshot_role_state(state: Path, label: str) -> None:
 
 def _run_concurrent_session(
     alice_state: Path, bob_state: Path,
-    alice_steps: list, bob_steps: list,
+    alice_steps: "list[str]", bob_steps: "list[str]",
     *, round_label: str,
     process_timeout_s: float = 2400.0,
     log_dir: Path,
@@ -182,7 +182,10 @@ def _run_concurrent_session(
 
 
 @pytest.mark.integration
-def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_factory):
+def test_concurrent_session_shutdown_then_restart(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Critical bug-hunting test: Alice and Bob each run as a single
     long-lived subprocess (not one subprocess per step), exchange
     messages in BOTH directions, shut down cleanly, and then a NEW pair
@@ -249,7 +252,10 @@ def test_concurrent_session_shutdown_then_restart(kpclientd_endpoint, tmp_path_f
 
 
 @pytest.mark.integration
-def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
+def test_multi_send_then_restart_read(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Alice queues 2 messages in one subprocess, then quits. Bob is then
     started fresh and must read both. Emulates 'user typed fast, then
     quit, peer came online later'.
@@ -278,7 +284,10 @@ def test_multi_send_then_restart_read(kpclientd_endpoint, tmp_path_factory):
 
 
 @pytest.mark.integration
-def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_factory):
+def test_read_latency_after_continuous_peer_sends(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Measure end-to-end latency from Bob's send completion to Alice's
     ConvLog commit, over several back-to-back messages.
 
@@ -377,7 +386,10 @@ def test_read_latency_after_continuous_peer_sends(kpclientd_endpoint, tmp_path_f
 
 
 @pytest.mark.integration
-def test_bidirectional_restart(kpclientd_endpoint, tmp_path_factory):
+def test_bidirectional_restart(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Alice and Bob both invite each other (bidirectional). They exchange
     messages in round 1, both quit. In round 2 (fresh subprocesses) Alice
     sends msg2A and Bob must read it; Bob sends msg2B and Alice must read it.

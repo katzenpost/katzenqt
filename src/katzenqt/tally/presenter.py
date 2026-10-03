@@ -20,13 +20,17 @@ Two kinds of entry point:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from sqlmodel import select
+from sqlmodel import col, select
 
 from .. import persistent
 from . import engine, schema
 from .engine import Outcome, SlotTally
 from .schema import Mode
+
+if TYPE_CHECKING:
+    from .. import models
 
 _UNKNOWN_VOTER = "(unknown)"
 
@@ -53,16 +57,46 @@ class SurveySummary:
 
     def voted_slot_ids(self) -> "list[str]":
         """The slot ids the local user has marked. The click-to-cycle voting
-        grid seeds its state from this."""
+        grid seeds its state from this.
+
+        >>> from katzenqt.tally.schema import Mode, new_survey_doc
+        >>> doc = new_survey_doc(bytes(16), "Lunch", Mode.APPROVAL, ["Mon", "Tue"])
+        >>> engine.apply_vote(doc, b"me", {"s1": "yes"})
+        >>> summarize(doc, conversation_id=1, my_voter_id=b"me").voted_slot_ids()
+        ['s1']
+        >>> summarize(doc, conversation_id=1, my_voter_id=b"you").voted_slot_ids()
+        []
+        """
         return list(self.my_choices)
 
     def my_score_on(self, slot_id: str) -> "str | None":
-        """My availability on ``slot_id``, or ``None`` if I left it blank."""
+        """My availability on ``slot_id``, or ``None`` if I left it blank.
+
+        >>> from katzenqt.tally.schema import Mode, new_survey_doc
+        >>> doc = new_survey_doc(bytes(16), "Lunch", Mode.APPROVAL, ["Mon", "Tue"])
+        >>> engine.apply_vote(doc, b"me", {"s1": "yes"})
+        >>> mine = summarize(doc, conversation_id=1, my_voter_id=b"me")
+        >>> mine.my_score_on("s1")
+        'yes'
+        >>> mine.my_score_on("s0") is None
+        True
+        """
         return self.my_choices.get(slot_id)
 
     def is_creator(self) -> bool:
         """Whether the local user opened this survey (only the creator may
-        close it; peers honour closes only from the creator)."""
+        close it; peers honour closes only from the creator).
+
+        >>> from katzenqt.tally.schema import Mode, new_survey_doc
+        >>> doc = new_survey_doc(
+        ...     bytes(16), "Lunch", Mode.APPROVAL, ["Mon"], creator=b"me")
+        >>> summarize(doc, conversation_id=1, my_voter_id=b"me").is_creator()
+        True
+        >>> summarize(doc, conversation_id=1, my_voter_id=b"you").is_creator()
+        False
+        >>> summarize(doc, conversation_id=1).is_creator()
+        False
+        """
         return (
             self.creator_voter_id is not None
             and self.my_voter_id is not None
@@ -80,6 +114,17 @@ class VoterRow:
     voter_id: "bytes | None" = None
 
     def line(self, slots: "tuple[SlotTally, ...]") -> str:
+        """One rendered line for this voter, in slot order.
+
+        >>> slots = (
+        ...     SlotTally("s0", "Mon", 1, 0, 0), SlotTally("s1", "", 0, 0, 1))
+        >>> VoterRow(name="Alice", choices={"s1": "yes"}, has_voted=True).line(slots)
+        'Alice: s1: yes'
+        >>> VoterRow(name="Bob", choices={}, has_voted=False).line(slots)
+        "Bob: hasn't voted"
+        >>> VoterRow(name="Cid", choices={}, has_voted=True).line(slots)
+        'Cid: no selections'
+        """
         if not self.has_voted:
             return f"{self.name}: hasn't voted"
         marks = ", ".join(
@@ -91,7 +136,7 @@ class VoterRow:
 
 
 def summarize(
-    doc,
+    doc: "schema.SurveyDoc",
     *,
     conversation_id: int,
     my_voter_id: "bytes | None" = None,
@@ -102,6 +147,21 @@ def summarize(
     ``voter_names`` (see :func:`voter_names`) is optional and only used to
     resolve the creator's display name; a doc whose creator is unknown (or a
     legacy doc predating the ``creator`` field) yields ``creator_name=None``.
+
+    >>> from katzenqt.tally.schema import Mode, new_survey_doc
+    >>> doc = new_survey_doc(
+    ...     bytes(16), "Lunch", Mode.APPROVAL, ["Mon", "Tue"], creator=b"me")
+    >>> engine.apply_vote(doc, b"me", {"s1": "yes"})
+    >>> summary = summarize(
+    ...     doc, conversation_id=7, my_voter_id=b"me",
+    ...     voter_names={b"me": "Alice"},
+    ... )
+    >>> summary.topic, summary.n_slots, summary.n_voters, summary.creator_name
+    ('Lunch', 2, 1, 'Alice')
+    >>> summary.my_choices, summary.outcome.kind
+    ({'s1': 'yes'}, 'winner')
+    >>> summarize(doc, conversation_id=7).creator_name is None
+    True
     """
     result = engine.tally(doc)
     my_choices: "dict[str, str]" = {}
@@ -149,7 +209,7 @@ def placeholder_text(summary: SurveySummary) -> str:
 
 
 def panel_rows(
-    doc,
+    doc: "schema.SurveyDoc",
     names: "dict[bytes, str]",
     *,
     my_voter_id: "bytes | None" = None,
@@ -160,7 +220,17 @@ def panel_rows(
     Every recorded voter appears with their ballot. When ``my_voter_id`` is
     given and has not voted, a ``has_voted=False`` row is added for them so the
     local user has a row to vote from. The local user sorts first, the rest by
-    name."""
+    name.
+
+    >>> from katzenqt.tally.schema import Mode, new_survey_doc
+    >>> doc = new_survey_doc(bytes(16), "Lunch", Mode.APPROVAL, ["Mon"])
+    >>> engine.apply_vote(doc, b"zz", {"s0": "yes"})
+    >>> [(r.name, r.has_voted)
+    ...  for r in panel_rows(doc, {b"zz": "Zoe"}, my_voter_id=b"aa")]
+    [('you', False), ('Zoe', True)]
+    >>> [(r.name, r.has_voted) for r in panel_rows(doc, {})]
+    [('(unknown)', True)]
+    """
     rows = [
         VoterRow(
             name=names.get(voter.voter_id, _UNKNOWN_VOTER),
@@ -199,7 +269,14 @@ class TallyRowText:
 
 
 def _selections(choices: "dict[str, str]", slots: "tuple[SlotTally, ...]") -> str:
-    """Render a ballot as ``slot: availability`` pairs, using slot text."""
+    """Render a ballot as ``slot: availability`` pairs, using slot text.
+
+    >>> slots = (SlotTally("s0", "Mon", 0, 0, 0), SlotTally("s1", "", 0, 0, 0))
+    >>> _selections({"s1": "no", "s0": "yes"}, slots)
+    'Mon: yes, s1: no'
+    >>> _selections({}, slots)
+    'no selections'
+    """
     texts = {s.slot_id: (s.text or s.slot_id) for s in slots}
     return ", ".join(
         f"{texts.get(sid, sid)}: {avail}" for sid, avail in sorted(choices.items())
@@ -207,10 +284,10 @@ def _selections(choices: "dict[str, str]", slots: "tuple[SlotTally, ...]") -> st
 
 
 def tally_row_text(
-    gcm,
+    gcm: "models.GroupChatMessage",
     *,
     actor_name: str,
-    survey_summary,
+    survey_summary: "SurveySummary | None",
 ) -> TallyRowText:
     """Format one tally chat row. Pure.
 
@@ -218,6 +295,26 @@ def tally_row_text(
     ``survey_summary`` is the projected survey the message concerns, or None if
     we do not hold it; a create with no crdt, or a vote/close for a survey we
     lack, becomes an ``invalid`` row explaining the problem.
+
+    >>> from katzenqt.models import (
+    ...     GroupChatMessage, GroupChatTally, GroupChatTypeEnum)
+    >>> from katzenqt.tally.schema import Mode, new_survey_doc
+    >>> doc = new_survey_doc(bytes(16), "Lunch", Mode.APPROVAL, ["Mon"])
+    >>> summary = summarize(doc, conversation_id=1)
+    >>> recast = GroupChatMessage(
+    ...     version=0, membership_hash=bytes(32),
+    ...     msg_type=GroupChatTypeEnum.TALLY_VOTE,
+    ...     tally=GroupChatTally(
+    ...         survey_id=bytes(16), choice={"s0": "yes"}, version=1),
+    ... )
+    >>> row = tally_row_text(recast, actor_name="Alice", survey_summary=summary)
+    >>> row.kind
+    'recast'
+    >>> row.text
+    'Alice changed vote in "[Poll] Lunch": Mon: yes'
+    >>> tally_row_text(
+    ...     recast, actor_name="Alice", survey_summary=None).kind
+    'invalid'
     """
     from ..models import GroupChatTypeEnum
 
@@ -323,7 +420,7 @@ def survey_ids_for_conversation(conversation_id: int) -> "list[bytes]":
         rows = sess.exec(
             select(persistent.TallyState)
             .where(persistent.TallyState.conversation_id == conversation_id)
-            .order_by(persistent.TallyState.survey_id)
+            .order_by(col(persistent.TallyState.survey_id))
         ).all()
         return [r.survey_id for r in rows]
 
@@ -347,8 +444,8 @@ def all_survey_ids() -> "list[tuple[int, bytes]]":
     with persistent.Session(persistent._engine_sync) as sess:
         rows = sess.exec(
             select(persistent.TallyState).order_by(
-                persistent.TallyState.conversation_id,
-                persistent.TallyState.survey_id,
+                col(persistent.TallyState.conversation_id),
+                col(persistent.TallyState.survey_id),
             )
         ).all()
         return [(r.conversation_id, r.survey_id) for r in rows]

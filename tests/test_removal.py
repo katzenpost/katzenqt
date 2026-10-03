@@ -1,9 +1,12 @@
+from pathlib import Path
 import asyncio
 import uuid
+from typing import TYPE_CHECKING, cast
 
 import cbor2
 import pytest
-from sqlmodel import select
+from PySide6.QtCore import QModelIndex
+from sqlmodel import SQLModel, select
 
 from katzenqt import network, persistent, removal
 from katzenqt.qt_models import ConversationLogModel
@@ -11,9 +14,13 @@ from katzenqt.tally.presenter import first_unread_order
 from katzenqt.tally import controller as tally_controller
 from tests.test_membership_hash import _make_conversation
 
+if TYPE_CHECKING:
+    from katzenqt.tally.schema import SurveyDoc
+
 
 def _mixwal(
-    stream: uuid.UUID, *, is_read: bool, plaintextwal=None
+    stream: uuid.UUID, *, is_read: bool,
+    plaintextwal: "uuid.UUID | None" = None,
 ) -> persistent.MixWAL:
     return persistent.MixWAL(
         bacap_stream=stream,
@@ -37,7 +44,7 @@ def _spill(rel_path: str) -> None:
     path.write_bytes(b"data")
 
 
-async def _count(model) -> int:
+async def _count(model: "type[SQLModel]") -> int:
     async with persistent.asession() as sess:
         return len((await sess.exec(select(model))).all())
 
@@ -45,6 +52,7 @@ async def _count(model) -> int:
 async def _alice(conv_id: int) -> persistent.ConversationPeer:
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         return next(p for p in conv.peers if p.name == "alice")
 
 
@@ -69,6 +77,7 @@ async def _add_substream(
     rcw_id = uuid.uuid4()
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         sess.add(persistent.ReadCapWAL(id=rcw_id, read_cap=b"\x05" * 136))
         sess.add(
             persistent.ConversationPeer(
@@ -90,7 +99,7 @@ async def _add_substream(
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_drops_everything_about_them():
+async def test_remove_peer_drops_everything_about_them() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     sub = await _add_substream(conv_id, alice)
@@ -103,6 +112,7 @@ async def test_remove_peer_drops_everything_about_them():
 
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         assert [p.name for p in conv.peers] == ["me"]
         for stream in (alice.read_cap_id, sub):
             assert await sess.get(persistent.ReadCapWAL, stream) is None
@@ -116,11 +126,12 @@ async def test_remove_peer_drops_everything_about_them():
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_keeps_own_messages_and_the_conversation():
+async def test_remove_peer_keeps_own_messages_and_the_conversation() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         own = conv.own_peer_id
     await _log(conv_id, own, 1, b"mine")
     await _log(conv_id, alice.id, 2, b"hers")
@@ -134,11 +145,12 @@ async def test_remove_peer_keeps_own_messages_and_the_conversation():
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_refuses_self_and_strangers():
+async def test_remove_peer_refuses_self_and_strangers() -> None:
     conv_id = await _make_conversation()
     other = await _make_conversation("other")
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         own = conv.own_peer_id
     with pytest.raises(removal.RemovalError):
         await removal.remove_peer(conversation_id=conv_id, peer_id=own)
@@ -151,11 +163,12 @@ async def test_remove_peer_refuses_self_and_strangers():
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_deletes_only_unshared_attachments():
+async def test_remove_peer_deletes_only_unshared_attachments() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         own = conv.own_peer_id
     unique = f"attachments/{conv_id}/unique.bin"
     shared = f"attachments/{conv_id}/shared.bin"
@@ -172,7 +185,7 @@ async def test_remove_peer_deletes_only_unshared_attachments():
 
 
 @pytest.mark.asyncio
-async def test_removal_never_deletes_outside_the_attachments_dir(tmp_path):
+async def test_removal_never_deletes_outside_the_attachments_dir(tmp_path: Path) -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     victim = persistent.state_file.parent / "victim.txt"
@@ -185,7 +198,7 @@ async def test_removal_never_deletes_outside_the_attachments_dir(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_cancels_its_reader_first():
+async def test_remove_peer_cancels_its_reader_first() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     entered = asyncio.Event()
@@ -210,6 +223,7 @@ async def _populate_conversation(conv_id: int) -> uuid.UUID:
     pwal = uuid.uuid4()
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         ind = uuid.uuid4()
         sess.add(persistent.WriteCapWAL(id=agg, write_cap=b"\x03" * 168))
         sess.add(
@@ -276,7 +290,7 @@ ALL_TABLES = (
 
 
 @pytest.mark.asyncio
-async def test_remove_conversation_leaves_nothing_behind():
+async def test_remove_conversation_leaves_nothing_behind() -> None:
     conv_id = await _make_conversation()
     await _populate_conversation(conv_id)
 
@@ -293,7 +307,7 @@ async def test_remove_conversation_leaves_nothing_behind():
 
 
 @pytest.mark.asyncio
-async def test_remove_conversation_leaves_other_conversations_alone():
+async def test_remove_conversation_leaves_other_conversations_alone() -> None:
     gone = await _make_conversation("gone")
     kept = await _make_conversation("kept")
     await _populate_conversation(gone)
@@ -323,11 +337,12 @@ async def test_remove_conversation_leaves_other_conversations_alone():
 
 
 @pytest.mark.asyncio
-async def test_remove_conversation_forgets_polls_in_memory():
+async def test_remove_conversation_forgets_polls_in_memory() -> None:
     conv_id = await _make_conversation()
     controller = tally_controller.INSTANCE
-    controller._docs[(conv_id, b"s")] = object()
-    controller._docs[(conv_id + 1, b"s")] = object()
+    doc = cast("SurveyDoc", object())
+    controller._docs[(conv_id, b"s")] = doc
+    controller._docs[(conv_id + 1, b"s")] = doc
     try:
         await removal.remove_conversation(conversation_id=conv_id)
         assert (conv_id, b"s") not in controller._docs
@@ -337,7 +352,7 @@ async def test_remove_conversation_forgets_polls_in_memory():
 
 
 @pytest.mark.asyncio
-async def test_remove_conversation_announces_transfer_removal():
+async def test_remove_conversation_announces_transfer_removal() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     sub = await _add_substream(conv_id, alice)
@@ -351,12 +366,12 @@ async def test_remove_conversation_announces_transfer_removal():
 
 
 @pytest.mark.asyncio
-async def test_remove_conversation_unknown_id():
+async def test_remove_conversation_unknown_id() -> None:
     with pytest.raises(removal.RemovalError):
         await removal.remove_conversation(conversation_id=12345)
 
 
-def test_sent_log_records_the_conversation_it_was_sent_in():
+def test_sent_log_records_the_conversation_it_was_sent_in() -> None:
     pwal = persistent.PlaintextWAL(
         id=uuid.uuid4(),
         bacap_stream=uuid.uuid4(),
@@ -383,35 +398,37 @@ def test_sent_log_records_the_conversation_it_was_sent_in():
         b"",
     ],
 )
-def test_attachment_paths_ignores_hostile_payloads(payload):
+def test_attachment_paths_ignores_hostile_payloads(payload: bytes) -> None:
     assert removal._attachment_paths(payload) == set()
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_unknown_conversation():
+async def test_remove_peer_unknown_conversation() -> None:
     with pytest.raises(removal.RemovalError, match="no conversation"):
         await removal.remove_peer(conversation_id=12345, peer_id=1)
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_leaves_the_membership_hash_until_deleted():
+async def test_remove_peer_leaves_the_membership_hash_until_deleted() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     await removal._silence_peers(conv_id, alice.id)
     async with persistent.asession() as sess:
         peer = await sess.get(persistent.ConversationPeer, alice.id)
         rcw = await sess.get(persistent.ReadCapWAL, alice.read_cap_id)
+        assert peer is not None and rcw is not None
         assert peer.active and rcw.paused
 
 
 @pytest.mark.asyncio
-async def test_first_unread_stays_within_the_log_after_removal():
+async def test_first_unread_stays_within_the_log_after_removal() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     for order in range(3):
         await _log(conv_id, alice.id, order)
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
+        assert conv is not None
         conv.first_unread = 2
         sess.add(conv)
         await sess.commit()
@@ -421,11 +438,11 @@ async def test_first_unread_stays_within_the_log_after_removal():
     log_model = ConversationLogModel(convo_id=conv_id)
     log_model.set_row_count()
     row = log_model.row_for_order(first_unread_order(conv_id))
-    assert row <= log_model.rowCount(None)
+    assert row <= log_model.rowCount(QModelIndex())
 
 
 @pytest.mark.asyncio
-async def test_stop_stream_logs_a_failing_task_and_carries_on(caplog):
+async def test_stop_stream_logs_a_failing_task_and_carries_on(caplog: pytest.LogCaptureFixture) -> None:
     stream = uuid.uuid4()
     entered = asyncio.Event()
 

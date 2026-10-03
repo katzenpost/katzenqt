@@ -79,9 +79,9 @@ def test_row_count_is_read_from_the_log_on_refresh() -> None:
         _append_row(convo_id, order)
     model = ConversationLogModel(convo_id=convo_id)
 
-    assert model.rowCount(None) == 0  # cache starts empty
+    assert model.rowCount() == 0  # cache starts empty
     model.refresh_row_count()
-    assert model.rowCount(None) == 3
+    assert model.rowCount() == 3
 
 
 def test_a_writer_that_forgets_to_notify_still_shows_its_row() -> None:
@@ -92,11 +92,11 @@ def test_a_writer_that_forgets_to_notify_still_shows_its_row() -> None:
     _append_row(convo_id, 0)
     model = ConversationLogModel(convo_id=convo_id)
     model.refresh_row_count()
-    assert model.rowCount(None) == 1
+    assert model.rowCount() == 1
 
     # A writer appends a row but does NOT notify the model.
     _append_row(convo_id, 1)
-    assert model.rowCount(None) == 1  # cache unchanged, as expected
+    assert model.rowCount() == 1  # cache unchanged, as expected
 
     # The next notification (any conversation update) self-heals.
     grown: "list[tuple[int, int]]" = []
@@ -104,7 +104,7 @@ def test_a_writer_that_forgets_to_notify_still_shows_its_row() -> None:
         lambda _p, first, last: grown.append((first, last))
     )
     model.refresh_row_count()
-    assert model.rowCount(None) == 2
+    assert model.rowCount() == 2
     assert grown == [(1, 1)]
 
 
@@ -115,8 +115,8 @@ def test_row_count_shrink_resets_and_clears_caches() -> None:
         _append_row(convo_id, order)
     model = ConversationLogModel(convo_id=convo_id)
     model.refresh_row_count()
-    assert model.rowCount(None) == 3
-    index = model.index(0, 0, None)
+    assert model.rowCount() == 3
+    index = model.index(0, 0)
     assert model.data(index, ROLE_CHAT_MESSAGE_ID) is not None  # warm the cache
 
     with persistent.Session(persistent._engine_sync) as sess:
@@ -132,7 +132,7 @@ def test_row_count_shrink_resets_and_clears_caches() -> None:
     resets: "list[bool]" = []
     model.modelReset.connect(lambda: resets.append(True))
     model.refresh_row_count()
-    assert model.rowCount(None) == 2
+    assert model.rowCount() == 2
     assert resets == [True]
 
 
@@ -151,7 +151,7 @@ def test_seed_then_append_inserts_exactly_the_new_row() -> None:
 
     _append_row(convo_id, 4)
     model.refresh_row_count()
-    assert model.rowCount(None) == 5
+    assert model.rowCount() == 5
     assert grown == [(4, 4)]
 
 
@@ -197,7 +197,7 @@ def test_rows_after_a_middle_deletion_stay_addressable() -> None:
     ids = [_append_row_with_id(convo_id, order) for order in range(4)]
     model = ConversationLogModel(convo_id=convo_id)
     model.refresh_row_count()
-    assert model.rowCount(None) == 4
+    assert model.rowCount() == 4
 
     with persistent.Session(persistent._engine_sync) as sess:
         row = sess.exec(
@@ -210,9 +210,9 @@ def test_rows_after_a_middle_deletion_stay_addressable() -> None:
         sess.commit()
 
     model.refresh_row_count()
-    assert model.rowCount(None) == 3
+    assert model.rowCount() == 3
     got = [
-        model.data(model.index(r, 0, None), ROLE_CHAT_MESSAGE_ID)
+        model.data(model.index(r, 0), ROLE_CHAT_MESSAGE_ID)
         for r in range(3)
     ]
     assert got == [str(ids[0]), str(ids[2]), str(ids[3])]
@@ -287,3 +287,9 @@ def test_refresh_row_count_reports_a_reset_on_deletion() -> None:
         sess.commit()
 
     assert model.refresh_row_count() is True
+
+
+def test_the_model_reports_its_own_parent_when_asked_without_a_child() -> None:
+    model = ConversationLogModel(convo_id=1)
+
+    assert model.parent() is None

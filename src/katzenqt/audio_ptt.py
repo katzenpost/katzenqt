@@ -155,11 +155,34 @@ def _load_backend_module() -> Any:
 
 
 def _supports_playback_error_polling(module: Any) -> bool:
+    """Whether the backend exposes the playback-error polling API we need.
+
+    >>> import types
+    >>> _supports_playback_error_polling(types.SimpleNamespace())
+    False
+    >>> class _Engine:
+    ...     def take_playback_error(self) -> None: ...
+    >>> _supports_playback_error_polling(
+    ...     types.SimpleNamespace(PttAudioEngine=_Engine))
+    True
+    >>> _supports_playback_error_polling(
+    ...     types.SimpleNamespace(PttAudioEngine=object))
+    False
+    """
     engine_type = getattr(module, "PttAudioEngine", None)
     return engine_type is not None and hasattr(engine_type, "take_playback_error")
 
 
 def _safe_component(value: str) -> str:
+    """Reduce a string to an ASCII path component safe to build a filename from.
+
+    >>> _safe_component("msg 42/../etc")
+    'msg-42----etc'
+    >>> _safe_component("clip_01-a")
+    'clip_01-a'
+    >>> _safe_component("...")
+    'voice-note'
+    """
     safe = "".join(
         char if char.isascii() and (char.isalnum() or char in "-_") else "-"
         for char in value

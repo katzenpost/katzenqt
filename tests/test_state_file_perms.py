@@ -1,3 +1,5 @@
+import pytest
+from pathlib import Path
 """Unit tests for the state-file permission clamp."""
 import os
 import stat
@@ -6,7 +8,7 @@ from katzenqt import persistent
 from katzenqt.persistent import _restrict_state_file_perms
 
 
-def test_restricts_permissions_to_owner_only(tmp_path):
+def test_restricts_permissions_to_owner_only(tmp_path: Path) -> None:
     f = tmp_path / "state.sqlite3"
     f.write_bytes(b"secret")
     os.chmod(f, 0o644)
@@ -15,11 +17,11 @@ def test_restricts_permissions_to_owner_only(tmp_path):
     assert mode == 0o600
 
 
-def test_missing_file_is_a_no_op(tmp_path):
+def test_missing_file_is_a_no_op(tmp_path: Path) -> None:
     _restrict_state_file_perms(tmp_path / "does-not-exist.sqlite3")
 
 
-def test_init_and_migrate_restricts_the_umask_during_upgrade(tmp_path, monkeypatch):
+def test_init_and_migrate_restricts_the_umask_during_upgrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Migrations create the state file under the ambient umask; on a
     permissive one it would be briefly group/world-readable for the whole
     upgrade run. init_and_migrate must not rely solely on the post-hoc
@@ -29,7 +31,7 @@ def test_init_and_migrate_restricts_the_umask_during_upgrade(tmp_path, monkeypat
     monkeypatch.setattr(persistent, "state_file", f)
     monkeypatch.setattr(persistent, "_restrict_state_file_perms", lambda path: None)
 
-    def fake_upgrade(cfg, revision):
+    def fake_upgrade(cfg: object, revision: object) -> None:
         # Mimics what the real migrations do: create the file under
         # whatever umask is in effect right now.
         fd = os.open(f, os.O_CREAT | os.O_WRONLY, 0o666)

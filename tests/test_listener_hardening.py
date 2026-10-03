@@ -10,18 +10,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Coroutine, Iterable
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, TypeVar
 
 import pytest
 
 from katzenqt import katzen, network
+from tests.stubs import returning
+
+if TYPE_CHECKING:
+    import uuid
+
+_T = TypeVar("_T")
 
 
 class _BlockedLoop:
     """Stand-in for the io thread: actually runs the queued coroutine on
     this loop, as ``MainWindow.run_in_io`` does over the thread hop."""
 
-    async def run_in_io(self, fn):
+    async def run_in_io(self, fn: Coroutine[object, object, _T]) -> _T:
         if not asyncio.iscoroutine(fn):
             # mirror asyncio.run_coroutine_threadsafe's contract: callers
             # pass a started coroutine (network...queue.get(), not .get),
@@ -34,10 +42,10 @@ class _FakeQueue:
     """One-shot queue: yields the canned items, then raises
     CancelledError, which the listener re-raises so the test task ends."""
 
-    def __init__(self, items):
+    def __init__(self, items: Iterable[object]) -> None:
         self.items = list(items)
 
-    async def get(self):
+    async def get(self) -> object:
         try:
             return self.items.pop(0)
         except IndexError:
@@ -45,34 +53,34 @@ class _FakeQueue:
 
 
 class _BoomLogModel:
-    def __init__(self):
-        self.calls = []
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
-    def refresh_row_count(self):
+    def refresh_row_count(self) -> None:
         self.calls.append("refresh")
         raise RuntimeError("boom")
 
-    def redraw_network_status(self):
+    def redraw_network_status(self) -> None:
         self.calls.append("redraw")
 
 
 class _ConvoState:
-    def __init__(self, log_model):
+    def __init__(self, log_model: _BoomLogModel) -> None:
         self.conversation_log_model = log_model
         self.chat_lines_scroll_idx = 0.0
 
 
-async def _run_until_cancelled(listener_coro):
+async def _run_until_cancelled(listener_coro: Coroutine[object, object, None]) -> None:
     task = asyncio.create_task(listener_coro)
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=5.0)
 
 
-async def _state_ready(*_a, **_k):
+async def _state_ready(*_a: object, **_k: object) -> bool:
     return True
 
 
-def _fake_window(**overrides):
+def _fake_window(**overrides: object) -> SimpleNamespace:
     base = dict(
         iothread=_BlockedLoop(),
         _wait_for_conversation_state=_state_ready,
@@ -97,8 +105,8 @@ def _fake_window(**overrides):
 class TestReceiveMsgListenerSurvives:
     @pytest.mark.asyncio
     async def test_bad_item_is_logged_and_next_item_still_served(
-        self, monkeypatch, caplog,
-    ):
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
         # must be present before _process_conversation_update runs
         log_model = _BoomLogModel()
         conversation_id = 1
@@ -123,23 +131,49 @@ class TestReceiveMsgListenerSurvives:
         )
 
 
+    @pytest.mark.asyncio
+    async def test_an_absent_systray_is_not_notified(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        conversation_id = 1
+        queue = _FakeQueue([(conversation_id, False)])
+        monkeypatch.setattr(network, "conversation_update_queue", queue)
+        state = SimpleNamespace(
+            conversation_log_model=SimpleNamespace(
+                refresh_row_count=returning(False),
+            ),
+            chat_lines_scroll_idx=0.0,
+        )
+        window = _fake_window(
+            systray=None,
+            conversation_state_by_id={conversation_id: state},
+        )
+        with caplog.at_level(logging.ERROR, logger="katzen"):
+            await _run_until_cancelled(
+                katzen.MainWindow.receive_msg_listener.__get__(window)()
+            )
+
+        assert state.chat_lines_scroll_idx == 1.0
+        assert caplog.records == []
+
+
 class TestPeerAddedListenerSurvives:
     @pytest.mark.asyncio
     async def test_bad_item_is_logged_and_next_item_still_served(
-        self, monkeypatch, caplog,
-    ):
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
         class _ContactsItem:
-            def __init__(self):
-                self.rows = []
+            def __init__(self) -> None:
+                self.rows: list[str] = []
                 self.append_calls = 0
 
-            def rowCount(self):
+            def rowCount(self) -> int:
                 return len(self.rows)
 
-            def child(self, r):
+            def child(self, r: int) -> SimpleNamespace:
                 return SimpleNamespace(text=lambda: f"peer-{r}")
 
-            def appendRow(self, item):
+            def appendRow(self, item: str) -> None:
                 self.append_calls += 1
                 if item == "BOOM":
                     raise RuntimeError("boom")
@@ -156,7 +190,7 @@ class TestPeerAddedListenerSurvives:
             (conversation_id, "alice"),  # must still be added
         ])
         monkeypatch.setattr(network, "peer_added_queue", queue)
-        monkeypatch.setattr(katzen, "QStandardItem", fake_item_class)
+        monkeypatch.setattr(katzen, "ContactsItem", fake_item_class)
 
         window = _fake_window(conversation_state_by_id={
             conversation_id: _State(),
@@ -177,19 +211,19 @@ class TestPeerAddedListenerSurvives:
 
 class TestPeerAddedDedups:
     @pytest.mark.asyncio
-    async def test_same_name_is_not_appended_twice(self):
+    async def test_same_name_is_not_appended_twice(self) -> None:
         class _ContactsItem:
-            def __init__(self):
-                self.rows = []
+            def __init__(self) -> None:
+                self.rows: list[str] = []
 
-            def rowCount(self):
+            def rowCount(self) -> int:
                 return len(self.rows)
 
-            def child(self, r):
+            def child(self, r: int) -> SimpleNamespace:
                 # child(r) mirrors a tree where every existing row is "bob"
                 return SimpleNamespace(text=lambda: "bob")
 
-            def appendRow(self, item):
+            def appendRow(self, item: str) -> None:
                 self.rows.append(item)
 
         class _State:
@@ -206,54 +240,68 @@ class TestPeerAddedDedups:
         assert len(_State.contacts_standard_item.rows) == 1
 
 
+class _FakeTransfersModel:
+    def __init__(self, boom_on: "str | None" = "started") -> None:
+        self.boom_on = boom_on
+        self.calls: list[tuple[object, ...]] = []
+
+    def start_transfer(self, rcw_id: uuid.UUID, conv_id: int,
+                       parent_name: str, total: int | None,
+                       direction: str = "download",
+                       raw_bytes: int = 0) -> None:
+        self.calls.append(
+            ("start", rcw_id, conv_id, parent_name, total, direction,
+             raw_bytes),
+        )
+        if self.boom_on == "started":
+            raise RuntimeError("boom")
+
+    def notify_piece(self, rcw_id: uuid.UUID, pieces: int,
+                     raw_bytes: int | None = None) -> None:
+        self.calls.append(("piece", rcw_id, pieces, raw_bytes))
+        if self.boom_on == "piece":
+            raise RuntimeError("boom")
+
+    def complete_transfer(self, rcw_id: uuid.UUID) -> None:
+        self.calls.append(("complete", rcw_id))
+
+    def set_paused(self, rcw_id: uuid.UUID, paused: bool) -> None:
+        self.calls.append(("paused", rcw_id, paused))
+
+    def remove_transfer(self, rcw_id: uuid.UUID) -> None:
+        self.calls.append(("removed", rcw_id))
+
+
 class TestTransfersListenerDrainsEvents:
     """The Transfers listener turns each substream_progress_queue
     event into a DownloadsModel call, and survives a per-item error via
     log-and-continue like the other UI listeners."""
 
-    def _fake_transfers_model(self, boom_on="started"):
-        class _Model:
-            def __init__(self):
-                self.calls = []
-
-            def start_transfer(self, rcw_id, conv_id, parent_name, total,
-                               direction="download", raw_bytes=0):
-                self.calls.append(
-                    ("start", rcw_id, conv_id, parent_name, total, direction,
-                     raw_bytes),
-                )
-                if boom_on == "started":
-                    raise RuntimeError("boom")
-
-            def notify_piece(self, rcw_id, pieces, raw_bytes=None):
-                self.calls.append(("piece", rcw_id, pieces, raw_bytes))
-                if boom_on == "piece":
-                    raise RuntimeError("boom")
-
-            def complete_transfer(self, rcw_id):
-                self.calls.append(("complete", rcw_id))
-
-            def set_paused(self, rcw_id, paused):
-                self.calls.append(("paused", rcw_id, paused))
-
-        return _Model()
+    def _fake_transfers_model(
+        self, boom_on: "str | None" = "started",
+    ) -> "_FakeTransfersModel":
+        return _FakeTransfersModel(boom_on)
 
     @pytest.mark.asyncio
-    async def test_events_are_dispatched_to_the_model(self, monkeypatch):
+    async def test_events_are_dispatched_to_the_model(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         rcw = __import__("uuid").uuid4()
         up_rcw = __import__("uuid").uuid4()
         queue = _FakeQueue([
-            ("started", rcw, 7, 3, "alice"),
-            ("piece", rcw, 1, 1529),
-            ("piece", rcw, 2, 3058),
-            ("paused", rcw),
-            ("resumed", rcw),
-            ("completed", rcw),
-            ("upload_started", up_rcw, 7, 25, 25000, "bob-conv", "photo.jpg"),
-            ("upload_piece", up_rcw, 6, 30000),
-            ("upload_paused", up_rcw),
-            ("upload_resumed", up_rcw),
-            ("upload_completed", up_rcw),
+            network.TransferStarted(rcw, 7, 3, "alice"),
+            network.TransferPiece(rcw, 1, 1529),
+            network.TransferPiece(rcw, 2, 3058),
+            network.TransferPaused(rcw, "download", paused=True),
+            network.TransferPaused(rcw, "download", paused=False),
+            network.TransferCompleted(rcw, "download", cancelled=False),
+            network.UploadStarted(
+                up_rcw, 7, 25, 25000, "bob-conv", "photo.jpg",
+            ),
+            network.UploadPiece(up_rcw, 6, 30000),
+            network.TransferPaused(up_rcw, "upload", paused=True),
+            network.TransferPaused(up_rcw, "upload", paused=False),
+            network.TransferCompleted(up_rcw, "upload", cancelled=False),
         ])
         monkeypatch.setattr(network, "substream_progress_queue", queue)
         model = self._fake_transfers_model(boom_on=None)
@@ -279,12 +327,12 @@ class TestTransfersListenerDrainsEvents:
 
     @pytest.mark.asyncio
     async def test_bad_item_is_logged_and_next_item_still_served(
-        self, monkeypatch, caplog,
-    ):
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
         rcw = __import__("uuid").uuid4()
         queue = _FakeQueue([
-            ("started", rcw, 7, 3, "alice"),  # boom
-            ("piece", rcw, 1, 1529),          # must still get through
+            network.TransferStarted(rcw, 7, 3, "alice"),  # boom
+            network.TransferPiece(rcw, 1, 1529),  # must still get through
         ])
         monkeypatch.setattr(network, "substream_progress_queue", queue)
         window = _fake_window(

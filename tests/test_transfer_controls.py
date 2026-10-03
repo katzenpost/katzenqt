@@ -1,10 +1,11 @@
 from collections.abc import Coroutine
 from types import SimpleNamespace
+from typing import cast
 from uuid import UUID
 from unittest.mock import AsyncMock
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from sqlmodel import select
 
 from katzenqt import katzen, network, persistent, qt_models
@@ -58,7 +59,9 @@ async def test_failed_transfer_menu_removes_the_clicked_uuid(
     window = SimpleNamespace(
         transfers_view=view, iothread=SimpleNamespace(run_in_io=run),
     )
-    await katzen.MainWindow.transfers_context_menu(window, None)
+    await katzen.MainWindow.transfers_context_menu(
+        cast(katzen.MainWindow, window), QPoint(),
+    )
     assert offered == ["Remove"]
     remove.assert_awaited_once_with(bacap_stream=stream)
     assert model.rowCount() == 0

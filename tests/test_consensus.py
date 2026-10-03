@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from katzenqt import katzen, network  # noqa: E402
 
 
-def _blob(desc: dict) -> bytes:
+def _blob(desc: "dict[str, object]") -> bytes:
     return cbor2.dumps(desc)
 
 
@@ -24,7 +24,7 @@ _EPOCH = int(
 )
 
 
-def _sample_doc() -> dict:
+def _sample_doc() -> "dict[str, object]":
     return {
         "Epoch": _EPOCH,
         "GenesisEpoch": 1000,
@@ -43,16 +43,16 @@ def _sample_doc() -> dict:
     }
 
 
-def test_derive_epoch_period_from_the_fixed_origin():
+def test_derive_epoch_period_from_the_fixed_origin() -> None:
     assert network.derive_epoch_period_seconds(_EPOCH, now=_NOW) == _PERIOD
 
 
-def test_derive_epoch_period_handles_missing_or_zero_epoch():
+def test_derive_epoch_period_handles_missing_or_zero_epoch() -> None:
     assert network.derive_epoch_period_seconds(None, now=_NOW) is None
     assert network.derive_epoch_period_seconds(0, now=_NOW) is None
 
 
-def test_summarize_pki_document_decodes_topology_and_consensus():
+def test_summarize_pki_document_decodes_topology_and_consensus() -> None:
     summary = network.summarize_pki_document(_sample_doc(), now=_NOW)
     assert summary is not None
     assert summary.epoch == _EPOCH
@@ -70,29 +70,31 @@ def test_summarize_pki_document_decodes_topology_and_consensus():
     assert summary.storage_replicas[0].addresses == ["tcp://replica1:1036"]
 
 
-def test_node_address_without_a_scheme_gets_the_transport_prefix():
+def test_node_address_without_a_scheme_gets_the_transport_prefix() -> None:
     doc = {
         "GatewayNodes": [
             _blob({"Name": "gw", "Addresses": {"tcp": ["gw:1234"]}}),
         ],
     }
     summary = network.summarize_pki_document(doc, now=_NOW)
+    assert summary is not None
     assert summary.gateways[0].addresses == ["tcp://gw:1234"]
 
 
-def test_summarize_pki_document_is_none_without_a_document():
+def test_summarize_pki_document_is_none_without_a_document() -> None:
     assert network.summarize_pki_document(None) is None
     assert network.summarize_pki_document({}) is None
 
 
-def test_summarize_tolerates_undecodable_node_blobs():
+def test_summarize_tolerates_undecodable_node_blobs() -> None:
     doc = _sample_doc()
     doc["GatewayNodes"] = [b"not cbor", _blob({"Name": "gw2"})]
     summary = network.summarize_pki_document(doc, now=_NOW)
+    assert summary is not None
     assert [n.name for n in summary.gateways] == ["gw2"]
 
 
-def test_format_duration():
+def test_format_duration() -> None:
     assert network.format_duration(None) == "unknown"
     assert network.format_duration(0) == "0s"
     assert network.format_duration(90) == "1m 30s"
@@ -102,11 +104,11 @@ def test_format_duration():
 
 
 @pytest.mark.asyncio
-async def test_consensus_dialog_renders_the_summary_and_tree():
+async def test_consensus_dialog_renders_the_summary_and_tree() -> None:
     app = QApplication.instance() or QApplication([])
     doc = _sample_doc()
 
-    async def fetch():
+    async def fetch() -> "dict[str, object]":
         return doc
 
     dialog = katzen.ConsensusDialog(None, fetch)
@@ -119,12 +121,28 @@ async def test_consensus_dialog_renders_the_summary_and_tree():
     assert dialog._fields["consensus"].text() != "—"
     # Gateways first, then two mix layers, service nodes, storage replicas.
     assert dialog._tree.topLevelItemCount() == 5
-    assert dialog._tree.topLevelItem(0).text(0) == "Gateways"
-    assert dialog._tree.topLevelItem(0).child(0).text(0) == "gw1"
-    assert dialog._tree.topLevelItem(1).child(0).text(0) == "mix1"
-    assert dialog._tree.topLevelItem(2).child(0).text(0) == "mix2"
-    assert dialog._tree.topLevelItem(4).text(0) == "Storage replicas"
-    assert dialog._tree.topLevelItem(4).child(0).text(0) == "rep1"
+    gateways = dialog._tree.topLevelItem(0)
+    layer1 = dialog._tree.topLevelItem(1)
+    layer2 = dialog._tree.topLevelItem(2)
+    replicas = dialog._tree.topLevelItem(4)
+    assert gateways is not None
+    assert layer1 is not None
+    assert layer2 is not None
+    assert replicas is not None
+    gateway0 = gateways.child(0)
+    mix1 = layer1.child(0)
+    mix2 = layer2.child(0)
+    replica0 = replicas.child(0)
+    assert gateway0 is not None
+    assert mix1 is not None
+    assert mix2 is not None
+    assert replica0 is not None
+    assert gateways.text(0) == "Gateways"
+    assert gateway0.text(0) == "gw1"
+    assert mix1.text(0) == "mix1"
+    assert mix2.text(0) == "mix2"
+    assert replicas.text(0) == "Storage replicas"
+    assert replica0.text(0) == "rep1"
     # Selecting a cell must paint the highlight behind the text.
     style = dialog._tree.styleSheet()
     assert "background-color" in style and "color" in style
@@ -133,10 +151,10 @@ async def test_consensus_dialog_renders_the_summary_and_tree():
 
 
 @pytest.mark.asyncio
-async def test_consensus_dialog_handles_no_document():
+async def test_consensus_dialog_handles_no_document() -> None:
     app = QApplication.instance() or QApplication([])
 
-    async def fetch():
+    async def fetch() -> None:
         return None
 
     dialog = katzen.ConsensusDialog(None, fetch)
@@ -147,11 +165,11 @@ async def test_consensus_dialog_handles_no_document():
 
 
 @pytest.mark.asyncio
-async def test_consensus_dialog_survives_a_failing_fetch():
+async def test_consensus_dialog_survives_a_failing_fetch() -> None:
     """A daemon-down fetch must not raise out of the timer's task."""
     app = QApplication.instance() or QApplication([])
 
-    async def fetch():
+    async def fetch() -> None:
         raise ConnectionError("daemon down")
 
     dialog = katzen.ConsensusDialog(None, fetch)
@@ -162,5 +180,5 @@ async def test_consensus_dialog_survives_a_failing_fetch():
 
 
 @pytest.mark.asyncio
-async def test_get_pki_document_is_none_before_connect():
+async def test_get_pki_document_is_none_before_connect() -> None:
     assert await network.get_pki_document(None) is None

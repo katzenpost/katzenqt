@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from katzenqt.tally import engine, schema
+from katzenqt.tally.engine import SlotTally, TallyResult
 from katzenqt.tally.schema import Mode
 
 
@@ -13,11 +14,11 @@ def _sid() -> bytes:
     return uuid.uuid4().bytes
 
 
-def _by_id(result):
+def _by_id(result: TallyResult) -> "dict[str, SlotTally]":
     return {s.slot_id: s for s in result.slots}
 
 
-def test_approval_counts_absent_slot_as_no():
+def test_approval_counts_absent_slot_as_no() -> None:
     doc = schema.new_survey_doc(_sid(), "lunch?", Mode.APPROVAL, ["noon", "one", "two"])
     engine.apply_vote(doc, b"alice", {"s0": "yes", "s1": "no", "s2": "yes"})
     engine.apply_vote(doc, b"bob", {"s0": "yes", "s2": "no"})  # s1 omitted -> no
@@ -31,7 +32,7 @@ def test_approval_counts_absent_slot_as_no():
     assert (by["s2"].yes, by["s2"].no, by["s2"].maybe) == (1, 1, 0)
 
 
-def test_availability_three_way_counts():
+def test_availability_three_way_counts() -> None:
     doc = schema.new_survey_doc(_sid(), "meet?", Mode.AVAILABILITY, ["mon", "tue"])
     engine.apply_vote(doc, b"a", {"s0": "yes", "s1": "maybe"})
     engine.apply_vote(doc, b"b", {"s0": "maybe", "s1": "no"})
@@ -42,7 +43,7 @@ def test_availability_three_way_counts():
     assert (by["s1"].yes, by["s1"].maybe, by["s1"].no) == (0, 1, 2)
 
 
-def test_domain_and_slot_validation():
+def test_domain_and_slot_validation() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a"])
     with pytest.raises(ValueError):
         engine.apply_vote(doc, b"a", {"s0": "maybe"})  # maybe illegal in approval
@@ -50,7 +51,7 @@ def test_domain_and_slot_validation():
         engine.apply_vote(doc, b"a", {"s9": "yes"})  # unknown slot
 
 
-def test_revote_overwrites_prior_choice():
+def test_revote_overwrites_prior_choice() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
     engine.apply_vote(doc, b"a", {"s0": "yes"})
     engine.apply_vote(doc, b"a", {"s0": "no", "s1": "yes"})
@@ -62,7 +63,7 @@ def test_revote_overwrites_prior_choice():
     assert by["s1"].yes == 1
 
 
-def test_newer_version_supersedes_prior_vote():
+def test_newer_version_supersedes_prior_vote() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
     engine.apply_vote(doc, b"x", {"s0": "yes"}, version=0)
     engine.apply_vote(doc, b"x", {"s0": "no", "s1": "yes"}, version=1)
@@ -74,7 +75,7 @@ def test_newer_version_supersedes_prior_vote():
     assert by["s1"].yes == 1
 
 
-def test_older_version_is_discarded_out_of_order():
+def test_older_version_is_discarded_out_of_order() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a"])
     engine.apply_vote(doc, b"x", {"s0": "yes"}, version=2)
     engine.apply_vote(doc, b"x", {"s0": "no"}, version=1)  # stale, must be ignored
@@ -84,7 +85,7 @@ def test_older_version_is_discarded_out_of_order():
     assert res.slots[0].yes == 1  # the version-2 vote stands
 
 
-def test_current_version_tracks_the_latest():
+def test_current_version_tracks_the_latest() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a"])
     assert engine.current_version(doc, b"x") == -1
     engine.apply_vote(doc, b"x", {"s0": "yes"}, version=0)
@@ -95,25 +96,25 @@ def test_current_version_tracks_the_latest():
     assert engine.current_version(doc, b"x") == 3
 
 
-def test_close_changes_status():
+def test_close_changes_status() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a"])
     assert engine.tally(doc).status == "open"
     engine.close_survey(doc)
     assert engine.tally(doc).status == "closed"
 
 
-def test_empty_slots_rejected():
+def test_empty_slots_rejected() -> None:
     with pytest.raises(ValueError):
         schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, [])
 
 
-def test_survey_id_round_trips():
+def test_survey_id_round_trips() -> None:
     sid = _sid()
     doc = schema.new_survey_doc(sid, "x", Mode.APPROVAL, ["a"])
     assert engine.tally(doc).survey_id == sid
 
 
-def test_outcome_declares_a_clear_winner():
+def test_outcome_declares_a_clear_winner() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
     engine.apply_vote(doc, b"v1", {"s0": "yes"})
     engine.apply_vote(doc, b"v2", {"s0": "yes", "s1": "yes"})
@@ -123,7 +124,7 @@ def test_outcome_declares_a_clear_winner():
     assert out.top_yes == 2
 
 
-def test_per_voter_lists_each_vote_with_its_choices_and_version():
+def test_per_voter_lists_each_vote_with_its_choices_and_version() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.AVAILABILITY, ["a", "b"])
     engine.apply_vote(doc, b"alice", {"s0": "yes"}, version=1)
     engine.apply_vote(doc, b"bob", {"s1": "maybe"}, version=0)
@@ -139,7 +140,7 @@ def test_per_voter_lists_each_vote_with_its_choices_and_version():
     assert len(got) == engine.tally(doc).n_voters
 
 
-def test_outcome_declares_a_tie():
+def test_outcome_declares_a_tie() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
     engine.apply_vote(doc, b"v1", {"s0": "yes"})
     engine.apply_vote(doc, b"v2", {"s1": "yes"})
@@ -149,7 +150,7 @@ def test_outcome_declares_a_tie():
     assert out.top_yes == 1
 
 
-def test_outcome_no_winner_without_a_single_yes():
+def test_outcome_no_winner_without_a_single_yes() -> None:
     doc = schema.new_survey_doc(_sid(), "x", Mode.APPROVAL, ["a", "b"])
     engine.apply_vote(doc, b"v1", {"s0": "no", "s1": "no"})
     out = engine.outcome(engine.tally(doc))

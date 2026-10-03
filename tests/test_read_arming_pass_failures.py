@@ -213,7 +213,9 @@ async def test_supervisor_restarts_after_an_unexpected_pass_failure(
     monkeypatch.setattr(
         network, "_wait_for_connection_or_shutdown", immediate_wait,
     )
-    await network.readables_to_mixwal_supervised(object())
+    await network.readables_to_mixwal_supervised(
+        cast("ThinClient", object()),
+    )
     assert len(calls) == 2
 
 

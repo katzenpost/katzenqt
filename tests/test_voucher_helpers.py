@@ -41,10 +41,11 @@ async def _make_conversation(*, own_write_cap: "bytes | None" = b"\x00" * 168,
 
 class TestAddPeerGuard:
     @pytest.mark.asyncio
-    async def test_none_read_cap_does_not_raise_and_adds_nothing(self):
+    async def test_none_read_cap_does_not_raise_and_adds_nothing(self) -> None:
         async with persistent.asession() as sess:
             conv_id = await _make_conversation()
             conv = await sess.get(persistent.Conversation, conv_id)
+            assert conv is not None
             voucher._add_peer(sess, conv, "newcomer", None)
             await sess.commit()
             peers = (await sess.exec(
@@ -55,10 +56,11 @@ class TestAddPeerGuard:
             assert peers == []
 
     @pytest.mark.asyncio
-    async def test_wrong_length_read_cap_does_not_raise_and_adds_nothing(self):
+    async def test_wrong_length_read_cap_does_not_raise_and_adds_nothing(self) -> None:
         async with persistent.asession() as sess:
             conv_id = await _make_conversation()
             conv = await sess.get(persistent.Conversation, conv_id)
+            assert conv is not None
             voucher._add_peer(sess, conv, "newcomer", b"\x00" * 10)
             await sess.commit()
             peers = (await sess.exec(
@@ -71,13 +73,13 @@ class TestAddPeerGuard:
 
 class TestBuildWhoReplyOmitsUnprovisionedSelf:
     @pytest.mark.asyncio
-    async def test_omits_self_when_neither_cap_is_provisioned(self):
+    async def test_omits_self_when_neither_cap_is_provisioned(self) -> None:
         conv_id = await _make_conversation(own_write_cap=None, own_read_cap=None)
         reply = await voucher._build_who_reply(conv_id)
         assert reply.please_adds == []
 
     @pytest.mark.asyncio
-    async def test_includes_self_when_read_cap_is_provisioned(self):
+    async def test_includes_self_when_read_cap_is_provisioned(self) -> None:
         conv_id = await _make_conversation(own_write_cap=None, own_read_cap=b"\x02" * 136)
         reply = await voucher._build_who_reply(conv_id)
         assert len(reply.please_adds) == 1
@@ -86,8 +88,8 @@ class TestBuildWhoReplyOmitsUnprovisionedSelf:
 
 class TestSendIntroductionMessageNeverRaises:
     @pytest.mark.asyncio
-    async def test_write_failure_is_logged_not_raised(self, monkeypatch, caplog):
-        async def boom(*_a, **_kw):
+    async def test_write_failure_is_logged_not_raised(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        async def boom(*_a: object, **_kw: object) -> None:
             raise RuntimeError("db is on fire")
 
         monkeypatch.setattr(voucher, "_write_introduction_log", boom)
@@ -104,32 +106,35 @@ class TestOwnReadCapDedupe:
     unmutated rcapwal.read_cap."""
 
     @pytest.mark.asyncio
-    async def test_prefers_provisioned_write_cap(self):
+    async def test_prefers_provisioned_write_cap(self) -> None:
         conv_id = await _make_conversation(
             own_write_cap=b"\xaa" * 168, own_read_cap=b"\xbb" * 136,
         )
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conv_id)
+            assert conv is not None
             assert await persistent.own_read_cap(sess, conv) == b"\xaa" * 136
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_read_cap_when_write_cap_unprovisioned(self):
+    async def test_falls_back_to_read_cap_when_write_cap_unprovisioned(self) -> None:
         conv_id = await _make_conversation(
             own_write_cap=None, own_read_cap=b"\xbb" * 136,
         )
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conv_id)
+            assert conv is not None
             assert await persistent.own_read_cap(sess, conv) == b"\xbb" * 136
 
     @pytest.mark.asyncio
-    async def test_none_when_neither_is_provisioned(self):
+    async def test_none_when_neither_is_provisioned(self) -> None:
         conv_id = await _make_conversation(own_write_cap=None, own_read_cap=None)
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conv_id)
+            assert conv is not None
             assert await persistent.own_read_cap(sess, conv) is None
 
     @pytest.mark.asyncio
-    async def test_reached_via_peer_no_lazy_relationship_access(self):
+    async def test_reached_via_peer_no_lazy_relationship_access(self) -> None:
         # Smoke test for the drain_mixwal_read_single shape of the bug: there
         # the conversation arrives via the link-model peer path and own_read_cap
         # must resolve the owner through columns/explicit session.get alone --
@@ -142,5 +147,6 @@ class TestOwnReadCapDedupe:
         )
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conv_id)
+            assert conv is not None
             sess.expire(conv, attribute_names=["own_peer"])
             assert await persistent.own_read_cap(sess, conv) == b"\xaa" * 136

@@ -8,6 +8,7 @@ regressions in headless callers. After this commit it must run
 before any subcommand fires.
 """
 from __future__ import annotations
+import pytest
 
 from pathlib import Path
 
@@ -16,12 +17,13 @@ from alembic.script import ScriptDirectory
 from katzenqt import integration_runner, persistent
 
 
-def test_main_calls_init_and_migrate(monkeypatch, capsys):
+def test_main_calls_init_and_migrate(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     calls: "list[str]" = []
-    monkeypatch.setattr(
-        persistent, "init_and_migrate",
-        lambda: calls.append("init_and_migrate") or None,
-    )
+
+    def fake_init_and_migrate() -> None:
+        calls.append("init_and_migrate")
+
+    monkeypatch.setattr(persistent, "init_and_migrate", fake_init_and_migrate)
 
     # ``read`` against a missing conversation returns 2 without ever
     # touching kpclientd. That is enough surface to confirm the
@@ -34,7 +36,7 @@ def test_main_calls_init_and_migrate(monkeypatch, capsys):
     assert "conversation 'no-such-conv' not found" in captured.out + captured.err
 
 
-def test_alembic_cfg_resolves_to_an_existing_ini():
+def test_alembic_cfg_resolves_to_an_existing_ini() -> None:
     """Whether running from the source tree or from an installed
     package, ``persistent._alembic_cfg.config_file_name`` must point at
     a file alembic can read."""
@@ -47,7 +49,7 @@ def test_alembic_cfg_resolves_to_an_existing_ini():
     )
 
 
-def test_alembic_script_location_resolves():
+def test_alembic_script_location_resolves() -> None:
     """The migrations directory referenced by ``_alembic_cfg`` must
     contain an ``env.py``. Catches a misconfigured script_location or a
     missing package-data entry early."""

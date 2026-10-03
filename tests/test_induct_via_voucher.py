@@ -1,6 +1,6 @@
 from collections.abc import Coroutine
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -54,7 +54,9 @@ async def test_induction_failure_dialog_reports_the_error(
         convo_state=lambda: SimpleNamespace(conversation_id=1),
         iothread=SimpleNamespace(run_in_io=run_in_io, kp_client=object()),
     )
-    await katzen.MainWindow.induct_via_voucher(window)
+    await katzen.MainWindow.induct_via_voucher(
+        cast("katzen.MainWindow", window),
+    )
     assert deferred, "no dialog was scheduled"
     for callback in deferred:
         callback()

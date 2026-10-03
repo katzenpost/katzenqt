@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Iterator
 
 import pytest
 
@@ -36,7 +37,7 @@ async def _make_convo(name: str = "g") -> int:
         return convo.id
 
 
-def _drain(queue) -> "list":
+def _drain(queue: "asyncio.Queue[tuple[int, bool]]") -> "list[tuple[int, bool]]":
     items = []
     while not queue.empty():
         items.append(queue.get_nowait())
@@ -44,7 +45,7 @@ def _drain(queue) -> "list":
 
 
 @pytest.fixture(autouse=True)
-def _reset_chat_queue():
+def _reset_chat_queue() -> "Iterator[None]":
     # A fresh queue keeps items from one test out of the next; replace the
     # module-level queue so the coroutine binds to this test's loop, and put
     # the original back afterwards so later test modules see the real queue.
@@ -52,7 +53,7 @@ def _reset_chat_queue():
     network.conversation_update_queue = asyncio.Queue()
     # check_for_new is unrelated to this assertion; stub it out.
     orig = network.check_for_new
-    async def _noop():
+    async def _noop() -> None:
         return None
     network.check_for_new = _noop
     yield
@@ -62,7 +63,7 @@ def _reset_chat_queue():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op", ["create", "vote", "close"])
-async def test_local_tally_op_wakes_the_chat_view(op):
+async def test_local_tally_op_wakes_the_chat_view(op: str) -> None:
     convo_id = await _make_convo()
     if op == "create":
         survey_id = None
@@ -71,6 +72,7 @@ async def test_local_tally_op_wakes_the_chat_view(op):
         survey_id = uuid.uuid4().bytes
         async with persistent.asession() as sess:
             convo = await sess.get(persistent.Conversation, convo_id)
+            assert convo is not None
             from katzenqt.tally.controller import INSTANCE
             await INSTANCE.create_local(sess, convo, survey_id, "t", Mode.APPROVAL, ["a"])
             await sess.commit()
@@ -79,8 +81,10 @@ async def test_local_tally_op_wakes_the_chat_view(op):
     if op == "create":
         await katzen._io_tally_create(convo_id, "topic", Mode.APPROVAL, ["a"])
     elif op == "vote":
+        assert survey_id is not None
         await katzen._io_tally_vote(convo_id, survey_id, {"s0": "yes"})
     else:
+        assert survey_id is not None
         await katzen._io_tally_close(convo_id, survey_id)
 
     assert _drain(network.conversation_update_queue) == [(convo_id, False)]

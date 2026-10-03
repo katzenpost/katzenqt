@@ -47,7 +47,7 @@ class PhaseStopwatch:
     otherwise.
     """
 
-    def __init__(self, what: str):
+    def __init__(self, what: str) -> None:
         self._what = what
         self._t0 = time.perf_counter()
         self._last = self._t0
@@ -208,11 +208,13 @@ def spawn_role(
     )
 
 
-def combined(proc: subprocess.CompletedProcess) -> str:
+def combined(proc: "subprocess.CompletedProcess[str]") -> str:
     return proc.stdout + proc.stderr
 
 
-def expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+def expect_token(
+    proc: "subprocess.CompletedProcess[str]", token: str,
+) -> str:
     """Find a logged line containing token; return the text after it. Results
     go through logging (stderr) with a level/name prefix, so match by
     substring."""

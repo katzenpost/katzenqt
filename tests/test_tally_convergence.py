@@ -11,10 +11,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from katzenqt.tally import engine, schema
+from katzenqt.tally.engine import TallyResult
 from katzenqt.tally.schema import Mode
 
 
-def _norm(result):
+def _norm(result: TallyResult) -> "list[tuple[str, int, int, int]]":
     return [(s.slot_id, s.yes, s.maybe, s.no) for s in result.slots]
 
 
@@ -22,7 +23,9 @@ _SLOTS = ["a", "b", "c"]
 _SLOT_IDS = [schema.slot_id(i) for i in range(len(_SLOTS))]
 
 
-def _choice_strategy(domain):
+def _choice_strategy(
+    domain: "tuple[str, ...]",
+) -> "st.SearchStrategy[dict[str, str]]":
     # A partial map: each slot independently present (with an availability) or
     # absent (which tallies as "no").
     return st.dictionaries(
@@ -37,7 +40,7 @@ def _choice_strategy(domain):
     mode=st.sampled_from(list(Mode)),
     data=st.data(),
 )
-def test_event_order_does_not_change_tally(mode, data):
+def test_event_order_does_not_change_tally(mode: Mode, data: st.DataObject) -> None:
     domain = schema.domain(mode)
     n = data.draw(st.integers(min_value=0, max_value=6))
     # Unique voter ids so each votes exactly once.

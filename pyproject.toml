@@ -74,6 +74,23 @@ rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", r
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+mypy_path = "src"
+files = ["src/katzenqt", "tests"]
+exclude = "(^|/)(resources_rc\\.py|ui_mixchat\\.py|ui_font_settings\\.py|migrations/)"
+untyped_calls_exclude = ["katzenqt.ui_mixchat", "katzenqt.ui_font_settings"]
+
+[[tool.mypy.overrides]]
+module = [
+    "katzenqt.resources_rc",
+    "katzenqt.ui_mixchat",
+    "katzenqt.ui_font_settings",
+    "katzenqt.migrations.*",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "katzenqt._thinclient"
+disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 addopts = "--cov=katzenqt --cov-report=term-missing --doctest-modules -vv"

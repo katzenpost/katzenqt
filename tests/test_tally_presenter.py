@@ -12,18 +12,21 @@ import uuid
 from katzenqt import persistent
 from katzenqt.tally import engine, presenter, schema
 from katzenqt.tally.controller import voter_id_from_read_cap
-from katzenqt.tally.schema import Mode
+from katzenqt.tally.engine import SlotTally
+from katzenqt.tally.schema import Mode, SurveyDoc
 
 ALICE_CAP = bytes([0x02]) * 136
 BOB_CAP = bytes([0x03]) * 136
 OWN_CAP = bytes([0x01]) * 136
 
 
-def _doc(mode: Mode = Mode.APPROVAL, slots=("a", "b")):
+def _doc(
+    mode: Mode = Mode.APPROVAL, slots: "list[str] | tuple[str, ...]" = ("a", "b"),
+) -> SurveyDoc:
     return schema.new_survey_doc(uuid.uuid4().bytes, "lunch?", mode, slots)
 
 
-def _make_convo_sync(name="g"):
+def _make_convo_sync(name: str = "g") -> int:
     """A conversation + own peer + two active peers, provisioned with read
     caps, committed through the sync engine the presenter reads."""
     wcap = persistent.WriteCapWAL(id=uuid.uuid4())
@@ -51,7 +54,7 @@ def _make_convo_sync(name="g"):
         return convo.id
 
 
-def test_summarize_projects_topic_counts_and_outcome():
+def test_summarize_projects_topic_counts_and_outcome() -> None:
     doc = _doc()
     engine.apply_vote(doc, voter_id_from_read_cap(ALICE_CAP), {"s0": "yes"})
 
@@ -70,7 +73,7 @@ def test_summarize_projects_topic_counts_and_outcome():
     assert summary.my_choices == {}
 
 
-def test_summarize_records_my_choices_from_my_voter_id():
+def test_summarize_records_my_choices_from_my_voter_id() -> None:
     doc = _doc()
     engine.apply_vote(doc, voter_id_from_read_cap(OWN_CAP), {"s0": "yes"})
 
@@ -82,7 +85,7 @@ def test_summarize_records_my_choices_from_my_voter_id():
     assert summary.my_score_on("s1") is None
 
 
-def test_summarize_resolves_the_creator_name_from_voter_names():
+def test_summarize_resolves_the_creator_name_from_voter_names() -> None:
     creator = voter_id_from_read_cap(ALICE_CAP)
     doc = schema.new_survey_doc(
         uuid.uuid4().bytes, "lunch?", Mode.APPROVAL, ["a"], creator=creator,
@@ -99,7 +102,7 @@ def test_summarize_resolves_the_creator_name_from_voter_names():
     ).creator_name == "alice"
 
 
-def test_creator_resolves_across_read_cap_index_suffix_variants():
+def test_creator_resolves_across_read_cap_index_suffix_variants() -> None:
     """Regression for the manual-testing bug: an inducted member's poll was
     attributed to "Polls" on other clients because the creator's own client
     hashed the pre-mutation read cap while everyone else held the salt-mutated
@@ -124,7 +127,7 @@ def test_creator_resolves_across_read_cap_index_suffix_variants():
     assert summary.is_creator() is True
 
 
-def test_placeholder_text_reflects_state_and_participation():
+def test_placeholder_text_reflects_state_and_participation() -> None:
     doc = _doc()
     open_none = presenter.summarize(doc, conversation_id=1)
     assert presenter.placeholder_text(open_none) == "[Poll] lunch? — open · no votes yet"
@@ -138,7 +141,7 @@ def test_placeholder_text_reflects_state_and_participation():
     assert presenter.placeholder_text(closed) == "[Poll] lunch? — closed"
 
 
-def test_panel_rows_map_voter_ids_to_names_and_unknowns():
+def test_panel_rows_map_voter_ids_to_names_and_unknowns() -> None:
     doc = _doc()
     engine.apply_vote(doc, voter_id_from_read_cap(ALICE_CAP), {"s0": "yes"})
     engine.apply_vote(doc, b"\xaa" * 16, {"s1": "no"})  # not a known member
@@ -150,7 +153,7 @@ def test_panel_rows_map_voter_ids_to_names_and_unknowns():
     assert by_name["alice"].line(doc_slots(doc)) == "alice: a: yes"
 
 
-def test_panel_rows_add_the_unvoted_local_user_first():
+def test_panel_rows_add_the_unvoted_local_user_first() -> None:
     doc = _doc()
     engine.apply_vote(doc, voter_id_from_read_cap(ALICE_CAP), {"s0": "yes"})
     me = voter_id_from_read_cap(OWN_CAP)
@@ -167,7 +170,7 @@ def test_panel_rows_add_the_unvoted_local_user_first():
     assert rows[1].choices == {"s0": "yes"}
 
 
-def test_panel_rows_do_not_duplicate_a_local_user_who_voted():
+def test_panel_rows_do_not_duplicate_a_local_user_who_voted() -> None:
     doc = _doc()
     me = voter_id_from_read_cap(OWN_CAP)
     engine.apply_vote(doc, me, {"s0": "yes"})
@@ -178,11 +181,11 @@ def test_panel_rows_do_not_duplicate_a_local_user_who_voted():
     assert rows[0].choices == {"s0": "yes"}
 
 
-def doc_slots(doc):
+def doc_slots(doc: SurveyDoc) -> "tuple[SlotTally, ...]":
     return tuple(presenter.summarize(doc, conversation_id=1).slots)
 
 
-def test_own_voter_id_and_voter_names_read_the_group_identity():
+def test_own_voter_id_and_voter_names_read_the_group_identity() -> None:
     convo_id = _make_convo_sync()
     me = presenter.own_voter_id(convo_id)
     assert me is not None and me == voter_id_from_read_cap(OWN_CAP)
@@ -193,7 +196,7 @@ def test_own_voter_id_and_voter_names_read_the_group_identity():
     assert names[voter_id_from_read_cap(BOB_CAP)] == "bob"
 
 
-def test_survey_ids_for_conversation_lists_the_conversations_surveys():
+def test_survey_ids_for_conversation_lists_the_conversations_surveys() -> None:
     convo_id = _make_convo_sync()
     first = uuid.uuid4().bytes
     second = uuid.uuid4().bytes
@@ -210,7 +213,7 @@ def test_survey_ids_for_conversation_lists_the_conversations_surveys():
     assert sorted(got) == sorted([first, second])
 
 
-def test_all_survey_ids_lists_every_conversation():
+def test_all_survey_ids_lists_every_conversation() -> None:
     one = _make_convo_sync("one")
     two = _make_convo_sync("two")
     s1, s2 = uuid.uuid4().bytes, uuid.uuid4().bytes
@@ -227,7 +230,7 @@ def test_all_survey_ids_lists_every_conversation():
     assert (one, s1) in got and (two, s2) in got
 
 
-def test_new_poll_count_counts_unread_create_rows():
+def test_new_poll_count_counts_unread_create_rows() -> None:
     from katzenqt.tally import events, sync
 
     convo_id = _make_convo_sync()
@@ -235,6 +238,7 @@ def test_new_poll_count_counts_unread_create_rows():
     doc = schema.new_survey_doc(survey_id, "lunch?", Mode.APPROVAL, ["a"])
     with persistent.Session(persistent._engine_sync) as sess:
         convo = sess.get(persistent.Conversation, convo_id)
+        assert convo is not None
         sess.add(persistent.ConversationLog(
             conversation_id=convo_id, conversation_peer_id=convo.own_peer_id,
             conversation_order=0,
@@ -249,13 +253,14 @@ def test_new_poll_count_counts_unread_create_rows():
     assert presenter.new_poll_count(convo_id) == 1
     with persistent.Session(persistent._engine_sync) as sess:
         convo = sess.get(persistent.Conversation, convo_id)
+        assert convo is not None
         convo.first_unread = 9
         sess.add(convo)
         sess.commit()
     assert presenter.new_poll_count(convo_id) == 0
 
 
-def test_is_creator_only_for_the_creator_voter():
+def test_is_creator_only_for_the_creator_voter() -> None:
     doc = _doc()
     # A survey we created carries our voter id as its creator.
     doc_self = schema.new_survey_doc(
@@ -273,7 +278,7 @@ def test_is_creator_only_for_the_creator_voter():
     assert theirs.is_creator() is False
 
 
-def test_survey_doc_returns_the_persisted_blob_and_none_when_missing():
+def test_survey_doc_returns_the_persisted_blob_and_none_when_missing() -> None:
     from katzenqt.tally import sync
 
     convo_id = _make_convo_sync()
@@ -289,10 +294,11 @@ def test_survey_doc_returns_the_persisted_blob_and_none_when_missing():
     assert presenter.survey_doc(convo_id, uuid.uuid4().bytes) is None
 
 
-def test_first_unread_and_conversation_names_read_the_conversation():
+def test_first_unread_and_conversation_names_read_the_conversation() -> None:
     convo_id = _make_convo_sync("lobby")
     with persistent.Session(persistent._engine_sync) as sess:
         conv = sess.get(persistent.Conversation, convo_id)
+        assert conv is not None
         conv.first_unread = 7
         sess.add(conv)
         sess.commit()

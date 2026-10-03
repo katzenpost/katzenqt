@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 
-from katzenqt import headless
+from katzenqt import headless, persistent
 from katzenqt.headless import _actions
+
+if TYPE_CHECKING:
+    import argparse
 
 CONFIG = ["--config", "/tmp/kqt-contract.toml"]
 
@@ -377,13 +382,22 @@ EXIT_CODES = {
 }
 
 
-@pytest.fixture
-def run(monkeypatch):
-    seen: dict[str, object] = {}
-    outcome: dict[str, object] = {"code": 0, "raises": None}
+class _Outcome(TypedDict):
+    code: int
+    raises: BaseException | None
 
-    def recorder(name):
-        async def record(args) -> int:
+
+@pytest.fixture
+def run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., tuple[int, dict[str, object]]]:
+    seen: dict[str, object] = {}
+    outcome: _Outcome = {"code": 0, "raises": None}
+
+    def recorder(
+        name: str,
+    ) -> Callable[[argparse.Namespace], Coroutine[object, object, int]]:
+        async def record(args: argparse.Namespace) -> int:
             seen.clear()
             seen.update(vars(args))
             seen["dispatched"] = name
@@ -394,10 +408,12 @@ def run(monkeypatch):
 
     for name in ACTIONS:
         monkeypatch.setattr(_actions, name, recorder(name))
-    monkeypatch.setattr(headless.persistent, "init_and_migrate", lambda: None)
+    monkeypatch.setattr(persistent, "init_and_migrate", lambda: None)
     monkeypatch.setattr(headless, "_configure_logging", lambda: None)
 
-    def invoke(argv, code=0, raises=None):
+    def invoke(
+        argv: list[str], code: int = 0, raises: BaseException | None = None,
+    ) -> tuple[int, dict[str, object]]:
         outcome["code"] = code
         outcome["raises"] = raises
         seen.clear()
@@ -409,7 +425,7 @@ def run(monkeypatch):
     return invoke
 
 
-def test_verb_set_is_exactly_these():
+def test_verb_set_is_exactly_these() -> None:
     assert sorted(DISPATCH) == sorted(VERBS)
     assert sorted(DISPATCH.values()) == ACTIONS
 
@@ -417,7 +433,11 @@ def test_verb_set_is_exactly_these():
 @pytest.mark.parametrize(
     ("argv", "expected"), CASES, ids=[" ".join(a) for a, _ in CASES],
 )
-def test_arguments_reach_the_action_unchanged(run, argv, expected):
+def test_arguments_reach_the_action_unchanged(
+    run: Callable[..., tuple[int, dict[str, object]]],
+    argv: list[str],
+    expected: dict[str, object],
+) -> None:
     returncode, namespace = run(argv)
     assert returncode == 0
     assert namespace.pop("dispatched") == DISPATCH[argv[0]]
@@ -426,12 +446,14 @@ def test_arguments_reach_the_action_unchanged(run, argv, expected):
         assert type(namespace[key]) is type(value), key
 
 
-def test_every_verb_is_covered():
+def test_every_verb_is_covered() -> None:
     assert {argv[0] for argv, _ in CASES} == set(VERBS)
 
 
 @pytest.mark.parametrize("verb", OFFLINE_VERBS)
-def test_offline_verbs_take_no_connection(run, verb):
+def test_offline_verbs_take_no_connection(
+    run: Callable[..., tuple[int, dict[str, object]]], verb: str,
+) -> None:
     argv = {"info": [verb], "remove-peer": [verb, "room", "bob"]}.get(verb, [verb, "room"])
     _, namespace = run(argv)
     assert "config" not in namespace
@@ -443,12 +465,16 @@ def test_offline_verbs_take_no_connection(run, verb):
 
 
 @pytest.mark.parametrize("code", sorted(EXIT_CODES))
-def test_action_exit_code_is_returned_unchanged(run, code):
+def test_action_exit_code_is_returned_unchanged(
+    run: Callable[..., tuple[int, dict[str, object]]], code: int,
+) -> None:
     returncode, _ = run(["info"], code=code)
     assert returncode == code
 
 
-def test_uncaught_action_error_is_not_swallowed(run):
+def test_uncaught_action_error_is_not_swallowed(
+    run: Callable[..., tuple[int, dict[str, object]]],
+) -> None:
     with pytest.raises(RuntimeError):
         run(["info"], raises=RuntimeError("boom"))
 
@@ -480,7 +506,9 @@ def test_uncaught_action_error_is_not_swallowed(run):
     ],
     ids=lambda argv: " ".join(argv) or "<no verb>",
 )
-def test_usage_errors_exit_2(run, argv):
+def test_usage_errors_exit_2(
+    run: Callable[..., tuple[int, dict[str, object]]], argv: list[str],
+) -> None:
     with pytest.raises(SystemExit) as exc:
         run(argv)
     assert exc.value.code == 2
@@ -490,7 +518,9 @@ def test_usage_errors_exit_2(run, argv):
 @pytest.mark.parametrize(
     "value", ["0", "-1", "nan", "inf", "-inf", "1e999", "bad"],
 )
-def test_send_timeout_rejects_nonpositive_and_infinite(run, verb, value):
+def test_send_timeout_rejects_nonpositive_and_infinite(
+    run: Callable[..., tuple[int, dict[str, object]]], verb: str, value: str,
+) -> None:
     with pytest.raises(SystemExit) as exc:
         run([verb, "room", "payload", "--timeout", value, *CONFIG])
     assert exc.value.code == 2
@@ -510,7 +540,11 @@ def test_send_timeout_rejects_nonpositive_and_infinite(run, verb, value):
         "tally-close",
     ],
 )
-def test_other_timeouts_are_a_plain_float(run, argv, expected):
+def test_other_timeouts_are_a_plain_float(
+    run: Callable[..., tuple[int, dict[str, object]]],
+    argv: list[str],
+    expected: float,
+) -> None:
     _, namespace = run([*argv, "--timeout", "0", *CONFIG])
     assert namespace["timeout"] == expected
     _, namespace = run([*argv, "--timeout", "inf", *CONFIG])
@@ -519,19 +553,24 @@ def test_other_timeouts_are_a_plain_float(run, argv, expected):
 
 @pytest.mark.parametrize("flag", ["-h", "--help"])
 @pytest.mark.parametrize("argv", [[], *[[v] for v in VERBS]])
-def test_help_exits_0(run, argv, flag, capsys):
+def test_help_exits_0(
+    run: Callable[..., tuple[int, dict[str, object]]],
+    argv: list[str],
+    flag: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     with pytest.raises(SystemExit) as exc:
         run([*argv, flag])
     assert exc.value.code == 0
     assert "katzenqt-headless" in capsys.readouterr().out
 
 
-def _action_source():
+def _action_source() -> ast.Module:
     path = Path(_actions.__file__)
     return ast.parse(path.read_text(encoding="ascii"))
 
 
-def _leading_literal(node):
+def _leading_literal(node: ast.expr) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if not isinstance(node, ast.JoinedStr):
@@ -545,7 +584,9 @@ def _leading_literal(node):
     return "".join(parts) or None
 
 
-def _tokens_and_codes(node):
+def _tokens_and_codes(
+    node: ast.AST,
+) -> tuple[tuple[tuple[str, str], ...], tuple[int, ...]]:
     tokens, codes = set(), set()
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call):
@@ -570,8 +611,8 @@ def _tokens_and_codes(node):
     return tuple(sorted(tokens)), tuple(sorted(codes))
 
 
-def test_result_tokens_and_exit_codes_are_frozen():
-    found = {}
+def test_result_tokens_and_exit_codes_are_frozen() -> None:
+    found: dict[str, tuple[tuple[tuple[str, str], ...], tuple[int, ...]]] = {}
     for node in _action_source().body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -580,7 +621,7 @@ def test_result_tokens_and_exit_codes_are_frozen():
     assert found == TOKENS_AND_CODES
 
 
-def test_exit_codes_used_are_documented():
+def test_exit_codes_used_are_documented() -> None:
     used = {
         code
         for _, codes in TOKENS_AND_CODES.values()

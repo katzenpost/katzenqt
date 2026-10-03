@@ -25,7 +25,7 @@ import asyncio
 import secrets
 import struct
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from katzenpost_thinclient import (
     BACAPDecryptionFailedError,
@@ -76,7 +76,13 @@ class _Envelope:
     cap: bytes        # the write_cap or read_cap presented at encrypt time
 
 
-class FakeThinClient:
+if TYPE_CHECKING:
+    from katzenqt._thinclient import ThinClient as _ThinClientBase
+else:
+    _ThinClientBase = object
+
+
+class FakeThinClient(_ThinClientBase):
     """Drop-in for `katzenpost_thinclient.ThinClient` covering only the
     methods `network.py` calls.
 
@@ -300,7 +306,7 @@ class FakeThinClient:
         envelope_hash: "bytes | None" = None,
         no_retry_on_box_id_not_found: bool = False,
         no_idempotent_box_already_exists: bool = False,
-        **kwargs,
+        **kwargs: object,
     ) -> StartResendingResult:
         self._record(
             "start_resending_encrypted_message",
@@ -312,7 +318,10 @@ class FakeThinClient:
             message_ciphertext=message_ciphertext,
         )
         self._maybe_raise("start_resending_encrypted_message")
-        env = self.envelopes.get(envelope_hash)
+        env = (
+            self.envelopes.get(envelope_hash)
+            if envelope_hash is not None else None
+        )
         if env is None:
             raise BoxIDNotFoundError()
         if envelope_hash in self.pending_acks or (env.box_id, env.message_box_index) in self.pending_ack_boxes:
@@ -351,7 +360,8 @@ class FakeThinClient:
             message_box_index=message_box_index,
         )
         self._maybe_raise("get_message_box_index_counter")
-        return struct.unpack("<Q", message_box_index[:8])[0]
+        counter: int = struct.unpack("<Q", message_box_index[:8])[0]
+        return counter
 
     def pki_document(self) -> Dict[str, Any]:
         return self._pki_doc

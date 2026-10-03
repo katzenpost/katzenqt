@@ -11,7 +11,7 @@ from katzenqt import persistent
 
 
 @pytest.mark.asyncio
-async def test_warm_async_engine_opens_a_connection_on_this_loop():
+async def test_warm_async_engine_opens_a_connection_on_this_loop() -> None:
     """The GUI calls this on the io loop before the Qt loop touches the async
     engine, so the pool's run-once connect mutex binds to the io loop instead
     of racing. Smoke-test that it completes and leaves the engine usable."""
@@ -22,10 +22,14 @@ async def test_warm_async_engine_opens_a_connection_on_this_loop():
 
 
 @pytest.mark.asyncio
-async def test_engines_enable_wal_and_busy_timeout():
+async def test_engines_enable_wal_and_busy_timeout() -> None:
     with persistent._engine_sync.connect() as conn:
-        wal, = conn.exec_driver_sql("PRAGMA journal_mode").first()
-        busy, = conn.exec_driver_sql("PRAGMA busy_timeout").first()
+        wal_row = conn.exec_driver_sql("PRAGMA journal_mode").first()
+        busy_row = conn.exec_driver_sql("PRAGMA busy_timeout").first()
+    assert wal_row is not None
+    assert busy_row is not None
+    wal, = wal_row
+    busy, = busy_row
     assert wal == "wal"
     # Small on purpose: the sync engine is awaited on the event-loop thread
     # (mark_sent) and used from the Qt thread, so a large busy_timeout would
@@ -34,7 +38,11 @@ async def test_engines_enable_wal_and_busy_timeout():
     assert busy == 250
 
     async with persistent._engine.connect() as conn:
-        wal, = (await conn.exec_driver_sql("PRAGMA journal_mode")).first()
-        busy, = (await conn.exec_driver_sql("PRAGMA busy_timeout")).first()
+        wal_row = (await conn.exec_driver_sql("PRAGMA journal_mode")).first()
+        busy_row = (await conn.exec_driver_sql("PRAGMA busy_timeout")).first()
+    assert wal_row is not None
+    assert busy_row is not None
+    wal, = wal_row
+    busy, = busy_row
     assert wal == "wal"
     assert busy == 250

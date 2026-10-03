@@ -10,6 +10,7 @@ import hashlib
 import types
 import uuid
 from pathlib import Path
+from typing import cast
 
 import cbor2
 import pytest
@@ -38,7 +39,9 @@ def _insert_payload(payload: bytes, network_status: int = 0) -> str:
 
 
 def _resolve(message_id: str) -> "_ResolvedAttachment | None":
-    return MainWindow._resolve_attachment(types.SimpleNamespace(), message_id)
+    return MainWindow._resolve_attachment(
+        cast(MainWindow, types.SimpleNamespace()), message_id,
+    )
 
 
 def test_file_marker_resolves_to_spilled_file(tmp_path: Path) -> None:
@@ -182,7 +185,7 @@ def test_file_outgoing_audio_resolves_to_cached_clip(tmp_path: Path) -> None:
 
 def test_is_previewable_attachment(tmp_path: Path) -> None:
     call = MainWindow._is_previewable_attachment
-    ns = types.SimpleNamespace()
+    ns = cast(MainWindow, types.SimpleNamespace())
     opus = tmp_path / "a.opus"
     opus.write_bytes(b"x")
     txt = tmp_path / "a.txt"

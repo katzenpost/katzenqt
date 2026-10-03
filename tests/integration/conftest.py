@@ -30,7 +30,9 @@ def _kpclientd_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: "list[pytest.Item]",
+) -> None:
     if os.environ.get("KATZENQT_DOCKER_INTEGRATION") == "1":
         return
     skip_marker = pytest.mark.skip(

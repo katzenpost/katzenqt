@@ -1,3 +1,4 @@
+from pathlib import Path
 import asyncio
 import struct
 
@@ -12,23 +13,25 @@ from katzenqt._thinclient import ThinClient
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interleaved, shutdown", [(False, False), (True, False), (True, True)])
 async def test_session_handshake_preserves_events_on_start_and_reconnect(
-    tmp_path, interleaved, shutdown,
-):
+    tmp_path: Path, interleaved: bool, shutdown: bool,
+) -> None:
     statuses = []
     epochs = []
     tokens = []
-    handlers = []
+    handlers: "list[asyncio.Task[object]]" = []
 
-    async def status(event):
+    async def status(event: dict[str, bool]) -> None:
         statuses.append(event["is_connected"])
 
-    async def pki(event):
+    async def pki(event: dict[str, bytes]) -> None:
         epochs.append(cbor2.loads(event["payload"])["Epoch"])
 
-    async def serve(reader, writer):
-        handlers.append(asyncio.current_task())
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        handler_task = asyncio.current_task()
+        assert handler_task is not None
+        handlers.append(handler_task)
 
-        async def send(response):
+        async def send(response: dict[str, object]) -> None:
             payload = cbor2.dumps(response)
             writer.write(struct.pack('>I', len(payload)) + payload)
             await writer.drain()
@@ -93,19 +96,21 @@ async def test_session_handshake_preserves_events_on_start_and_reconnect(
 
 @pytest.mark.asyncio
 async def test_handshake_drain_times_out_if_session_token_reply_never_arrives(
-    tmp_path, monkeypatch,
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A daemon that sends interleaved events but never completes the
     handshake must not hang recv() forever -- that would also block the
     base client's own _reconnect() retry/backoff loop from regaining
     control."""
     monkeypatch.setattr(_thinclient, "_HANDSHAKE_TIMEOUT_SECONDS", 0.2)
-    handlers = []
+    handlers: "list[asyncio.Task[object]]" = []
 
-    async def serve(reader, writer):
-        handlers.append(asyncio.current_task())
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        handler_task = asyncio.current_task()
+        assert handler_task is not None
+        handlers.append(handler_task)
 
-        async def send(response):
+        async def send(response: dict[str, object]) -> None:
             payload = cbor2.dumps(response)
             writer.write(struct.pack('>I', len(payload)) + payload)
             await writer.drain()
