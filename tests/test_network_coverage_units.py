@@ -467,6 +467,38 @@ class TestTryAssemble:
             )
 
     @pytest.mark.asyncio
+    async def test_a_message_from_a_newer_client_is_dropped_and_named(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        stream = uuid.uuid4()
+        newer = cbor2.dumps(
+            {"version": models.GROUP_CHAT_VERSION + 1, "text": 7}
+        )
+        async with persistent.asession() as sess:
+            sess.add(
+                persistent.ReceivedPiece(
+                    read_cap=stream,
+                    bacap_index=_idx(0)[:8],
+                    chunk_type=b"F",
+                    chunk=newer,
+                )
+            )
+            await sess.commit()
+        with caplog.at_level(logging.WARNING, logger="katzen.network"):
+            async with persistent.asession() as sess:
+                assembled = await network._try_assemble(
+                    sess,
+                    stream,
+                    _idx(0)[:8],
+                )
+        assert assembled is None
+        (record,) = caplog.records
+        assert "from a newer client" in record.message
+        assert "version 2 is newer than version 1" in record.message
+        assert record.exc_info is None
+
+    @pytest.mark.asyncio
     async def test_a_chain_that_decodes_to_nothing_is_not_assembled(
         self,
         monkeypatch: pytest.MonkeyPatch,

@@ -21,6 +21,17 @@ SUBSTREAM_NAME_PREFIX = ":substream:"
 # Version 1 carries acknowledgements and drops the membership hash.
 GROUP_CHAT_VERSION = 1
 
+
+class UnsupportedVersion(ValueError):
+    """A message written by a newer client than this one."""
+
+    def __init__(self, version: int) -> None:
+        super().__init__(
+            f"message version {version} is newer than version "
+            f"{GROUP_CHAT_VERSION}, the newest this client reads"
+        )
+        self.version = version
+
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
 # importer of this module, including the headless integration runner
@@ -428,17 +439,29 @@ class GroupChatMessage(BaseModel):
     @classmethod
     def from_cbor(cls, cbor_bytes:bytes) -> "GroupChatMessage":
         """Decode a wire payload, inferring ``msg_type`` when it is absent.
+        A payload of a newer version than this client knows is refused
+        before anything else in it is looked at.
 
         >>> legacy = cbor2.dumps(
         ...     {"version": 0, "membership_hash": bytes(32), "who": "alice"},
         ... )
         >>> GroupChatMessage.from_cbor(legacy).msg_type
         <GroupChatTypeEnum.WHO: 3>
-        >>> msg = GroupChatMessage(version=0, text="hi")
+        >>> msg = GroupChatMessage(version=GROUP_CHAT_VERSION, text="hi")
         >>> GroupChatMessage.from_cbor(msg.to_cbor()) == msg
         True
+        >>> newer = cbor2.dumps({"version": GROUP_CHAT_VERSION + 1})
+        >>> GroupChatMessage.from_cbor(newer)
+        Traceback (most recent call last):
+            ...
+        katzenqt.models.UnsupportedVersion: message version 2 is newer than version 1, the newest this client reads
         """
-        return cls(**cbor2.loads(cbor_bytes)) # TODO not at all what we want but here we go
+        fields = cbor2.loads(cbor_bytes)
+        if isinstance(fields, dict):
+            version = fields.get("version")
+            if isinstance(version, int) and version > GROUP_CHAT_VERSION:
+                raise UnsupportedVersion(version)
+        return cls(**fields) # TODO not at all what we want but here we go
 
 def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | None":
     """Reassemble a serialised ``SendOperation`` chain into a

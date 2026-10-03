@@ -1958,6 +1958,12 @@ async def _try_assemble(
     chunks = [(rp.chunk_type, rp.chunk) for rp in chain]
     try:
         gcm = models.unserialize(chunks)
+    except models.UnsupportedVersion as exc:
+        logger.warning(
+            "dropping a message from a newer client at rcw=%s terminal=%s: %s",
+            rcw_id, terminal_idx_8b.hex(), exc,
+        )
+        return None
     except Exception as exc:  # malformed CBOR or framing: leave RPs for retry
         logger.warning(
             "could not assemble chain at rcw=%s terminal=%s: %s",
