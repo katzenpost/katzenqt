@@ -9,4 +9,5 @@ cp -a . /tmp/rb
 ( cd /tmp/rb && rm -rf dist && packaging/debian/build.sh >/dev/null )
 b=$(sha256sum /tmp/rb/dist/katzenqt_*.deb | cut -d' ' -f1)
 
+printf 'first  %s\nsecond %s\n' "$a" "$b"
 test "$a" = "$b"

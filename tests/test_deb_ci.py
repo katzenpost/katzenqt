@@ -80,3 +80,14 @@ def test_the_closure_toolchain_is_declared() -> None:
     ci = CI.read_text()
     for pkg in ("cargo", "rustc", "cmake", "python3-pip", "unzip", "git"):
         assert pkg in ci, pkg
+
+def test_the_workflow_always_runs_so_its_verdict_is_reportable() -> None:
+    wf = WORKFLOW.read_text()
+    triggers = wf[wf.index("on:"):wf.index("permissions:")]
+    assert "paths" not in triggers
+    assert "merge_group:" in triggers
+    assert re.search(r"^  changes:$", wf, re.MULTILINE)
+    assert re.search(r"^  deb-result:\n    needs: deb\n", wf, re.MULTILINE)
+    assert "!cancelled()" in wf
+    gate = "needs.changes.outputs.packaging == 'true'"
+    assert wf.count(gate) == 3
