@@ -17,34 +17,9 @@ def test_reply_who_round_trips_through_cbor() -> None:
         please_adds=[_please_add("alice", CAP_A), _please_add("bob", CAP_B)],
     )
     restored = models.GroupChatReplyWho.from_cbor(original.to_cbor())
-    assert [p.display_name for p in restored.please_adds] == ["alice", "bob"]
-    assert [p.read_cap for p in restored.please_adds] == [CAP_A, CAP_B]
-
-
-def test_reply_who_membership_hash_is_32_bytes() -> None:
-    reply = models.GroupChatReplyWho(please_adds=[_please_add("alice", CAP_A)])
-    assert len(reply.membership_hash()) == 32
-
-
-def test_reply_who_membership_hash_is_stable_for_equal_content() -> None:
-    one = models.GroupChatReplyWho(please_adds=[_please_add("alice", CAP_A)])
-    two = models.GroupChatReplyWho(please_adds=[_please_add("alice", CAP_A)])
-    assert one.membership_hash() == two.membership_hash()
-
-
-def test_reply_who_membership_hash_tracks_the_member_set() -> None:
-    one = models.GroupChatReplyWho(please_adds=[_please_add("alice", CAP_A)])
-    two = models.GroupChatReplyWho(please_adds=[_please_add("alice", CAP_B)])
-    assert one.membership_hash() != two.membership_hash()
-
-
-def test_reply_who_membership_hash_depends_on_order() -> None:
-    a = _please_add("alice", CAP_A)
-    b = _please_add("bob", CAP_B)
-    assert (
-        models.GroupChatReplyWho(please_adds=[a, b]).membership_hash()
-        != models.GroupChatReplyWho(please_adds=[b, a]).membership_hash()
-    )
+    listed = [p for p in restored.please_adds if p is not None]
+    assert [p.display_name for p in listed] == ["alice", "bob"]
+    assert [p.read_cap for p in listed] == [CAP_A, CAP_B]
 
 
 @pytest.mark.parametrize("chunk_size", [-1, 0, 1])
@@ -56,7 +31,6 @@ def test_serialize_refuses_a_chunk_size_that_cannot_hold_a_prefix(
         messages=[
             models.GroupChatMessage(
                 version=0,
-                membership_hash=bytes(32),
                 text="hi",
             )
         ],
@@ -69,7 +43,6 @@ def test_as_introduction_returns_the_payload_for_an_introduction() -> None:
     intro = _please_add("carol", CAP_A)
     gcm = models.GroupChatMessage(
         version=0,
-        membership_hash=bytes(32),
         introduction=intro,
     )
     assert gcm.msg_type == models.GroupChatTypeEnum.INTRODUCTION
@@ -79,7 +52,6 @@ def test_as_introduction_returns_the_payload_for_an_introduction() -> None:
 def test_as_introduction_is_none_for_a_plain_text_message() -> None:
     gcm = models.GroupChatMessage(
         version=0,
-        membership_hash=bytes(32),
         text="hello",
     )
     assert gcm.as_introduction is None

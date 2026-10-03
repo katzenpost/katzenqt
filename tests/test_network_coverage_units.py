@@ -388,7 +388,6 @@ class TestTryAssemble:
         stream = uuid.uuid4()
         gcm = models.GroupChatMessage(
             version=0,
-            membership_hash=b"X" * 32,
             text="split",
         )
         blob = gcm.to_cbor()
