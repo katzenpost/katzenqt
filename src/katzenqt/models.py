@@ -322,6 +322,11 @@ class GroupChatMessage(BaseModel):
     reply_who: str | None = Field(default=None)
     tally: GroupChatTally | None = Field(default=None)
 
+    # Who this sender acknowledges, by roster index, and one BACAP
+    # MessageBoxIndex for each; see ``katzenqt.ack_codec``. Absent when there
+    # is nothing to acknowledge.
+    acks: bytes | None = Field(default=None)
+
     @model_validator(mode="before")
     @classmethod
     def _infer_msg_type(cls, data: object) -> object:
@@ -384,6 +389,12 @@ class GroupChatMessage(BaseModel):
         0
         >>> "introduction" in cbor2.loads(msg.to_cbor())
         False
+        >>> "acks" in cbor2.loads(msg.to_cbor())
+        False
+        >>> acked = GroupChatMessage(
+        ...     version=0, text="hi", acks=bytes([9]) + bytes(104))
+        >>> len(cbor2.loads(acked.to_cbor())["acks"])
+        105
         """
         return cbor2.dumps(self.model_dump(exclude_none=True))
 
