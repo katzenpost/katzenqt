@@ -20,8 +20,12 @@ def test_pins_are_explicit() -> None:
         r"^PYCRDT_URL := https://github.com/", makefile, re.MULTILINE
     )
     assert re.search(r"^PYCRDT_REV := [0-9a-f]{40}$", makefile, re.MULTILINE)
-    assert re.search(r"^THINCLIENT_VER := ", makefile, re.MULTILINE)
-    assert re.search(r"^PPRINTPP_VER := ", makefile, re.MULTILINE)
+    assert re.search(
+        r"^THINCLIENT_URL := https://github.com/", makefile, re.MULTILINE
+    )
+    assert re.search(
+        r"^THINCLIENT_REV := [0-9a-f]{40}$", makefile, re.MULTILINE
+    )
     assert re.search(
         r"^RUSTIC_AUDIO_URL := https://github.com/", makefile, re.MULTILINE
     )
@@ -35,31 +39,27 @@ def test_closure_builds_from_source_not_prebuilt_binaries() -> None:
     body = SCRIPT.read_text()
     assert "$PYCRDT_URL" in body and "$PYCRDT_REV" in body
     assert '"$PIP" wheel' in body
-    assert "--no-binary :all:" in body
     assert "python3-pycrdt" in body
-    assert "python3-katzenpost-thinclient" in body
     assert "python3-rustic-audio-tool" in body
+    assert "pprintpp" not in body
+    assert "katzenpost_thinclient" not in body
     assert "SOURCE_DATE_EPOCH" in body
     assert "$RUSTIC_AUDIO_URL" in body and "$RUSTIC_AUDIO_REV" in body
 
 
 def test_vendored_debs_declare_their_debian_runtime_deps() -> None:
     body = SCRIPT.read_text()
-    for dep in (
-        "python3-anyio",
-        "python3-cbor2",
-        "python3-coloredlogs",
-        "python3-pprintpp",
-        "python3-toml",
-    ):
+    for dep in ("python3-anyio", "libasound2"):
         assert dep in body
 
 
-def test_pprintpp_ships_no_compiled_object() -> None:
+def test_the_thin_client_comes_from_its_own_repo_not_pypi() -> None:
+    ci = CI.read_text()
+    assert '"$THINCLIENT_URL" "$THINCLIENT_REV"' in ci
+    assert "packaging/container/dep-deb.sh" in ci
+    assert "pprintpp" not in ci
     body = SCRIPT.read_text()
-    assert "python3-pprintpp" in body
-    assert "--only-binary :all:" in body
-    assert "refusing" in body
+    assert "pprintpp" not in body
 
 
 def test_closure_container_has_rust_toolchain() -> None:
@@ -83,6 +83,7 @@ def test_ci_builds_and_installs_the_closure() -> None:
     ci = CI.read_text()
     assert "make deb-ci" in wf
     assert "packaging/container/pydeps-build.sh" in ci
+    assert '"$debs"/python3-katzenpost-thinclient_*.deb' in ci
     assert "apt install" in ci
     assert "pip install" not in ci
 

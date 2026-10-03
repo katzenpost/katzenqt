@@ -6,8 +6,6 @@ root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 mk="$root/packaging/debian/targets.mk"
 PYCRDT_URL=$(sed -n 's/^PYCRDT_URL := //p' "$mk")
 PYCRDT_REV=$(sed -n 's/^PYCRDT_REV := //p' "$mk")
-THIN_VER=$(sed -n 's/^THINCLIENT_VER := //p' "$mk")
-PPRINTPP_VER=$(sed -n 's/^PPRINTPP_VER := //p' "$mk")
 PIP_VER=$(sed -n 's/^PIP_VER := //p' "$mk")
 MATURIN_VER=$(sed -n 's/^MATURIN_VER := //p' "$mk")
 
@@ -64,18 +62,3 @@ mkdir -p "$work/wh-audio"
 "$PIP" wheel --no-deps -w "$work/wh-audio" "$work/audio"
 build_deb python3-rustic-audio-tool amd64 "$work/wh-audio" \
 	"python3, libasound2t64 | libasound2"
-
-mkdir -p "$work/wh-pprintpp"
-"$PIP" wheel --no-deps --only-binary :all: -w "$work/wh-pprintpp" \
-  "pprintpp==$PPRINTPP_VER"
-if unzip -l "$work"/wh-pprintpp/*.whl | grep -qE "\.(so|pyd)$"; then
-	printf '%s\n' "pprintpp wheel ships a compiled object; refusing" >&2
-	exit 1
-fi
-build_deb python3-pprintpp all "$work/wh-pprintpp" "python3"
-
-mkdir -p "$work/wh-thin"
-"$PIP" wheel --no-deps --no-binary :all: -w "$work/wh-thin" \
-  "katzenpost_thinclient==$THIN_VER"
-build_deb python3-katzenpost-thinclient all "$work/wh-thin" \
-	"python3, python3-cbor2, python3-coloredlogs, python3-pprintpp, python3-toml"

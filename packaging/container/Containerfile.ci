@@ -12,8 +12,8 @@ RUN apt-get update \
 		/tmp/control \
 	&& apt-get install -y --no-install-recommends \
 		build-essential cargo cmake curl git libasound2-dev \
-		pkg-config python3-dev python3-pip python3-venv rustc \
-		systemd unzip
+		pkg-config python3-dev python3-pip python3-venv rust-all \
+		rustc systemd unzip
 
 RUN arch=$(dpkg --print-architecture) \
 	&& curl -fsSLo /tmp/go.tar.gz \

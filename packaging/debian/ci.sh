@@ -12,6 +12,11 @@ KATZENPOST_URL=${KATZENPOST_URL:-$(sed -n \
     's/^KATZENPOST_URL := //p' Makefile)}
 KATZENPOST_REV=${KATZENPOST_REV:-$(sed -n \
     's/^KATZENPOST_REV := //p' Makefile)}
+tmk=packaging/debian/targets.mk
+THINCLIENT_URL=${THINCLIENT_URL:-$(sed -n \
+    's/^THINCLIENT_URL := //p' "$tmk")}
+THINCLIENT_REV=${THINCLIENT_REV:-$(sed -n \
+    's/^THINCLIENT_REV := //p' "$tmk")}
 mkdir -p "$debs"
 
 apt update
@@ -51,12 +56,12 @@ fi
 
 packaging/container/pydeps-build.sh "$debs"
 packaging/container/dep-deb.sh "$debs" "$KATZENPOST_URL" "$KATZENPOST_REV"
+packaging/container/dep-deb.sh "$debs" "$THINCLIENT_URL" "$THINCLIENT_REV"
 packaging/debian/build.sh
 cp dist/katzenqt_*.deb "$debs"/
 
 apt update
 apt install -y \
-    "$debs"/python3-pprintpp_*.deb \
     "$debs"/python3-pycrdt_*.deb \
     "$debs"/python3-rustic-audio-tool_*.deb \
     "$debs"/python3-katzenpost-thinclient_*.deb \
