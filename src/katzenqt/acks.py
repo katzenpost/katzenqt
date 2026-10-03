@@ -185,17 +185,10 @@ async def ensure_own_roster(
 async def _blocked(
     sess: "AsyncSession", conv: persistent.Conversation, key: bytes
 ) -> bool:
-    """Whether acknowledgements must wait: we are introducing a new member
-    and its ``Introduction`` has not been written yet."""
+    """Whether acknowledgements must wait: we are replying to a new member,
+    or its ``Introduction`` has not been written yet. An induction still
+    waiting for the joiner's voucher does not hold them back."""
     if conv.id in inducting:
-        return True
-    introducing = await sess.exec(
-        select(persistent.PendingVoucher).where(
-            persistent.PendingVoucher.conversation_id == conv.id,
-            persistent.PendingVoucher.role == "inductor",
-        )
-    )
-    if introducing.first() is not None:
         return True
     unwritten = await sess.exec(
         select(persistent.IntroductionSeen).where(

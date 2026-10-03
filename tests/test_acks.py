@@ -859,6 +859,27 @@ async def test_a_reply_that_already_lists_us_is_not_adopted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_induction_waiting_for_its_voucher_holds_nothing_back() -> (
+    None
+):
+    chat, _ = await _two_members(read_to=6)
+    async with persistent.asession() as sess:
+        sess.add(
+            persistent.PendingVoucher(
+                role="inductor",
+                conversation_id=chat.conversation_id,
+                step="inducting",
+                voucher=b"w" * 32,
+            )
+        )
+        await sess.commit()
+
+    message = models.GroupChatMessage(version=0, text="hi")
+    await chat.queue(message)
+    assert message.acks is not None
+
+
+@pytest.mark.asyncio
 async def test_the_joiner_side_of_the_handshake_adopts_the_rosters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -19,7 +19,7 @@ restarts. All cap and key material is opaque bytes; the daemon does the crypto.
 import asyncio
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
@@ -779,24 +779,33 @@ async def derive_read_and_induct(
     not report a duplicate contact or a duplicate introduction announcement.
 
     The reply tells the joiner its place in our roster, so our roster must
-    not change between building the reply and queueing the Introduction: one
-    induction runs at a time per conversation, and no message of ours
-    acknowledges anything meanwhile (see ``acks.inducting``)."""
+    not change between building the reply and queueing the Introduction: that
+    part runs one induction at a time per conversation, and no message of
+    ours acknowledges anything meanwhile (see ``acks.inducting``). Reading
+    box 0 may wait on a human, so it stays outside."""
+    pending = await _read_joiner_payload(connection, conversation_id, peer_name, voucher)
     lock = _induction_locks.setdefault(conversation_id, asyncio.Lock())
     async with lock:
         acks.inducting.add(conversation_id)
         try:
-            return await _derive_read_and_induct(
-                connection, conversation_id, peer_name, voucher,
+            return await _reply_and_introduce(
+                connection, conversation_id, peer_name, voucher, pending,
             )
         finally:
             acks.inducting.discard(conversation_id)
 
 
-async def _derive_read_and_induct(
+class _JoinerPayload(NamedTuple):
+    pending_id: uuid.UUID
+    voucher_write_cap: bytes
+    voucher_payload: bytes
+    box1_index: bytes
+
+
+async def _read_joiner_payload(
     connection: "ThinClient", conversation_id: int, peer_name: str,
     voucher: bytes,
-) -> "str | None":
+) -> _JoinerPayload:
     derived = await _rpc_racing_connection_life(
         bacap_uuid=_brief(voucher), what="voucher_derive_stream",
         rpc_factory=lambda: connection.voucher_derive_stream(voucher=voucher),
@@ -826,6 +835,15 @@ async def _derive_read_and_induct(
         _brief(derived.voucher_read_cap), _brief(box1_index),
     )
 
+    return _JoinerPayload(
+        pv_id, derived.voucher_write_cap, voucher_payload, box1_index,
+    )
+
+
+async def _reply_and_introduce(
+    connection: "ThinClient", conversation_id: int, peer_name: str,
+    voucher: bytes, pending: _JoinerPayload,
+) -> "str | None":
     if not await acks.wait_for_outgoing(
         conversation_id, deadline_s=_OUTGOING_ACKS_SLACK_SECONDS,
     ):
@@ -837,12 +855,16 @@ async def _derive_read_and_induct(
     induct = await _rpc_racing_connection_life(
         bacap_uuid=_brief(voucher), what="voucher_induct",
         rpc_factory=lambda: connection.voucher_induct(
-            voucher=voucher, voucher_payload=voucher_payload, who_reply=who_reply.to_cbor(),
+            voucher=voucher, voucher_payload=pending.voucher_payload,
+            who_reply=who_reply.to_cbor(),
         ),
         backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
     )
 
-    await _publish_box(connection, derived.voucher_write_cap, box1_index, induct.sealed_reply)
+    await _publish_box(
+        connection, pending.voucher_write_cap, pending.box1_index,
+        induct.sealed_reply,
+    )
 
     joiner_name = _sanitize_peer_name(induct.display_name or peer_name)
     already_inducted = False
@@ -872,7 +894,7 @@ async def _derive_read_and_induct(
                 joiner_name, _brief(induct.mutated_message_read_cap),
                 conversation_id,
             )
-        row = await sess.get(persistent.PendingVoucher, pv_id)
+        row = await sess.get(persistent.PendingVoucher, pending.pending_id)
         await _finish_pending_voucher(sess, conv, row)
         await sess.commit()
 
