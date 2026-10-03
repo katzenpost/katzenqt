@@ -102,7 +102,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import _args
 from .. import epochs
-from .. import conversation_handlers, models, network, persistent, removal
+from .. import models, network, persistent, removal
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
 from ..tally import schema as tally_schema
@@ -343,9 +343,6 @@ async def _send_one_gcm(
         # requires the PWAL's bacap_stream to match a fully-provisioned
         # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
         own_bacap_stream = convo.write_cap
-        gcm.membership_hash = await conversation_handlers.local_membership_hash(
-            sess, convo
-        )
 
     send_op = models.SendOperation(
         bacap_stream=own_bacap_stream, messages=[gcm],
@@ -389,9 +386,7 @@ async def _send_one_gcm(
 
 
 async def _action_send(args: _args.Send) -> int:
-    gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8, text=args.text,
-    )
+    gcm = models.GroupChatMessage(version=0, text=args.text)
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
@@ -412,9 +407,7 @@ async def _action_send_file(args: _args.SendFile) -> int:
         filetype=args.filetype or "application/octet-stream",
         basename=args.basename or path.name,
     )
-    gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8, file_upload=file_upload,
-    )
+    gcm = models.GroupChatMessage(version=0, file_upload=file_upload)
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
@@ -507,15 +500,7 @@ async def _action_multi_send(args: _args.MultiSend) -> int:
     texts = args.texts.split("|")
     final_pwal_ids: "list[uuid.UUID]" = []
     for text in texts:
-        # Recompute per send: membership can change mid-session (an
-        # INTRODUCTION between sends), so the hash is fetched here, not once
-        # up front.
-        membership_hash = await conversation_handlers.membership_hash_for(
-            conversation_id
-        )
-        gcm = models.GroupChatMessage(
-            version=0, membership_hash=membership_hash, text=text,
-        )
+        gcm = models.GroupChatMessage(version=0, text=text)
         send_op = models.SendOperation(
             bacap_stream=own_bacap_stream, messages=[gcm],
         )
@@ -618,13 +603,7 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
         for step_idx, raw in enumerate(args.steps):
             kind, _, payload = raw.partition(":")
             if kind == "SEND":
-                # Recompute per send: membership can change mid-session (F3).
-                membership_hash = await conversation_handlers.membership_hash_for(
-                    conversation_id
-                )
-                gcm = models.GroupChatMessage(
-                    version=0, membership_hash=membership_hash, text=payload,
-                )
+                gcm = models.GroupChatMessage(version=0, text=payload)
                 send_op = models.SendOperation(
                     bacap_stream=own_bacap_stream, messages=[gcm],
                 )
@@ -1133,18 +1112,6 @@ def resolve_connection_config(args: _args.Connected) -> "tuple[str, str | None]"
     with os.fdopen(fd, "w") as fh:
         fh.write(body)
     return path, path
-
-
-async def _action_membership_hash(args: _args.MembershipHash) -> int:
-    """Print the conversation's locally computed membership hash. Offline;
-    needs no daemon. Prints one ``MEMBERSHIP_HASH=<hex>`` line."""
-    conv_id = await _conv_id_by_name(args.conv_name)
-    if conv_id is None:
-        logger.error("conversation %r not found", args.conv_name)
-        return 2
-    digest = await conversation_handlers.membership_hash_for(conv_id)
-    logger.info("MEMBERSHIP_HASH=%s", digest.hex())
-    return 0
 
 
 async def _action_remove_conv(args: _args.RemoveConv) -> int:

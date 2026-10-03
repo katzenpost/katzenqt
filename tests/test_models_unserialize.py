@@ -52,7 +52,7 @@ def test_unserialize_single_box_round_trip() -> None:
     """A short message fits in one chunk; the single ``b'F'`` chunk
     must round-trip to the original message."""
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"X" * 32, text="hello",
+        version=0, text="hello",
     )
     op = models.SendOperation(
         bacap_stream=uuid.uuid4(), messages=[gcm],
@@ -75,7 +75,7 @@ def test_unserialize_multibox_chain() -> None:
     trip through ``serialize`` + ``unserialize``."""
     text = "A" * 5000
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"Y" * 32, text=text,
+        version=0, text=text,
     )
     op = models.SendOperation(
         bacap_stream=uuid.uuid4(), messages=[gcm],
@@ -106,7 +106,7 @@ def test_unserialize_round_trip_hypothesis(
     range serialize accepts, ``unserialize`` recovers the original
     text byte-for-byte."""
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"Z" * 32, text=text,
+        version=0, text=text,
     )
     op = models.SendOperation(
         bacap_stream=uuid.uuid4(), messages=[gcm],
@@ -124,7 +124,7 @@ def test_unserialize_gap_returns_none() -> None:
     """An incomplete chain (no terminating ``b'F'``) returns
     ``None``; appending the missing terminator completes it."""
     cbor = models.GroupChatMessage(
-        version=0, membership_hash=b"X" * 32, text="abc",
+        version=0, text="abc",
     ).to_cbor()
     half = len(cbor) // 2
     head, tail = cbor[:half], cbor[half:]

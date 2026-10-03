@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class _Message:
-    membership_hash: bytes = b""
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,9 +111,6 @@ async def test_send_starts_and_closes_exactly_one_session(
     ))
     monkeypatch.setattr(_actions, "models", SimpleNamespace(
         SendOperation=_SendOperation,
-    ))
-    monkeypatch.setattr(_actions, "conversation_handlers", SimpleNamespace(
-        local_membership_hash=AsyncMock(return_value=b"m" * 32),
     ))
     monkeypatch.setattr(_actions, "network", SimpleNamespace(
         check_for_new=AsyncMock(),

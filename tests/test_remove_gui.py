@@ -10,7 +10,7 @@ from PySide6.QtGui import QStandardItemModel
 from sqlmodel import select
 
 from katzenqt import katzen, persistent
-from tests.test_membership_hash import _make_conversation
+from tests._conversation import make_conversation as _make_conversation
 
 if TYPE_CHECKING:
     from katzenqt.qt_models import ConversationUIState

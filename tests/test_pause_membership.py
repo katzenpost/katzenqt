@@ -3,8 +3,8 @@ from uuid import UUID
 import pytest
 from sqlmodel import select
 
-from katzenqt import conversation_handlers, network, persistent, voucher
-from tests.test_membership_hash import _make_conversation
+from katzenqt import network, persistent, voucher
+from tests._conversation import make_conversation as _make_conversation
 
 
 @pytest.mark.asyncio
@@ -15,13 +15,11 @@ async def test_read_pause_preserves_membership_and_voucher_members() -> None:
         assert conv is not None
         peer = next(p for p in conv.peers if p.id != conv.own_peer_id)
         stream = peer.read_cap_id
-        before_hash = await conversation_handlers.local_membership_hash(sess, conv)
     before_reply = await voucher._build_who_reply(conv_id)
     await network.pause_peer_reads(bacap_stream=stream)
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conv_id)
         assert conv is not None
-        assert await conversation_handlers.local_membership_hash(sess, conv) == before_hash
         rcw = await sess.get(persistent.ReadCapWAL, stream)
         assert rcw is not None and rcw.paused
         assert all(p.active for p in conv.peers)

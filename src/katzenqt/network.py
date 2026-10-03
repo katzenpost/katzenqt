@@ -1793,7 +1793,6 @@ def _safe_basename(name: str) -> str:
 
 def _spill_attachment(
     file_upload: "models.GroupChatFileUpload",
-    membership_hash: bytes,
     conversation_id: int,
 ) -> bytes:
     """Write the attachment bytes to disk and return the CBOR marker
@@ -1823,7 +1822,6 @@ def _spill_attachment(
             "size": len(blob),
             "basename": safe,
             "filetype": file_upload.filetype,
-            "membership_hash": membership_hash,
         })
 
     sha = hashlib.sha256(blob).digest()
@@ -1854,7 +1852,6 @@ def _spill_attachment(
         "size": len(blob),
         "rel_path": rel_path,
         "sha256": sha,
-        "membership_hash": membership_hash,
     }
     if attachment_images.is_image_attachment(file_upload.filetype, safe):
         thumb_rel_path = attachment_images.spill_image_thumbnail(
@@ -2384,7 +2381,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             )
             spilled_payload = await asyncio.to_thread(
                 _spill_attachment,
-                spill_gcm.file_upload, spill_gcm.membership_hash, spill_conv_id,
+                spill_gcm.file_upload, spill_conv_id,
             )
 
     try:

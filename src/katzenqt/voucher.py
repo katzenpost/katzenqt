@@ -589,9 +589,8 @@ async def await_and_open(
         # keypair (provision_read_caps); replace it with the salt-mutated read
         # cap, which is the 32-byte key plus the 104-byte index -- exactly the
         # cap the inductor recorded for us and the rest of the group holds.
-        # Leaving the un-mutated cap here made our own voter identity (and
-        # membership hash, which self-represents via write_cap[32:]) disagree
-        # with everyone else's view of us.
+        # Leaving the un-mutated cap here made our own voter identity
+        # disagree with everyone else's view of us.
         own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
         if own_peer is not None:
             own_rcw = await sess.get(persistent.ReadCapWAL, own_peer.read_cap_id)
@@ -640,7 +639,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
     """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
     final PlaintextWAL id, for the caller to wait on the ack."""
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8,
+        version=0,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(
             display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,

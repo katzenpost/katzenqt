@@ -3,7 +3,7 @@ from sqlmodel import select
 
 from katzenqt import persistent
 from katzenqt.headless import _actions, _args
-from tests.test_membership_hash import _make_conversation
+from tests._conversation import make_conversation as _make_conversation
 
 
 async def _peer_names() -> "list[str]":

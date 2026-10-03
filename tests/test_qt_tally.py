@@ -83,7 +83,7 @@ def _next_order(convo_id: int) -> int:
 
 
 def _seed_chat(convo_id: int, peer_id: int, text: str) -> None:
-    cm = models.GroupChatMessage(version=0, membership_hash=bytes(32), text=text)
+    cm = models.GroupChatMessage(version=0, text=text)
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.ConversationLog(
             conversation_id=convo_id, conversation_peer_id=peer_id,

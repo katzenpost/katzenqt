@@ -133,7 +133,7 @@ def test_spill_attachment_image_includes_thumb_rel_path() -> None:
         filetype="image/png",
         basename="received.png",
     )
-    marker = network._spill_attachment(upload, b"TODO" * 8, conversation_id=5)
+    marker = network._spill_attachment(upload, conversation_id=5)
 
     assert marker[:1] == b"F"
     decoded = cbor2.loads(marker[1:])
@@ -154,7 +154,7 @@ def test_spill_attachment_non_image_has_no_thumb() -> None:
         filetype="arbitrary",
         basename="doc.pdf",
     )
-    marker = network._spill_attachment(upload, b"TODO" * 8, conversation_id=5)
+    marker = network._spill_attachment(upload, conversation_id=5)
     decoded = cbor2.loads(marker[1:])
     assert "thumb_rel_path" not in decoded
 

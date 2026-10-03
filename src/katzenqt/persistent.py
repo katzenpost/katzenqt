@@ -660,7 +660,6 @@ async def peer_has_read_cap(
     (the daemon mints a fresh random salt on every ``voucher_induct``). The
     index suffix is therefore not an identity, so this dedup keys on the
     32-byte public-key prefix alone -- matching
-    ``models.canonical_membership_hash`` and
     ``tally.controller.voter_id_from_read_cap``. Otherwise a re-induction
     adds a second peer for the same member, whose cap addresses a
     salt-determined box sequence nobody writes, and it polls a nonexistent

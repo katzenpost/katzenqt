@@ -1,14 +1,11 @@
-import annotated_types
 import asyncio
-from typing_extensions import Annotated
-from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict, field_serializer, model_validator
+from pydantic import Field, BaseModel, SecretBytes, SecretStr, field_serializer, model_validator
 import cbor2
 from enum import Enum
 import uuid
 import secrets
 import io
 from . import persistent
-import hashlib
 from base64 import b64encode, b64decode
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, List, Tuple, Union
@@ -19,66 +16,7 @@ SerializedRow = Union[persistent.PlaintextWAL, persistent.ReadCapWAL]
 if TYPE_CHECKING:
     from pydantic import FieldSerializationInfo
 
-# --- membership hash (GROUP_CHAT_PROTOCOL.md section 6b) ------------------
-# The recipe is fixed so that independent implementations compute the same
-# 32-byte digest over the same member set.
-
 SUBSTREAM_NAME_PREFIX = ":substream:"
-
-MEMBERSHIP_DOMAIN = b"KP:membership:v1"
-
-MEMBERSHIP_SENTINELS = (b"TODO" * 8, bytes(32))
-
-
-def is_membership_sentinel(digest: bytes) -> bool:
-    """Whether ``digest`` is a 'no membership hash' sentinel accepted
-    without comparison during the migration window.
-
-    >>> is_membership_sentinel(b"TODO" * 8)
-    True
-    >>> is_membership_sentinel(bytes(32))
-    True
-    >>> is_membership_sentinel(canonical_membership_hash([bytes(136)]))
-    False
-    """
-    return digest in MEMBERSHIP_SENTINELS
-
-
-def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
-    """Order-independent membership hash of a set of member read caps:
-    take each cap's 32-byte public-key prefix, dedupe and sort those
-    byte-wise, concatenate, and SHA-256 under :data:`MEMBERSHIP_DOMAIN`.
-
-    Hashing the prefix (not the whole cap) keeps the digest stable across
-    the index/mutation suffix variants of the same member's read cap — a
-    joiner's pre-mutation cap, the salt-mutated cap the group holds, and
-    future-only read caps starting at a later index all collapse to one
-    member. The caller represents itself as ``write_cap[32:]``.
-
-    >>> key_a = bytes(range(32))
-    >>> key_b = bytes(range(32, 64))
-    >>> cap_a = key_a + bytes(104)
-    >>> cap_b = key_b + bytes(104)
-    >>> len(cap_a)
-    136
-    >>> canonical_membership_hash([cap_a, cap_b]) == canonical_membership_hash(
-    ...     [cap_b, cap_a])
-    True
-    >>> canonical_membership_hash(
-    ...     [cap_a, key_a + bytes(103) + bytes([1])],
-    ... ) == canonical_membership_hash([cap_a])
-    True
-    >>> canonical_membership_hash([cap_a]) == canonical_membership_hash(
-    ...     [cap_a, cap_b])
-    False
-    >>> len(canonical_membership_hash([cap_a]))
-    32
-    """
-    digest = hashlib.sha256()
-    digest.update(MEMBERSHIP_DOMAIN)
-    for key in sorted({cap[:32] for cap in read_caps}):
-        digest.update(key)
-    return digest.digest()
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
@@ -187,9 +125,6 @@ class GroupChatReplyWho(BaseModel):
         'alice'
         """
         return cls(**cbor2.loads(data))
-    def membership_hash(self) -> bytes:
-        return hashlib.blake2b(self.to_cbor(), digest_size=32).digest()
-    # the conversation hash should be available
     
 
 class GroupChatTypeEnum(Enum):
@@ -372,7 +307,6 @@ class GroupChatMessage(BaseModel):
     """
     model_config = {'validate_assignment': True}
     version: int = Field(ge=0,)
-    membership_hash : "Annotated[bytes, Strict(), annotated_types.Len(32, 32),]"
 
     # The message's type, made explicit so a conversation handler can route by
     # it rather than guessing from which optional field is set. Serialised as
@@ -426,14 +360,10 @@ class GroupChatMessage(BaseModel):
         read-matching code paths.
 
         >>> intro = GroupChatPleaseAdd(display_name="alice", read_cap=bytes(136))
-        >>> announce = GroupChatMessage(
-        ...     version=0, membership_hash=bytes(32), introduction=intro,
-        ... )
+        >>> announce = GroupChatMessage(version=0, introduction=intro)
         >>> announce.as_introduction.display_name
         'alice'
-        >>> GroupChatMessage(
-        ...     version=0, membership_hash=bytes(32), text="hi",
-        ... ).as_introduction is None
+        >>> GroupChatMessage(version=0, text="hi").as_introduction is None
         True
         """
         if self.msg_type == GroupChatTypeEnum.INTRODUCTION and self.introduction is not None:
@@ -449,7 +379,7 @@ class GroupChatMessage(BaseModel):
 
         - The exception is that when we need to send more than one message at the same time,
 
-        >>> msg = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
+        >>> msg = GroupChatMessage(version=0, text="hi")
         >>> cbor2.loads(msg.to_cbor())["msg_type"]
         0
         >>> "introduction" in cbor2.loads(msg.to_cbor())
@@ -466,7 +396,7 @@ class GroupChatMessage(BaseModel):
         ... )
         >>> GroupChatMessage.from_cbor(legacy).msg_type
         <GroupChatTypeEnum.WHO: 3>
-        >>> msg = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
+        >>> msg = GroupChatMessage(version=0, text="hi")
         >>> GroupChatMessage.from_cbor(msg.to_cbor()) == msg
         True
         """
@@ -498,9 +428,7 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
     original ``bacap_stream`` or from an indirection substream; the
     caller has already classified them by the time they reach here.
 
-    >>> blob = GroupChatMessage(
-    ...     version=0, membership_hash=bytes(32), text="hi there",
-    ... ).to_cbor()
+    >>> blob = GroupChatMessage(version=0, text="hi there").to_cbor()
     >>> unserialize([(b"C", blob[:5]), (b"F", blob[5:])]).text
     'hi there'
     >>> unserialize([(b"C", blob)]) is None

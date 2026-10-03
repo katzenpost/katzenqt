@@ -27,7 +27,7 @@ def test_plain_text_without_f_prefix() -> None:
 
 
 def test_inline_text_group_chat_message() -> None:
-    gcm = GroupChatMessage(version=0, membership_hash=b"TODO" * 8, text="hi there")
+    gcm = GroupChatMessage(version=0, text="hi there")
     info = _decode_group_chat_payload(b"F" + gcm.to_cbor())
     assert info.display == "hi there"
     assert info.kind == "text"
@@ -39,7 +39,7 @@ def test_inline_file_upload_audio() -> None:
         payload=b"OggSfake", filetype="audio/opus", basename="note.opus",
     )
     gcm = GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8, file_upload=upload,
+        version=0, file_upload=upload,
     )
     info = _decode_group_chat_payload(b"F" + gcm.to_cbor())
     assert info.display == "Voice note: note.opus"
@@ -57,7 +57,6 @@ def test_file_marker_non_audio() -> None:
         size=1234,
         rel_path="attachments/7/abc-report.pdf",
         sha256=b"\x00" * 32,
-        membership_hash=b"TODO" * 8,
     )
     info = _decode_group_chat_payload(payload)
     assert info.display == "[attachment] report.pdf"
@@ -75,7 +74,6 @@ def test_file_marker_audio() -> None:
         size=42,
         rel_path="attachments/7/def-hello.opus",
         sha256=b"\x11" * 32,
-        membership_hash=b"TODO" * 8,
     )
     info = _decode_group_chat_payload(payload)
     assert info.display == "Voice note: hello.opus"
@@ -90,7 +88,6 @@ def test_file_oversized() -> None:
         basename="huge.bin",
         filetype="arbitrary",
         size=250 * 1024 * 1024,
-        membership_hash=b"TODO" * 8,
     )
     info = _decode_group_chat_payload(payload)
     assert info.kind == "oversized"
@@ -141,7 +138,6 @@ def test_file_marker_image_uses_thumbnail() -> None:
         rel_path="attachments/7/abc-photo.jpg",
         thumb_rel_path="attachments/7/abc-thumb-photo.jpg.jpg",
         sha256=b"\x00" * 32,
-        membership_hash=b"TODO" * 8,
     )
     info = _decode_group_chat_payload(payload)
     # Image rows render as a thumbnail, so the text line is suppressed.
@@ -160,7 +156,6 @@ def test_file_marker_image_without_thumb_falls_back_to_full() -> None:
         size=99,
         rel_path="attachments/7/def-diagram.png",
         sha256=b"\x11" * 32,
-        membership_hash=b"TODO" * 8,
     )
     info = _decode_group_chat_payload(payload)
     assert info.display == ""
@@ -191,7 +186,7 @@ class _InlineFields(TypedDict, total=False):
 def _inline(**kwargs: Unpack[_InlineFields]) -> bytes:
     from katzenqt.models import GroupChatMessage
 
-    gcm = GroupChatMessage(version=0, membership_hash=b"\x00" * 32, **kwargs)
+    gcm = GroupChatMessage(version=0, **kwargs)
     body: bytes = gcm.to_cbor()
     return b"F" + body
 
@@ -246,7 +241,7 @@ def test_oversized_inline_text_is_clamped_before_display() -> None:
     from katzenqt.models import MAX_MESSAGE_CHARS, _TEXT_TRUNCATION_MARKER
 
     huge = "q" * (MAX_MESSAGE_CHARS + 10000)
-    gcm = GroupChatMessage(version=0, membership_hash=b"TODO" * 8, text=huge)
+    gcm = GroupChatMessage(version=0, text=huge)
     info = _decode_group_chat_payload(b"F" + gcm.to_cbor())
     assert info.kind == "text"
     assert len(info.display) == MAX_MESSAGE_CHARS + len(_TEXT_TRUNCATION_MARKER)

@@ -114,15 +114,9 @@ def shown(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
 def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     sent: list[dict[str, object]] = []
 
-    async def membership_hash_for(_conversation_id: int) -> bytes:
-        return bytes(32)
-
     async def notify_outbound_chat_sent(**kwargs: object) -> None:
         sent.append(kwargs)
 
-    monkeypatch.setattr(
-        katzen.conversation_handlers, "membership_hash_for", membership_hash_for,
-    )
     monkeypatch.setattr(
         katzen.network, "notify_outbound_chat_sent", notify_outbound_chat_sent,
     )
