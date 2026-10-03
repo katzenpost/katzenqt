@@ -462,6 +462,14 @@ class ReadCapWAL(SQLModel, table=True):
     write_cap_id : uuid.UUID | None = Field(foreign_key="writecapwal.id", index=True)
     read_cap: bytes | None = Field(None, min_length=136, max_length=136)
     next_index: bytes | None = Field(None, min_length=104, max_length=104)
+    # The box that ended the last message read on this stream, and the last
+    # such box with nothing before it still being fetched through a
+    # substream. Only the second is safe to acknowledge: acknowledging a box
+    # says everything before it has been read.
+    frontier_index: bytes | None = Field(None, min_length=104, max_length=104)
+    last_read_index: bytes | None = Field(None, min_length=104, max_length=104)
+    # The box this client last acknowledged on this stream.
+    acked_index: bytes | None = Field(None, min_length=104, max_length=104)
     # Sent on the extended I-chunk (wire bytes 1-4). Total
     # plaintext chunks (C-chunks + final F) of a substream file transfer, only
     # set on the substream transfer's own ReadCapWAL. None means the peer sent
@@ -1057,6 +1065,10 @@ class ConversationPeer(SQLModel, table=True):
     name: str = Field(index=True, min_length=1, max_length=30)
     read_cap_id: uuid.UUID = Field(foreign_key="readcapwal.id", index=True, description="point to the read cap we need to use to read this peer")
     active: bool = Field(default=True, description="Do we try to read this?")
+    acked_position: bytes | None = Field(
+        default=None, min_length=8, max_length=8,
+        description="the furthest box of our own stream this peer has acknowledged, as a position",
+    )
     conversation : "Conversation" = Relationship(back_populates="peers", link_model=ConversationPeerLink, sa_relationship_kwargs={"lazy":"selectin"})
 
 class Conversation(SQLModel, table=True):
@@ -1204,6 +1216,105 @@ class ConversationLog(SQLModel, table=True):
         )
 
 
+def position_bytes(position: int) -> bytes:
+    """A position on a BACAP stream, as stored. Positions are 64-bit
+    unsigned counters, which sqlite's signed integers cannot hold, so they
+    are stored as eight big-endian bytes, which sort as the numbers do.
+
+    >>> position_bytes(258).hex()
+    '0000000000000102'
+    >>> position_bytes(2**64 - 1) > position_bytes(2**63)
+    True
+    """
+    return position.to_bytes(8, "big")
+
+
+def position_int(stored: "bytes | None") -> int:
+    """The position :func:`position_bytes` stored; -1 for none.
+
+    >>> position_int(position_bytes(258)), position_int(None)
+    (258, -1)
+    """
+    return -1 if stored is None else int.from_bytes(stored, "big")
+
+
+def box_position(box_index: bytes) -> int:
+    """The position a BACAP ``MessageBoxIndex`` names on its stream: the
+    little-endian counter in its first eight bytes.
+
+    >>> box_position((258).to_bytes(8, "little") + bytes(96))
+    258
+    """
+    return int.from_bytes(box_index[:8], "little")
+
+
+class SentBox(SQLModel, table=True):
+    """One box this client wrote to a conversation's own stream. Kept so
+    that an acknowledgement naming a box can be checked against what was
+    actually written (see "Sent-box records" in the group chat spec)."""
+    __table_args__ = (
+        UniqueConstraint('bacap_stream', 'box_index', name='uniq_sentbox_stream_and_index'),
+    )
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    conversation_id: int = Field(foreign_key="conversation.id", index=True)
+    bacap_stream: uuid.UUID = Field(index=True)
+    box_index: bytes = Field(min_length=104, max_length=104)
+    position: bytes = Field(min_length=8, max_length=8)
+    written_at: float
+
+
+class RosterMember(SQLModel, table=True):
+    """What this client knows of one member's roster in one conversation
+    (see "Rosters" in the group chat spec, and ``katzenqt.rosters``).
+
+    A member is its read-cap public key, or the placeholder left where a
+    removed member has been forgotten. Its roster began either as a list
+    known outright (``base_roster``, a CBOR list of members: our own
+    roster, a founder's, or one handed over when we joined) or as a copy
+    of its introducer's at the ``Introduction`` that announced it. Our own
+    row's ``base_roster`` is our roster itself and grows as we number
+    members.
+    """
+    conversation_id: int = Field(foreign_key="conversation.id", primary_key=True)
+    member_key: bytes = Field(primary_key=True)
+    seen: bytes | None = Field(
+        default=None, min_length=8, max_length=8,
+        description="the position through which we have every message of this member's stream",
+    )
+    base_roster: bytes | None = Field(default=None)
+    base_introducer: bytes | None = Field(default=None)
+    base_position: bytes | None = Field(default=None, min_length=8, max_length=8)
+
+
+class IntroductionSeen(SQLModel, table=True):
+    """An ``Introduction`` this client has read or written: who introduced
+    whom, and at which position on the introducer's stream."""
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    conversation_id: int = Field(foreign_key="conversation.id", index=True)
+    introducer_key: bytes
+    position: bytes | None = Field(
+        default=None, min_length=8, max_length=8,
+        description="NULL while our own Introduction waits to be written",
+    )
+    member_key: bytes
+    pending_pwal: uuid.UUID | None = Field(
+        default=None, index=True,
+        description="our own Introduction: the PlaintextWAL whose box gives its position",
+    )
+
+
+class AckLevel(SQLModel, table=True):
+    """One acknowledgement read from a member: the roster index it named,
+    in that member's own roster, and how far it reached. ``value`` is the
+    raw ``MessageBoxIndex``, kept until it is known whether it names us."""
+    conversation_id: int = Field(foreign_key="conversation.id", primary_key=True)
+    acker_key: bytes = Field(primary_key=True)
+    position: bytes = Field(primary_key=True, min_length=8, max_length=8)
+    roster_index: int = Field(primary_key=True)
+    reached: bytes = Field(min_length=8, max_length=8)
+    value: bytes | None = Field(default=None, min_length=104, max_length=104)
+
+
 class TallyState(SQLModel, table=True):
     """The convergent state of one tally survey, as a single CRDT blob.
 
@@ -1217,6 +1328,7 @@ class TallyState(SQLModel, table=True):
     conversation_id: int = Field(foreign_key="conversation.id", index=True)
     doc_state: bytes
 __all__ = [
+    "AckLevel",
     "AppSetting",
     "AsyncIterator",
     "AsyncSession",
@@ -1228,6 +1340,7 @@ __all__ = [
     "ConversationPeerLink",
     "Field",
     "Lock",
+    "IntroductionSeen",
     "MixWAL",
     "NAMING_CONVENTION",
     "NamedTuple",
@@ -1237,8 +1350,10 @@ __all__ = [
     "PlaintextWAL",
     "ReadCapWAL",
     "ReceivedPiece",
+    "RosterMember",
     "Relationship",
     "SQLModel",
+    "SentBox",
     "SentLog",
     "Sequence",
     "Session",
@@ -1271,10 +1386,13 @@ __all__ = [
     "metadata",
     "next_conversation_order",
     "os",
+    "box_position",
     "own_read_cap",
     "peer_has_read_cap",
     "peer_named_in_conversation",
     "peer_named_in_conversation_sync",
+    "position_bytes",
+    "position_int",
     "sa",
     "select",
     "sqlalchemy",
