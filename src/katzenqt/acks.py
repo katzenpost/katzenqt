@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 import secrets
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, NamedTuple
 
 import cbor2
@@ -32,9 +34,24 @@ logger = logging.getLogger(__name__)
 _CHUNK_SIZE = 1530
 
 inducting: set[int] = set()
-"""Conversations for which a reply to a new member has been built and its
+"""Conversations for which a reply to a new member is being built or its
 ``Introduction`` is not yet queued. No message of ours may number anyone in
 between, or the place the reply promised the new member would be taken."""
+
+
+@asynccontextmanager
+async def held_back(conversation_id: int) -> AsyncIterator[None]:
+    """Hold this conversation's acknowledgements back while a new member is
+    inducted. It starts under the conversation's writer lock, which a
+    message keeps from taking its acknowledgements until it is committed:
+    so whatever got in first is queued by now, and ``wait_for_outgoing``
+    will see it."""
+    async with persistent.conversation_log_order_lock(conversation_id):
+        inducting.add(conversation_id)
+    try:
+        yield
+    finally:
+        inducting.discard(conversation_id)
 
 
 def member_key(read_cap: bytes) -> bytes:
@@ -252,7 +269,10 @@ async def serialize_with_acks(
     """Attach the pending acknowledgements to ``gcm`` and serialize it for
     ``conv``'s own stream. The caller adds the rows to ``sess`` and commits:
     what was acknowledged is recorded in that same transaction, so a message
-    that is never queued acknowledges nothing."""
+    that is never queued acknowledges nothing. The caller holds
+    ``persistent.conversation_log_order_lock`` from before this call until
+    it has committed, so that an induction cannot begin in between (see
+    ``held_back``)."""
     attached = await _attach(sess, conv, gcm)
     send_op = models.SendOperation(
         bacap_stream=conv.write_cap, messages=[gcm]
@@ -912,6 +932,7 @@ __all__ = [
     "forget_member",
     "forget_outgoing",
     "hand_over",
+    "held_back",
     "inducting",
     "introduced",
     "load_group",

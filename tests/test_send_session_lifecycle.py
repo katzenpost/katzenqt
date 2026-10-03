@@ -6,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+from katzenqt import persistent
 from katzenqt.headless import _actions
 
 if TYPE_CHECKING:
@@ -89,6 +90,7 @@ async def test_send_starts_and_closes_exactly_one_session(
     monkeypatch.setattr(_actions, "persistent", SimpleNamespace(
         asession=Session, Conversation=SimpleNamespace(name="demo"),
         PlaintextWAL=_Pending, SentLog=SimpleNamespace(id=7),
+        conversation_log_order_lock=persistent.conversation_log_order_lock,
     ))
     monkeypatch.setattr(_actions, "acks", SimpleNamespace(
         serialize_with_acks=AsyncMock(return_value=([], [_Pending()])),

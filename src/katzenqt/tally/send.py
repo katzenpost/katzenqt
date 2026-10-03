@@ -24,7 +24,9 @@ if TYPE_CHECKING:
 async def stage_outbound(sess: "AsyncSession", conversation: "persistent.Conversation", gcm: "models.GroupChatMessage") -> uuid.UUID:
     """Serialise ``gcm``, with whatever acknowledgements are pending, and
     stage its rows in ``sess``. Returns the id of the final PlaintextWAL,
-    which lands in SentLog once the message has cleared."""
+    which lands in SentLog once the message has cleared. The caller holds
+    ``persistent.conversation_log_order_lock`` until it has committed (see
+    ``acks.serialize_with_acks``)."""
     new_write_caps, db_entries = await acks.serialize_with_acks(
         sess, conversation, gcm,
     )

@@ -4,14 +4,24 @@ replies that cannot be read, and members removed before they were numbered."""
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlmodel import select
 
-from katzenqt import acks, models, persistent, removal, rosters, voucher
+from katzenqt import (
+    acks,
+    models,
+    network,
+    persistent,
+    removal,
+    rosters,
+    voucher,
+)
 from katzenqt.headless import _actions
 from tests.test_acks import (
     _Chat,
@@ -295,6 +305,59 @@ async def test_a_headless_message_too_large_for_one_box_gets_its_stream() -> (
         models.GroupChatMessage(version=0, text="x" * 4000),
     )
     assert await _write_caps() == before + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleeps
+async def test_a_headless_message_waits_for_the_writer_lock() -> None:
+    chat, _ = await _two_members(read_to=6)
+    async with persistent.conversation_log_order_lock(chat.conversation_id):
+        queueing = asyncio.create_task(
+            _actions._queue_text(
+                chat.conversation_id,
+                models.GroupChatMessage(version=0, text="hi"),
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not queueing.done()
+    await queueing
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleeps
+async def test_a_headless_send_waits_for_the_writer_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat, _ = await _two_members(read_to=6)
+
+    async def mark_sent() -> None:
+        async with persistent.asession() as sess:
+            for row in (
+                await sess.exec(select(persistent.PlaintextWAL))
+            ).all():
+                sess.add(persistent.SentLog(id=row.id))
+            await sess.commit()
+
+    monkeypatch.setattr(
+        _actions,
+        "_connect_and_start",
+        AsyncMock(return_value=(object(), object())),
+    )
+    monkeypatch.setattr(_actions, "_shutdown", AsyncMock())
+    monkeypatch.setattr(network, "check_for_new", mark_sent)
+    async with persistent.conversation_log_order_lock(chat.conversation_id):
+        sending = asyncio.create_task(
+            _actions._send_one_gcm(
+                "demo",
+                models.GroupChatMessage(version=0, text="hi"),
+                timeout=5.0,
+            )
+        )
+        await asyncio.sleep(0.05)
+        async with persistent.asession() as sess:
+            queued = (await sess.exec(select(persistent.PlaintextWAL))).all()
+        assert queued == []
+    assert await sending == 0
 
 
 async def _write_caps() -> int:

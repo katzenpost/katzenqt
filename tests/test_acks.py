@@ -4,6 +4,7 @@ box must pass."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import uuid
@@ -987,6 +988,68 @@ async def test_an_induction_waiting_for_its_voucher_holds_nothing_back() -> (
     message = models.GroupChatMessage(version=0, text="hi")
     await chat.queue(message)
     assert message.acks is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleeps
+async def test_an_induction_counts_a_message_still_being_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message that has taken its acknowledgements but is not committed
+    yet must be among those the induction waits for."""
+    chat, _ = await _two_members(read_to=6)
+    serializing, release = asyncio.Event(), asyncio.Event()
+    serialize = models.SendOperation.serialize_async
+
+    async def held(
+        self: models.SendOperation, *, chunk_size: int, conversation_id: int
+    ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
+        serializing.set()
+        await release.wait()
+        return await serialize(
+            self, chunk_size=chunk_size, conversation_id=conversation_id
+        )
+
+    async def payload(*_a: object, **_k: object) -> voucher._JoinerPayload:
+        return voucher._JoinerPayload(uuid.uuid4(), b"w", b"p", b"i")
+
+    owed: list[int] = []
+
+    async def count(conversation_id: int, *, deadline_s: float) -> bool:
+        async with persistent.asession() as sess:
+            rows = (await sess.exec(select(persistent.OutgoingAcks))).all()
+        owed.append(len(rows))
+        return False
+
+    monkeypatch.setattr(models.SendOperation, "serialize_async", held)
+    monkeypatch.setattr(voucher, "_read_joiner_payload", payload)
+    monkeypatch.setattr(acks, "wait_for_outgoing", count)
+
+    message = models.GroupChatMessage(version=0, text="hello")
+    sending = asyncio.create_task(
+        acks.append_outbound_text(
+            conversation_id=chat.conversation_id,
+            conversation_peer_id=chat.own_peer_id,
+            gcm=message,
+        )
+    )
+    await serializing.wait()
+    induction = asyncio.create_task(
+        voucher.derive_read_and_induct(
+            cast("ThinClient", object()),
+            chat.conversation_id,
+            "carol",
+            b"v" * 32,
+        )
+    )
+    # Long enough for an induction that does not wait to get ahead.
+    await asyncio.sleep(0.05)
+    release.set()
+    await sending
+    with pytest.raises(RuntimeError, match="still being sent"):
+        await induction
+    assert message.acks is not None
+    assert owed == [1]
 
 
 @pytest.mark.asyncio

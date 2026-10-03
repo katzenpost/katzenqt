@@ -781,18 +781,14 @@ async def derive_read_and_induct(
     The reply tells the joiner its place in our roster, so our roster must
     not change between building the reply and queueing the Introduction: that
     part runs one induction at a time per conversation, and no message of
-    ours acknowledges anything meanwhile (see ``acks.inducting``). Reading
+    ours acknowledges anything meanwhile (see ``acks.held_back``). Reading
     box 0 may wait on a human, so it stays outside."""
     pending = await _read_joiner_payload(connection, conversation_id, peer_name, voucher)
     lock = _induction_locks.setdefault(conversation_id, asyncio.Lock())
-    async with lock:
-        acks.inducting.add(conversation_id)
-        try:
-            return await _reply_and_introduce(
-                connection, conversation_id, peer_name, voucher, pending,
-            )
-        finally:
-            acks.inducting.discard(conversation_id)
+    async with lock, acks.held_back(conversation_id):
+        return await _reply_and_introduce(
+            connection, conversation_id, peer_name, voucher, pending,
+        )
 
 
 class _JoinerPayload(NamedTuple):

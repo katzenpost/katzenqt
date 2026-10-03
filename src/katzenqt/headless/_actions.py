@@ -342,19 +342,20 @@ async def _send_one_gcm(
         # requires the PWAL's bacap_stream to match a fully-provisioned
         # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
         # The message's pending acknowledgements are attached and recorded
-        # in the same transaction that queues it.
-        new_write_caps, db_entries = await acks.serialize_with_acks(
-            sess, convo, gcm,
-        )
-        final_pwal_id = db_entries[-1].id
-        num_pwals = sum(
-            1 for e in db_entries if isinstance(e, persistent.PlaintextWAL)
-        )
-        for cap_uuid in new_write_caps:
-            sess.add(persistent.WriteCapWAL(id=cap_uuid))
-        for obj in db_entries:
-            sess.add(obj)
-        await sess.commit()
+        # in the same transaction that queues it, under the writer lock.
+        async with persistent.conversation_log_order_lock(convo.id):
+            new_write_caps, db_entries = await acks.serialize_with_acks(
+                sess, convo, gcm,
+            )
+            final_pwal_id = db_entries[-1].id
+            num_pwals = sum(
+                1 for e in db_entries if isinstance(e, persistent.PlaintextWAL)
+            )
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            await sess.commit()
 
     headroom_s = max(120.0, num_pwals * 60.0)
     budget_s = epochs.budget_s(headroom_s) if timeout is None else timeout
@@ -383,21 +384,23 @@ async def _queue_text(
     conversation_id: int, gcm: models.GroupChatMessage,
 ) -> uuid.UUID:
     """Queue ``gcm`` on the conversation's own stream, with whatever
-    acknowledgements are pending, in one transaction. Returns the id of the
-    final PlaintextWAL, which lands in SentLog once the message has cleared."""
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conversation_id)
-        assert convo is not None
-        new_write_caps, db_entries = await acks.serialize_with_acks(
-            sess, convo, gcm,
-        )
-        final_pwal_id = db_entries[-1].id
-        for cap_uuid in new_write_caps:
-            sess.add(persistent.WriteCapWAL(id=cap_uuid))
-        for obj in db_entries:
-            sess.add(obj)
-        await sess.commit()
-        return final_pwal_id
+    acknowledgements are pending, in one transaction under the writer lock.
+    Returns the id of the final PlaintextWAL, which lands in SentLog once the
+    message has cleared."""
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            convo = await sess.get(persistent.Conversation, conversation_id)
+            assert convo is not None
+            new_write_caps, db_entries = await acks.serialize_with_acks(
+                sess, convo, gcm,
+            )
+            final_pwal_id = db_entries[-1].id
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            await sess.commit()
+            return final_pwal_id
 
 
 async def _action_send(args: _args.Send) -> int:
@@ -980,18 +983,19 @@ async def _action_tally_vote(args: _args.TallyVote) -> int:
             if convo is None:
                 logger.error("conversation %r not found", args.conv_name)
                 return 2
-            try:
-                version = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
-            except ValueError as exc:
-                logger.error("invalid vote: %s", exc)
-                return 2
-            if version is None:
-                logger.error("could not apply vote to survey %s", survey_id.hex())
-                return 1
-            final_pwal_id = await tally_send.stage_outbound(
-                sess, convo, tally_events.build_vote(survey_id, choice, version),
-            )
-            await sess.commit()
+            async with persistent.conversation_log_order_lock(convo.id):
+                try:
+                    version = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
+                except ValueError as exc:
+                    logger.error("invalid vote: %s", exc)
+                    return 2
+                if version is None:
+                    logger.error("could not apply vote to survey %s", survey_id.hex())
+                    return 1
+                final_pwal_id = await tally_send.stage_outbound(
+                    sess, convo, tally_events.build_vote(survey_id, choice, version),
+                )
+                await sess.commit()
 
         await network.check_for_new()
         if await _wait_for_sent(
@@ -1052,13 +1056,14 @@ async def _action_tally_close(args: _args.TallyClose) -> int:
             if convo is None:
                 logger.error("conversation %r not found", args.conv_name)
                 return 2
-            if not await tally_instance.close_local(sess, convo, survey_id):
-                logger.error("could not close survey %s (only the creator may)", survey_id.hex())
-                return 1
-            final_pwal_id = await tally_send.stage_outbound(
-                sess, convo, tally_events.build_close(survey_id),
-            )
-            await sess.commit()
+            async with persistent.conversation_log_order_lock(convo.id):
+                if not await tally_instance.close_local(sess, convo, survey_id):
+                    logger.error("could not close survey %s (only the creator may)", survey_id.hex())
+                    return 1
+                final_pwal_id = await tally_send.stage_outbound(
+                    sess, convo, tally_events.build_close(survey_id),
+                )
+                await sess.commit()
 
         await network.check_for_new()
         if await _wait_for_sent(
