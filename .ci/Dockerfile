@@ -14,8 +14,12 @@ RUN apt-get update \
         libpulse0 \
         libxcb-cursor0 \
         libxkbcommon0 \
-        pkg-config
+        pkg-config \
+        devscripts \
+        equivs
 
+ARG GO_VERSION=1.27.1
+ARG GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 ARG ACT_VERSION=0.2.89
 ARG ACT_SHA256=0191d6f1f3b716b5c55820032605d05fc3c1cdbf581ebeff655019e5dd1524c0
 ARG FORGEJO_RUNNER_VERSION=13.2.0
@@ -25,6 +29,14 @@ ARG WOODPECKER_CLI_SHA256=e7e78b0cc2f1172407d4e1439909bf8f55fb9b55f0fa79ae28338b
 
 COPY --from=uv /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=uv /usr/local/bin/uvx /usr/local/bin/uvx
+
+RUN curl -fsSLo /tmp/go.tar.gz \
+      "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+ && echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - \
+ && tar -C /usr/local -xzf /tmp/go.tar.gz \
+ && rm -f /tmp/go.tar.gz \
+ && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+ && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 
 WORKDIR /tmp/runners
 RUN curl -fsSLO "https://github.com/nektos/act/releases/download/v${ACT_VERSION}/act_Linux_x86_64.tar.gz" \
@@ -42,4 +54,5 @@ RUN curl -fsSLO "https://github.com/nektos/act/releases/download/v${ACT_VERSION}
 WORKDIR /
 
 RUN uv --version && act --version && forgejo-runner --version \
- && woodpecker-cli --version
+ && woodpecker-cli --version && go version && command -v dh \
+ && dpkg-buildpackage --version | head -1
