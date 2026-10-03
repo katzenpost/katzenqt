@@ -93,12 +93,15 @@ module = "katzenqt._thinclient"
 disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
-addopts = "--cov=katzenqt --cov-report=term-missing --doctest-modules -vv"
+addopts = """\
+--cov=katzenqt --cov-report=term-missing --doctest-modules \
+-n auto --dist loadscope -vv -m 'not nightly'"""
 testpaths = [
     "src",
     "tests",
 ]
 markers = [
+    "nightly: full-size runs for the nightly job or a changed subject",
     "integration: docker-mixnet integration test (requires KATZENQT_DOCKER_INTEGRATION=1)",
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
     "serial_docker: bounces shared docker containers (kpclientd/gateway); run after and separately from the parallel workers",
@@ -108,6 +111,17 @@ markers = [
 # because setting norecursedirs at all replaces the built-in list
 # wholesale rather than extending it.
 norecursedirs = ["src/katzenqt/migrations", ".hypothesis"]
+
+[tool.coverage.run]
+source = ["katzenqt"]
+
+[tool.coverage.report]
+fail_under = 100
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]
 
 [tool.ruff]
 line-length = 78

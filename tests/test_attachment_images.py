@@ -109,9 +109,7 @@ def test_spill_image_thumbnail_small_image_not_upscaled() -> None:
     abs_path = persistent.state_file.parent / rel_path
     thumb = QImage()
     assert thumb.load(str(abs_path))
-    # KeepAspectRatio with a target larger than the source still fits the
-    # box; the longest edge must not exceed the cap.
-    assert max(thumb.width(), thumb.height()) <= attachment_images.THUMB_MAX_PX
+    assert (thumb.width(), thumb.height()) == (64, 48)
 
 
 def test_spill_image_thumbnail_non_image_returns_none() -> None:

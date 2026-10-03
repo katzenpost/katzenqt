@@ -8,9 +8,8 @@ from katzenpost_thinclient import ThinClient
 
 from katzenqt import network
 
-pytestmark = pytest.mark.asyncio
 
-
+@pytest.mark.asyncio
 async def test_a_failing_worker_is_paced_before_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -40,6 +39,7 @@ async def test_a_failing_worker_is_paced_before_restart(
     assert slept and slept[0] >= network._SUPERVISOR_RETRY_S
 
 
+@pytest.mark.asyncio
 async def test_an_early_clean_return_restarts_rather_than_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -66,6 +66,7 @@ async def test_an_early_clean_return_restarts_rather_than_exits(
     assert len(calls) == 3
 
 
+@pytest.mark.asyncio
 async def test_drain_mixwal_no_longer_swallows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -85,10 +86,18 @@ def test_failure_reason_drops_peer_chosen_text() -> None:
     assert reason.isprintable()
 
 
+@pytest.mark.asyncio
 async def test_dismissing_an_already_cleared_transfer_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from katzenqt import persistent
+
+    peer = SimpleNamespace(
+        name=f"{network._SUBSTREAM_NAME_PREFIX}parent:00ff", active=True,
+    )
+    added: list[object] = []
+    deleted: list[object] = []
+    commits: list[int] = []
 
     class Sess:
         async def __aenter__(self) -> "Sess":
@@ -98,12 +107,36 @@ async def test_dismissing_an_already_cleared_transfer_is_idempotent(
             return None
 
         async def get(self, model: object, key: object) -> object:
-            return SimpleNamespace(substream_failure=None)
+            return SimpleNamespace(substream_failure=None, read_cap=None)
+
+        async def exec(self, query: object) -> "Sess":
+            return self
+
+        def all(self) -> list[object]:
+            return [peer]
+
+        def add(self, row: object) -> None:
+            added.append(row)
+
+        async def delete(self, row: object) -> None:
+            deleted.append(row)
+
+        async def commit(self) -> None:
+            commits.append(1)
+
+    async def no_parent(sess: object, name: str) -> None:
+        return None
 
     monkeypatch.setattr(persistent, "asession", Sess)
+    monkeypatch.setattr(network, "_substream_parent", no_parent)
     await network.dismiss_failed_transfer(bacap_stream=uuid.uuid4())
+    assert peer.active is True
+    assert added == []
+    assert deleted == []
+    assert commits == []
 
 
+@pytest.mark.asyncio
 async def test_a_slow_but_cancellable_join_still_closes_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -132,7 +165,7 @@ async def test_a_slow_but_cancellable_join_still_closes_the_client(
     assert stopped == [True]
 
 
-
+@pytest.mark.asyncio
 async def test_a_join_that_ignores_cancellation_still_closes_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -160,6 +193,7 @@ async def test_a_join_that_ignores_cancellation_still_closes_the_client(
     await asyncio.sleep(0)
 
 
+@pytest.mark.asyncio
 async def test_backoff_resets_after_a_healthy_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
