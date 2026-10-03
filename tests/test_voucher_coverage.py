@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from sqlmodel import select
@@ -10,6 +11,9 @@ from sqlmodel import select
 from katzenqt import models, persistent, voucher
 
 from tests.fakes.thinclient import FakeThinClient
+
+if TYPE_CHECKING:
+    from katzenpost_thinclient import ThinClient
 
 _PROVISIONED_WRITE_CAP = bytes([0x09]) * 168
 _MUTATED_WRITE_CAP = bytes([0x07]) * 168
@@ -213,7 +217,9 @@ async def test_minting_publishes_box0_and_records_the_box1_index() -> None:
 async def test_awaiting_without_a_pending_voucher_raises() -> None:
     conversation_id = await _make_conversation()
     with pytest.raises(RuntimeError, match="no pending joiner voucher"):
-        await voucher.await_and_open(OpeningConnection(b""), conversation_id)
+        await voucher.await_and_open(
+            cast("ThinClient", OpeningConnection(b"")), conversation_id,
+        )
 
 
 @pytest.mark.asyncio
@@ -242,7 +248,7 @@ async def test_opening_caps_the_members_it_takes_from_the_reply(
 
     with caplog.at_level(logging.WARNING):
         added = await voucher.await_and_open(
-            OpeningConnection(who_reply.to_cbor()),
+            cast("ThinClient", OpeningConnection(who_reply.to_cbor())),
             conversation_id,
         )
 
@@ -271,7 +277,7 @@ async def test_opening_adds_the_members_named_in_the_reply(
     monkeypatch.setattr(voucher, "_read_box", read_box)
 
     added = await voucher.await_and_open(
-        OpeningConnection(who_reply.to_cbor()),
+        cast("ThinClient", OpeningConnection(who_reply.to_cbor())),
         conversation_id,
     )
 
@@ -306,7 +312,7 @@ async def test_inducting_refuses_once_the_group_is_at_capacity(
 
     with caplog.at_level(logging.WARNING):
         joined = await voucher.derive_read_and_induct(
-            InductingConnection(),
+            cast("ThinClient", InductingConnection()),
             conversation_id,
             "bob",
             bytes([0x22]) * 32,
