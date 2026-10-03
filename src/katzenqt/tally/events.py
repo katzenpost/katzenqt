@@ -7,7 +7,7 @@ network and no database.
 """
 from __future__ import annotations
 
-from ..models import GroupChatMessage, GroupChatTally, GroupChatTypeEnum
+from ..models import GROUP_CHAT_VERSION, GroupChatMessage, GroupChatTally, GroupChatTypeEnum
 
 
 def _message(kind: GroupChatTypeEnum, tally: GroupChatTally) -> GroupChatMessage:
@@ -21,7 +21,7 @@ def _message(kind: GroupChatTypeEnum, tally: GroupChatTally) -> GroupChatMessage
     True
     """
     return GroupChatMessage(
-        version=0, msg_type=kind, tally=tally,
+        version=GROUP_CHAT_VERSION, msg_type=kind, tally=tally,
     )
 
 

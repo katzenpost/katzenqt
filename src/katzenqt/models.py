@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
 SUBSTREAM_NAME_PREFIX = ":substream:"
 
+# Version 1 carries acknowledgements and drops the membership hash.
+GROUP_CHAT_VERSION = 1
+
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
 # importer of this module, including the headless integration runner

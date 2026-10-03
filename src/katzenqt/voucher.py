@@ -677,7 +677,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
     """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
     final PlaintextWAL id, for the caller to wait on the ack."""
     gcm = models.GroupChatMessage(
-        version=0,
+        version=models.GROUP_CHAT_VERSION,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(
             display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,

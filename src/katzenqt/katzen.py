@@ -53,7 +53,7 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      pending_joiner_join_conversation_ids, pending_voucher_for)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
-from .models import (GroupChatFileUpload,
+from .models import (GROUP_CHAT_VERSION, GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation)
 #from ui_mixchat_chatview import Ui_ChatForm
 # qt_models.py also re-exports ConversationUIState (moved here so the
@@ -1855,7 +1855,7 @@ class MainWindow(QMainWindow):
             self._restore_unsent_text(convo_state, msg)
             return
 
-        group_chat_message = GroupChatMessage(version=0, text=msg)
+        group_chat_message = GroupChatMessage(version=GROUP_CHAT_VERSION, text=msg)
 
         # conversation_order is a count subquery evaluated at commit. The
         # receive/voucher paths append on the io loop; the send path funnels
@@ -2458,7 +2458,7 @@ class MainWindow(QMainWindow):
                 continue
 
             upload = GroupChatFileUpload.from_path(f_path)
-            gcm = GroupChatMessage(version=0, file_upload=upload)
+            gcm = GroupChatMessage(version=GROUP_CHAT_VERSION, file_upload=upload)
 
             # Pre-assign the ConversationLog id so a voice-note draft (which is
             # discarded right after sending) can be cached for playback under

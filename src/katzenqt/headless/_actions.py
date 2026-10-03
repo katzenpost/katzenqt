@@ -404,7 +404,7 @@ async def _queue_text(
 
 
 async def _action_send(args: _args.Send) -> int:
-    gcm = models.GroupChatMessage(version=0, text=args.text)
+    gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, text=args.text)
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
@@ -425,7 +425,7 @@ async def _action_send_file(args: _args.SendFile) -> int:
         filetype=args.filetype or "application/octet-stream",
         basename=args.basename or path.name,
     )
-    gcm = models.GroupChatMessage(version=0, file_upload=file_upload)
+    gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, file_upload=file_upload)
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
@@ -517,7 +517,7 @@ async def _action_multi_send(args: _args.MultiSend) -> int:
     texts = args.texts.split("|")
     final_pwal_ids: "list[uuid.UUID]" = []
     for text in texts:
-        gcm = models.GroupChatMessage(version=0, text=text)
+        gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, text=text)
         final_pwal_ids.append(await _queue_text(conversation_id, gcm))
 
     connection, bg = await _connect_and_start()
@@ -609,7 +609,7 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
         for step_idx, raw in enumerate(args.steps):
             kind, _, payload = raw.partition(":")
             if kind == "SEND":
-                gcm = models.GroupChatMessage(version=0, text=payload)
+                gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, text=payload)
                 final_pwal_id = await _queue_text(conversation_id, gcm)
                 # Marker for the reconnect integration test: the write is now
                 # committed to MixWAL but has not yet been handed to the
