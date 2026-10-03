@@ -1003,3 +1003,36 @@ async def test_a_removed_conversation_leaves_no_roster_behind() -> None:
             persistent.OutgoingAcks,
         ):
             assert (await sess.exec(select(table))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_the_summary_names_our_roster_and_who_has_acknowledged_us() -> (
+    None
+):
+    chat, _ = await _two_members()
+    ours = await chat.wrote(11)
+    gcm = models.GroupChatMessage(
+        version=0,
+        text="got it",
+        acks=ack_codec.encode({0: ours}),
+    )
+    await chat.receive("bob", gcm, position=7)
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        assert await acks.summary(sess, conv) == (["me", "bob"], {"bob": 11})
+
+    await removal.remove_peer(
+        conversation_id=chat.conversation_id,
+        peer_id=chat.peers["bob"][0],
+    )
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        assert await acks.summary(sess, conv) == (["me", "?"], {})
+
+    plain = await _Chat().create()
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, plain.conversation_id)
+        assert conv is not None
+        assert await acks.summary(sess, conv) == (None, {})

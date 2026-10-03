@@ -758,6 +758,10 @@ async def _action_info(args: _args.Info) -> int:
     Synthetic substream peers (whose names begin with the
     ``:substream:`` marker) are excluded from per-conversation peer
     counts so the output reflects only user-facing peers.
+
+    For a conversation that keeps rosters, ``roster`` is our own roster as
+    display names in order; it is null otherwise. ``acked`` maps each member
+    that has acknowledged our stream to the position it has reached.
     """
     with persistent._engine_sync.connect() as conn:
         ctx = MigrationContext.configure(conn)
@@ -778,11 +782,14 @@ async def _action_info(args: _args.Info) -> int:
                     persistent.ConversationLog.conversation_id == c.id
                 )
             )).one()
+            roster, acked = await acks.summary(sess, c)
             conv_summaries.append({
                 "id": c.id,
                 "name": c.name,
                 "peer_count": len(real_peers),
                 "messages": int(msg_count),
+                "roster": roster,
+                "acked": acked,
             })
 
         pwal_count = (await sess.exec(

@@ -268,6 +268,11 @@ async def serialize_with_acks(
         chunk_size=_CHUNK_SIZE, conversation_id=conv.id
     )
     if attached is not None:
+        logger.debug(
+            "acknowledging %d member(s) in conversation %d",
+            len(attached.levels),
+            conv.id,
+        )
         sess.add(
             persistent.OutgoingAcks(
                 pwal_id=db_entries[-1].id,
@@ -837,6 +842,32 @@ async def forget_member(
     await sess.flush()
 
 
+async def summary(
+    sess: "AsyncSession", conv: persistent.Conversation
+) -> "tuple[list[str] | None, dict[str, int]]":
+    """For inspection: our roster as display names in order, with "?" where
+    a member is no longer known, and how far each member has acknowledged
+    our stream. The roster is None for a conversation that keeps none."""
+    members = await _other_members(sess, conv)
+    acked = {
+        peer.name: persistent.position_int(peer.acked_position)
+        for peer, _ in members.values()
+        if peer.acked_position is not None
+    }
+    own = await enabled(sess, conv)
+    if own is None:
+        return None, acked
+    roster = rosters.roster_of(await load_group(sess, conv.id), own) or ()
+    own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
+    names = []
+    for key in roster:
+        if key == own:
+            names.append(own_peer.name if own_peer is not None else "?")
+        else:
+            names.append(members[key][0].name if key in members else "?")
+    return names, acked
+
+
 __all__ = [
     "adopt",
     "append_outbound_text",
@@ -854,5 +885,6 @@ __all__ = [
     "own_key",
     "serialize_with_acks",
     "settle",
+    "summary",
     "wait_for_outgoing",
 ]
