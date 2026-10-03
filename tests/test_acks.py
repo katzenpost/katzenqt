@@ -751,6 +751,27 @@ async def test_a_cancelled_message_leaves_a_later_acknowledgement_alone() -> (
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_message_owes_nothing_to_a_member_since_removed() -> (
+    None
+):
+    chat, _ = await _two_members(read_to=6)
+    upload = await acks.append_outbound_text(
+        conversation_id=chat.conversation_id,
+        conversation_peer_id=chat.own_peer_id,
+        gcm=models.GroupChatMessage(version=0, text="x" * 4000),
+    )
+    assert upload is not None
+    await removal.remove_peer(
+        conversation_id=chat.conversation_id, peer_id=chat.peers["bob"][0]
+    )
+
+    await network.cancel_upload(rcw_id=upload.rcw_id)
+
+    async with persistent.asession() as sess:
+        assert (await sess.exec(select(persistent.OutgoingAcks))).all() == []
+
+
+@pytest.mark.asyncio
 async def test_acknowledgements_left_by_a_dropped_message_are_cleared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
