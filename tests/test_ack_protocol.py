@@ -6,6 +6,8 @@ function or state-machine step over plain dataclasses.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from hypothesis import given, note, settings
 from hypothesis import strategies as st
@@ -509,3 +511,12 @@ def test_a_requested_scan_is_not_vacuously_satisfied_without_alice(
     )
     note(f"final scan={scan!r} next_index={next_index} received={received}")
     assert received == set()
+
+
+@pytest.mark.parametrize("state", list(ap.ScanState))
+def test_an_event_the_scan_does_not_know_is_refused(
+    state: ap.ScanState,
+) -> None:
+    unknown = cast("ap.ScanEvent", object())
+    with pytest.raises(TypeError, match="unhandled event"):
+        ap.step(ap.ReaderScan(state), unknown)

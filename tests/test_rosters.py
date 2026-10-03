@@ -424,3 +424,11 @@ def test_everyone_ends_up_numbering_everyone(
     everyone = set(world.clients)
     for client in world.clients.values():
         assert set(client.roster) == everyone
+
+
+def test_a_roster_is_handed_over_only_as_far_as_its_members_are_listed() -> (
+    None
+):
+    introducer = Group(bases={A: (A, B, C)}, seen={A: 0})
+    handed = rosters.hand_over(introducer, [A, B])
+    assert handed.rosters == [bytes([0, 1]), b""]
