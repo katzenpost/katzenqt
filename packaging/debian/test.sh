@@ -4,7 +4,7 @@ set -eu
 katzenqt-headless --help >/dev/null
 python3 -c "import pycrdt, katzenpost_thinclient"
 test -x /usr/bin/kpclientd
-test -f /etc/katzenpost/client.toml
+test -f /etc/katzenpost/kpclientd.toml
 test -f /usr/lib/systemd/user/kpclientd.service
 
 units="/etc/systemd/user /usr/lib/systemd/user /root/.config/systemd/user"

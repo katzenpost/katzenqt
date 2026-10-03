@@ -6,12 +6,13 @@ CI = ROOT / "packaging" / "debian" / "ci.sh"
 TEST_SH = ROOT / "packaging" / "debian" / "test.sh"
 
 
-def test_service_installed_as_user_unit_but_not_enabled() -> None:
+def test_the_daemon_and_its_unit_come_from_the_katzenpost_package() -> None:
+    control = (DEBIAN / "control").read_text()
     rules = (DEBIAN / "rules").read_text()
-    assert "usr/lib/systemd/user" in rules
-    assert "/usr/bin/kpclientd" in rules
-    assert "/etc/katzenpost/client.toml" in rules
-    assert "dh_installsystemduser --no-enable" in rules
+    assert "katzenpost," in control
+    assert "kpclientd," not in control
+    assert "systemd" not in rules
+    assert "kpclientd" not in rules
 
 
 def test_no_user_preset_ships() -> None:
@@ -25,6 +26,7 @@ def test_no_user_preset_ships() -> None:
     rules = (DEBIAN / "rules").read_text()
     assert "usr/lib/systemd/user-preset" not in rules
     assert "enable kpclientd.service" not in rules
+    assert not list(DEBIAN.glob("*.user-preset"))
 
 
 def test_postinst_prompts_only_when_interactive() -> None:

@@ -93,9 +93,10 @@ def test_ci_invokes_the_packaging_scripts() -> None:
     ci = CI.read_text()
     assert "packaging/debian/build.sh" in ci
     assert "packaging/container/pydeps-build.sh" in ci
-    assert "packaging/container/kpclientd-build.sh" in ci
+    assert "packaging/container/dep-deb.sh" in ci
     assert "python3-rustic-audio-tool" in ci
     assert ".wants/kpclientd.service" in TEST_SH.read_text()
+    assert not (ROOT / "packaging" / "debian" / "kpclientd").exists()
     assert "pip install" not in ci
 
 
