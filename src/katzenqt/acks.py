@@ -534,6 +534,40 @@ async def _accept(
     return True
 
 
+async def forget_outgoing(sess: "AsyncSession", pwal_id: uuid.UUID) -> None:
+    """The message ending in ``pwal_id`` will never be written, so neither
+    will its acknowledgements. Each is owed again on the next message,
+    unless a later one has since acknowledged further."""
+    queued = await sess.get(persistent.OutgoingAcks, pwal_id)
+    if queued is None:
+        return
+    await sess.delete(queued)
+    conv = await sess.get(persistent.Conversation, queued.conversation_id)
+    assert conv is not None
+    group = await load_group(sess, conv.id)
+    roster = rosters.roster_of(group, queued.acker_key) or ()
+    members = await _other_members(sess, conv)
+    for index, reached in cbor2.loads(queued.levels).items():
+        if index >= len(roster) or roster[index] not in members:
+            continue
+        _, rcw = members[roster[index]]
+        if (
+            rcw.acked_index is not None
+            and persistent.box_position(rcw.acked_index) == reached
+        ):
+            rcw.acked_index = None
+            sess.add(rcw)
+
+
+async def _abandoned(sess: "AsyncSession", pwal_id: uuid.UUID) -> bool:
+    """Whether the message ending in ``pwal_id`` was dropped unwritten: it
+    is neither queued nor sent. Asked in that order, since a message leaves
+    the queue in the transaction that records it as sent."""
+    if await sess.get(persistent.PlaintextWAL, pwal_id) is not None:
+        return False
+    return await sess.get(persistent.SentLog, pwal_id) is None
+
+
 async def wait_for_outgoing(
     conversation_id: int, *, deadline_s: float
 ) -> bool:
@@ -541,13 +575,20 @@ async def wait_for_outgoing(
     has been written. Until then our roster may still grow by them, and a
     reply to a new member cannot say where its roster index will be."""
     async with persistent.asession() as sess:
-        owed = (
+        queued = (
             await sess.exec(
                 select(persistent.OutgoingAcks.pwal_id).where(
                     persistent.OutgoingAcks.conversation_id == conversation_id
                 )
             )
         ).all()
+        owed = []
+        for pwal_id in queued:
+            if await _abandoned(sess, pwal_id):
+                await forget_outgoing(sess, pwal_id)
+            else:
+                owed.append(pwal_id)
+        await sess.commit()
     for pwal_id in owed:
         if not await persistent.wait_for_sent(pwal_id, deadline_s=deadline_s):
             return False
@@ -869,6 +910,7 @@ __all__ = [
     "enabled",
     "ensure_own_roster",
     "forget_member",
+    "forget_outgoing",
     "hand_over",
     "inducting",
     "introduced",

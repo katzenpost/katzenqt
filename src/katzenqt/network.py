@@ -2949,6 +2949,8 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
         ))).first()
         if convlog is not None:
             await sess.delete(convlog)
+        # What the message acknowledged goes unsent with it.
+        await acks.forget_outgoing(sess, i_chunk_id)
         await sess.delete(i_chunk_row)
         rcw_row = await sess.get(persistent.ReadCapWAL, rcw_id)
         if rcw_row is not None:

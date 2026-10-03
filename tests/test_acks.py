@@ -692,6 +692,116 @@ async def test_a_message_too_large_for_one_box_still_carries_them() -> None:
     assert gcm.acks is not None
 
 
+async def _never_sent(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
+    raise AssertionError(f"waited for {pwal_id}, which will never be sent")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_message_gives_its_acknowledgements_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat, _ = await _two_members(read_to=6)
+    upload = await acks.append_outbound_text(
+        conversation_id=chat.conversation_id,
+        conversation_peer_id=chat.own_peer_id,
+        gcm=models.GroupChatMessage(version=0, text="x" * 4000),
+    )
+    assert upload is not None
+    await network.cancel_upload(rcw_id=upload.rcw_id)
+
+    async with persistent.asession() as sess:
+        assert (await sess.exec(select(persistent.OutgoingAcks))).all() == []
+    monkeypatch.setattr(persistent, "wait_for_sent", _never_sent)
+    assert await acks.wait_for_outgoing(chat.conversation_id, deadline_s=1.0)
+
+    again = models.GroupChatMessage(version=0, text="hi")
+    await chat.queue(again)
+    assert again.acks is not None and list(ack_codec.decode(again.acks)) == [
+        1
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_message_leaves_a_later_acknowledgement_alone() -> (
+    None
+):
+    chat, _ = await _two_members(read_to=6)
+    upload = await acks.append_outbound_text(
+        conversation_id=chat.conversation_id,
+        conversation_peer_id=chat.own_peer_id,
+        gcm=models.GroupChatMessage(version=0, text="x" * 4000),
+    )
+    assert upload is not None
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, chat.peers["bob"][1])
+        assert rcw is not None
+        rcw.last_read_index = _index(8)
+        sess.add(rcw)
+        await sess.commit()
+    later = models.GroupChatMessage(version=0, text="read further")
+    await chat.queue(later)
+    assert later.acks is not None
+
+    await network.cancel_upload(rcw_id=upload.rcw_id)
+
+    again = models.GroupChatMessage(version=0, text="nothing new")
+    await chat.queue(again)
+    assert again.acks is None
+
+
+@pytest.mark.asyncio
+async def test_acknowledgements_left_by_a_dropped_message_are_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat, _ = await _two_members(read_to=6)
+    queued = await chat.queue(models.GroupChatMessage(version=0, text="hi"))
+    async with persistent.asession() as sess:
+        pwal = await sess.get(persistent.PlaintextWAL, queued)
+        assert pwal is not None
+        await sess.delete(pwal)
+        await sess.commit()
+
+    monkeypatch.setattr(persistent, "wait_for_sent", _never_sent)
+    assert await acks.wait_for_outgoing(chat.conversation_id, deadline_s=1.0)
+    async with persistent.asession() as sess:
+        assert (await sess.exec(select(persistent.OutgoingAcks))).all() == []
+
+    again = models.GroupChatMessage(version=0, text="hi")
+    await chat.queue(again)
+    assert again.acks is not None
+
+
+@pytest.mark.asyncio
+async def test_acknowledgements_of_a_message_already_sent_are_not_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat, _ = await _two_members(read_to=6)
+    queued = await chat.queue(models.GroupChatMessage(version=0, text="hi"))
+    async with persistent.asession() as sess:
+        pwal = await sess.get(persistent.PlaintextWAL, queued)
+        assert pwal is not None
+        await sess.delete(pwal)
+        sess.add(
+            persistent.SentLog(
+                id=queued, conversation_id=chat.conversation_id
+            )
+        )
+        await sess.commit()
+    asked: list[uuid.UUID] = []
+
+    async def sent(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
+        asked.append(pwal_id)
+        return True
+
+    monkeypatch.setattr(persistent, "wait_for_sent", sent)
+    assert await acks.wait_for_outgoing(chat.conversation_id, deadline_s=1.0)
+    assert asked == [queued]
+
+    again = models.GroupChatMessage(version=0, text="hi")
+    await chat.queue(again)
+    assert again.acks is None
+
+
 @pytest.mark.asyncio
 async def test_the_gui_path_queues_and_wakes_the_listeners() -> None:
     chat, _ = await _two_members(read_to=6)
