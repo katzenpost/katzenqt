@@ -16,7 +16,7 @@ from typing import NamedTuple
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import models, persistent
+from . import acks, models, persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
 from .tally import controller as tally_controller
 
@@ -42,9 +42,16 @@ async def dispatch(
     peer: persistent.ConversationPeer,
     gcm: models.GroupChatMessage,
     full_payload: bytes,
+    position: "int | None" = None,
 ) -> DispatchResult:
     """Handle ``gcm`` for ``peer``. See :class:`DispatchResult` for what each
-    field means."""
+    field means.
+
+    ``position`` is where the message sits on ``peer``'s own stream. When it
+    is known, what the message says about rosters (whom it acknowledges, whom
+    it introduces) is recorded before it is routed."""
+    if position is not None:
+        await acks.on_message(sess, peer, gcm, position)
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
 
@@ -176,6 +183,7 @@ __all__ = [
     "AsyncSession",
     "GroupChatPleaseAdd",
     "GroupChatTypeEnum",
+    "acks",
     "annotations",
     "dispatch",
     "logger",

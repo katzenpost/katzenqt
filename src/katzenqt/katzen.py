@@ -1857,34 +1857,21 @@ class MainWindow(QMainWindow):
 
         group_chat_message = GroupChatMessage(version=0, text=msg)
 
-        # TODO: this is general code that should live in a shared place:
-        send_op = SendOperation(
-            bacap_stream=convo_state.own_peer_bacap_uuid,
-            messages=[group_chat_message]
-        )
-        # TODO this code is duplicated in self.send_file
-        new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
-            conversation_id=convo_state.conversation_id)
-
         # conversation_order is a count subquery evaluated at commit. The
         # receive/voucher paths append on the io loop; the send path funnels
         # its append through the same single writer loop (via run_in_io) under
         # the per-conversation lock, so two transactions can never stamp the
         # same order and trip the unique constraint.
         #
-        # One run_in_io hop, not three: append, the queue-put that wakes
-        # receive_msg_listener, and check_for_new all happen inside the same
-        # io-loop coroutine instead of three separate cross-thread round trips.
+        # The message is serialized on the io loop too: its pending
+        # acknowledgements are attached and recorded in the transaction that
+        # queues it. One run_in_io hop covers that, the queue-put that wakes
+        # receive_msg_listener, and check_for_new.
         await self.iothread.run_in_io(
-            network.notify_outbound_chat_sent(
+            network.notify_outbound_text_sent(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
-                new_write_caps=new_write_caps,
-                db_entries=db_entries,
-                payload=b"F" + group_chat_message.to_cbor(),
-                # TODO massive hack here because we don't reassemble sendops yet
-                final_pwal_id=db_entries[-1].id,
+                gcm=group_chat_message,
             )
         )
 

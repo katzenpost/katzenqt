@@ -1965,7 +1965,7 @@ class TestDrainMixwalReadSingle:
         # Monkeypatch conversation_handlers.dispatch to raise an exception.
         # This simulates a processing error (e.g., CBOR decode failure, CRDT
         # error) that gets caught by the generic exception handler.
-        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes) -> None:
+        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes, position: "int | None" = None) -> None:
             raise ValueError("malformed chunk data")
         
         monkeypatch.setattr(conversation_handlers, "dispatch", failing_dispatch)
@@ -2007,7 +2007,7 @@ class TestDrainMixwalReadSingle:
             plaintext=_make_F_payload("test"),  # F-chunk triggers dispatch
         )
         
-        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes) -> None:
+        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes, position: "int | None" = None) -> None:
             raise ValueError("bad data")
         
         monkeypatch.setattr(conversation_handlers, "dispatch", failing_dispatch)

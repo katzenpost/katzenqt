@@ -15,20 +15,18 @@ import uuid
 
 from typing import TYPE_CHECKING
 
-from .. import models, persistent
+from .. import acks, models, persistent
 
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
-_CHUNK_SIZE = 1530
-
 
 async def stage_outbound(sess: "AsyncSession", conversation: "persistent.Conversation", gcm: "models.GroupChatMessage") -> uuid.UUID:
-    """Serialise ``gcm`` and stage its rows in ``sess``. Returns the id of the
-    final PlaintextWAL, which lands in SentLog once the message has cleared."""
-    send_op = models.SendOperation(bacap_stream=conversation.write_cap, messages=[gcm])
-    new_write_caps, db_entries = await send_op.serialize_async(
-        chunk_size=_CHUNK_SIZE, conversation_id=conversation.id,
+    """Serialise ``gcm``, with whatever acknowledgements are pending, and
+    stage its rows in ``sess``. Returns the id of the final PlaintextWAL,
+    which lands in SentLog once the message has cleared."""
+    new_write_caps, db_entries = await acks.serialize_with_acks(
+        sess, conversation, gcm,
     )
     for cap_uuid in new_write_caps:
         sess.add(persistent.WriteCapWAL(id=cap_uuid))

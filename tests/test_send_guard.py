@@ -117,9 +117,8 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     async def notify_outbound_chat_sent(**kwargs: object) -> None:
         sent.append(kwargs)
 
-    monkeypatch.setattr(
-        katzen.network, "notify_outbound_chat_sent", notify_outbound_chat_sent,
-    )
+    for name in ("notify_outbound_chat_sent", "notify_outbound_text_sent"):
+        monkeypatch.setattr(katzen.network, name, notify_outbound_chat_sent)
     return sent
 
 

@@ -102,7 +102,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import _args
 from .. import epochs
-from .. import models, network, persistent, removal
+from .. import acks, models, network, persistent, removal
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
 from ..tally import schema as tally_schema
@@ -337,25 +337,19 @@ async def _send_one_gcm(
         if convo is None:
             logger.error("conversation %r not found", conv_name)
             return 2
-        conversation_id = convo.id
         # Outgoing writes for this conversation go on the write-cap's
         # bacap_stream (i.e., the WriteCapWAL primary key). find_resendable
         # requires the PWAL's bacap_stream to match a fully-provisioned
         # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
-        own_bacap_stream = convo.write_cap
-
-    send_op = models.SendOperation(
-        bacap_stream=own_bacap_stream, messages=[gcm],
-    )
-    new_write_caps, db_entries = await send_op.serialize_async(
-        chunk_size=1530, conversation_id=conversation_id,
-    )
-    final_pwal_id = db_entries[-1].id
-    num_pwals = sum(
-        1 for e in db_entries if isinstance(e, persistent.PlaintextWAL)
-    )
-
-    async with persistent.asession() as sess:
+        # The message's pending acknowledgements are attached and recorded
+        # in the same transaction that queues it.
+        new_write_caps, db_entries = await acks.serialize_with_acks(
+            sess, convo, gcm,
+        )
+        final_pwal_id = db_entries[-1].id
+        num_pwals = sum(
+            1 for e in db_entries if isinstance(e, persistent.PlaintextWAL)
+        )
         for cap_uuid in new_write_caps:
             sess.add(persistent.WriteCapWAL(id=cap_uuid))
         for obj in db_entries:
@@ -383,6 +377,27 @@ async def _send_one_gcm(
         return 3
     finally:
         await _shutdown(bg, connection)
+
+
+async def _queue_text(
+    conversation_id: int, gcm: models.GroupChatMessage,
+) -> uuid.UUID:
+    """Queue ``gcm`` on the conversation's own stream, with whatever
+    acknowledgements are pending, in one transaction. Returns the id of the
+    final PlaintextWAL, which lands in SentLog once the message has cleared."""
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conversation_id)
+        assert convo is not None
+        new_write_caps, db_entries = await acks.serialize_with_acks(
+            sess, convo, gcm,
+        )
+        final_pwal_id = db_entries[-1].id
+        for cap_uuid in new_write_caps:
+            sess.add(persistent.WriteCapWAL(id=cap_uuid))
+        for obj in db_entries:
+            sess.add(obj)
+        await sess.commit()
+        return final_pwal_id
 
 
 async def _action_send(args: _args.Send) -> int:
@@ -495,23 +510,12 @@ async def _action_multi_send(args: _args.MultiSend) -> int:
             logger.error("conversation %r not found", args.conv_name)
             return 2
         conversation_id = convo.id
-        own_bacap_stream = convo.write_cap
 
     texts = args.texts.split("|")
     final_pwal_ids: "list[uuid.UUID]" = []
     for text in texts:
         gcm = models.GroupChatMessage(version=0, text=text)
-        send_op = models.SendOperation(
-            bacap_stream=own_bacap_stream, messages=[gcm],
-        )
-        _, db_entries = await send_op.serialize_async(
-            chunk_size=1530, conversation_id=conversation_id,
-        )
-        final_pwal_ids.append(db_entries[-1].id)
-        async with persistent.asession() as sess:
-            for obj in db_entries:
-                sess.add(obj)
-            await sess.commit()
+        final_pwal_ids.append(await _queue_text(conversation_id, gcm))
 
     connection, bg = await _connect_and_start()
     try:
@@ -592,7 +596,6 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
             return 2
         own_peer_id = convo.own_peer_id
         conversation_id = convo.id
-        own_bacap_stream = convo.write_cap
 
     connection, bg = await _connect_and_start()
     try:
@@ -604,17 +607,7 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
             kind, _, payload = raw.partition(":")
             if kind == "SEND":
                 gcm = models.GroupChatMessage(version=0, text=payload)
-                send_op = models.SendOperation(
-                    bacap_stream=own_bacap_stream, messages=[gcm],
-                )
-                _, db_entries = await send_op.serialize_async(
-                    chunk_size=1530, conversation_id=conversation_id,
-                )
-                final_pwal_id = db_entries[-1].id
-                async with persistent.asession() as sess:
-                    for obj in db_entries:
-                        sess.add(obj)
-                    await sess.commit()
+                final_pwal_id = await _queue_text(conversation_id, gcm)
                 # Marker for the reconnect integration test: the write is now
                 # committed to MixWAL but has not yet been handed to the
                 # drain, so a subprocess killed on this token is killed with

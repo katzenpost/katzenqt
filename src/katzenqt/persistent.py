@@ -1,4 +1,6 @@
 import asyncio
+import time
+import cbor2
 import sqlalchemy as sa
 from sqlalchemy.orm import declarative_base
 #from pydantic import BaseModel, ConfigDict, Field
@@ -841,6 +843,52 @@ def _ensure_sent_log_and_flip_status(
     return conversation_id
 
 
+def _record_sent_box(
+    sess: "Session", box_index: bytes, pwal: "PlaintextWAL",
+) -> None:
+    """Note a box just written to a conversation's own stream, and what the
+    message it ends does to our roster now that its position is known: an
+    ``Introduction`` of ours gets its position, and the acknowledgements it
+    carried become ``AckLevel`` rows of our own. Shared by both mark_sent
+    finalize paths; safe to run twice for the same box."""
+    conv = sess.get(Conversation, pwal.conversation_id)
+    if conv is None or conv.write_cap != pwal.bacap_stream:
+        return
+    position = position_bytes(box_position(box_index))
+    if sess.exec(select(SentBox).where(
+        SentBox.bacap_stream == pwal.bacap_stream,
+        SentBox.box_index == box_index,
+    )).first() is None:
+        sess.add(SentBox(
+            conversation_id=conv.id, bacap_stream=pwal.bacap_stream,
+            box_index=box_index, position=position, written_at=time.time(),
+        ))
+    for intro in sess.exec(select(IntroductionSeen).where(
+        IntroductionSeen.pending_pwal == pwal.id,
+    )).all():
+        intro.position = position
+        intro.pending_pwal = None
+        sess.add(intro)
+    own_key = None
+    if queued := sess.get(OutgoingAcks, pwal.id):
+        own_key = queued.acker_key
+        for roster_index, reached in cbor2.loads(queued.levels).items():
+            sess.merge(AckLevel(
+                conversation_id=conv.id, acker_key=own_key, position=position,
+                roster_index=roster_index, reached=position_bytes(reached),
+            ))
+        sess.delete(queued)
+    if own_key is None:
+        wcw = sess.get(WriteCapWAL, conv.write_cap)
+        if wcw is not None and wcw.write_cap is not None:
+            own_key = wcw.write_cap[32:64]
+    if own_key is not None:
+        own = sess.get(RosterMember, (conv.id, own_key))
+        if own is not None and position_int(position) > position_int(own.seen):
+            own.seen = position
+            sess.add(own)
+
+
 def _finalize_stale_ack(
     mw_id: uuid.UUID, plaintextwal_id: uuid.UUID,
 ) -> "int | None":
@@ -854,12 +902,14 @@ def _finalize_stale_ack(
     conversation_id = None
     with Session(_engine_sync) as sess:
         stale_mw = sess.get(MixWAL, mw_id)
-        if stale_mw is not None:
-            sess.delete(stale_mw)
         pwal = sess.get(PlaintextWAL, plaintextwal_id)
         if pwal is not None:
             conversation_id = _ensure_sent_log_and_flip_status(sess, pwal)
+            if stale_mw is not None:
+                _record_sent_box(sess, stale_mw.current_message_index, pwal)
             sess.delete(pwal)
+        if stale_mw is not None:
+            sess.delete(stale_mw)
         sess.commit()
     return conversation_id
 
@@ -903,6 +953,7 @@ def _mark_sent_txn(mw_id: uuid.UUID, bacap_stream: uuid.UUID,
         if bacap_stream != pwal.bacap_stream:
             logger.error("mw.bacap_stream doesn't match pwal.bacap_stream")
         if mw_row := sess.get(MixWAL, mw_id):
+            _record_sent_box(sess, mw_row.current_message_index, pwal)
             sess.delete(mw_row)
         sess.delete(pwal)
         # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
@@ -1315,6 +1366,17 @@ class AckLevel(SQLModel, table=True):
     value: bytes | None = Field(default=None, min_length=104, max_length=104)
 
 
+class OutgoingAcks(SQLModel, table=True):
+    """The acknowledgements a queued message of ours carries. Our own roster
+    grows by them only once that message is written, at the position it is
+    written at, so they wait here until then and become ``AckLevel`` rows of
+    our own. ``levels`` is a CBOR map of roster index to position reached."""
+    pwal_id: uuid.UUID = Field(primary_key=True)
+    conversation_id: int = Field(foreign_key="conversation.id", index=True)
+    acker_key: bytes
+    levels: bytes
+
+
 class TallyState(SQLModel, table=True):
     """The convergent state of one tally survey, as a single CRDT blob.
 
@@ -1342,6 +1404,7 @@ __all__ = [
     "Lock",
     "IntroductionSeen",
     "MixWAL",
+    "OutgoingAcks",
     "NAMING_CONVENTION",
     "NamedTuple",
     "OutboundUpload",
