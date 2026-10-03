@@ -17,7 +17,7 @@ async def _peer_names() -> "list[str]":
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_action_deletes_the_named_member():
+async def test_remove_peer_action_deletes_the_named_member() -> None:
     await _make_conversation("room")
 
     code = await _actions._action_remove_peer(
@@ -34,7 +34,9 @@ async def test_remove_peer_action_deletes_the_named_member():
 @pytest.mark.parametrize(
     "conv,peer", [("room", "nobody"), ("room", "me"), ("ghost", "alice")]
 )
-async def test_remove_peer_action_refuses_and_changes_nothing(conv, peer):
+async def test_remove_peer_action_refuses_and_changes_nothing(
+    conv: str, peer: str,
+) -> None:
     await _make_conversation("room")
 
     code = await _actions._action_remove_peer(
@@ -48,7 +50,7 @@ async def test_remove_peer_action_refuses_and_changes_nothing(conv, peer):
 
 
 @pytest.mark.asyncio
-async def test_remove_conv_action_deletes_only_that_conversation():
+async def test_remove_conv_action_deletes_only_that_conversation() -> None:
     await _make_conversation("gone")
     await _make_conversation("kept")
 
@@ -66,7 +68,7 @@ async def test_remove_conv_action_deletes_only_that_conversation():
 
 
 @pytest.mark.asyncio
-async def test_remove_conv_action_unknown_name():
+async def test_remove_conv_action_unknown_name() -> None:
     code = await _actions._action_remove_conv(
         _args.RemoveConv(action="remove-conv", conv_name="ghost"),
     )

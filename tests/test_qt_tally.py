@@ -18,7 +18,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QModelIndex, Qt  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QModelIndex, Qt  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
@@ -42,7 +42,7 @@ OWN_CAP = bytes([0x01]) * 136
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _qt_app() -> Iterator[QApplication]:
+def _qt_app() -> Iterator[QCoreApplication]:
     app = QApplication.instance() or QApplication([])
     yield app
 
@@ -92,7 +92,9 @@ def _seed_chat(convo_id: int, peer_id: int, text: str) -> None:
         sess.commit()
 
 
-def _seed_tally_row(convo_id: int, peer_id: int, gcm) -> None:
+def _seed_tally_row(
+    convo_id: int, peer_id: int, gcm: models.GroupChatMessage,
+) -> None:
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.ConversationLog(
             conversation_id=convo_id, conversation_peer_id=peer_id,
@@ -111,7 +113,7 @@ def _seed_survey(
     slots: "tuple[str, ...]" = ("chicken", "pasta"),
     creator_voter_id: "bytes | None" = None,
     votes: "list[tuple[bytes, dict[str, str]]] | None" = None,
-):
+) -> schema.SurveyDoc:
     doc = schema.new_survey_doc(
         survey_id, topic, mode, slots,
         creator=creator_voter_id or voter_id_from_read_cap(OWN_CAP),
@@ -132,7 +134,7 @@ def _seed_survey(
 # ---------------------------------------------------------------------------
 
 
-def test_create_row_renders_as_a_poll_line():
+def test_create_row_renders_as_a_poll_line() -> None:
     convo_id, peer_id = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     doc = _seed_survey(convo_id, survey_id)
@@ -147,7 +149,7 @@ def test_create_row_renders_as_a_poll_line():
     assert m.data(idx, 0) == "me created [Poll] lunch? — open · no votes yet"
 
 
-def test_vote_row_names_the_sender_and_lists_selections():
+def test_vote_row_names_the_sender_and_lists_selections() -> None:
     convo_id, peer_id = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id)
@@ -163,7 +165,7 @@ def test_vote_row_names_the_sender_and_lists_selections():
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "vote"
 
 
-def test_recast_row_says_changed_vote():
+def test_recast_row_says_changed_vote() -> None:
     convo_id, peer_id = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id)
@@ -173,11 +175,13 @@ def test_recast_row_says_changed_vote():
     )
     m = ConversationLogModel(convo_id)
     m.set_row_count()
-    assert "changed vote in" in m.data(m.index(0, 0, QModelIndex()), 0)
+    row_text = m.data(m.index(0, 0, QModelIndex()), 0)
+    assert isinstance(row_text, str)
+    assert "changed vote in" in row_text
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "recast"
 
 
-def test_vote_for_an_unknown_survey_renders_invalid():
+def test_vote_for_an_unknown_survey_renders_invalid() -> None:
     convo_id, peer_id = _make_convo_sync()
     survey_id = uuid.uuid4().bytes  # no survey seeded
     _seed_tally_row(convo_id, peer_id, events.build_vote(survey_id, {"s0": "yes"}))
@@ -188,7 +192,7 @@ def test_vote_for_an_unknown_survey_renders_invalid():
     assert m.data(m.index(0, 0, QModelIndex()), ROLE_CHAT_TALLY_KIND) == "invalid"
 
 
-def test_unknown_vote_row_rewrites_when_the_survey_arrives():
+def test_unknown_vote_row_rewrites_when_the_survey_arrives() -> None:
     """An early vote for a not-yet-seen survey renders as "unknown poll"; once
     the survey arrives, a tally-event refresh must re-project the row."""
     convo_id, peer_id = _make_convo_sync()
@@ -198,11 +202,14 @@ def test_unknown_vote_row_rewrites_when_the_survey_arrives():
     m = ConversationLogModel(convo_id)
     m.set_row_count()
     idx = m.index(0, 0, QModelIndex())
-    assert "vote for unknown poll" in m.data(idx, 0)
+    unknown_text = m.data(idx, 0)
+    assert isinstance(unknown_text, str)
+    assert "vote for unknown poll" in unknown_text
 
     _seed_survey(convo_id, survey_id, topic="lunch?")
     m.refresh_tally_rows()
     text = m.data(idx, 0)
+    assert isinstance(text, str)
     assert "vote for unknown poll" not in text
     assert 'voted on "[Poll] lunch?"' in text
     assert m.data(idx, ROLE_CHAT_TALLY_KIND) == "vote"
@@ -213,7 +220,7 @@ def test_unknown_vote_row_rewrites_when_the_survey_arrives():
 # ---------------------------------------------------------------------------
 
 
-def test_panel_renders_a_survey_and_remembers_it_as_current():
+def test_panel_renders_a_survey_and_remembers_it_as_current() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id, topic="dinner?", slots=("tacos", "sushi"))
@@ -232,7 +239,7 @@ def test_panel_renders_a_survey_and_remembers_it_as_current():
     assert panel.current_survey() == (convo_id, survey_id)
 
 
-def test_panel_cycles_slots_and_submits_its_selection():
+def test_panel_cycles_slots_and_submits_its_selection() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id)
@@ -243,7 +250,7 @@ def test_panel_cycles_slots_and_submits_its_selection():
     assert panel.selection == {}
     assert panel._vote_button.isEnabled() is False
 
-    fired: "list[dict]" = []
+    fired: "list[dict[str, str]]" = []
     panel.voteSubmitted.connect(fired.append)
 
     assert panel._slot_buttons["s0"].text() == "–"
@@ -267,7 +274,7 @@ def test_panel_cycles_slots_and_submits_its_selection():
     assert panel._vote_button.isEnabled() is False  # submitted == current
 
 
-def test_panel_grid_lists_other_voters_choices():
+def test_panel_grid_lists_other_voters_choices() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(
@@ -283,7 +290,7 @@ def test_panel_grid_lists_other_voters_choices():
     assert {"yes", "no"} <= texts  # alice's ballot is rendered read-only
 
 
-def test_panel_grid_sizes_columns_and_aligns_names():
+def test_panel_grid_sizes_columns_and_aligns_names() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id, slots=("tacos", "sushi"))
@@ -301,12 +308,12 @@ def test_panel_grid_sizes_columns_and_aligns_names():
         if label.text() in ("Voter", "me")
     ]
     assert name_labels
-    assert all(label.alignment() & Qt.AlignRight for label in name_labels)
+    assert all(label.alignment() & Qt.AlignmentFlag.AlignRight for label in name_labels)
     # The local user has not voted: no Edit button until they do.
     assert panel._edit_button.isHidden() is True
 
 
-def test_panel_grid_scrolls_instead_of_clipping():
+def test_panel_grid_scrolls_instead_of_clipping() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id, slots=("tacos", "sushi"))
@@ -326,7 +333,7 @@ def test_panel_grid_scrolls_instead_of_clipping():
         assert panel.maximumWidth() <= screen.availableGeometry().width()
 
 
-def test_panel_edit_vote_grows_the_window_to_fit():
+def test_panel_edit_vote_grows_the_window_to_fit() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(
@@ -357,7 +364,7 @@ def test_panel_edit_vote_grows_the_window_to_fit():
     assert after != before
 
 
-def test_panel_first_vote_grows_the_window_for_wider_values():
+def test_panel_first_vote_grows_the_window_for_wider_values() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(
@@ -391,7 +398,7 @@ def test_panel_first_vote_grows_the_window_for_wider_values():
     assert after != before
 
 
-def test_panel_voted_local_row_edits_and_resends():
+def test_panel_voted_local_row_edits_and_resends() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(
@@ -417,7 +424,7 @@ def test_panel_voted_local_row_edits_and_resends():
     assert panel.selection == {"s0": "yes", "s1": "yes"}
     assert panel._vote_button.isEnabled() is True  # edit re-activates Send
 
-    fired: "list[dict]" = []
+    fired: "list[dict[str, str]]" = []
     panel.voteSubmitted.connect(fired.append)
     panel._vote_button.click()
     assert fired == [{"s0": "yes", "s1": "yes"}]
@@ -426,7 +433,7 @@ def test_panel_voted_local_row_edits_and_resends():
     assert panel._edit_button.isHidden() is False
 
 
-def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
+def test_panel_close_button_only_for_the_creator_and_emits_close_requested() -> None:
     convo_id, _ = _make_convo_sync()
     mine = uuid.uuid4().bytes
     alice = uuid.uuid4().bytes
@@ -449,7 +456,7 @@ def test_panel_close_button_only_for_the_creator_and_emits_close_requested():
     assert fired == [True]
 
 
-def test_panel_window_title_names_the_conversation_and_topic():
+def test_panel_window_title_names_the_conversation_and_topic() -> None:
     convo_id, _ = _make_convo_sync("lobby")
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id, topic="dinner?")
@@ -464,7 +471,7 @@ def test_panel_window_title_names_the_conversation_and_topic():
     assert panel.windowTitle() == "lobby — Poll"
 
 
-def test_panel_clear_drops_the_current_survey():
+def test_panel_clear_drops_the_current_survey() -> None:
     convo_id, _ = _make_convo_sync()
     survey_id = uuid.uuid4().bytes
     _seed_survey(convo_id, survey_id)
@@ -484,7 +491,7 @@ def test_panel_clear_drops_the_current_survey():
 # ---------------------------------------------------------------------------
 
 
-def test_create_dialog_gathers_topic_slots_and_mode():
+def test_create_dialog_gathers_topic_slots_and_mode() -> None:
     from PySide6.QtWidgets import QDialogButtonBox
 
     dialog = TallyCreateDialog()
@@ -509,7 +516,7 @@ def test_create_dialog_gathers_topic_slots_and_mode():
     assert dialog.mode() is Mode.APPROVAL
 
 
-def test_create_dialog_removes_and_reorders_custom_slots():
+def test_create_dialog_removes_and_reorders_custom_slots() -> None:
     dialog = TallyCreateDialog()
     for text in ("a", "b", "c"):
         dialog._slot_input.setText(text)

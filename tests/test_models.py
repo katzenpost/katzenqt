@@ -8,8 +8,7 @@ from hypothesis import example, given
 
 from katzenqt import models, persistent
 
-test_please_add_deserialize = given(st.text(), st.binary())
-@test_please_add_deserialize
+@given(st.text(), st.binary())
 @example(
     # The test always failed when commented parts were varied together.
     orig_display_name="",  # or any other generated value
@@ -20,7 +19,9 @@ test_please_add_deserialize = given(st.text(), st.binary())
     orig_display_name="hello",  # or any other generated value
     orig_read_cap=b"a"*136,  # or any other generated value
 ).via("discovered failure")
-def test_please_add_deserialize(orig_display_name, orig_read_cap):
+def test_please_add_deserialize(
+    orig_display_name: str, orig_read_cap: bytes,
+) -> None:
     try:
         gcpa = models.GroupChatPleaseAdd(display_name=orig_display_name, read_cap=orig_read_cap)
     except pydantic.ValidationError as v:
@@ -32,7 +33,7 @@ def test_please_add_deserialize(orig_display_name, orig_read_cap):
     assert orig_display_name == gcpa2.display_name
     assert orig_read_cap == gcpa2.read_cap
 
-def test_please_add_deserialize_ex1():
+def test_please_add_deserialize_ex1() -> None:
     ser1 = "omxkaXNwbGF5X25hbWVjYWJjaHJlYWRfY2FwWIgUrpdmcpaGg7MltRYuCXL+wHekem4erUxfaO4A7PQ6cRZnTCtmr+yGm+nc3IYtYumbLzEh7NBuOXPHPeC3EN7sT8m4mfsP+q+eP6vZGNOi7iOLjqAKrY2L5VsNswy4VtT/ssUQGZW/TIBQM+aok/600tjRX1PeqCjVDGDlg6s0agRjj6JXOscT"
     gcpa2 = models.GroupChatPleaseAdd.from_human_readable(ser1)
     assert gcpa2.display_name == "abc"
@@ -45,17 +46,14 @@ def test_please_add_deserialize_ex1():
         b'\xd2\xd8\xd1_S\xde\xa8(\xd5\x0c`\xe5\x83\xab4j\x04c\x8f\xa2W:\xc7\x13')
 
 
-def test_send_operation_empty():
+def test_send_operation_empty() -> None:
     bacap_stream = uuid.uuid4()
     s = models.SendOperation(messages=[],bacap_stream=bacap_stream)
     res = s.serialize(chunk_size=1400, conversation_id=123)
-    assert res is not None
-    assert type(res) is tuple
-    assert res != []
+    assert res == ([], [])
 
-test_send_operation_preserves_1 = given(st.integers(min_value=2), st.text())
-@test_send_operation_preserves_1
-def test_send_operation_preserves_1(chunk_size, text):
+@given(st.integers(min_value=2), st.text())
+def test_send_operation_preserves_1(chunk_size: int, text: str) -> None:
     """Test that SendOperation chunking preserves the CBOR encoding of the input."""
     m = models.GroupChatMessage(version=0,membership_hash=b'a'*32, text=text)
     bacap_stream = uuid.uuid4()
@@ -88,11 +86,13 @@ def test_send_operation_preserves_1(chunk_size, text):
         assert isinstance(ser[0], persistent.PlaintextWAL)
         assert ser[0].bacap_payload[0:1] == b"F"  # final
         recon += ser[0].bacap_payload[1:]
-        assert ser[-1].bacap_stream == bacap_stream
+        last = ser[-1]
+        assert isinstance(last, persistent.PlaintextWAL)
+        assert last.bacap_stream == bacap_stream
     assert recon == m.to_cbor()
 
 
-def test_serialize_assigns_non_null_id_to_every_pwal():
+def test_serialize_assigns_non_null_id_to_every_pwal() -> None:
     """Every PlaintextWAL emitted by serialize, including the indirection
     release on a multi-box send, must carry a fresh primary-key UUID
     before commit. The runner captures ``db_entries[-1].id`` to know
@@ -120,7 +120,7 @@ def test_serialize_assigns_non_null_id_to_every_pwal():
     assert len(set(ids)) == len(ids), f"duplicate PWAL ids: {ids}"
 
 
-def test_serialize_sets_substream_total_chunks_on_multi_chunk():
+def test_serialize_sets_substream_total_chunks_on_multi_chunk() -> None:
     """A multi-box send's indirection ReadCapWAL carries the
     total plaintext chunk count (C-chunks + final F) so the Transfers panel
     can render progress as n/total over the substream's ReceivedPiece rows."""
@@ -140,14 +140,14 @@ def test_serialize_sets_substream_total_chunks_on_multi_chunk():
     assert rcws[0].substream_total_chunks == c_count + 1
 
 
-def test_clamp_message_text_leaves_normal_messages_untouched():
+def test_clamp_message_text_leaves_normal_messages_untouched() -> None:
     msg = "a normal chat message"
     assert models.clamp_message_text(msg) == msg
     exact = "x" * models.MAX_MESSAGE_CHARS
     assert models.clamp_message_text(exact) == exact
 
 
-def test_clamp_message_text_truncates_oversized_and_marks_it():
+def test_clamp_message_text_truncates_oversized_and_marks_it() -> None:
     oversized = "y" * (models.MAX_MESSAGE_CHARS + 5000)
     clamped = models.clamp_message_text(oversized)
     assert len(clamped) == models.MAX_MESSAGE_CHARS + len(models._TEXT_TRUNCATION_MARKER)
@@ -155,7 +155,7 @@ def test_clamp_message_text_truncates_oversized_and_marks_it():
     assert clamped.endswith(models._TEXT_TRUNCATION_MARKER)
 
 
-def test_clamp_message_text_is_idempotent():
+def test_clamp_message_text_is_idempotent() -> None:
     oversized = "z" * (models.MAX_MESSAGE_CHARS * 3)
     once = models.clamp_message_text(oversized)
     twice = models.clamp_message_text(once)
@@ -163,7 +163,7 @@ def test_clamp_message_text_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_serialize_async_matches_serialize():
+async def test_serialize_async_matches_serialize() -> None:
     """The off-loop wrapper produces the same chunking as the sync method."""
     m = models.GroupChatMessage(version=0, membership_hash=b"a" * 32, text="hello world")
     s = models.SendOperation(messages=[m], bacap_stream=uuid.uuid4())
@@ -173,13 +173,17 @@ async def test_serialize_async_matches_serialize():
         chunk_size=1530, conversation_id=7,
     )
 
+    def payload_of(row: models.SerializedRow) -> bytes:
+        assert isinstance(row, persistent.PlaintextWAL)
+        return row.bacap_payload
+
     assert len(async_caps) == len(sync_caps)
-    assert [r.bacap_payload for r in async_rows] == [
-        r.bacap_payload for r in sync_rows
+    assert [payload_of(r) for r in async_rows] == [
+        payload_of(r) for r in sync_rows
     ]
 
 
 @pytest.mark.asyncio
-async def test_serialize_async_empty_message_list():
+async def test_serialize_async_empty_message_list() -> None:
     s = models.SendOperation(messages=[], bacap_stream=uuid.uuid4())
     assert await s.serialize_async(chunk_size=1530, conversation_id=1) == ([], [])

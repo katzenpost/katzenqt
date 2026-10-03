@@ -7,7 +7,7 @@ from katzenqt.katzen_util import create_task
 
 
 @pytest.mark.asyncio
-async def test_create_task_logs_failure_without_noising_the_event_loop(caplog):
+async def test_create_task_logs_failure_without_noising_the_event_loop(caplog: pytest.LogCaptureFixture) -> None:
     # The done callback must NOT re-raise the task's exception: a callback
     # raise only surfaces as a spurious asyncio "Exception in callback"
     # traceback (seen on transient kpclientd link drops during a bounce).
@@ -19,7 +19,7 @@ async def test_create_task_logs_failure_without_noising_the_event_loop(caplog):
     prev_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda l, c: handler_calls.append(c))
     try:
-        async def boom():
+        async def boom() -> None:
             raise RuntimeError("nope")
 
         with caplog.at_level(logging.ERROR, logger="katzen.util"):
@@ -38,8 +38,8 @@ async def test_create_task_logs_failure_without_noising_the_event_loop(caplog):
 
 
 @pytest.mark.asyncio
-async def test_create_task_cancellation_is_not_an_error(caplog):
-    async def sleeps_forever():
+async def test_create_task_cancellation_is_not_an_error(caplog: pytest.LogCaptureFixture) -> None:
+    async def sleeps_forever() -> None:
         await asyncio.Event().wait()
 
     with caplog.at_level(logging.ERROR, logger="katzen.util"):

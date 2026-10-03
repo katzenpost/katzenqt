@@ -43,7 +43,7 @@ _HELPER = Path(__file__).with_name("_helper.py")
     "a430f7202849",  # ReceivedPiece introduced
     "93eef61c3c54",  # 64-bit-integer remediation; one before AppSetting
 ])
-def test_upgrade_from_revision_reaches_head(revision, tmp_path):
+def test_upgrade_from_revision_reaches_head(revision, tmp_path: Path) -> None:
     """Each historical revision must upgrade to head and leave every
     table the SQLModel metadata defines present and named.
 
@@ -92,7 +92,7 @@ def test_upgrade_from_revision_reaches_head(revision, tmp_path):
     )
 
 
-def test_helper_module_exists():
+def test_helper_module_exists() -> None:
     """The subprocess helper must remain present alongside this
     test file; a renamed or missing helper turns every parametrised
     case into a silent skip if the test ever swallows the missing-file

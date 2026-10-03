@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Coroutine, Iterator
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 
 from katzenqt import katzen
+
+_T = TypeVar("_T")
 
 
 class _StubMsgBox:
@@ -35,16 +39,16 @@ class _StubMsgBox:
         Yes = 0x4000
         No = 0x10000
 
-    def __init__(self, *a, **k):
+    def __init__(self, *a: object, **k: object) -> None:
         pass
 
-    def setStandardButtons(self, *a):
+    def setStandardButtons(self, *a: object) -> None:
         pass
 
-    def setDefaultButton(self, *a):
+    def setDefaultButton(self, *a: object) -> None:
         pass
 
-    def standardButton(self, *a):
+    def standardButton(self, *a: object) -> None:
         raise AssertionError(
             "standardButton() maps a button widget, not a result code"
         )
@@ -53,7 +57,7 @@ class _StubMsgBox:
 class _Loop:
     """Stand-in for the io thread: runs the queued coroutine on this loop."""
 
-    async def run_in_io(self, fn):
+    async def run_in_io(self, fn: Coroutine[object, object, _T]) -> _T:
         if not asyncio.iscoroutine(fn):
             raise TypeError("A coroutine object is required")
         return await fn
@@ -67,41 +71,43 @@ def _fake_window() -> SimpleNamespace:
     return SimpleNamespace(convo_state=lambda: _Convo(), iothread=_Loop())
 
 
-def _install_stubs(monkeypatch, dialog_results):
+def _install_stubs(
+    monkeypatch: pytest.MonkeyPatch, dialog_results: Iterator[int],
+) -> tuple[list[uuid.UUID], list[tuple[tuple[object, ...], dict[str, object]]]]:
     """Stub the Qt dialog surface and the voucher helpers.
 
     ``dialog_results`` is an iterator of the values successive
     ``_dialog_finished`` calls return. Returns ``(cancel_calls, mint_calls)``.
     """
-    cancel_calls = []
-    mint_calls = []
+    cancel_calls: list[uuid.UUID] = []
+    mint_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     class _InputDialog:
-        def __init__(self, *a, **k):
+        def __init__(self, *a: object, **k: object) -> None:
             pass
 
-        def setWindowTitle(self, *a):
+        def setWindowTitle(self, *a: object) -> None:
             pass
 
-        def setLabelText(self, *a):
+        def setLabelText(self, *a: object) -> None:
             pass
 
-        def textValue(self):
+        def textValue(self) -> str:
             return ""
 
-    async def _not_joined(_conversation_id):
+    async def _not_joined(_conversation_id: int) -> bool:
         return False
 
-    async def _pending(_conversation_id):
+    async def _pending(_conversation_id: int) -> uuid.UUID:
         return uuid.uuid4()
 
-    async def _dialog_finished(_dialog):
+    async def _dialog_finished(_dialog: object) -> int:
         return next(dialog_results)
 
-    async def _cancel(pv_id):
+    async def _cancel(pv_id: uuid.UUID) -> None:
         cancel_calls.append(pv_id)
 
-    async def _mint(*a, **k):
+    async def _mint(*a: object, **k: object) -> None:
         mint_calls.append((a, k))
 
     monkeypatch.setattr(katzen, "QMessageBox", _StubMsgBox)
@@ -114,13 +120,13 @@ def _install_stubs(monkeypatch, dialog_results):
     return cancel_calls, mint_calls
 
 
-async def _run_generate_voucher():
+async def _run_generate_voucher() -> None:
     run = katzen.MainWindow.generate_voucher.__get__(_fake_window())
     await run()  # async_cb returns the task; awaiting re-raises any failure
 
 
 @pytest.mark.asyncio
-async def test_replace_prompt_no_returns_without_cancelling(monkeypatch):
+async def test_replace_prompt_no_returns_without_cancelling(monkeypatch: pytest.MonkeyPatch) -> None:
     cancel_calls, mint_calls = _install_stubs(
         monkeypatch, iter([_StubMsgBox.StandardButton.No]),
     )
@@ -130,7 +136,7 @@ async def test_replace_prompt_no_returns_without_cancelling(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_replace_prompt_yes_cancels_and_continues(monkeypatch):
+async def test_replace_prompt_yes_cancels_and_continues(monkeypatch: pytest.MonkeyPatch) -> None:
     cancel_calls, mint_calls = _install_stubs(
         monkeypatch,
         iter([_StubMsgBox.StandardButton.Yes, 0]),  # second result: name prompt dismissed

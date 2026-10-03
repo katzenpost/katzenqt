@@ -5,6 +5,7 @@ review). The `fake_thinclient`/`fast_asyncio_sleep` fixtures let these
 run many rounds with no real wall-clock delay.
 """
 from __future__ import annotations
+from tests.fakes.thinclient import FakeThinClient
 
 import asyncio
 import logging
@@ -15,16 +16,21 @@ from katzenpost_thinclient import (
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
 )
 
-from katzenqt import voucher
+from katzenqt import network, voucher
 
 
-async def _make_write_read_pair(fake_thinclient):
+async def _make_write_read_pair(
+    fake_thinclient: FakeThinClient,
+) -> "tuple[bytes, bytes, bytes]":
     """A fresh keypair with nothing written yet."""
     kp = await fake_thinclient.new_keypair(seed=b"\x01" * 32)
     return kp.write_cap, kp.read_cap, kp.first_message_index
 
 
-async def _write_box(fake_thinclient, write_cap, idx, plaintext):
+async def _write_box(
+    fake_thinclient: FakeThinClient, write_cap: bytes, idx: bytes,
+    plaintext: bytes,
+) -> None:
     wcr = await fake_thinclient.encrypt_write(
         write_cap=write_cap, message_box_index=idx, plaintext=plaintext,
     )
@@ -38,7 +44,7 @@ async def _write_box(fake_thinclient, write_cap, idx, plaintext):
 
 class TestReadBoxRetriesOnTransientErrors:
     @pytest.mark.asyncio
-    async def test_retries_past_box_id_not_found_then_succeeds(self, fake_thinclient):
+    async def test_retries_past_box_id_not_found_then_succeeds(self, fake_thinclient: FakeThinClient) -> None:
         # Nothing written yet: the first couple of rounds see
         # BoxIDNotFoundError organically (the fake raises it whenever the
         # box isn't in box_store), no injection needed.
@@ -57,8 +63,8 @@ class TestReadBoxRetriesOnTransientErrors:
         DatabaseFailureError, CourierError, ThinClientOfflineError,
     ])
     async def test_retries_past_each_transient_error_type_then_succeeds(
-        self, fake_thinclient, exc_cls,
-    ):
+        self, fake_thinclient: FakeThinClient, exc_cls: "type[Exception]",
+    ) -> None:
         write_cap, read_cap, idx = await _make_write_read_pair(fake_thinclient)
         # Write the box first: inject_error's queue is consumed by ANY call
         # to start_resending_encrypted_message, including the write below,
@@ -75,7 +81,7 @@ class TestReadBoxRetriesOnTransientErrors:
         assert plaintext == b"payload"
 
     @pytest.mark.asyncio
-    async def test_warns_after_sustained_stall(self, fake_thinclient, caplog):
+    async def test_warns_after_sustained_stall(self, fake_thinclient: FakeThinClient, caplog: pytest.LogCaptureFixture) -> None:
         # Never written: every round hits BoxIDNotFoundError organically.
         # _STALL_WARN_ROUNDS rounds in, _read_box should escalate to a
         # WARNING even though it keeps retrying rather than giving up.
@@ -96,12 +102,12 @@ class TestReadBoxRetriesOnTransientErrors:
 class TestPublishBoxRetriesOnTransientErrors:
     @pytest.mark.asyncio
     async def test_epoch_rollover_mid_publish_retries_at_same_index(
-        self, fake_thinclient
-    ):
+        self, fake_thinclient: FakeThinClient
+    ) -> None:
         write_cap, _read_cap, idx = await _make_write_read_pair(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message",
-            voucher.ConnectionLifeInterruptedError("epoch rolled over"),
+            network.ConnectionLifeInterruptedError("epoch rolled over"),
         )
         nxt = await voucher._publish_box(fake_thinclient, write_cap, idx, b"payload")
         assert nxt is not None
@@ -110,16 +116,16 @@ class TestPublishBoxRetriesOnTransientErrors:
 
     @pytest.mark.asyncio
     async def test_publish_gives_up_at_the_deadline(
-        self, fake_thinclient, monkeypatch, caplog
-    ):
+        self, fake_thinclient: FakeThinClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
         monkeypatch.setattr(voucher, "_PUBLISH_DEADLINE_S", 0.0)
         write_cap, _read_cap, idx = await _make_write_read_pair(fake_thinclient)
         fake_thinclient.inject_error(
             "start_resending_encrypted_message",
-            voucher.ConnectionLifeInterruptedError("epoch rolled over"),
+            network.ConnectionLifeInterruptedError("epoch rolled over"),
         )
         with caplog.at_level(logging.ERROR, logger="katzen.voucher"):
-            with pytest.raises(voucher.ConnectionLifeInterruptedError):
+            with pytest.raises(network.ConnectionLifeInterruptedError):
                 await voucher._publish_box(
                     fake_thinclient, write_cap, idx, b"payload"
                 )

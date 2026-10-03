@@ -9,6 +9,8 @@ import uuid
 
 import pytest
 
+from sqlmodel import col, select
+
 from katzenqt import conversation_handlers, models, persistent
 
 
@@ -24,7 +26,10 @@ def _index() -> bytes:
     return secrets.token_bytes(104)
 
 
-async def _make_conversation(sess, *, own_name="self", own_write_cap=None):
+async def _make_conversation(
+    sess: persistent.AsyncSession, *, own_name: str = "self",
+    own_write_cap: "bytes | None" = None,
+) -> "tuple[int, int, bytes]":
     """A conversation with just its own (inactive) peer, mirroring
     new_conversation's shape. Returns (conversation_id, own peer's
     ConversationPeer.id)."""
@@ -48,7 +53,9 @@ async def _make_conversation(sess, *, own_name="self", own_write_cap=None):
     return conv_id, own_peer_id, own_read_cap
 
 
-async def _add_active_peer(sess, conv_id: int, *, name: str, read_cap: bytes):
+async def _add_active_peer(
+    sess: persistent.AsyncSession, conv_id: int, *, name: str, read_cap: bytes,
+) -> None:
     rcw_id = uuid.uuid4()
     sess.add(persistent.ReadCapWAL(id=rcw_id, read_cap=read_cap, next_index=_index()))
     peer = persistent.ConversationPeer(name=name, read_cap_id=rcw_id, active=True)
@@ -61,7 +68,7 @@ async def _add_active_peer(sess, conv_id: int, *, name: str, read_cap: bytes):
 
 class TestAlreadyHas:
     @pytest.mark.asyncio
-    async def test_distinct_read_cap_with_same_name_is_not_already_had(self):
+    async def test_distinct_read_cap_with_same_name_is_not_already_had(self) -> None:
         # Two different people who happen to pick the same display name
         # must both be addable; a name match alone must never suppress a
         # genuinely distinct peer.
@@ -72,7 +79,7 @@ class TestAlreadyHas:
             assert await conversation_handlers._already_has(sess, conv_id, intro) is False
 
     @pytest.mark.asyncio
-    async def test_same_read_cap_is_already_had(self):
+    async def test_same_read_cap_is_already_had(self) -> None:
         async with persistent.asession() as sess:
             conv_id, _own_id, _own_rc = await _make_conversation(sess)
             rc = _read_cap()
@@ -83,7 +90,7 @@ class TestAlreadyHas:
 
 class TestHandleIntroductionSelfRecognition:
     @pytest.mark.asyncio
-    async def test_falls_back_to_own_read_cap_when_write_cap_unprovisioned(self):
+    async def test_falls_back_to_own_read_cap_when_write_cap_unprovisioned(self) -> None:
         # own_peer's write cap hasn't been provisioned yet (write_cap=None);
         # an announcement carrying our own (unmutated) read cap must still
         # be recognised as "about ourselves" via the read-cap fallback,
@@ -93,6 +100,7 @@ class TestHandleIntroductionSelfRecognition:
                 sess, own_write_cap=None,
             )
             own_peer = await sess.get(persistent.ConversationPeer, own_peer_id)
+            assert own_peer is not None
             gcm = models.GroupChatMessage(
                 version=0, membership_hash=b"m" * 32,
                 msg_type=models.GroupChatTypeEnum.INTRODUCTION,
@@ -114,13 +122,14 @@ class TestHandleIntroductionSelfRecognition:
             assert len(links) == 1
 
     @pytest.mark.asyncio
-    async def test_returns_peer_added_for_the_caller_to_announce(self):
+    async def test_returns_peer_added_for_the_caller_to_announce(self) -> None:
         # peer_added must be returned (not fired as a notification here):
         # the caller only announces it after its own commit succeeds, so a
         # retried transaction can't duplicate the notification.
         async with persistent.asession() as sess:
             conv_id, own_peer_id, _own_rc = await _make_conversation(sess)
             own_peer = await sess.get(persistent.ConversationPeer, own_peer_id)
+            assert own_peer is not None
             newcomer_rc = _read_cap()
             gcm = models.GroupChatMessage(
                 version=0, membership_hash=b"m" * 32,
@@ -137,7 +146,7 @@ class TestHandleIntroductionSelfRecognition:
 
 
 @pytest.mark.asyncio
-async def test_introduction_respects_member_limit(monkeypatch):
+async def test_introduction_respects_member_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     from katzenqt import voucher
 
     monkeypatch.setattr(voucher, "MAX_GROUP_MEMBERS", 1)
@@ -145,6 +154,7 @@ async def test_introduction_respects_member_limit(monkeypatch):
         conv_id, own_id, _ = await _make_conversation(sess)
         await _add_active_peer(sess, conv_id, name="alice", read_cap=_read_cap())
         peer = await sess.get(persistent.ConversationPeer, own_id)
+        assert peer is not None
         cap = _read_cap()
         gcm = models.GroupChatMessage(
             version=0, membership_hash=b"0" * 32,

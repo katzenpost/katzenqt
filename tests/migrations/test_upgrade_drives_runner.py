@@ -24,7 +24,7 @@ _PYTHON = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
 _HELPER = Path(__file__).with_name("_helper.py")
 
 
-def test_info_then_read_against_upgraded_state(tmp_path):
+def test_info_then_read_against_upgraded_state(tmp_path: Path) -> None:
     """Pre-stage a sqlite at the revision before AppSetting was
     introduced; the runner must upgrade it on first invocation and
     the resulting ``info`` line must parse as JSON with a non-empty

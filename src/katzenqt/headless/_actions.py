@@ -101,6 +101,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import _args
+from .. import epochs
 from .. import conversation_handlers, models, network, persistent, removal
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
@@ -176,7 +177,7 @@ async def _shutdown(
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     joining.cancel()
-                    logging.warning(
+                    logger.warning(
                         "background task did not finish cancelling",
                     )
                     break
@@ -253,6 +254,7 @@ async def _wait_for_conv_write_cap(conversation_id: int, attempts: int = 120, de
     for _ in range(attempts):
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
+            assert conv is not None
             wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
             if wcw is not None and wcw.write_cap is not None:
                 return True
@@ -319,14 +321,12 @@ async def _send_one_gcm(
 
     Serialises ``gcm`` into the conversation's outgoing BACAP stream,
     spawns the headless background loops, and waits for the final
-    PlaintextWAL to land in SentLog. The budget scales with the
-    number of chunks so a multi-box attachment is given enough time
-    to clear (sixty seconds per chunk on the local docker mixnet,
-    one-hundred-twenty seconds minimum by default). KQT_SEND_BUDGET_FLOOR_S
-    overrides the floor for slower environments, e.g. CI's 4-way
-    concurrent load on a shared kpclientd (see test-integration-docker.yml)
-    -- left as an opt-in override rather than a raised default so a real
-    send failure isn't detected twice as slowly for every caller.
+    PlaintextWAL to land in SentLog. The budget is one epoch plus
+    headroom, and the headroom scales with the number of chunks so a
+    multi-box attachment is given enough time to clear. Nothing needs
+    setting per network: the epoch comes from the PKI document, so the
+    same code waits two minutes longer on the local mixnet and twenty
+    minutes longer on a live one.
     """
     async with persistent.asession() as sess:
         convo = (await sess.exec(
@@ -365,8 +365,8 @@ async def _send_one_gcm(
             sess.add(obj)
         await sess.commit()
 
-    budget_floor_s = float(os.environ.get("KQT_SEND_BUDGET_FLOOR_S", "120.0"))
-    budget_s = max(budget_floor_s, num_pwals * 60.0) if timeout is None else timeout
+    headroom_s = max(120.0, num_pwals * 60.0)
+    budget_s = epochs.budget_s(headroom_s) if timeout is None else timeout
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
@@ -647,7 +647,9 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
                 # the two compete for daemon CPU on a loaded CI runner,
                 # which pushes per-step wall time well above the
                 # single-role baseline.
-                if not await persistent.wait_for_sent(final_pwal_id, deadline_s=600.0):
+                if not await persistent.wait_for_sent(
+                    final_pwal_id, deadline_s=600.0,
+                ):
                     logger.error(f"STEP_FAIL:{step_idx}:send-timeout:{payload}")
                     return 3
                 logger.info(f"STEP_OK:{step_idx}:SEND:{payload}:ts={time.time():.3f}")
@@ -836,7 +838,17 @@ async def _action_info(args: _args.Info) -> int:
 
 
 def _parse_slot_votes(items: "list[str]") -> "dict[str, str]":
-    """Turn ``["s0=yes", "s1=no"]`` into ``{"s0": "yes", "s1": "no"}``."""
+    """Turn ``["s0=yes", "s1=no"]`` into ``{"s0": "yes", "s1": "no"}``.
+
+    >>> _parse_slot_votes(["s0=yes", "s1=no"])
+    {'s0': 'yes', 's1': 'no'}
+    >>> _parse_slot_votes([])
+    {}
+    >>> _parse_slot_votes(["s0"])
+    Traceback (most recent call last):
+        ...
+    ValueError: slot vote 's0' must be SLOT_ID=availability
+    """
     choice = {}
     for item in items:
         slot, sep, avail = item.partition("=")
@@ -847,6 +859,19 @@ def _parse_slot_votes(items: "list[str]") -> "dict[str, str]":
 
 
 def _tally_json(result: "tally_engine.TallyResult") -> str:
+    """Serialise a tally, and its derived outcome, as one JSON line.
+
+    >>> result = tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 2,
+    ...     [tally_engine.SlotTally("s0", "Mon", 1, 0, 1),
+    ...      tally_engine.SlotTally("s1", "Tue", 1, 0, 1)],
+    ... )
+    >>> decoded = json.loads(_tally_json(result))
+    >>> decoded["survey_id"], decoded["mode"], decoded["outcome"]
+    ('00000000000000000000000000000000', 'approval', 'tie')
+    >>> [w["slot_id"] for w in decoded["winners"]]
+    ['s0', 's1']
+    """
     out = tally_engine.outcome(result)
     return json.dumps({
         "survey_id": result.survey_id.hex(),
@@ -865,7 +890,20 @@ def _tally_json(result: "tally_engine.TallyResult") -> str:
 
 
 def _declare_outcome(result: "tally_engine.TallyResult") -> str:
-    """A one-line human declaration of the tally's outcome."""
+    """A one-line human declaration of the tally's outcome.
+
+    >>> tied = [tally_engine.SlotTally("s0", "Mon", 1, 0, 1),
+    ...         tally_engine.SlotTally("s1", "Tue", 1, 0, 1)]
+    >>> _declare_outcome(tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 2, tied))
+    'TIE=Mon, Tue (1 yes each)'
+    >>> _declare_outcome(tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 2, tied[:1]))
+    'WINNER=Mon (1 yes)'
+    >>> _declare_outcome(tally_engine.TallyResult(
+    ...     bytes(16), tally_schema.Mode.APPROVAL, "open", 0, []))
+    'WINNER=none (no yes votes)'
+    """
     out = tally_engine.outcome(result)
     if out.kind == "no_winner":
         return "WINNER=none (no yes votes)"

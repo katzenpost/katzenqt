@@ -30,6 +30,7 @@ from tests.integration._outcomes import check_roles
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role, epoch_duration_s,
 )
+from tests.integration._bounce_helpers import budget_s
 
 # Emitted by network.on_new_pki_document on every epoch advance, whatever
 # is in flight, so the poll below and the assertion cannot drift apart.
@@ -40,7 +41,11 @@ _EPOCH_ADVANCE_RE = re.compile(r"PKI epoch advanced to \d+ \(from \d+\)")
 
 @pytest.mark.integration
 @pytest.mark.epoch_driven
-def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory, monkeypatch):
+def test_read_recovers_after_epoch_rollover(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("KQT_LOG_LEVEL", "INFO")
 
     alice_state = tmp_path_factory.mktemp("alice") / "state"
@@ -82,13 +87,16 @@ def test_read_recovers_after_epoch_rollover(kpclientd_endpoint, tmp_path_factory
                 f"{alice_err.read_text()[-4000:]}"
             )
 
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=750.0)
+        send = run_role(
+            bob_state, "chat-session", "demo", "SEND:m1",
+            timeout=budget_s(630.0),
+        )
         assert send.returncode == 0, send.stdout + send.stderr
 
         # If the fix regressed, this hangs on the stale envelope up to the
         # 1200s backstop; bound the wait well under that so a regression
         # fails the test instead of stalling the suite for 20 minutes.
-        alice_proc.wait(timeout=180.0)
+        alice_proc.wait(timeout=budget_s(60.0))
     except Exception:
         alice_proc.kill()
         raise

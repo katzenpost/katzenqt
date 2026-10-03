@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+from pathlib import Path
 import pytest
 
 from tests.integration._bounce_helpers import epoch_duration_s
@@ -29,14 +30,17 @@ def _kpclientd_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: "list[pytest.Item]",
+) -> None:
     if os.environ.get("KATZENQT_DOCKER_INTEGRATION") == "1":
         return
     skip_marker = pytest.mark.skip(
         reason="set KATZENQT_DOCKER_INTEGRATION=1 to run docker integration tests"
     )
+    here = Path(__file__).resolve().parent
     for item in items:
-        if "integration" in str(item.fspath):
+        if here in Path(str(item.fspath)).resolve().parents:
             item.add_marker(skip_marker)
 
 

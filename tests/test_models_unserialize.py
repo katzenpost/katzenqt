@@ -26,7 +26,9 @@ from hypothesis import given, settings, strategies as st
 from katzenqt import models, persistent
 
 
-def _substream_chunks(db_entries):
+def _substream_chunks(
+    db_entries: list[models.SerializedRow],
+) -> list[persistent.PlaintextWAL]:
     """Return the PlaintextWAL rows that carry the payload chunks,
     in emission order (which is already BACAP order: a chain of
     ``b'C'`` followed by one ``b'F'``). The trailing indirection
@@ -35,15 +37,18 @@ def _substream_chunks(db_entries):
     filter."""
     return [
         e for e in db_entries
-        if isinstance(e, persistent.PlaintextWAL) and e.indirection is None
+        if isinstance(e, persistent.PlaintextWAL)
+        if e.indirection is None
     ]
 
 
-def _to_chunks(pwals):
+def _to_chunks(
+    pwals: list[persistent.PlaintextWAL],
+) -> list[tuple[bytes, bytes]]:
     return [(p.bacap_payload[:1], p.bacap_payload[1:]) for p in pwals]
 
 
-def test_unserialize_single_box_round_trip():
+def test_unserialize_single_box_round_trip() -> None:
     """A short message fits in one chunk; the single ``b'F'`` chunk
     must round-trip to the original message."""
     gcm = models.GroupChatMessage(
@@ -55,7 +60,9 @@ def test_unserialize_single_box_round_trip():
     new_caps, db_entries = op.serialize(chunk_size=1530, conversation_id=1)
     assert new_caps == []
     assert len(db_entries) == 1
-    payload = db_entries[0].bacap_payload
+    only = db_entries[0]
+    assert isinstance(only, persistent.PlaintextWAL)
+    payload = only.bacap_payload
     assert payload[:1] == b"F"
 
     recovered = models.unserialize([(payload[:1], payload[1:])])
@@ -63,7 +70,7 @@ def test_unserialize_single_box_round_trip():
     assert recovered.text == "hello"
 
 
-def test_unserialize_multibox_chain():
+def test_unserialize_multibox_chain() -> None:
     """A long message that spans multiple BACAP boxes must round-
     trip through ``serialize`` + ``unserialize``."""
     text = "A" * 5000
@@ -92,7 +99,9 @@ def test_unserialize_multibox_chain():
     text=st.text(min_size=0, max_size=5000),
     chunk_size=st.integers(min_value=10, max_value=1530),
 )
-def test_unserialize_round_trip_hypothesis(text, chunk_size):
+def test_unserialize_round_trip_hypothesis(
+    text: str, chunk_size: int,
+) -> None:
     """Property: for any text payload and any chunk size in the
     range serialize accepts, ``unserialize`` recovers the original
     text byte-for-byte."""
@@ -111,7 +120,7 @@ def test_unserialize_round_trip_hypothesis(text, chunk_size):
     assert recovered.text == text
 
 
-def test_unserialize_gap_returns_none():
+def test_unserialize_gap_returns_none() -> None:
     """An incomplete chain (no terminating ``b'F'``) returns
     ``None``; appending the missing terminator completes it."""
     cbor = models.GroupChatMessage(
@@ -126,22 +135,22 @@ def test_unserialize_gap_returns_none():
     assert recovered.text == "abc"
 
 
-def test_unserialize_empty_chain_returns_none():
+def test_unserialize_empty_chain_returns_none() -> None:
     assert models.unserialize([]) is None
 
 
-def test_unserialize_rejects_unknown_chunk_type():
+def test_unserialize_rejects_unknown_chunk_type() -> None:
     with pytest.raises(ValueError, match="unknown chunk type"):
         models.unserialize([(b"X", b"junk")])
 
 
-def test_unserialize_rejects_indirection_byte():
+def test_unserialize_rejects_indirection_byte() -> None:
     """Indirection is the network coalescer's job; the data layer
     must refuse to silently treat it as data."""
     with pytest.raises(ValueError, match="indirection"):
         models.unserialize([(b"I", b"some read cap")])
 
 
-def test_unserialize_rejects_F_not_at_end():
+def test_unserialize_rejects_F_not_at_end() -> None:
     with pytest.raises(ValueError, match="'F'"):
         models.unserialize([(b"F", b"a"), (b"C", b"b")])

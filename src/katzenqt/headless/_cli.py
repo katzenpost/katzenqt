@@ -27,6 +27,26 @@ class Plan(Generic[A]):
 
 
 def seconds(value: str) -> float:
+    """Parse a click timeout option, rejecting anything not finite and positive.
+
+    >>> seconds("2.5")
+    2.5
+    >>> try:
+    ...     seconds("0")
+    ... except click.BadParameter as exc:
+    ...     print(exc)
+    timeout must be a finite positive number
+    >>> try:
+    ...     seconds("inf")
+    ... except click.BadParameter as exc:
+    ...     print(exc)
+    timeout must be a finite positive number
+    >>> try:
+    ...     seconds("soon")
+    ... except click.BadParameter as exc:
+    ...     print(exc)
+    timeout must be a finite positive number
+    """
     try:
         timeout = float(value)
     except (TypeError, ValueError):

@@ -13,6 +13,7 @@ def test_the_indirection_path_consults_the_cap() -> None:
     import textwrap
 
     path = inspect.getsourcefile(network)
+    assert path is not None
     tree = ast.parse(io.open(path, encoding="utf-8").read())
     fn = next(
         n for n in ast.walk(tree)

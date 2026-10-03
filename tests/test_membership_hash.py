@@ -7,6 +7,7 @@ TODO sentinel.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 
 import pytest
@@ -15,7 +16,7 @@ from katzenqt import conversation_handlers, models, persistent
 from katzenqt.models import GroupChatMessage, SendOperation
 
 
-def test_canonical_hash_is_deduped_sorted_and_domained():
+def test_canonical_hash_is_deduped_sorted_and_domained() -> None:
     a = b"a" * 136
     b = b"b" * 136
     got = models.canonical_membership_hash([b, a, a])
@@ -25,7 +26,7 @@ def test_canonical_hash_is_deduped_sorted_and_domained():
     assert not models.is_membership_sentinel(got)
 
 
-def test_canonical_hash_ignores_the_read_cap_index_suffix():
+def test_canonical_hash_ignores_the_read_cap_index_suffix() -> None:
     """Two caps for the same member (same 32-byte key, different 104-byte
     index suffix) must collapse to one member, so membership agrees across a
     joiner's pre-mutation cap, the salt-mutated cap the group holds, and a
@@ -46,7 +47,7 @@ def test_canonical_hash_ignores_the_read_cap_index_suffix():
     )
 
 
-def test_sentinels():
+def test_sentinels() -> None:
     assert models.is_membership_sentinel(b"TODO" * 8)
     assert models.is_membership_sentinel(bytes(32))
     assert not models.is_membership_sentinel(b"x" * 32)
@@ -83,10 +84,11 @@ async def _make_conversation(name: str = "demo") -> int:
 
 
 @pytest.mark.asyncio
-async def test_local_membership_hash_uses_write_cap_and_peers():
+async def test_local_membership_hash_uses_write_cap_and_peers() -> None:
     conv_id = await _make_conversation()
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
         got = await conversation_handlers.local_membership_hash(sess, convo)
     want = models.canonical_membership_hash([b"\x02" * 136, b"\x01" * 136])
     assert got == want
@@ -94,10 +96,11 @@ async def test_local_membership_hash_uses_write_cap_and_peers():
 
 
 @pytest.mark.asyncio
-async def test_send_stamps_the_real_membership_hash():
+async def test_send_stamps_the_real_membership_hash() -> None:
     conv_id = await _make_conversation()
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
         expected = await conversation_handlers.local_membership_hash(sess, convo)
         gcm = GroupChatMessage(
             version=0, membership_hash=b"TODO" * 8, text="hello",

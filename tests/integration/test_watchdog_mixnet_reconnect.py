@@ -22,6 +22,7 @@ running on this host. Skipped unless KATZENQT_DOCKER_INTEGRATION=1.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -32,9 +33,10 @@ from tests.integration._bounce_helpers import (
     find_kpclientd_container, find_same_network_container, podman,
     PhaseStopwatch,
 )
+from tests.integration._bounce_helpers import budget_s
 
 
-def _poll_for(path, needle: str, deadline_s: float) -> bool:
+def _poll_for(path: Path, needle: str, deadline_s: float) -> bool:
     deadline = time.time() + deadline_s
     while time.time() < deadline:
         if needle in path.read_text():
@@ -46,8 +48,10 @@ def _poll_for(path, needle: str, deadline_s: float) -> bool:
 @pytest.mark.integration
 @pytest.mark.serial_docker
 def test_read_recovers_promptly_after_mixnet_reconnect(
-    kpclientd_endpoint, tmp_path_factory, monkeypatch,
-):
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # INFO, not just the default WARNING: on_connection_status's
     # reconnected-transition line is logger.info.
     monkeypatch.setenv("KQT_LOG_LEVEL", "INFO")
@@ -77,23 +81,30 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
 
         podman(["pause", gateway])
         gateway_paused = True
-        saw_disconnect = _poll_for(alice_err, "reports disconnected from mixnet", 60.0)
+        saw_disconnect = _poll_for(
+            alice_err, "reports disconnected from mixnet", 60.0,
+        )
         tw.mark("disconnect_seen")
 
         podman(["unpause", gateway])
         gateway_paused = False
-        saw_reconnect = _poll_for(alice_err, "reports reconnected to mixnet", 90.0)
+        saw_reconnect = _poll_for(
+            alice_err, "reports reconnected to mixnet", 90.0,
+        )
         tw.mark("reconnect_seen")
 
         # Bob's send happens only once we believe the daemon has
         # reconnected: Alice's read is still pending at that point (Bob
         # hasn't sent), so the reconnect_event is guaranteed to fire
         # before the read itself resolves.
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=750.0)
+        send = run_role(
+            bob_state, "chat-session", "demo", "SEND:m1",
+            timeout=budget_s(630.0),
+        )
         assert send.returncode == 0, send.stdout + send.stderr
         tw.mark("bob_sent")
 
-        alice_proc.wait(timeout=750.0)
+        alice_proc.wait(timeout=budget_s(630.0))
     except Exception:
         alice_proc.kill()
         if gateway_paused:

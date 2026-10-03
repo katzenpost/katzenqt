@@ -2,6 +2,8 @@ import asyncio
 import logging
 import cbor2
 import struct
+from collections.abc import Iterator
+from typing import cast
 
 import pytest
 
@@ -32,7 +34,7 @@ _TRACKED_EVENTS = (
 
 
 @pytest.fixture(autouse=True)
-def _restore_module_events():
+def _restore_module_events() -> Iterator[None]:
     """Snapshot the module-level events before each test and restore them
     afterwards so a `shutdown()` or `on_connection_status()` call in one
     test does not leak into the next.
@@ -52,40 +54,40 @@ def _restore_module_events():
 class TestCreateNewKeypair:
     """Deterministic derivation of (write_cap, read_cap) from a 32-byte seed."""
 
-    def test_seed_must_be_32_bytes(self):
+    def test_seed_must_be_32_bytes(self) -> None:
         with pytest.raises(AssertionError):
             create_new_keypair(b"too short")
 
-    def test_seed_must_be_bytes_not_str(self):
+    def test_seed_must_be_bytes_not_str(self) -> None:
         with pytest.raises(AssertionError):
-            create_new_keypair("a" * 32)
+            create_new_keypair(cast("bytes", "a" * 32))
 
-    def test_cap_sizes(self):
+    def test_cap_sizes(self) -> None:
         write_cap, read_cap = create_new_keypair(b"\x00" * 32)
         assert len(write_cap) == 168
         assert len(read_cap) == 136
 
-    def test_write_cap_embeds_read_cap_in_tail(self):
+    def test_write_cap_embeds_read_cap_in_tail(self) -> None:
         write_cap, read_cap = create_new_keypair(b"\x05" * 32)
         assert write_cap[32:] == read_cap
 
-    def test_signing_seed_differs_from_verify_key(self):
+    def test_signing_seed_differs_from_verify_key(self) -> None:
         write_cap, read_cap = create_new_keypair(b"\x42" * 32)
         assert write_cap[:32] != read_cap[:32]
 
-    def test_deterministic_for_same_seed(self):
+    def test_deterministic_for_same_seed(self) -> None:
         seed = bytes(range(32))
         first = create_new_keypair(seed)
         second = create_new_keypair(seed)
         assert first == second
 
-    def test_distinct_seeds_yield_distinct_caps(self):
+    def test_distinct_seeds_yield_distinct_caps(self) -> None:
         a_write, a_read = create_new_keypair(b"\x00" * 32)
         b_write, b_read = create_new_keypair(b"\x01" * 32)
         assert a_write != b_write
         assert a_read != b_read
 
-    def test_start_index_top_bit_cleared(self):
+    def test_start_index_top_bit_cleared(self) -> None:
         # The first 8 bytes of first_message_index encode start_idx as a
         # little-endian u64 with the high bit forced to zero (see the
         # & 0x7fffffffffffffff mask). SQLite has no unsigned 64-bit type,
@@ -98,7 +100,7 @@ class TestCreateNewKeypair:
 
 
 class TestShutdown:
-    def test_shutdown_sets_should_quit_event(self):
+    def test_shutdown_sets_should_quit_event(self) -> None:
         ev = getattr(network, "__should_quit")
         ev.clear()
         shutdown()
@@ -107,14 +109,14 @@ class TestShutdown:
 
 class TestEventSignals:
     @pytest.mark.asyncio
-    async def test_signal_readables_to_mixwal_sets_event(self):
+    async def test_signal_readables_to_mixwal_sets_event(self) -> None:
         ev = getattr(network, "readables_to_mixwal_event")
         ev.clear()
         await signal_readables_to_mixwal()
         assert ev.is_set()
 
     @pytest.mark.asyncio
-    async def test_check_for_new_sets_resendable_event(self):
+    async def test_check_for_new_sets_resendable_event(self) -> None:
         ev = getattr(network, "resendable_event")
         ev.clear()
         await check_for_new()
@@ -123,7 +125,7 @@ class TestEventSignals:
 
 class TestOnConnectionStatus:
     @pytest.fixture(autouse=True)
-    def _reset_transition_state(self):
+    def _reset_transition_state(self) -> Iterator[None]:
         # on_connection_status tracks the previous report so it can log
         # transitions only once; reset it so each test starts from "no
         # prior report" rather than leaking state from test run order.
@@ -135,27 +137,27 @@ class TestOnConnectionStatus:
         network._last_connected = None
 
     @pytest.mark.asyncio
-    async def test_connected_sets_mixnet_connected(self):
+    async def test_connected_sets_mixnet_connected(self) -> None:
         ev = getattr(network, "__mixnet_connected")
         ev.clear()
         await on_connection_status({"is_connected": True, "err": None})
         assert ev.is_set()
 
     @pytest.mark.asyncio
-    async def test_disconnected_clears_mixnet_connected(self):
+    async def test_disconnected_clears_mixnet_connected(self) -> None:
         ev = getattr(network, "__mixnet_connected")
         ev.set()
         await on_connection_status({"is_connected": False, "err": None})
         assert not ev.is_set()
 
     @pytest.mark.asyncio
-    async def test_disconnected_warns(self, caplog):
+    async def test_disconnected_warns(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="katzen.network"):
             await on_connection_status({"is_connected": False, "err": None})
         assert any("disconnected" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_disconnected_warns_once_per_transition(self, caplog):
+    async def test_disconnected_warns_once_per_transition(self, caplog: pytest.LogCaptureFixture) -> None:
         # A daemon retry loop reports the same disconnected state every
         # ~15-30s during an outage; the warning must fire once, on the
         # transition, not on every repeated report.
@@ -168,7 +170,7 @@ class TestOnConnectionStatus:
         assert len(warnings) == 1
 
     @pytest.mark.asyncio
-    async def test_disconnect_with_err_does_not_also_warn(self, caplog):
+    async def test_disconnect_with_err_does_not_also_warn(self, caplog: pytest.LogCaptureFixture) -> None:
         # A disconnect that also carries an err payload is fully captured by
         # the ERROR log below; it must not also emit the plain WARNING for
         # what is a single event.
@@ -179,14 +181,14 @@ class TestOnConnectionStatus:
         assert not any("disconnected" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_err_payload_does_not_raise(self):
+    async def test_err_payload_does_not_raise(self) -> None:
         await on_connection_status({
             "is_connected": False,
             "err": {"Op": "read", "Net": "tcp"},
         })
 
     @pytest.mark.asyncio
-    async def test_capital_err_field_does_not_raise(self):
+    async def test_capital_err_field_does_not_raise(self) -> None:
         await on_connection_status({
             "is_connected": False,
             "err": None,
@@ -194,7 +196,7 @@ class TestOnConnectionStatus:
         })
 
     @pytest.mark.asyncio
-    async def test_connected_true_with_err_still_sets_event(self):
+    async def test_connected_true_with_err_still_sets_event(self) -> None:
         # If the daemon reports connected but also surfaces an error
         # field, the event should still reflect connectivity, with the
         # error merely logged.
@@ -209,20 +211,26 @@ class TestOnConnectionStatus:
 
 class TestOnMessageReply:
     @pytest.mark.asyncio
-    async def test_no_matching_queue_is_silent(self):
+    async def test_no_matching_queue_is_silent(self) -> None:
         # No listener registered for this message_id: must not raise.
         await on_message_reply(
-            {"message_id": b"\x00" * 16, "payload": b"data"}
+            cast(
+                "network._MessageReply",
+                {"message_id": b"\x00" * 16, "payload": b"data"},
+            )
         )
 
     @pytest.mark.asyncio
-    async def test_matching_queue_receives_reply(self):
+    async def test_matching_queue_receives_reply(self) -> None:
         queues = getattr(network, "__on_message_queues")
         message_id = b"\x42" * 16
-        q: asyncio.Queue = asyncio.Queue()
+        q: "asyncio.Queue[network._MessageReply]" = asyncio.Queue()
         queues[message_id] = q
         try:
-            reply = {"message_id": message_id, "payload": b"hello"}
+            reply = cast(
+                "network._MessageReply",
+                {"message_id": message_id, "payload": b"hello"},
+            )
             await on_message_reply(reply)
             received = await asyncio.wait_for(q.get(), timeout=1.0)
             assert received is reply
@@ -230,15 +238,18 @@ class TestOnMessageReply:
             queues.pop(message_id, None)
 
     @pytest.mark.asyncio
-    async def test_unrelated_queue_not_disturbed(self):
+    async def test_unrelated_queue_not_disturbed(self) -> None:
         queues = getattr(network, "__on_message_queues")
         listener_id = b"\xaa" * 16
         intruder_id = b"\xbb" * 16
-        q: asyncio.Queue = asyncio.Queue()
+        q: "asyncio.Queue[network._MessageReply]" = asyncio.Queue()
         queues[listener_id] = q
         try:
             await on_message_reply(
-                {"message_id": intruder_id, "payload": b"not yours"}
+                cast(
+                    "network._MessageReply",
+                    {"message_id": intruder_id, "payload": b"not yours"},
+                )
             )
             # The listener queue should remain empty.
             assert q.empty()
@@ -248,35 +259,37 @@ class TestOnMessageReply:
 
 class TestOnMessageSent:
     @pytest.mark.asyncio
-    async def test_success_path_does_not_raise(self):
-        await on_message_sent({
+    async def test_success_path_does_not_raise(self) -> None:
+        await on_message_sent(cast("network._MessageSent", {
             "message_id": b"\x00" * 16,
             "surbid": b"\x01" * 16,
             "sent_at": 0,
             "reply_eta": 0,
             "err": None,
-        })
+        }))
 
     @pytest.mark.asyncio
-    async def test_err_path_does_not_raise(self):
-        await on_message_sent({
+    async def test_err_path_does_not_raise(self) -> None:
+        await on_message_sent(cast("network._MessageSent", {
             "message_id": b"\x00" * 16,
             "err": "PKI error: service not found",
-        })
+        }))
 
     @pytest.mark.asyncio
-    async def test_missing_err_key_is_handled(self):
+    async def test_missing_err_key_is_handled(self) -> None:
         # Some emissions may omit the err key entirely; reply.get() must
         # cover that without surprising the caller.
-        await on_message_sent({"message_id": b"\x00" * 16})
+        await on_message_sent(
+            cast("network._MessageSent", {"message_id": b"\x00" * 16}),
+        )
 
 
 class TestOnError:
     @pytest.mark.asyncio
-    async def test_callback_fires_on_exception(self):
+    async def test_callback_fires_on_exception(self) -> None:
         called = []
 
-        async def boom():
+        async def boom() -> None:
             raise RuntimeError("nope")
 
         task = asyncio.create_task(boom())
@@ -286,10 +299,10 @@ class TestOnError:
         assert called == ["fired"]
 
     @pytest.mark.asyncio
-    async def test_callback_skipped_on_success(self):
+    async def test_callback_skipped_on_success(self) -> None:
         called = []
 
-        async def ok():
+        async def ok() -> int:
             return 42
 
         task = asyncio.create_task(ok())
@@ -298,8 +311,8 @@ class TestOnError:
         assert called == []
 
     @pytest.mark.asyncio
-    async def test_returns_the_task(self):
-        async def ok():
+    async def test_returns_the_task(self) -> None:
+        async def ok() -> None:
             return None
 
         task = asyncio.create_task(ok())
@@ -308,10 +321,10 @@ class TestOnError:
         await task
 
     @pytest.mark.asyncio
-    async def test_passes_args_and_kwargs(self):
+    async def test_passes_args_and_kwargs(self) -> None:
         captured = []
 
-        async def boom():
+        async def boom() -> None:
             raise ValueError("x")
 
         task = asyncio.create_task(boom())
@@ -325,7 +338,7 @@ class TestOnError:
         assert captured == [((1, 2), {"key": "value"})]
 
     @pytest.mark.asyncio
-    async def test_failed_task_does_not_noise_the_event_loop(self):
+    async def test_failed_task_does_not_noise_the_event_loop(self) -> None:
         # The done callback must NOT re-raise the task's exception: a
         # callback raise only surfaces as a spurious "Exception in
         # callback" traceback via the loop's exception handler (seen in
@@ -333,15 +346,18 @@ class TestOnError:
         # plaintext hit the dead link during a bounce).
         loop = asyncio.get_running_loop()
         fired = []
-        handler_calls = []
+        handler_calls: "list[dict[str, object]]" = []
         prev_handler = loop.get_exception_handler()
 
-        def stub_handler(loop_, context):
+        def stub_handler(
+            loop_: asyncio.AbstractEventLoop,
+            context: "dict[str, object]",
+        ) -> None:
             handler_calls.append(context)
 
         loop.set_exception_handler(stub_handler)
         try:
-            async def boom():
+            async def boom() -> None:
                 raise RuntimeError("nope")
 
             task = asyncio.create_task(boom())
@@ -360,15 +376,15 @@ class TestOnError:
 class TestEpochRaceLivelock:
     @pytest.mark.real_sleeps
     @pytest.mark.asyncio
-    async def test_gives_up_racing_the_epoch_after_repeated_losses(self, caplog):
+    async def test_gives_up_racing_the_epoch_after_repeated_losses(self, caplog: pytest.LogCaptureFixture) -> None:
         network._EPOCH_LOSS_STREAK.clear()
         uid = "livelock-stream"
         rolls = 0
 
-        async def never_answers():
+        async def never_answers() -> None:
             await asyncio.sleep(3600)
 
-        async def roll_epoch():
+        async def roll_epoch() -> None:
             await asyncio.sleep(0.01)
             await network.on_new_pki_document(
                 {"payload": cbor2.dumps({"Epoch": 9000 + rolls})}

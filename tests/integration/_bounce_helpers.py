@@ -47,7 +47,7 @@ class PhaseStopwatch:
     otherwise.
     """
 
-    def __init__(self, what: str):
+    def __init__(self, what: str) -> None:
         self._what = what
         self._t0 = time.perf_counter()
         self._last = self._t0
@@ -145,6 +145,25 @@ def epoch_duration_s() -> float:
     return _parse_go_duration(match.group(1))
 
 
+def budget_for(epoch_s: float, headroom_s: float) -> float:
+    """A wait that rides out one epoch plus ``headroom_s`` of slack.
+
+    >>> budget_for(120.0, 630.0)
+    750.0
+    >>> budget_for(1200.0, 630.0)
+    1830.0
+    """
+    return epoch_s + headroom_s
+
+
+def budget_s(headroom_s: float) -> float:
+    return budget_for(epoch_duration_s(), headroom_s)
+
+
+def deadline_arg(headroom_s: float) -> str:
+    return str(int(budget_s(headroom_s)))
+
+
 # Connecting verbs require an explicit kpclientd connection. The docker mixnet's
 # kpclientd listens on TCP 127.0.0.1:64331 (override via KATZENQT_KPCLIENTD_HOST
 # / KATZENQT_KPCLIENTD_PORT, matching conftest).
@@ -156,8 +175,10 @@ CONN_ARGS = ("--address", KP_ADDR, "--network", "tcp")
 
 
 def run_role(
-    role_state: Path, *cli_args: str, timeout: float = 300.0,
+    role_state: Path, *cli_args: str, timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if timeout is None:
+        timeout = budget_s(180.0)
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     env["PYTHONUNBUFFERED"] = "1"
@@ -187,11 +208,13 @@ def spawn_role(
     )
 
 
-def combined(proc: subprocess.CompletedProcess) -> str:
+def combined(proc: "subprocess.CompletedProcess[str]") -> str:
     return proc.stdout + proc.stderr
 
 
-def expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+def expect_token(
+    proc: "subprocess.CompletedProcess[str]", token: str,
+) -> str:
     """Find a logged line containing token; return the text after it. Results
     go through logging (stderr) with a level/name prefix, so match by
     substring."""
@@ -210,14 +233,23 @@ def bootstrap_voucher(alice_state: Path, bob_state: Path) -> None:
     cap) and replies with her read cap, and Bob joins (gaining hers). Both can
     then read each other, the bidirectional state the restart tests exercise."""
     for state, name in ((alice_state, "alice"), (bob_state, "bob")):
-        create = run_role(state, "create-conv", "demo", name, timeout=450.0)
+        create = run_role(
+            state, "create-conv", "demo", name, timeout=budget_s(330.0),
+        )
         assert create.returncode == 0, create.stdout + create.stderr
-    mint = run_role(bob_state, "voucher-mint", "demo", "bob", timeout=750.0)
+    mint = run_role(
+        bob_state, "voucher-mint", "demo", "bob", timeout=budget_s(630.0),
+    )
     assert mint.returncode == 0, mint.stdout + mint.stderr
     voucher = expect_token(mint, "VOUCHER=")
-    induct = run_role(alice_state, "voucher-induct", "demo", "bob", voucher, timeout=750.0)
+    induct = run_role(
+        alice_state, "voucher-induct", "demo", "bob", voucher,
+        timeout=budget_s(630.0),
+    )
     assert induct.returncode == 0, induct.stdout + induct.stderr
-    joined = run_role(bob_state, "voucher-await", "demo", timeout=750.0)
+    joined = run_role(
+        bob_state, "voucher-await", "demo", timeout=budget_s(630.0),
+    )
     assert joined.returncode == 0, joined.stdout + joined.stderr
 
 

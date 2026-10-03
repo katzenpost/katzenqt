@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -23,8 +24,8 @@ async def test_peer_pause_target_is_scoped_and_unambiguous() -> None:
             await sess.commit()
             await sess.refresh(conv)
             ids.append(conv.id)
-        peer = await persistent.peer_named_in_conversation(sess, ids[1], "bob")
-        assert peer is not None and peer.read_cap_id == caps[1]
+        found = await persistent.peer_named_in_conversation(sess, ids[1], "bob")
+        assert found is not None and found.read_cap_id == caps[1]
     item = QStandardItem("room-1")
     window = SimpleNamespace(
         _wait_for_conversation_state=AsyncMock(return_value=True),
@@ -32,14 +33,17 @@ async def test_peer_pause_target_is_scoped_and_unambiguous() -> None:
             contacts_standard_item=item, own_peer_id=-1,
         )},
     )
-    await katzen.MainWindow._process_peer_added(window, ids[1], "bob")
-    assert item.child(0).peer_read_cap_id == caps[1]
+    await katzen.MainWindow._process_peer_added(
+        cast(katzen.MainWindow, window), ids[1], "bob",
+    )
+    assert cast(katzen.ContactsItem, item.child(0)).peer_read_cap_id == caps[1]
     async with persistent.asession() as sess:
-        conv = await sess.get(persistent.Conversation, ids[1])
+        room = await sess.get(persistent.Conversation, ids[1])
+        assert room is not None
         extra_cap = uuid4()
         sess.add(persistent.ReadCapWAL(id=extra_cap))
         sess.add(persistent.ConversationPeer(
-            name="bob", read_cap_id=extra_cap, conversation=conv,
+            name="bob", read_cap_id=extra_cap, conversation=room,
         ))
         await sess.commit()
         assert await persistent.peer_named_in_conversation(sess, ids[1], "bob") is None

@@ -19,12 +19,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
 from tests.integration._process import run_logged
 
 from tests.integration._bounce_helpers import bootstrap_voucher as _bootstrap_voucher
+from tests.integration._bounce_helpers import budget_s, deadline_arg
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -45,8 +47,10 @@ _CONN_ARGS = ("--address", _KP_ADDR, "--network", "tcp")
 
 
 def _run_role(
-    role_state: Path, *cli_args: str, timeout: float = 300.0,
+    role_state: Path, *cli_args: str, timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if timeout is None:
+        timeout = budget_s(180.0)
     env = os.environ.copy()
     env["KQT_STATE"] = str(role_state)
     cmd = [_PYTHON, "-m", "katzenqt.integration_runner", *cli_args, *_CONN_ARGS]
@@ -55,11 +59,11 @@ def _run_role(
     )
 
 
-def _output(proc: subprocess.CompletedProcess) -> str:
+def _output(proc: "subprocess.CompletedProcess[str]") -> str:
     return proc.stdout + proc.stderr
 
 
-def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
+def _expect_token(proc: "subprocess.CompletedProcess[str]", token: str) -> str:
     for line in _output(proc).splitlines():
         idx = line.find(token)
         if idx != -1:
@@ -69,12 +73,32 @@ def _expect_token(proc: subprocess.CompletedProcess, token: str) -> str:
     )
 
 
-def _slots_by_id(tally_json: dict) -> dict:
+class _SlotJson(TypedDict):
+    slot_id: str
+    text: str
+    yes: int
+    maybe: int
+    no: int
+
+
+class _TallyJson(TypedDict):
+    survey_id: str
+    mode: str
+    status: str
+    n_voters: int
+    slots: "list[_SlotJson]"
+    outcome: str
+
+
+def _slots_by_id(tally_json: _TallyJson) -> "dict[str, _SlotJson]":
     return {s["slot_id"]: s for s in tally_json["slots"]}
 
 
 @pytest.mark.integration
-def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
+def test_tally_converges_across_peers(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
 
@@ -84,7 +108,7 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     create = _run_role(
         alice_state, "tally-create", "demo", "lunch?",
         "--mode", "approval", "--slot", "A", "--slot", "B", "--slot", "C",
-        timeout=900.0,
+        timeout=budget_s(780.0),
     )
     assert create.returncode == 0, _output(create)
     survey = _expect_token(create, "TALLY_CREATED=")
@@ -92,8 +116,9 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     # Bob votes for A and C (he must first receive the survey).
     bob_vote = _run_role(
         bob_state, "tally-vote", "demo", "--survey", survey,
-        "--slot", "s0=yes", "--slot", "s2=yes", "--timeout", "900",
-        timeout=1200.0,
+        "--slot", "s0=yes", "--slot", "s2=yes",
+        "--timeout", deadline_arg(780.0),
+        timeout=budget_s(1080.0),
     )
     assert bob_vote.returncode == 0, _output(bob_vote)
     assert "VOTED" in _output(bob_vote)
@@ -101,8 +126,9 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     # Alice votes for A and B.
     alice_vote = _run_role(
         alice_state, "tally-vote", "demo", "--survey", survey,
-        "--slot", "s0=yes", "--slot", "s1=yes", "--timeout", "900",
-        timeout=1200.0,
+        "--slot", "s0=yes", "--slot", "s1=yes",
+        "--timeout", deadline_arg(780.0),
+        timeout=budget_s(1080.0),
     )
     assert alice_vote.returncode == 0, _output(alice_vote)
     assert "VOTED" in _output(alice_vote)
@@ -110,12 +136,14 @@ def test_tally_converges_across_peers(kpclientd_endpoint, tmp_path_factory):
     # Both read the tally, waiting for two voters.
     alice_res = _run_role(
         alice_state, "tally-result", "demo", "--survey", survey,
-        "--expect-voters", "2", "--timeout", "900", timeout=1000.0,
+        "--expect-voters", "2", "--timeout", deadline_arg(780.0),
+        timeout=budget_s(880.0),
     )
     assert alice_res.returncode == 0, _output(alice_res)
     bob_res = _run_role(
         bob_state, "tally-result", "demo", "--survey", survey,
-        "--expect-voters", "2", "--timeout", "900", timeout=1000.0,
+        "--expect-voters", "2", "--timeout", deadline_arg(780.0),
+        timeout=budget_s(880.0),
     )
     assert bob_res.returncode == 0, _output(bob_res)
 

@@ -1,3 +1,4 @@
+from tests.fakes.thinclient import FakeThinClient
 import asyncio
 import threading
 
@@ -8,18 +9,19 @@ from katzenqt import network, persistent
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["timeout", "cancel", "reply", "reconnect"])
-async def test_rpc_cleans_up_owned_tasks(outcome):
+async def test_rpc_cleans_up_owned_tasks(outcome: str) -> None:
     before = asyncio.all_tasks()
     started = asyncio.Event()
     released = asyncio.Event()
 
-    async def rpc():
+    async def rpc() -> "int | None":
         started.set()
         try:
             if outcome == "reply":
                 network._reconnect_event.set()
                 return 42
             await asyncio.Event().wait()
+            return None
         finally:
             released.set()
 
@@ -45,7 +47,7 @@ async def test_rpc_cleans_up_owned_tasks(outcome):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["timeout", "cancel", "connected", "shutdown"])
-async def test_connection_gate_cleans_up_waiters(outcome):
+async def test_connection_gate_cleans_up_waiters(outcome: str) -> None:
     before = asyncio.all_tasks()
     task = asyncio.create_task(network._wait_for_connection_or_shutdown(
         idle_retry_s=0.01,
@@ -65,7 +67,7 @@ async def test_connection_gate_cleans_up_waiters(outcome):
 
 
 @pytest.mark.asyncio
-async def test_idle_resend_sweeps_leave_no_waiters(fake_thinclient, monkeypatch):
+async def test_idle_resend_sweeps_leave_no_waiters(fake_thinclient: FakeThinClient, monkeypatch: pytest.MonkeyPatch) -> None:
     before = asyncio.all_tasks()
     monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.001)
     network.__mixnet_connected.set()
@@ -81,13 +83,13 @@ async def test_idle_resend_sweeps_leave_no_waiters(fake_thinclient, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_thread_commit_finishes_before_cancellation_returns():
+async def test_thread_commit_finishes_before_cancellation_returns() -> None:
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
     finished = threading.Event()
 
-    def commit():
+    def commit() -> int:
         loop.call_soon_threadsafe(started.set)
         if not release.wait(5):
             raise TimeoutError("test did not release commit")

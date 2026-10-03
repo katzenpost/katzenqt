@@ -23,6 +23,8 @@ job, in the same `run_in_io` style the chat composer uses.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -45,6 +47,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+if TYPE_CHECKING:
+    from PySide6.QtGui import QShowEvent
+
+    from .tally.engine import SlotTally
+
 from .tally import presenter, schema
 from .tally.engine import Outcome
 from .tally.presenter import SurveySummary
@@ -56,7 +63,16 @@ from .tally.sync import load_doc
 
 
 def outcome_text(outcome: Outcome) -> str:
-    """One-line declaration of a survey's current result."""
+    """One-line declaration of a survey's current result.
+
+    >>> from katzenqt.tally.engine import SlotTally
+    >>> lunch = SlotTally(slot_id="s0", text="Lunch", yes=2, maybe=0, no=1)
+    >>> unnamed = SlotTally(slot_id="s1", text="", yes=2, maybe=0, no=1)
+    >>> outcome_text(Outcome(kind="tie", winners=[lunch, unnamed], top_yes=2))
+    'Tie: Lunch / s1 (2 yes each).'
+    >>> outcome_text(Outcome(kind="winner", winners=[lunch], top_yes=2))
+    'Leading: Lunch (2 yes).'
+    """
     if outcome.kind == "no_winner":
         return "No winner yet — no slot has any yes votes."
     if outcome.kind == "tie":
@@ -95,7 +111,6 @@ class TallyPanel(QDialog):
         self._cycle: "list[str]" = []  # availabilities to cycle (no blank)
         self._slot_text: "dict[str, str]" = {}
         self._slot_buttons: "dict[str, QToolButton]" = {}
-        self._edit_button: "QPushButton | None" = None
 
         self._topic_label = QLabel("No poll selected")
         self._topic_label.setStyleSheet("font-weight: bold; font-size: 14px;")
@@ -132,13 +147,13 @@ class TallyPanel(QDialog):
         buttons.addStretch(1)
         buttons.addWidget(self._close_button)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._topic_label)
-        layout.addWidget(self._status_label)
-        layout.addWidget(self._meta_label)
-        layout.addWidget(self._outcome_label)
-        layout.addWidget(self._grid_scroll, 1)
-        layout.addLayout(buttons)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.addWidget(self._topic_label)
+        self._root_layout.addWidget(self._status_label)
+        self._root_layout.addWidget(self._meta_label)
+        self._root_layout.addWidget(self._outcome_label)
+        self._root_layout.addWidget(self._grid_scroll, 1)
+        self._root_layout.addLayout(buttons)
 
     # -- population ----------------------------------------------------------
 
@@ -265,7 +280,7 @@ class TallyPanel(QDialog):
         self._slot_text.clear()
 
     @staticmethod
-    def _slot_totals(slot) -> str:
+    def _slot_totals(slot: "SlotTally") -> str:
         totals = f"yes {slot.yes}"
         if slot.maybe:
             totals += f" · maybe {slot.maybe}"
@@ -286,14 +301,18 @@ class TallyPanel(QDialog):
         slots = summary.slots
 
         voter_header = QLabel("Voter")
-        voter_header.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        voter_header.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._grid.addWidget(voter_header, 0, 0)
         for col, slot in enumerate(slots, start=1):
             self._slot_text[slot.slot_id] = slot.text or slot.slot_id
             header = QLabel(self._slot_text[slot.slot_id])
-            header.setAlignment(Qt.AlignCenter)
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
             header.setToolTip(self._slot_totals(slot))
-            self._grid.addWidget(header, 0, col, Qt.AlignCenter)
+            self._grid.addWidget(
+                header, 0, col, Qt.AlignmentFlag.AlignCenter
+            )
 
         is_open = summary.status == "open"
         me = next(
@@ -307,7 +326,9 @@ class TallyPanel(QDialog):
         for row, voter in enumerate(self._voters, start=1):
             is_me = voter is me
             name = QLabel(voter.name)
-            name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            name.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
             self._grid.addWidget(name, row, 0)
             editable = is_me and self._editing and is_open
             for col, slot in enumerate(slots, start=1):
@@ -319,7 +340,9 @@ class TallyPanel(QDialog):
                     button.clicked.connect(
                         lambda _=False, sid=slot.slot_id: self._cycle_slot(sid)
                     )
-                    self._grid.addWidget(button, row, col, Qt.AlignCenter)
+                    self._grid.addWidget(
+                        button, row, col, Qt.AlignmentFlag.AlignCenter
+                    )
                 else:
                     avail = (
                         self._selection.get(slot.slot_id)
@@ -327,8 +350,10 @@ class TallyPanel(QDialog):
                         else voter.choices.get(slot.slot_id)
                     )
                     cell = QLabel(avail or "")
-                    cell.setAlignment(Qt.AlignCenter)
-                    self._grid.addWidget(cell, row, col, Qt.AlignCenter)
+                    cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self._grid.addWidget(
+                        cell, row, col, Qt.AlignmentFlag.AlignCenter
+                    )
 
         # The name column keeps its natural width; the option columns share the
         # rest equally so the grid fills the window with no gap.
@@ -357,8 +382,10 @@ class TallyPanel(QDialog):
         overflow, so the rows are never squeezed to fit (which clipped the
         first or last row). Growing only: setMinimumSize enlarges a visible
         window when the content grows but never shrinks one when it shrinks."""
-        self.layout().activate()
-        chrome = self.layout().sizeHint() - self._grid_scroll.sizeHint()
+        self._root_layout.activate()
+        chrome = (
+            self._root_layout.sizeHint() - self._grid_scroll.sizeHint()
+        )
         preferred = self._grid_host.sizeHint() + chrome
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
@@ -369,7 +396,7 @@ class TallyPanel(QDialog):
             preferred = preferred.boundedTo(avail)
         self.setMinimumSize(preferred)
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: "QShowEvent") -> None:
         super().showEvent(event)
         if not self._sized:
             # The pre-show size hint can be a hair short; re-fit once the
@@ -480,7 +507,7 @@ class TallyCreateDialog(QDialog):
         return self._topic.text().strip()
 
     def mode(self) -> schema.Mode:
-        return self._mode_combo.currentData()
+        return cast("schema.Mode", self._mode_combo.currentData())
 
     def slots(self) -> "list[str]":
         return list(self._slots)
@@ -561,7 +588,7 @@ class TallyCreateDialog(QDialog):
             self._slots[target], self._slots[row],
         )
 
-    def _update_ok(self, *_) -> None:
+    def _update_ok(self, *_: object) -> None:
         ok = bool(self.topic()) and len(self._slots) >= 1
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(ok)
 

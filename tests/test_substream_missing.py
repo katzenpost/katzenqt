@@ -52,12 +52,13 @@ async def test_missing_box_keeps_the_cursor_until_the_budget_expires() -> None:
         stream, terminal=False, now_s=40.0, budget_s=30.0,
     )
     event = network.substream_progress_queue.get_nowait()
-    assert event[:2] == ("failed", stream)
+    assert isinstance(event, network.TransferFailed)
+    assert event.rcw_id == stream
     async with persistent.asession() as sess:
         rcw = await sess.get(persistent.ReadCapWAL, stream)
         assert rcw is not None
         assert rcw.next_index == cursor
-        assert rcw.substream_failure == event[2]
+        assert rcw.substream_failure == event.reason
         assert (await sess.exec(select(persistent.MixWAL))).first() is None
         peer = (await sess.exec(select(persistent.ConversationPeer))).one()
         assert not peer.active

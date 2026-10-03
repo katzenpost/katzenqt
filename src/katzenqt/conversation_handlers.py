@@ -11,6 +11,7 @@ This module is free of Qt; the receive path that calls it must stay so too.
 from __future__ import annotations
 
 import logging
+from typing import NamedTuple
 
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -22,15 +23,28 @@ from .tally import controller as tally_controller
 logger = logging.getLogger(__name__)
 
 
-async def dispatch(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[int, str] | None, bool]":
-    """Handle ``gcm`` for ``peer``. Returns ``(convlog_added, signal_send,
-    peer_added, tally_added)``: whether a ConversationLog row was added (so the
-    chat view is notified), whether outbound work was staged that the send loop
-    must be poked for, whether a newcomer peer was added (their
-    ``(conversation_id, display_name)`` for the caller to announce to the UI
-    *after* its commit succeeds), and whether a tally event was consumed (so
-    the caller can notify the GUI after its commit succeeds — the tally rows
-    never touch the log)."""
+class PeerAnnouncement(NamedTuple):
+
+    conversation_id: int
+    display_name: str
+
+
+class DispatchResult(NamedTuple):
+
+    convlog_added: bool
+    signal_send: bool
+    peer_added: "PeerAnnouncement | None"
+    tally_added: bool
+
+
+async def dispatch(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+    full_payload: bytes,
+) -> DispatchResult:
+    """Handle ``gcm`` for ``peer``. See :class:`DispatchResult` for what each
+    field means."""
     await _verify_membership_advisory(sess, peer, gcm)
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
@@ -79,6 +93,7 @@ async def membership_hash_for(conversation_id: int) -> bytes:
     conversation, and return its current local membership hash."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
+        assert conv is not None
         return await local_membership_hash(sess, conv)
 
 
@@ -102,12 +117,22 @@ async def _verify_membership_advisory(
         )
 
 
-async def _handle_chat(sess, peer, gcm, full_payload) -> "tuple[bool, bool, bool, bool]":
+async def _handle_chat(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+    full_payload: bytes,
+) -> DispatchResult:
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
-    return True, False, False, False
+    return DispatchResult(True, False, None, False)
 
 
-async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bool, tuple[int, str] | None, bool]":
+async def _handle_introduction(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+    full_payload: bytes,
+) -> DispatchResult:
     """A member announced a newcomer: add the newcomer as a peer so their
     stream gets read, unless the announcement is about ourselves or someone we
     already know. The message itself is always stored, so every member's
@@ -139,12 +164,14 @@ async def _handle_introduction(sess, peer, gcm, full_payload) -> "tuple[bool, bo
                 logger.warning("conversation %s reached its member limit", conv.id)
             else:
                 _add_peer(sess, conv, intro.display_name, intro.read_cap)
-                peer_added = (conv.id, _sanitize_peer_name(intro.display_name))
+                peer_added = PeerAnnouncement(conv.id, _sanitize_peer_name(intro.display_name))
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
-    return True, False, peer_added, False
+    return DispatchResult(True, False, peer_added, False)
 
 
-async def _already_has(sess, conv_id: int, intro: "GroupChatPleaseAdd") -> bool:
+async def _already_has(
+    sess: AsyncSession, conv_id: int, intro: "GroupChatPleaseAdd",
+) -> bool:
     """True if the conversation already has a peer with this exact read cap.
 
     The read cap is the newcomer's unique cryptographic identity; matching
@@ -166,13 +193,18 @@ async def _already_has(sess, conv_id: int, intro: "GroupChatPleaseAdd") -> bool:
     return await persistent.peer_has_read_cap(sess, conv_id, intro.read_cap)
 
 
-async def _handle_tally(sess, peer, gcm, full_payload) -> "tuple[bool, bool, None, bool]":
+async def _handle_tally(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+    full_payload: bytes,
+) -> DispatchResult:
     result = await tally_controller.handle_event(sess, peer, gcm)
     # Every tally message is a chat row (displayed from its decoded payload),
     # so it is appended like any other; ``tally_added`` additionally tells the
     # caller to refresh the poll views.
     sess.add(persistent.ConversationLog.append_from(peer, full_payload))
-    return True, result.signal_send, None, True
+    return DispatchResult(True, result.signal_send, None, True)
 
 
 _CHAT_TYPES = (
@@ -194,3 +226,19 @@ _HANDLERS = {
     **{t: _handle_chat for t in _CHAT_TYPES},
     **{t: _handle_tally for t in _TALLY_TYPES},
 }
+__all__ = [
+    "AsyncSession",
+    "GroupChatPleaseAdd",
+    "GroupChatTypeEnum",
+    "annotations",
+    "dispatch",
+    "local_membership_hash",
+    "logger",
+    "logging",
+    "membership_hash_for",
+    "models",
+    "persistent",
+    "select",
+    "tally_controller",
+]
+

@@ -12,11 +12,15 @@ from tests.integration._bounce_helpers import (
     kpclientd_reachable, find_kpclientd_container, podman, wait_reachable,
     PhaseStopwatch,
 )
+from tests.integration._bounce_helpers import budget_s
 
 
 @pytest.mark.integration
 @pytest.mark.serial_docker
-def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path_factory):
+def test_read_recovers_after_full_kpclientd_restart(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     alice_state = tmp_path_factory.mktemp("alice") / "state"
     bob_state = tmp_path_factory.mktemp("bob") / "state"
     log_dir = tmp_path_factory.mktemp("watchdog_logs")
@@ -60,11 +64,14 @@ def test_read_recovers_after_full_kpclientd_restart(kpclientd_endpoint, tmp_path
         wait_reachable(120.0)
         tw.mark("tcp_back")
 
-        send = run_role(bob_state, "chat-session", "demo", "SEND:m1", timeout=1200.0)
+        send = run_role(
+            bob_state, "chat-session", "demo", "SEND:m1",
+            timeout=budget_s(1080.0),
+        )
         assert send.returncode == 0, send.stdout + send.stderr
         tw.mark("bob_sent")
 
-        alice_proc.wait(timeout=2100.0)
+        alice_proc.wait(timeout=budget_s(1980.0))
         tw.mark("alice_read")
     except Exception:
         alice_proc.kill()

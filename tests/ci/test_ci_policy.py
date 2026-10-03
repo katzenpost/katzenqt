@@ -63,16 +63,45 @@ def test_all_final_job_combinations() -> None:
         states, ("passed", "deadline", "failed", ""), states, states,
     ):
         expected = (
-            live_job == epoch == "success"
-            and ((live == "passed" and docker in ("success", "skipped"))
-                 or (live == "deadline" and docker == "success"))
+            epoch == "success"
+            and ((live_job == "success" and live == "passed")
+                 or docker == "success")
         )
         assert integration_passed(live_job, live, docker, epoch) == expected
+        assert integration_passed(
+            live_job, live, docker, epoch, True,
+        ) == (epoch == "success" and docker == "success")
 
 
-def test_hard_live_failure_cannot_be_overridden_by_docker() -> None:
-    assert not integration_passed("failure", "failed", "success", "success")
-    assert not integration_passed("success", "failed", "success", "success")
+def test_the_queue_never_accepts_a_skipped_docker_job() -> None:
+    assert integration_passed("success", "passed", "skipped", "success")
+    assert not integration_passed(
+        "success", "passed", "skipped", "success", True,
+    )
+    assert integration_passed("success", "passed", "success", "success", True)
+
+
+def test_the_workflow_still_hardens_the_queue() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert (
+        "REQUIRE_DOCKER: ${{ github.event_name == 'merge_group' "
+        "&& '--require-docker' || '' }}" in text
+    )
+    assert '--epoch="$EPOCH" $REQUIRE_DOCKER' in text
+
+
+def test_the_docker_suite_is_required_when_the_live_check_does_not_pass(
+) -> None:
+    assert integration_passed("failure", "failed", "success", "success")
+    assert integration_passed("success", "failed", "success", "success")
+    assert not integration_passed("success", "failed", "skipped", "success")
+    assert not integration_passed("skipped", "", "skipped", "success")
+    assert integration_passed("skipped", "", "success", "success")
+
+
+def test_a_passing_live_check_needs_no_docker_run() -> None:
+    assert integration_passed("success", "passed", "skipped", "success")
+    assert integration_passed("success", "passed", "", "success")
 
 
 def test_final_command_publishes_both_lane_results(tmp_path: Path) -> None:
@@ -129,7 +158,7 @@ def test_live_run_removes_the_previous_report_first() -> None:
 @pytest.mark.parametrize("live_job, live, docker, epoch, expected", [
     ("success", "passed", "skipped", "success", 0),
     ("success", "deadline", "skipped", "success", 1),
-    ("failure", "failed", "success", "success", 1),
+    ("failure", "failed", "success", "success", 0),
     ("success", "passed", "skipped", "skipped", 1),
 ])
 def test_final_command_checks_skipped_lanes(

@@ -8,6 +8,7 @@ ordinary messages still land in it).
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING
 
 import pytest
 from sqlmodel import select
@@ -17,13 +18,16 @@ from katzenqt.tally import engine, events, schema, sync
 from katzenqt.tally.controller import TallyController, voter_id_from_read_cap
 from katzenqt.tally.schema import Mode, votes_map
 
+if TYPE_CHECKING:
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
 ALICE_CAP = bytes([0x02]) * 136
 BOB_CAP = bytes([0x03]) * 136
 CAROL_CAP = bytes([0x05]) * 136
 OWN_CAP = bytes([0x01]) * 136
 
 
-def test_voter_id_ignores_the_read_cap_index_suffix():
+def test_voter_id_ignores_the_read_cap_index_suffix() -> None:
     """Identity is the 32-byte public key, not the 104-byte index suffix: a
     joiner's pre-mutation cap and the salt-mutated cap the group holds for the
     same member must hash to the same voter id (and different members must
@@ -37,7 +41,13 @@ def test_voter_id_ignores_the_read_cap_index_suffix():
     assert voter_id_from_read_cap(other) != voter_id_from_read_cap(shared_copy)
 
 
-async def _make_convo(sess, name, own_cap, peer_caps):
+async def _make_convo(
+    sess: AsyncSession, name: str, own_cap: bytes, peer_caps: dict[str, bytes],
+) -> tuple[
+    persistent.Conversation,
+    persistent.ConversationPeer,
+    dict[str, persistent.ConversationPeer],
+]:
     """Build a conversation with an own peer and named remote peers, each with
     a provisioned read capability. Mirrors headless ``create-conv``."""
     wcap = persistent.WriteCapWAL(id=uuid.uuid4())
@@ -50,7 +60,7 @@ async def _make_convo(sess, name, own_cap, peer_caps):
     sess.add(convo)
     sess.add(own_peer)
 
-    peers = {}
+    peers: dict[str, persistent.ConversationPeer] = {}
     for pname, cap in peer_caps.items():
         rcap = persistent.ReadCapWAL(id=uuid.uuid4(), read_cap=cap)
         peer = persistent.ConversationPeer(name=pname, read_cap_id=rcap.id, conversation=convo)
@@ -66,7 +76,7 @@ async def _make_convo(sess, name, own_cap, peer_caps):
 
 
 @pytest.mark.asyncio
-async def test_vote_is_keyed_to_the_authenticated_sender():
+async def test_vote_is_keyed_to_the_authenticated_sender() -> None:
     ctrl = TallyController()
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
@@ -80,6 +90,7 @@ async def test_vote_is_keyed_to_the_authenticated_sender():
         await sess.commit()
 
     doc = ctrl.get(convo_id, survey_id)
+    assert doc is not None
     keys = set(votes_map(doc).keys())
     assert keys == {
         voter_id_from_read_cap(ALICE_CAP).hex(),
@@ -92,7 +103,7 @@ async def test_vote_is_keyed_to_the_authenticated_sender():
 
 
 @pytest.mark.asyncio
-async def test_one_peer_cannot_overwrite_anothers_vote():
+async def test_one_peer_cannot_overwrite_anothers_vote() -> None:
     ctrl = TallyController()
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
@@ -108,6 +119,7 @@ async def test_one_peer_cannot_overwrite_anothers_vote():
         await sess.commit()
 
     doc = ctrl.get(convo_id, survey_id)
+    assert doc is not None
     vmap = votes_map(doc)
     bob_key = voter_id_from_read_cap(BOB_CAP).hex()
     assert vmap[bob_key]["s0"] == "yes"
@@ -115,7 +127,7 @@ async def test_one_peer_cannot_overwrite_anothers_vote():
 
 
 @pytest.mark.asyncio
-async def test_state_persists_and_a_fresh_controller_reloads_it():
+async def test_state_persists_and_a_fresh_controller_reloads_it() -> None:
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
         convo, _own, peers = await _make_convo(sess, "g", OWN_CAP, {"alice": ALICE_CAP})
@@ -127,13 +139,15 @@ async def test_state_persists_and_a_fresh_controller_reloads_it():
 
     reloaded = TallyController()
     await reloaded.load_all()
-    res = engine.tally(reloaded.get(convo_id, survey_id))
+    reloaded_doc = reloaded.get(convo_id, survey_id)
+    assert reloaded_doc is not None
+    res = engine.tally(reloaded_doc)
     assert res.n_voters == 1
     assert res.slots[0].maybe == 1
 
 
 @pytest.mark.asyncio
-async def test_dispatch_logs_tally_rows_and_routes_chat_too():
+async def test_dispatch_logs_tally_rows_and_routes_chat_too() -> None:
     survey_id = uuid.uuid4().bytes
     conversation_handlers.tally_controller.INSTANCE._docs.clear()
     async with persistent.asession() as sess:
@@ -172,7 +186,7 @@ async def test_dispatch_logs_tally_rows_and_routes_chat_too():
 
 
 @pytest.mark.asyncio
-async def test_creator_can_close_but_non_creator_cannot_locally():
+async def test_creator_can_close_but_non_creator_cannot_locally() -> None:
     ctrl = TallyController()
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
@@ -181,7 +195,9 @@ async def test_creator_can_close_but_non_creator_cannot_locally():
         # We created it, so we may close it.
         await ctrl.create_local(sess, convo, survey_id, "x", Mode.APPROVAL, ["a"])
         assert await ctrl.close_local(sess, convo, survey_id) is True
-        assert engine.tally(ctrl.get(convo.id, survey_id)).status == "closed"
+        closed_doc = ctrl.get(convo.id, survey_id)
+        assert closed_doc is not None
+        assert engine.tally(closed_doc).status == "closed"
 
         # A survey whose creator is Alice: our local user must not close it.
         other = uuid.uuid4().bytes
@@ -189,11 +205,13 @@ async def test_creator_can_close_but_non_creator_cannot_locally():
             other, "y", Mode.APPROVAL, ["a"], creator=voter_id_from_read_cap(ALICE_CAP)))
         await ctrl.handle_event(sess, peers["alice"], events.build_create(other, blob))
         assert await ctrl.close_local(sess, convo, other) is False
-        assert engine.tally(ctrl.get(convo.id, other)).status == "open"
+        other_doc = ctrl.get(convo.id, other)
+        assert other_doc is not None
+        assert engine.tally(other_doc).status == "open"
 
 
 @pytest.mark.asyncio
-async def test_close_event_honoured_only_from_the_creator():
+async def test_close_event_honoured_only_from_the_creator() -> None:
     ctrl = TallyController()
     survey_id = uuid.uuid4().bytes
     async with persistent.asession() as sess:
@@ -204,16 +222,20 @@ async def test_close_event_honoured_only_from_the_creator():
 
         # A close from Alice (not the creator) is ignored.
         await ctrl.handle_event(sess, peers["alice"], events.build_close(survey_id))
-        assert engine.tally(ctrl.get(convo.id, survey_id)).status == "open"
+        open_doc = ctrl.get(convo.id, survey_id)
+        assert open_doc is not None
+        assert engine.tally(open_doc).status == "open"
 
         # A close from the creator's read cap is honoured.
         await ctrl.handle_event(sess, peers["creator"], events.build_close(survey_id))
-        assert engine.tally(ctrl.get(convo.id, survey_id)).status == "closed"
+        honoured_doc = ctrl.get(convo.id, survey_id)
+        assert honoured_doc is not None
+        assert engine.tally(honoured_doc).status == "closed"
         await sess.commit()
 
 
 @pytest.mark.asyncio
-async def test_cross_conversation_apply_is_isolated():
+async def test_cross_conversation_apply_is_isolated() -> None:
     """A survey created in conversation A cannot be seized or perturbed by a
     peer in conversation B who reuses its survey id."""
     from katzenqt.tally import controller as controller_mod
@@ -237,15 +259,17 @@ async def test_cross_conversation_apply_is_isolated():
 
     assert ctrl.get(b_id, survey_id) is None
     a_doc = ctrl.get(a_id, survey_id)
+    assert a_doc is not None
     assert engine.tally(a_doc).slots[0].yes == 1
 
     async with persistent.asession() as sess:
         row = await sess.get(persistent.TallyState, survey_id)
+        assert row is not None
         assert row.conversation_id == a_id
 
 
 @pytest.mark.asyncio
-async def test_oversized_survey_id_is_dropped():
+async def test_oversized_survey_id_is_dropped() -> None:
     ctrl = TallyController()
     huge_id = b"\x01" * (controller_max_survey_id() + 1)
     async with persistent.asession() as sess:
@@ -261,7 +285,7 @@ async def test_oversized_survey_id_is_dropped():
 
 
 @pytest.mark.asyncio
-async def test_oversized_crdt_blob_is_dropped():
+async def test_oversized_crdt_blob_is_dropped() -> None:
     from katzenqt.tally import controller as controller_mod
 
     ctrl = TallyController()
@@ -285,14 +309,14 @@ def controller_max_survey_id() -> int:
 
 
 @pytest.mark.asyncio
-async def test_undecodable_crdt_is_dropped_not_raised(caplog):
+async def test_undecodable_crdt_is_dropped_not_raised(caplog: pytest.LogCaptureFixture) -> None:
     from katzenqt.tally import sync
     with pytest.raises(ValueError):
         sync.load_doc(b"\xde\xad\xbe\xef" * 8)
 
 
 @pytest.mark.asyncio
-async def test_malformed_sync_request_is_dropped_not_raised(caplog):
+async def test_malformed_sync_request_is_dropped_not_raised(caplog: pytest.LogCaptureFixture) -> None:
     """A TALLY_SYNC_REQ carrying a garbage state vector must not raise out of
     dispatch (which would wedge the receive loop); it is dropped like any other
     undecodable tally payload, and no reply is staged (False return)."""
@@ -308,7 +332,7 @@ async def test_malformed_sync_request_is_dropped_not_raised(caplog):
 
 
 @pytest.mark.asyncio
-async def test_apply_and_reject_verdicts_for_received_events():
+async def test_apply_and_reject_verdicts_for_received_events() -> None:
     """`handle_event` reports applied/rejected for the timeline, and a rejected
     event changes nothing."""
     ctrl = TallyController()
@@ -336,7 +360,9 @@ async def test_apply_and_reject_verdicts_for_received_events():
         assert rejected.detail
         await sess.commit()
 
-    assert engine.tally(ctrl.get(convo_id, survey_id)).n_voters == 1
+    one_voter_doc = ctrl.get(convo_id, survey_id)
+    assert one_voter_doc is not None
+    assert engine.tally(one_voter_doc).n_voters == 1
 
 
 # ---------------------------------------------------------------------------
@@ -344,13 +370,15 @@ async def test_apply_and_reject_verdicts_for_received_events():
 # ---------------------------------------------------------------------------
 
 
-def _created_doc_blob(survey_id, topic="t", slots=("a", "b")):
+def _created_doc_blob(
+    survey_id: bytes, topic: str = "t", slots: tuple[str, ...] = ("a", "b"),
+) -> bytes:
     doc = schema.new_survey_doc(survey_id, topic, Mode.APPROVAL, list(slots))
     return sync.full_state(doc)
 
 
 @pytest.mark.asyncio
-async def test_vote_before_create_is_applied_when_the_survey_arrives():
+async def test_vote_before_create_is_applied_when_the_survey_arrives() -> None:
     """A vote on one member's stream can be consumed before the create on
     another's. It is a no-op while the survey is unknown, then applied (from
     the buffer) the moment the create builds the Doc."""
@@ -372,13 +400,15 @@ async def test_vote_before_create_is_applied_when_the_survey_arrives():
         convo_id = convo.id
         await sess.commit()
 
-    result = engine.tally(ctrl.get(convo_id, survey_id))
+    doc = ctrl.get(convo_id, survey_id)
+    assert doc is not None
+    result = engine.tally(doc)
     assert result.n_voters == 1
     assert result.slots[0].yes == 1
 
 
 @pytest.mark.asyncio
-async def test_reconcile_buffers_an_early_vote_then_the_create_applies_it():
+async def test_reconcile_buffers_an_early_vote_then_the_create_applies_it() -> None:
     """A vote whose create was never processed in a previous session is
     recovered from the ConversationLog at startup and applied when the create
     finally arrives."""
@@ -412,14 +442,16 @@ async def test_reconcile_buffers_an_early_vote_then_the_create_applies_it():
         assert applied.status == "applied"
         await sess.commit()
 
-    result = engine.tally(ctrl.get(convo_id, survey_id))
+    doc = ctrl.get(convo_id, survey_id)
+    assert doc is not None
+    result = engine.tally(doc)
     assert result.n_voters == 1
     assert result.slots[0].yes == 1
     assert (convo_id, survey_id) not in ctrl._pending
 
 
 @pytest.mark.asyncio
-async def test_reconcile_ignores_surveys_we_already_persisted():
+async def test_reconcile_ignores_surveys_we_already_persisted() -> None:
     """Once a survey is persisted its ballots are already in the Doc, so the
     log scan must not re-buffer them (that is what makes startup replay
     idempotent)."""
@@ -447,7 +479,7 @@ async def test_reconcile_ignores_surveys_we_already_persisted():
 
 
 @pytest.mark.asyncio
-async def test_buffered_vote_already_in_the_create_blob_is_not_double_applied():
+async def test_buffered_vote_already_in_the_create_blob_is_not_double_applied() -> None:
     """A create may already carry a ballot (e.g. the creator had it); the
     buffered copy must not overwrite or duplicate it."""
     ctrl = TallyController()
@@ -468,6 +500,8 @@ async def test_buffered_vote_already_in_the_create_blob_is_not_double_applied():
         convo_id = convo.id
         await sess.commit()
 
-    result = engine.tally(ctrl.get(convo_id, survey_id))
+    stored_doc = ctrl.get(convo_id, survey_id)
+    assert stored_doc is not None
+    result = engine.tally(stored_doc)
     assert result.n_voters == 1
     assert result.slots[0].yes == 1

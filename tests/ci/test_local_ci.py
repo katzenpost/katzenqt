@@ -58,9 +58,9 @@ class _Run:
     def socket(self) -> Path:
         return self.runtime / "podman/podman.sock"
 
-    def make(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def make(self, *args: str, target: str = "ci-local-act") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [MAKE, "-f", str(ROOT / "Makefile"), "ci-local", *args],
+            [MAKE, "-f", str(ROOT / "Makefile"), target, *args],
             cwd=self.directory, env=self.env, text=True,
             capture_output=True, timeout=15,
         )
@@ -162,9 +162,10 @@ def test_make_runs_act_in_place_after_pinging_socket(run: _Run) -> None:
     )
     arguments = (calls / "args").read_text().splitlines()
     assert arguments == [
-        "-P", "ubuntu-24.04=localhost/katzenqt-act:latest",
+        "-P", "ubuntu-24.04=localhost/katzenqt-ci:latest",
         "--rm", "--concurrent-jobs", "1", "--network", "host",
-        "-P", "ubuntu-latest=localhost/katzenqt-act:latest",
+        "-P", "ubuntu-latest=localhost/katzenqt-ci:latest",
+        "--pull=false", "--var", "CI_IMAGE=localhost/katzenqt-ci:latest",
         "--container-daemon-socket", f"unix://{run.socket}",
         "--container-options",
         f'--volume "{run.directory}/.ci-local:{run.directory}/.ci-local"',
@@ -175,6 +176,7 @@ def test_make_runs_act_in_place_after_pinging_socket(run: _Run) -> None:
         "--env", f"CARGO_HOME={run.directory}/.ci-local/cargo-home",
         "--artifact-server-path", str(run.directory / ".ci-local/artifacts"),
         "--artifact-server-addr", "127.0.0.1",
+        "-j", "test",
     ]
     for name in ("uv-cache", "go-mod", "go-build", "cargo-home"):
         assert (run.directory / ".ci-local" / name).is_dir()

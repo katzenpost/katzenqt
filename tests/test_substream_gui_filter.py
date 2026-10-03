@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -17,28 +18,29 @@ from katzenqt.network import _SUBSTREAM_NAME_PREFIX
 
 
 def _peer(name: str, *, active: bool = True, peer_id: int = 1,
-           read_cap_id: "uuid.UUID | None" = None) -> SimpleNamespace:
-    return SimpleNamespace(
+           read_cap_id: "uuid.UUID | None" = None,
+           ) -> persistent.ConversationPeer:
+    return cast("persistent.ConversationPeer", SimpleNamespace(
         name=name, active=active, id=peer_id,
         read_cap_id=read_cap_id or uuid.uuid4(),
-    )
+    ))
 
 
 class TestPeerIsDisplayable:
-    def test_normal_peer_is_displayable(self):
+    def test_normal_peer_is_displayable(self) -> None:
         assert katzen._peer_is_displayable(_peer("alice")) is True
 
-    def test_substream_peer_is_not_displayable(self):
+    def test_substream_peer_is_not_displayable(self) -> None:
         assert katzen._peer_is_displayable(
             _peer(f"{_SUBSTREAM_NAME_PREFIX}<demo>:<nonce>")
         ) is False
 
-    def test_inactive_substream_peer_is_not_displayable(self):
+    def test_inactive_substream_peer_is_not_displayable(self) -> None:
         assert katzen._peer_is_displayable(
             _peer(f"{_SUBSTREAM_NAME_PREFIX}<demo>:<nonce>", active=False)
         ) is False
 
-    def test_looks_like_substream_but_exact_prefix_matters(self):
+    def test_looks_like_substream_but_exact_prefix_matters(self) -> None:
         # A real peer named e.g. ":substreams!" must survive: only the exact
         # reserved prefix is filtered.
         assert katzen._peer_is_displayable(_peer(":substreams!")) is True
@@ -82,7 +84,7 @@ async def _add_active_peer(conversation_id: int, name: str) -> None:
 
 class TestBuildWhoReplySkipsSubstreamPeers:
     @pytest.mark.asyncio
-    async def test_active_substream_peer_is_omitted(self):
+    async def test_active_substream_peer_is_omitted(self) -> None:
         conv_id = await _make_conversation()
         await _add_active_peer(conv_id, "alice")
         await _add_active_peer(conv_id, f"{_SUBSTREAM_NAME_PREFIX}<demo>:<nonce>")
@@ -92,7 +94,7 @@ class TestBuildWhoReplySkipsSubstreamPeers:
         assert f"{_SUBSTREAM_NAME_PREFIX}<demo>:<nonce>" not in names
 
     @pytest.mark.asyncio
-    async def test_only_normal_peer_survives(self):
+    async def test_only_normal_peer_survives(self) -> None:
         conv_id = await _make_conversation()
         await _add_active_peer(conv_id, "bob")
         reply = await voucher._build_who_reply(conv_id)

@@ -23,7 +23,7 @@ from katzenqt.katzen_util import is_risky_attachment_extension
         "weird.name.SVGZ",
     ],
 )
-def test_risky_extensions_are_flagged(basename):
+def test_risky_extensions_are_flagged(basename: str) -> None:
     assert is_risky_attachment_extension(basename) is True
 
 
@@ -41,5 +41,7 @@ def test_risky_extensions_are_flagged(basename):
         ".hidden",
     ],
 )
-def test_safe_or_unknown_extensions_are_not_flagged(basename):
+def test_safe_or_unknown_extensions_are_not_flagged(
+    basename: str,
+) -> None:
     assert is_risky_attachment_extension(basename) is False

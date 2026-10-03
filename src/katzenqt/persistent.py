@@ -9,19 +9,27 @@ import alembic.command
 import alembic.context
 import uuid
 from contextlib import asynccontextmanager
-from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, UniqueConstraint, select
+from sqlmodel import Field, Relationship, Session, SQLModel, col, create_engine, UniqueConstraint, select
 from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlmodel.sql.expression import Select
 from sqlalchemy.ext.asyncio import create_async_engine
 import sqlalchemy
 count = sqlalchemy.func.count
 import aiosqlite # https://pypi.org/project/aiosqlite/
-from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, NamedTuple, Sequence, TypeVar, cast
 from .katzen_util import create_task
 if TYPE_CHECKING:
-    import sqlmodel
+    from typing import Self
+    from sqlalchemy.engine.interfaces import DBAPIConnection
+    from sqlalchemy.pool import ConnectionPoolEntry
+    from sqlmodel.main import FieldInfo
+    from sqlmodel.sql.expression import SelectOfScalar
+    from ._thinclient import ThinClient
 from alembic import context
 import logging
 import os
+
+from . import epochs
 from threading import Lock
 
 logger = logging.getLogger("katzen.persistent")
@@ -90,7 +98,7 @@ async def conversation_log_order_lock(conversation_id: int) -> AsyncIterator[Non
         lock.release()
 
 
-def next_conversation_order(conversation_id: int):
+def next_conversation_order(conversation_id: int) -> "sa.ScalarSelect[int]":
     """Scalar subquery for the next ``conversation_order`` value:
     ``MAX(order) + 1`` (or 0 for an empty log) evaluated at INSERT/COMMIT
     time. Shared by every ConversationLog append site so a future change to
@@ -112,7 +120,7 @@ async def append_outbound_chat(
     conversation_id: int,
     conversation_peer_id: int,
     new_write_caps: list[uuid.UUID],
-    db_entries: list[SQLModel],
+    db_entries: "Sequence[SQLModel]",
     payload: bytes,
     final_pwal_id: uuid.UUID | None = None,
     log_id: uuid.UUID | None = None,
@@ -188,7 +196,7 @@ class UploadAck(NamedTuple):
 
 
 async def _outbound_upload_from_entries(
-    sess: AsyncSession, conversation_id: int, db_entries: list[SQLModel],
+    sess: AsyncSession, conversation_id: int, db_entries: "Sequence[SQLModel]",
 ) -> "OutboundUpload | None":
     """Describe the substream announced by ``db_entries``, if any.
 
@@ -197,12 +205,17 @@ async def _outbound_upload_from_entries(
     ReadCapWAL it points at. Ordinary sends have neither.
     """
     i_chunk = next(
-        (o for o in db_entries if getattr(o, "indirection", None) is not None),
+        (o for o in db_entries
+         if isinstance(o, PlaintextWAL) and o.indirection is not None),
         None,
     )
     if i_chunk is None:
         return None
-    rcw = next((o for o in db_entries if o.id == i_chunk.indirection), None)
+    rcw = next(
+        (o for o in db_entries
+         if isinstance(o, ReadCapWAL) and o.id == i_chunk.indirection),
+        None,
+    )
     conv = await sess.get(Conversation, conversation_id)
     # Effective payload bytes: the agg C/F PlaintextWALs on the substream,
     # each carrying a 1-byte chunk-type prefix before its data.
@@ -264,7 +277,9 @@ _engine = create_async_engine(_sql_url, echo=False, future=True, pool_size=1000)
 _engine_sync = create_engine(_sql_url.replace('+aiosqlite://','://'), echo=False, pool_size=1000)
 
 
-def _set_sqlite_pragmas(dbapi_connection, connection_record):
+def _set_sqlite_pragmas(
+    dbapi_connection: "DBAPIConnection", connection_record: "ConnectionPoolEntry",
+) -> None:
     """Enable WAL and a short busy timeout on every pooled connection.
 
     Without busy_timeout, any write that finds another writer holding the
@@ -304,7 +319,7 @@ metadata.naming_convention = NAMING_CONVENTION
 
 
 @asynccontextmanager
-async def asession() -> "AsyncIterator[sqlmodel.ext.asyncio.session.AsyncSession]":
+async def asession() -> "AsyncIterator[AsyncSession]":
     """Opens a sqlmodel.ext.asyncio.session.AsyncSession
 
     Connection acquisition and release are shielded from task
@@ -384,14 +399,14 @@ def init_and_migrate() -> None:
         os.umask(old_umask)
     _restrict_state_file_perms(state_file)
 
-def id_field(table_name: str):
+def id_field(table_name: str) -> "FieldInfo":
     sequence = sa.Sequence(f"{table_name}_id_seq")
-    return Field(
+    return cast("FieldInfo", Field(
         default=None,
         primary_key=True,
         sa_column_args=[sequence],
         sa_column_kwargs={"server_default": sequence.next_value()},
-    )
+    ))
 
 class AppSetting(SQLModel, table=True):
     id: str = Field(primary_key=True)  # name of the setting
@@ -430,10 +445,10 @@ class MixWAL(SQLModel, table=True):
     next_message_index: bytes = Field(min_length=104, max_length=104)
     is_read : bool
     @classmethod
-    def get_new(cls, except_these:"Set[uuid.UUID]"):
-        return select(cls).where(cls.bacap_stream.not_in(except_these))
+    def get_new(cls, except_these: "set[uuid.UUID]") -> "SelectOfScalar[Self]":
+        return select(cls).where(col(cls.bacap_stream).not_in(except_these))
     @classmethod
-    async def resend_queue_from_disk(cls) -> "Set[uuid.UUID]":
+    async def resend_queue_from_disk(cls) -> "set[uuid.UUID]":
         # TODO something needs to restore the connection.ack_queues listeners, which means we need to know the message_id
         # TODO associated with MixWALs that we send out
         bacap_streams = set()
@@ -460,8 +475,10 @@ class ReadCapWAL(SQLModel, table=True):
         sa_column_kwargs={"server_default": sa.text("0")},
     )
     @classmethod
-    async def get_by_bacap_stream(cls, stream: uuid.UUID):
-        return (await sess.exec(select(cls).where(id=stream))).one()
+    async def get_by_bacap_stream(
+        cls, sess: "AsyncSession", stream: uuid.UUID,
+    ) -> "ReadCapWAL":
+        return (await sess.exec(select(cls).where(cls.id == stream))).one()
 
 class WriteCapWAL(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)
@@ -472,10 +489,10 @@ class WriteCapWAL(SQLModel, table=True):
     # never paused. Persisted so a paused upload stays paused across a restart.
     paused: bool = Field(default=False)
     @classmethod
-    def get_by_bacap_uuid(cls, uuid):
+    def get_by_bacap_uuid(cls, uuid: "uuid.UUID") -> "sa.Select[tuple[Self]]":
         # from typing import ClassVar
         # select_by_bacap_uuid: ClassVar[sa.select()] = sa.select(cls).where(cls.id==uuid)
-        return sa.select(cls).where(cls.id==uuid)
+        return sa.select(cls).where(col(cls.id)==uuid)
 
 class PendingVoucher(SQLModel, table=True):
     """An in-flight Contact Voucher handshake, durable across restarts.
@@ -546,9 +563,9 @@ class SentLog(SQLModel, table=True):
     )
     @classmethod
     async def mark_sent(
-        cls, connection, mw: MixWAL, resend_queue, *,
+        cls, connection: "ThinClient", mw: MixWAL, resend_queue: "set[uuid.UUID]", *,
         resolve_counter: Callable[[bytes], Awaitable[int]] | None = None,
-    ) -> int:
+    ) -> "int | None":
         """Add SentLog entry, delete corresponding MixWAL and PlaintextWAL entries.
         Also bump index so we don't just keep writing to the same index??
 
@@ -664,11 +681,11 @@ async def peer_has_read_cap(
             select(ReadCapWAL.read_cap)
             .join(
                 ConversationPeer,
-                ConversationPeer.read_cap_id == ReadCapWAL.id,
+                col(ConversationPeer.read_cap_id) == ReadCapWAL.id,
             )
             .join(
                 ConversationPeerLink,
-                ConversationPeerLink.conversation_peer_id
+                col(ConversationPeerLink.conversation_peer_id)
                 == ConversationPeer.id,
             )
             .where(
@@ -680,7 +697,9 @@ async def peer_has_read_cap(
     return bool(rows)
 
 
-async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
+async def own_read_cap(
+    session: "AsyncSession", conversation: "Conversation",
+) -> "bytes | None":
     """The conversation owner's salt-mutated read cap: the write cap's
     [32:] suffix once that is provisioned, else the unmutated
     ``rcapwal.read_cap``.
@@ -715,15 +734,24 @@ async def own_read_cap(session: "AsyncSession", conversation) -> "bytes | None":
     return own_cap
 
 
-async def wait_for_sent(pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25) -> bool:
-    """Poll SentLog for ``pwal_id`` until it appears or ``deadline_s``
+
+
+async def wait_for_sent(
+    pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25,
+) -> bool:
+    """Poll SentLog for ``pwal_id`` until one epoch plus ``deadline_s``
     elapses. Returns True if acked in time, False on timeout.
 
     Shared by every caller that needs to block until an outbound
     plaintext's ACK lands (voucher.py's introduction wait, the headless
     SEND step); each decides for itself what a timeout means (log and
-    move on, vs. fail the whole action)."""
-    deadline = asyncio.get_event_loop().time() + deadline_s
+    move on, vs. fail the whole action).
+
+    ``deadline_s`` is slack on top of one epoch, not the whole wait: an ack
+    may have to ride out a PKI rollover, and an epoch is two minutes on the
+    local mixnet and twenty on a live one. The period comes from the PKI
+    document, so nothing needs setting per network."""
+    deadline = asyncio.get_event_loop().time() + epochs.budget_s(deadline_s)
     while asyncio.get_event_loop().time() < deadline:
         async with asession() as sess:
             hit = (await sess.exec(
@@ -765,6 +793,7 @@ async def upload_progress_after_ack(bacap_stream: uuid.UUID) -> "UploadAck | Non
                 PlaintextWAL.bacap_stream == bacap_stream,
             )
         )).one()
+        assert rcw.substream_total_chunks is not None
         total = int(rcw.substream_total_chunks)
         return UploadAck(
             rcw_id=rcw.id, sent=total - int(remaining), total=total,
@@ -772,14 +801,16 @@ async def upload_progress_after_ack(bacap_stream: uuid.UUID) -> "UploadAck | Non
         )
 
 
-def _read_wcw_precheck(bacap_stream) -> "bytes | None":
+def _read_wcw_precheck(bacap_stream: uuid.UUID) -> "bytes | None":
     """Return wcw.next_index for the stream (worker-thread helper for mark_sent)."""
     with Session(_engine_sync) as sess:
         wcw = sess.get(WriteCapWAL, bacap_stream)
         return wcw.next_index if wcw else None
 
 
-def _ensure_sent_log_and_flip_status(sess, pwal: "PlaintextWAL") -> "int | None":
+def _ensure_sent_log_and_flip_status(
+    sess: "Session", pwal: "PlaintextWAL",
+) -> "int | None":
     """Idempotent-insert pwal's SentLog row, and flip its ConversationLog
     entry (if any) to sent. Shared by both mark_sent finalize paths.
 
@@ -803,7 +834,9 @@ def _ensure_sent_log_and_flip_status(sess, pwal: "PlaintextWAL") -> "int | None"
     return conversation_id
 
 
-def _finalize_stale_ack(mw_id, plaintextwal_id) -> "int | None":
+def _finalize_stale_ack(
+    mw_id: uuid.UUID, plaintextwal_id: uuid.UUID,
+) -> "int | None":
     """Stale/stray-MW finalize transaction (worker-thread helper for mark_sent).
 
     Runs when the regression guard detected the writer already advanced past
@@ -824,8 +857,10 @@ def _finalize_stale_ack(mw_id, plaintextwal_id) -> "int | None":
     return conversation_id
 
 
-def _mark_sent_txn(mw_id, bacap_stream, plaintextwal_id, is_read,
-                   next_index, new_idx, real_next) -> "int | None":
+def _mark_sent_txn(mw_id: uuid.UUID, bacap_stream: uuid.UUID,
+                   plaintextwal_id: uuid.UUID, is_read: bool,
+                   next_index: bytes, new_idx: int,
+                   real_next: "int | None") -> "int | None":
     """Normal ACK finalize transaction (worker-thread helper for mark_sent).
 
     Records SentLog, advances WriteCapWAL, flips ConversationLog status, and
@@ -868,6 +903,17 @@ def _mark_sent_txn(mw_id, bacap_stream, plaintextwal_id, is_read,
     return conversation_id
 
 
+class ResendableRow(NamedTuple):
+    id: uuid.UUID
+    after_id: uuid.UUID | None
+    after_stream: uuid.UUID | None
+    bacap_stream: uuid.UUID
+    conversation_id: int
+    bacap_payload: bytes
+    indirection: uuid.UUID | None
+    rownum: int
+
+
 class PlaintextWAL(SQLModel, table=True):
     """Plaintext chunks of (bacap_payload) to insert into (bacap_stream).
     See models.py for SendOperation -> PlaintextWAL serialization details.
@@ -895,7 +941,7 @@ class PlaintextWAL(SQLModel, table=True):
     
 
     @classmethod
-    def find_resendable(cls, resend_queue: "Set[uuid.UUID]") -> sa.sql.selectable.Select:
+    def find_resendable(cls, resend_queue: "set[uuid.UUID]") -> "Select[ResendableRow]":
         # We can start resending in these cases:
         # - after_stream IS NONE AND after_id IS NONE
         # - after_stream IS NONE AND after_id IN (sentIDs)
@@ -908,16 +954,16 @@ class PlaintextWAL(SQLModel, table=True):
         """
         @sqlite> SELECT anon_1.id, anon_1.after_id, anon_1.after_stream, anon_1.bacap_stream, anon_1.conversation_id, anon_1.bacap_payload, anon_1.rownum  FROM (SELECT plaintextwal.id AS id, plaintextwal.after_id AS after_id, plaintextwal.after_stream AS after_stream, plaintextwal.bacap_stream AS bacap_stream, plaintextwal.conversation_id AS conversation_id, plaintextwal.bacap_payload AS bacap_payload, row_number() OVER (PARTITION BY plaintextwal.bacap_stream) AS rownum  FROM plaintextwal LEFT JOIN sentlog ON sentlog.id IN (plaintextwal.after_stream, plaintextwal.after_id) WHERE (plaintextwal.id NOT IN (1,2)) AND (plaintextwal.after_id IS NULL OR plaintextwal.after_id=sentlog.id) AND (plaintextwal.after_stream IS NULL OR plaintextwal.after_stream=sentlog.id)) AS anon_1 where anon_1.rownum = 1;
         """
-        sent_cte = sa.select(sa.select(SentLog.id).cte('sent_cte'))  # Successfully sent messages
-        mixwal_bacap_cte = sa.select(sa.select(MixWAL.bacap_stream).cte('mixwal_bacap_cte'))
-        populated_read_cap_cte = sa.select(sa.select(ReadCapWAL.id).where(ReadCapWAL.read_cap != None).cte("populated_read_cap_cte"))
+        sent_cte = sa.select(sa.select(col(SentLog.id)).cte('sent_cte'))  # Successfully sent messages
+        mixwal_bacap_cte = sa.select(sa.select(col(MixWAL.bacap_stream)).cte('mixwal_bacap_cte'))
+        populated_read_cap_cte = sa.select(sa.select(col(ReadCapWAL.id)).where(col(ReadCapWAL.read_cap) != None).cte("populated_read_cap_cte"))
         # A paused stream's rows are withheld from the sweep entirely (the
         # I-chunk on the main stream is not affected: the main WriteCapWAL is
         # never paused, and its after_stream gate still holds it back while the
         # paused substream's rows remain).
-        populated_write_cap_cte = sa.select(sa.select(WriteCapWAL.id).where(
-            WriteCapWAL.write_cap != None,
-            WriteCapWAL.paused == False,  # noqa: E712
+        populated_write_cap_cte = sa.select(sa.select(col(WriteCapWAL.id)).where(
+            col(WriteCapWAL.write_cap) != None,
+            col(WriteCapWAL.paused) == False,  # noqa: E712
         ).cte("populated_write_cap_cte"))
         # Aliased copy of the table for the after_stream gate's correlated
         # NOT EXISTS subquery. The gate fires when the referenced
@@ -933,11 +979,11 @@ class PlaintextWAL(SQLModel, table=True):
         from sqlalchemy.orm import aliased as _aliased
         _other_pwal = _aliased(PlaintextWAL)
         # instead of a cte that selects it all we may want to us after_id/after_stream directly
-        row = sa.func.row_number().over(partition_by=PlaintextWAL.bacap_stream).label("rownum")
+        row = sa.func.row_number().over(partition_by=col(PlaintextWAL.bacap_stream)).label("rownum")
         all_elig= (
             sa.select(PlaintextWAL, row)
             .where(
-                PlaintextWAL.bacap_stream.not_in(mixwal_bacap_cte),  # one msg per BACAP stream at a time
+                col(PlaintextWAL.bacap_stream).not_in(mixwal_bacap_cte),  # one msg per BACAP stream at a time
             )
             .where(
                 sa.and_(
@@ -945,15 +991,15 @@ class PlaintextWAL(SQLModel, table=True):
                     # so the filter column has to match. The prior
                     # PlaintextWAL.id.not_in(resend_queue) was a silent no-op
                     # because the two UUID spaces essentially never overlap.
-                    PlaintextWAL.bacap_stream.not_in(resend_queue),
-                    sa.or_(PlaintextWAL.after_id.is_(None),
-                        PlaintextWAL.after_id.in_(sent_cte)
+                    col(PlaintextWAL.bacap_stream).not_in(resend_queue),
+                    sa.or_(col(PlaintextWAL.after_id).is_(None),
+                        col(PlaintextWAL.after_id).in_(sent_cte)
                         ),
                     sa.or_(
-                        PlaintextWAL.after_stream.is_(None),
+                        col(PlaintextWAL.after_stream).is_(None),
                         # No PWAL remains on the referenced bacap_stream.
                         sa.not_(sa.exists().where(
-                            _other_pwal.bacap_stream == PlaintextWAL.after_stream
+                            col(_other_pwal.bacap_stream) == PlaintextWAL.after_stream
                         )),
                     ),
                 )
@@ -961,13 +1007,13 @@ class PlaintextWAL(SQLModel, table=True):
             .where(
                 sa.or_(
                     # Not an b'I'ndirection:
-                    PlaintextWAL.indirection.is_(None),
+                    col(PlaintextWAL.indirection).is_(None),
                     # We can synthesize the b'I'ndirection because we now have the read cap:
-                    PlaintextWAL.indirection.in_(populated_read_cap_cte)  # If it has been provisioned
+                    col(PlaintextWAL.indirection).in_(populated_read_cap_cte)  # If it has been provisioned
                 )
             )
             .where(
-                PlaintextWAL.bacap_stream.in_(populated_write_cap_cte)  # if not, it's still waiting for provisioning
+                col(PlaintextWAL.bacap_stream).in_(populated_write_cap_cte)  # if not, it's still waiting for provisioning
             )
         ).subquery()
         # return at most one resendable per bacap_stream:
@@ -976,7 +1022,16 @@ class PlaintextWAL(SQLModel, table=True):
         # TODO need to rethink the logic here; should probably not have more than one thing serialized per bacap stream at time.
         # TODO also dubious to have the insert into MixWAL be in a separate transaction from where we mark the PlaintextWAL as "spent"
         # TODO - ie, shouldn't have __resend_queue be a python variable, but rather a database concept.
-        return sa.select(all_elig).filter(all_elig.c.rownum == 1)
+        return Select[ResendableRow](
+            all_elig.c.id,
+            all_elig.c.after_id,
+            all_elig.c.after_stream,
+            all_elig.c.bacap_stream,
+            all_elig.c.conversation_id,
+            all_elig.c.bacap_payload,
+            all_elig.c.indirection,
+            all_elig.c.rownum,
+        ).filter(all_elig.c.rownum == 1)
 
 class ReceivedPiece(SQLModel, table=True):
     """Pieces for reassembling a SendOperation into ConversationLog entries.
@@ -1049,7 +1104,7 @@ def peer_named_in_conversation_sync(
     peers = sess.exec(
         select(ConversationPeer)
         .join(ConversationPeerLink,
-              ConversationPeerLink.conversation_peer_id == ConversationPeer.id)
+              col(ConversationPeerLink.conversation_peer_id) == ConversationPeer.id)
         .where(ConversationPeerLink.conversation_id == conversation_id,
                ConversationPeer.name == name)
     ).all()
@@ -1062,11 +1117,28 @@ async def peer_named_in_conversation(
     peers = (await sess.exec(
         select(ConversationPeer)
         .join(ConversationPeerLink,
-              ConversationPeerLink.conversation_peer_id == ConversationPeer.id)
+              col(ConversationPeerLink.conversation_peer_id) == ConversationPeer.id)
         .where(ConversationPeerLink.conversation_id == conversation_id,
                ConversationPeer.name == name)
     )).all()
     return peers[0] if len(peers) == 1 else None
+
+
+async def peer_id_by_read_cap(
+    *, conversation_id: int, read_cap_id: uuid.UUID,
+) -> "int | None":
+    """The ConversationPeer id of the member in this conversation whose read
+    cap is ``read_cap_id``, or None when no such member is there. Read
+    through the async engine: the GUI reaches it via run_in_io, never the
+    sync engine on the Qt thread."""
+    async with asession() as sess:
+        return (await sess.exec(
+            select(ConversationPeer.id)
+            .where(col(ConversationPeer.id)
+                   == ConversationPeerLink.conversation_peer_id)
+            .where(ConversationPeerLink.conversation_id == conversation_id)
+            .where(ConversationPeer.read_cap_id == read_cap_id)
+        )).first()
 
 
 class ConversationLog(SQLModel, table=True):
@@ -1118,7 +1190,9 @@ class ConversationLog(SQLModel, table=True):
         description="""the PlaintextWAL entry for the final message that marks this sent""",
     )
     @classmethod
-    def append_from(cls, conversation_peer: ConversationPeer, payload) -> "ConversationLog":
+    def append_from(
+        cls, conversation_peer: ConversationPeer, payload: bytes,
+    ) -> "ConversationLog":
         """Add payload to the end end of conversation_peer. It is the caller's responsibility to add
         the new ConversationLog instance to a Session and commit it; this constructor merely creates
         the Python object.
@@ -1143,3 +1217,73 @@ class TallyState(SQLModel, table=True):
     survey_id: bytes = Field(primary_key=True, min_length=1)
     conversation_id: int = Field(foreign_key="conversation.id", index=True)
     doc_state: bytes
+__all__ = [
+    "AppSetting",
+    "AsyncIterator",
+    "AsyncSession",
+    "Awaitable",
+    "Callable",
+    "Conversation",
+    "ConversationLog",
+    "ConversationPeer",
+    "ConversationPeerLink",
+    "Field",
+    "Lock",
+    "MixWAL",
+    "NAMING_CONVENTION",
+    "NamedTuple",
+    "OutboundUpload",
+    "Path",
+    "PendingVoucher",
+    "PlaintextWAL",
+    "ReadCapWAL",
+    "ReceivedPiece",
+    "Relationship",
+    "SQLModel",
+    "SentLog",
+    "Sequence",
+    "Session",
+    "TYPE_CHECKING",
+    "TallyState",
+    "TypeVar",
+    "UniqueConstraint",
+    "UploadAck",
+    "WriteCapWAL",
+    "aiosqlite",
+    "alembic",
+    "app_data",
+    "append_outbound_chat",
+    "asession",
+    "asynccontextmanager",
+    "asyncio",
+    "cast",
+    "context",
+    "conversation_log_order_lock",
+    "count",
+    "create_async_engine",
+    "create_engine",
+    "create_task",
+    "declarative_base",
+    "id_field",
+    "importlib",
+    "init_and_migrate",
+    "logger",
+    "logging",
+    "metadata",
+    "next_conversation_order",
+    "os",
+    "own_read_cap",
+    "peer_has_read_cap",
+    "peer_named_in_conversation",
+    "peer_named_in_conversation_sync",
+    "sa",
+    "select",
+    "sqlalchemy",
+    "state_file",
+    "upload_progress_after_ack",
+    "uuid",
+    "wait_for_sent",
+    "warm_async_engine",
+    "xdg_data_home",
+]
+

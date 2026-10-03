@@ -9,6 +9,7 @@ existed.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 import cbor2
 import pytest
@@ -26,18 +27,23 @@ from katzenqt.models import (
 MH = b"Z" * 32
 
 
-def _substream_chunks(db_entries):
+def _substream_chunks(
+    db_entries: "Sequence[models.SerializedRow]",
+) -> "list[persistent.PlaintextWAL]":
     return [
         e for e in db_entries
-        if isinstance(e, persistent.PlaintextWAL) and e.indirection is None
+        if isinstance(e, persistent.PlaintextWAL)
+        if e.indirection is None
     ]
 
 
-def _to_chunks(pwals):
+def _to_chunks(
+    pwals: "Sequence[persistent.PlaintextWAL]",
+) -> "list[tuple[bytes, bytes]]":
     return [(p.bacap_payload[:1], p.bacap_payload[1:]) for p in pwals]
 
 
-def test_msg_type_is_an_integer_on_the_wire():
+def test_msg_type_is_an_integer_on_the_wire() -> None:
     gcm = GroupChatMessage(
         version=0, membership_hash=MH, msg_type=GroupChatTypeEnum.TALLY_VOTE,
         tally=GroupChatTally(survey_id=b"sid", choice={"s0": "yes"}),
@@ -54,7 +60,7 @@ def test_msg_type_is_an_integer_on_the_wire():
     GroupChatTypeEnum.TALLY_SYNC_REQ,
     GroupChatTypeEnum.TALLY_SYNC_RESP,
 ])
-def test_each_tally_kind_round_trips_through_cbor(kind):
+def test_each_tally_kind_round_trips_through_cbor(kind: GroupChatTypeEnum) -> None:
     tally = GroupChatTally(
         survey_id=uuid.uuid4().bytes,
         version=3,
@@ -76,7 +82,7 @@ def test_each_tally_kind_round_trips_through_cbor(kind):
     assert back.tally.crdt == tally.crdt
 
 
-def test_large_crdt_blob_round_trips_through_send_operation():
+def test_large_crdt_blob_round_trips_through_send_operation() -> None:
     """A create blob too big for one box must chunk across boxes and reassemble."""
     blob = bytes((i * 7 + 3) & 0xFF for i in range(5000))
     gcm = GroupChatMessage(
@@ -92,17 +98,18 @@ def test_large_crdt_blob_round_trips_through_send_operation():
     recovered = models.unserialize(chunks)
     assert recovered is not None
     assert recovered.msg_type is GroupChatTypeEnum.TALLY_CREATE
+    assert recovered.tally is not None
     assert recovered.tally.crdt == blob
 
 
-def test_legacy_payload_without_msg_type_infers_text():
+def test_legacy_payload_without_msg_type_infers_text() -> None:
     legacy = cbor2.dumps({"version": 0, "membership_hash": MH, "text": "hi"})
     gcm = GroupChatMessage.from_cbor(legacy)
     assert gcm.msg_type is GroupChatTypeEnum.TEXT
     assert gcm.text == "hi"
 
 
-def test_legacy_payload_without_msg_type_infers_file_upload():
+def test_legacy_payload_without_msg_type_infers_file_upload() -> None:
     fu = GroupChatFileUpload(payload=b"abc", filetype="arbitrary", basename="a.bin")
     legacy = cbor2.dumps({
         "version": 0, "membership_hash": MH,
@@ -110,10 +117,11 @@ def test_legacy_payload_without_msg_type_infers_file_upload():
     })
     gcm = GroupChatMessage.from_cbor(legacy)
     assert gcm.msg_type is GroupChatTypeEnum.FILE_UPLOAD
+    assert gcm.file_upload is not None
     assert gcm.file_upload.basename == "a.bin"
 
 
-def test_legacy_payload_without_msg_type_infers_introduction():
+def test_legacy_payload_without_msg_type_infers_introduction() -> None:
     intro = GroupChatPleaseAdd(display_name="bob", read_cap=b"r" * 136)
     legacy = cbor2.dumps({
         "version": 0, "membership_hash": MH,
@@ -123,7 +131,7 @@ def test_legacy_payload_without_msg_type_infers_introduction():
     assert gcm.msg_type is GroupChatTypeEnum.INTRODUCTION
 
 
-def test_plain_text_message_defaults_to_text_type():
+def test_plain_text_message_defaults_to_text_type() -> None:
     gcm = GroupChatMessage(version=0, membership_hash=MH, text="hello")
     assert gcm.msg_type is GroupChatTypeEnum.TEXT
     assert GroupChatMessage.from_cbor(gcm.to_cbor()).msg_type is GroupChatTypeEnum.TEXT

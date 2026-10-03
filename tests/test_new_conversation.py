@@ -17,7 +17,15 @@ import pytest
 from katzenqt import katzen, persistent
 
 
-def _build_objects(name="demo", own="me"):
+def _build_objects(
+    name: str = "demo", own: str = "me",
+) -> tuple[
+    persistent.WriteCapWAL,
+    persistent.ReadCapWAL,
+    persistent.Conversation,
+    persistent.ConversationPeer,
+    persistent.ConversationLog,
+]:
     # Mirrors new_conversation's construction at katzen.py:new_conversation.
     wcapwal = persistent.WriteCapWAL(id=uuid.uuid4())
     rcapwal = persistent.ReadCapWAL(id=uuid.uuid4(), write_cap_id=wcapwal.id)
@@ -40,7 +48,7 @@ def _build_objects(name="demo", own="me"):
 
 class TestCommitNewConversation:
     @pytest.mark.asyncio
-    async def test_rows_land_and_objects_are_refreshed_in_place(self):
+    async def test_rows_land_and_objects_are_refreshed_in_place(self) -> None:
         wcapwal, rcapwal, convo, own_peer, first_post = _build_objects()
         assert convo.id is None and own_peer.id is None
 
@@ -77,7 +85,7 @@ class TestCommitNewConversation:
             assert logs[0].payload.startswith(b"Your name in this conversation is ")
 
     @pytest.mark.asyncio
-    async def test_stray_second_call_does_not_widen_the_row_set(self):
+    async def test_stray_second_call_does_not_widen_the_row_set(self) -> None:
         # The caller (new_conversation) guarantees the one-shot, so this is a
         # belly-flop fallback rather than a contract. Re-adding the (cleanish)
         # detached instances emits UPDATEs for the same PKs, so a stray repeat

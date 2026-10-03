@@ -19,13 +19,14 @@ restarts. All cap and key material is opaque bytes; the daemon does the crypto.
 import asyncio
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
 )
 from sqlalchemy import func
-from sqlmodel import select
+from sqlmodel import col, select
 
 from . import models, persistent
 from .katzen_util import create_task
@@ -36,6 +37,9 @@ from .network import (
     PacketContext,
     _delivery_racing_connection_life,
 )
+
+if TYPE_CHECKING:
+    from ._thinclient import ThinClient
 
 logger = logging.getLogger("katzen.voucher")
 
@@ -56,7 +60,15 @@ _PUBLISH_TRANSIENT_ERRORS = (
 
 
 def _brief(b: "bytes | None") -> str:
-    """Short first/last hex of a cap or box index for log lines."""
+    """Short first/last hex of a cap or box index for log lines.
+
+    >>> _brief(None)
+    'None'
+    >>> _brief(b"")
+    'None'
+    >>> _brief(bytes(range(16)))
+    '0001020304050607..08090a0b0c0d0e0f'
+    """
     if not b:
         return "None"
     return b[:8].hex() + ".." + b[-8:].hex()
@@ -101,7 +113,7 @@ async def pending_voucher_for(conversation_id: int, role: str = "joiner") -> "uu
         return row.id if row is not None else None
 
 
-async def list_pending_vouchers() -> "list[tuple]":
+async def list_pending_vouchers() -> "list[tuple[uuid.UUID, str, str, str]]":
     """Every unfinished voucher as (id, conversation_name, role, step), for the
     pending-voucher view."""
     out = []
@@ -112,7 +124,7 @@ async def list_pending_vouchers() -> "list[tuple]":
     return out
 
 
-async def cancel_pending_voucher(pending_id) -> None:
+async def cancel_pending_voucher(pending_id: uuid.UUID) -> None:
     """Delete a pending voucher row, abandoning that half-finished handshake."""
     async with persistent.asession() as sess:
         row = await sess.get(persistent.PendingVoucher, pending_id)
@@ -152,7 +164,7 @@ async def voucher_used_for(conversation_id: int) -> bool:
         return bool(conv is not None and conv.voucher_used)
 
 
-async def list_used_vouchers() -> "list[tuple]":
+async def list_used_vouchers() -> "list[tuple[int, str]]":
     """Every conversation whose voucher was successfully used, as
     (conversation_id, conversation_name), for the pending-voucher view."""
     async with persistent.asession() as sess:
@@ -164,7 +176,11 @@ async def list_used_vouchers() -> "list[tuple]":
         return [(conv.id, conv.name) for conv in rows]
 
 
-async def _finish_pending_voucher(sess, conversation, pending_row) -> None:
+async def _finish_pending_voucher(
+    sess: persistent.AsyncSession,
+    conversation: persistent.Conversation,
+    pending_row: "persistent.PendingVoucher | None",
+) -> None:
     """Complete a handshake in one commit: mark the conversation's voucher used
     and delete the in-flight PendingVoucher row. Callers own the surrounding
     session and commit."""
@@ -174,7 +190,10 @@ async def _finish_pending_voucher(sess, conversation, pending_row) -> None:
         await sess.delete(pending_row)
 
 
-async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, payload: bytes) -> bytes:
+async def _publish_box(
+    connection: "ThinClient", write_cap: bytes, message_box_index: bytes,
+    payload: bytes,
+) -> bytes:
     """Write payload to one box and return the next box index.
 
     Both RPCs raced against connection-life the same way network.py's
@@ -226,7 +245,8 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
                 _brief(message_box_index), _brief(write_cap),
                 _brief(wcr.next_message_box_index),
             )
-            return wcr.next_message_box_index
+            next_index: bytes = wcr.next_message_box_index
+            return next_index
         except _PUBLISH_TRANSIENT_ERRORS as e:
             elapsed = asyncio.get_event_loop().time() - started
             if elapsed >= _PUBLISH_DEADLINE_S:
@@ -248,7 +268,8 @@ async def _publish_box(connection, write_cap: bytes, message_box_index: bytes, p
 
 
 async def _read_box(
-    connection, read_cap: bytes, message_box_index: bytes, *, stage: str = "read_box",
+    connection: "ThinClient", read_cap: bytes, message_box_index: bytes, *,
+    stage: str = "read_box",
 ) -> "tuple[bytes, bytes]":
     """Read one box, blocking until it exists, and return (plaintext, next index).
 
@@ -356,8 +377,11 @@ async def _read_box(
             await asyncio.sleep(_READ_RETRY_GAP_S)
 
 
-async def _conversation_write_cap(sess, conversation_id: int) -> persistent.WriteCapWAL:
+async def _conversation_write_cap(
+    sess: persistent.AsyncSession, conversation_id: int,
+) -> persistent.WriteCapWAL:
     conv = await sess.get(persistent.Conversation, conversation_id)
+    assert conv is not None
     wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
     if wcw is None or wcw.write_cap is None:
         raise RuntimeError(
@@ -374,6 +398,17 @@ def _sanitize_peer_name(name: str) -> str:
     substream peer and have their messages routed onto another peer's log.
 
     Pure and total: never raises, always returns a non-empty string.
+
+    >>> _sanitize_peer_name("alice")
+    'alice'
+    >>> _sanitize_peer_name(":substream:5:abc")
+    '5:abc'
+    >>> _sanitize_peer_name(":substream::substream:x")
+    'x'
+    >>> _sanitize_peer_name(chr(7) + "bo" + chr(0x85) + "b")
+    'bob'
+    >>> _sanitize_peer_name("")
+    'unnamed'
     """
     cleaned = "".join(
         ch for ch in (name or "") if not (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F)
@@ -393,14 +428,19 @@ async def _active_member_count(
         .join(persistent.ConversationPeerLink)
         .where(
             persistent.ConversationPeerLink.conversation_id == conversation_id,
-            persistent.ConversationPeer.active.is_(True),
-            ~persistent.ConversationPeer.name.startswith(_SUBSTREAM_NAME_PREFIX),
+            col(persistent.ConversationPeer.active).is_(True),
+            ~col(persistent.ConversationPeer.name).startswith(_SUBSTREAM_NAME_PREFIX),
         )
     )
     return (await sess.exec(statement)).one()
 
 
-def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
+def _add_peer(
+    sess: persistent.AsyncSession,
+    conversation: persistent.Conversation,
+    name: str,
+    read_cap: "bytes | None",
+) -> None:
     if not read_cap or len(read_cap) != _INDEX_LEN + 32:
         # 136 bytes total: a 32-byte public key plus the 104-byte index. A
         # None or malformed read_cap (e.g. a who-reply entry sent before its
@@ -422,7 +462,9 @@ def _add_peer(sess, conversation, name: str, read_cap: "bytes | None") -> None:
     ))
 
 
-async def mint_and_publish(connection, conversation_id: int, display_name: str) -> bytes:
+async def mint_and_publish(
+    connection: "ThinClient", conversation_id: int, display_name: str,
+) -> bytes:
     """Joiner: mint a Voucher over this conversation's MessageStream, publish the
     payload to VoucherStream box 0, and return the Voucher to share out of band.
 
@@ -471,6 +513,7 @@ async def mint_and_publish(connection, conversation_id: int, display_name: str) 
 
     async with persistent.asession() as sess:
         row = await sess.get(persistent.PendingVoucher, pv_id)
+        assert row is not None
         row.box1_index = box1_index
         row.step = STEP_AWAITING
         sess.add(row)
@@ -479,10 +522,13 @@ async def mint_and_publish(connection, conversation_id: int, display_name: str) 
         "mint_and_publish: published box0 on voucher write_cap %s; poll of box 1 at %s",
         _brief(mint.voucher_write_cap), _brief(box1_index),
     )
-    return mint.voucher
+    minted_voucher: bytes = mint.voucher
+    return minted_voucher
 
 
-async def await_and_open(connection, conversation_id: int) -> "list[str]":
+async def await_and_open(
+    connection: "ThinClient", conversation_id: int,
+) -> "list[str]":
     """Joiner: poll VoucherStream box 1 for the inductor's reply, open it, move
     this conversation's write cap onto the salt-mutated sequence, and add the
     members named in the reply as peers. Returns the display names added, so a
@@ -504,6 +550,8 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
         pv_id, voucher_read_cap, box1_index, secret_key = (
             pv.id, pv.voucher_read_cap, pv.box1_index, pv.voucher_secret_key,
         )
+        assert box1_index is not None
+        assert voucher_read_cap is not None
 
     sealed_reply, _ = await _read_box(
         connection, voucher_read_cap, box1_index, stage="await_and_open(box1)",
@@ -514,8 +562,9 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
     )
 
     async with persistent.asession() as sess:
-        wcw = await _conversation_write_cap(sess, conversation_id)
-        message_write_cap = wcw.write_cap
+        message_write_cap = (
+            await _conversation_write_cap(sess, conversation_id)
+        ).write_cap
 
     opened = await _rpc_racing_connection_life(
         bacap_uuid=_brief(message_write_cap), what="voucher_open",
@@ -529,7 +578,9 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
 
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
+        assert conv is not None
         wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
+        assert wcw is not None
         wcw.write_cap = opened.mutated_message_write_cap
         wcw.next_index = opened.mutated_message_write_cap[-_INDEX_LEN:]
         sess.add(wcw)
@@ -548,7 +599,7 @@ async def await_and_open(connection, conversation_id: int) -> "list[str]":
                 own_rcw.read_cap = opened.mutated_message_write_cap[32:]
                 own_rcw.next_index = own_rcw.read_cap[-_INDEX_LEN:]
                 sess.add(own_rcw)
-        added = []
+        added: "list[str]" = []
         remaining = max(0, MAX_GROUP_MEMBERS - await _active_member_count(
             sess, conversation_id,
         ))
@@ -598,6 +649,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
     async with persistent.conversation_log_order_lock(conversation_id):
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
+            assert conv is not None
             send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
             new_write_caps, db_entries = await send_op.serialize_async(
                 chunk_size=1530, conversation_id=conversation_id,
@@ -657,7 +709,9 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     create_task(_wait_intro_acked(final_pwal_id, display_name, conversation_id))
 
 
-async def _wait_intro_acked(final_pwal_id, display_name: str, conversation_id: int) -> None:
+async def _wait_intro_acked(
+    final_pwal_id: uuid.UUID, display_name: str, conversation_id: int,
+) -> None:
     """Wait until the INTRODUCTION announcement is acked into SentLog.
 
     Fire-and-forget: a timeout is logged, never raised, so the induction
@@ -671,7 +725,8 @@ async def _wait_intro_acked(final_pwal_id, display_name: str, conversation_id: i
 
 
 async def derive_read_and_induct(
-    connection, conversation_id: int, peer_name: str, voucher: bytes,
+    connection: "ThinClient", conversation_id: int, peer_name: str,
+    voucher: bytes,
 ) -> "str | None":
     """Inductor: derive the VoucherStream from the Voucher, read the joiner's
     payload from box 0, seal a reply carrying the group's read caps, write it to
@@ -724,6 +779,7 @@ async def derive_read_and_induct(
     at_capacity = False
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
+        assert conv is not None
         if not await persistent.peer_has_read_cap(
             sess, conversation_id, induct.mutated_message_read_cap,
         ):
@@ -764,6 +820,7 @@ async def _build_who_reply(conversation_id: int) -> models.GroupChatReplyWho:
     inductor's own stream plus any already-active peers."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
+        assert conv is not None
         own_read_cap = await persistent.own_read_cap(sess, conv)
         please_adds = []
         if own_read_cap is not None:

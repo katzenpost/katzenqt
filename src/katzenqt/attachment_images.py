@@ -78,7 +78,17 @@ def is_image_attachment(filetype: "str | None", basename: str) -> bool:
 
     Trusts an ``image/*`` ``filetype`` tag first, then falls back to the
     basename's extension so legacy rows (tagged ``arbitrary``) and
-    received files still resolve."""
+    received files still resolve.
+
+    >>> is_image_attachment("image/png", "notes.txt")
+    True
+    >>> is_image_attachment("arbitrary", "photo.jpg")
+    True
+    >>> is_image_attachment("arbitrary", "notes.txt")
+    False
+    >>> is_image_attachment(None, "photo.jpg")
+    True
+    """
     if filetype and filetype.startswith("image/"):
         return True
     guessed, _ = mimetypes.guess_type(basename)
@@ -88,7 +98,15 @@ def is_image_attachment(filetype: "str | None", basename: str) -> bool:
 def guess_image_filetype(path: Path) -> str:
     """Return an ``image/*`` MIME type for recognised image files, else
     ``arbitrary``. Non-image types are intentionally collapsed to the
-    generic marker so only images trigger thumbnail rendering."""
+    generic marker so only images trigger thumbnail rendering.
+
+    >>> guess_image_filetype(Path("cat.PNG"))
+    'image/png'
+    >>> guess_image_filetype(Path("clip.opus"))
+    'arbitrary'
+    >>> guess_image_filetype(Path("notes.txt"))
+    'arbitrary'
+    """
     guessed, _ = mimetypes.guess_type(path.name)
     if guessed and guessed.startswith("image/"):
         return guessed

@@ -1,23 +1,29 @@
 name: Namenlos Integration Tests
 
 on:
+  merge_group:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: '0 */12 * * *'
   workflow_dispatch:
 
 jobs:
   namenlos-integration:
+    if: ${{ github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'merge_group' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     outputs:
       tests: ${{ steps.tests.outcome }}
       verdict: ${{ steps.result.outputs.verdict }}
 
     steps:
       - name: Set the job deadline
-        run: echo "KQT_CI_DEADLINE=$(($(date +%s) + 3600))" >> "$GITHUB_ENV"
+        run: echo "KQT_CI_DEADLINE=$(($(date +%s) + 5400))" >> "$GITHUB_ENV"
 
       - name: Checkout katzenqt
         uses: actions/checkout@v7
@@ -162,7 +168,9 @@ jobs:
 
   docker-integration:
     needs: [namenlos-integration]
-    if: ${{ !cancelled() && (needs.namenlos-integration.result != 'success' || needs.namenlos-integration.outputs.verdict != 'passed') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group'
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: read
       packages: write
@@ -274,7 +282,7 @@ jobs:
         timeout-minutes: 90
         env:
           KATZENQT_DOCKER_INTEGRATION: "1"
-          KQT_INTEGRATION_PARALLEL: "4"
+          KQT_INTEGRATION_PARALLEL: "2"
         run: |
           mkdir -p integration-results
           bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
@@ -320,6 +328,9 @@ jobs:
             ${{ env.KATZENPOST_DIR }}/docker/mixnet-alpine/*/*/*.log
 
   epoch-integration:
+    if: ${{ github.event_name == 'merge_group'
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -465,7 +476,9 @@ jobs:
 
   integration-result:
     needs: [namenlos-integration, docker-integration, epoch-integration]
-    if: always()
+    if: ${{ always() && (github.event_name == 'merge_group'
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -482,7 +495,8 @@ jobs:
           LIVE: ${{ needs.namenlos-integration.outputs.verdict }}
           DOCKER: ${{ needs.docker-integration.result }}
           EPOCH: ${{ needs.epoch-integration.result }}
+          REQUIRE_DOCKER: ${{ github.event_name == 'merge_group' && '--require-docker' || '' }}
         run: |
           python3 -m tools.integration_result final \
             --live-job="$LIVE_JOB" --live="$LIVE" \
-            --docker="$DOCKER" --epoch="$EPOCH"
+            --docker="$DOCKER" --epoch="$EPOCH" $REQUIRE_DOCKER
