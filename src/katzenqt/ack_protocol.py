@@ -6,6 +6,7 @@ session, a connection, or a docker mixnet. See "Opportunistic
 acknowledgements and backfill" and "Rewrite and scan" in the group chat
 protocol spec.
 """
+
 from __future__ import annotations
 
 import enum
@@ -43,6 +44,7 @@ class ReaderScan:
 # `READING` is never itself escalated by this function; only an explicit
 # `ScanRequested`, sourced from the user asking their client to scan, does.
 
+
 @dataclass(frozen=True)
 class ReadOk:
     """A box was read and holds a real message."""
@@ -66,11 +68,14 @@ class ScanRequested:
     """The user asked their client to scan this channel."""
 
 
-ScanEvent: TypeAlias = "ReadOk | ReadTombstoned | ReadNotFound | ScanRequested"
+ScanEvent: TypeAlias = (
+    "ReadOk | ReadTombstoned | ReadNotFound | ScanRequested"
+)
 
 
 # Effects: instructions back to the driver. `step` never performs I/O or
 # touches a database itself; it only says what the driver should do next.
+
 
 @dataclass(frozen=True)
 class Ingest:
@@ -109,7 +114,9 @@ ScanEffect: TypeAlias = (
 )
 
 
-def step(scan: ReaderScan, event: ScanEvent) -> "tuple[ReaderScan, list[ScanEffect]]":
+def step(
+    scan: ReaderScan, event: ScanEvent
+) -> "tuple[ReaderScan, list[ScanEffect]]":
     """One transition of the reader's scan state machine. Total over every
     (state, event) pair: a combination the spec's transition table leaves
     out because nothing changes is a no-op here (same state, no effects),
@@ -129,7 +136,10 @@ def step(scan: ReaderScan, event: ScanEvent) -> "tuple[ReaderScan, list[ScanEffe
         if isinstance(event, ReadNotFound):
             return scan, []
         if isinstance(event, ScanRequested):
-            return ReaderScan(ScanState.SCANNING), [ProbeBackward(), ProbeForward()]
+            return ReaderScan(ScanState.SCANNING), [
+                ProbeBackward(),
+                ProbeForward(),
+            ]
         raise TypeError(f"unhandled event {event!r} in {scan.state}")
 
     if scan.state is ScanState.SCANNING:
@@ -157,7 +167,8 @@ class SentBoxRecord:
 
 
 def select_backfill(
-    journal: "list[SentBoxRecord]", current_epoch: int,
+    journal: "list[SentBoxRecord]",
+    current_epoch: int,
 ) -> "list[SentBoxRecord]":
     """Rows due for the periodic rewrite: whatever has not already been
     rewritten this replica epoch. This is the sweep's only eligibility

@@ -3,6 +3,7 @@
 No session, no connection, no fake, no docker: everything here is a plain
 function or state-machine step over plain dataclasses.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -24,30 +25,62 @@ _SCANNING = ap.ReaderScan(ap.ScanState.SCANNING)
 _PAYLOAD = b"a real message"
 
 _CASES = [
-    ("reading/data ingests and advances",
-     _READING, ap.ReadOk(_PAYLOAD),
-     _READING, [ap.Ingest(_PAYLOAD), ap.AdvanceExpected()]),
-    ("reading/tombstone advances, nothing to ingest",
-     _READING, ap.ReadTombstoned(),
-     _READING, [ap.AdvanceExpected()]),
-    ("reading/not-found is a no-op: indistinguishable from an ordinarily quiet stream",
-     _READING, ap.ReadNotFound(),
-     _READING, []),
-    ("reading/a scan request starts scanning",
-     _READING, ap.ScanRequested(),
-     _SCANNING, [ap.ProbeBackward(), ap.ProbeForward()]),
-    ("scanning/data ingests and keeps scanning",
-     _SCANNING, ap.ReadOk(_PAYLOAD),
-     _SCANNING, [ap.Ingest(_PAYLOAD), ap.ProbeForward()]),
-    ("scanning/tombstone keeps scanning, nothing to ingest",
-     _SCANNING, ap.ReadTombstoned(),
-     _SCANNING, [ap.ProbeForward()]),
-    ("scanning/not-found is the true frontier",
-     _SCANNING, ap.ReadNotFound(),
-     _READING, [ap.AdoptFrontier()]),
-    ("scanning/a repeated scan request is a no-op: already scanning",
-     _SCANNING, ap.ScanRequested(),
-     _SCANNING, []),
+    (
+        "reading/data ingests and advances",
+        _READING,
+        ap.ReadOk(_PAYLOAD),
+        _READING,
+        [ap.Ingest(_PAYLOAD), ap.AdvanceExpected()],
+    ),
+    (
+        "reading/tombstone advances, nothing to ingest",
+        _READING,
+        ap.ReadTombstoned(),
+        _READING,
+        [ap.AdvanceExpected()],
+    ),
+    (
+        "reading/not-found is a no-op: indistinguishable from an ordinarily quiet stream",
+        _READING,
+        ap.ReadNotFound(),
+        _READING,
+        [],
+    ),
+    (
+        "reading/a scan request starts scanning",
+        _READING,
+        ap.ScanRequested(),
+        _SCANNING,
+        [ap.ProbeBackward(), ap.ProbeForward()],
+    ),
+    (
+        "scanning/data ingests and keeps scanning",
+        _SCANNING,
+        ap.ReadOk(_PAYLOAD),
+        _SCANNING,
+        [ap.Ingest(_PAYLOAD), ap.ProbeForward()],
+    ),
+    (
+        "scanning/tombstone keeps scanning, nothing to ingest",
+        _SCANNING,
+        ap.ReadTombstoned(),
+        _SCANNING,
+        [ap.ProbeForward()],
+    ),
+    (
+        "scanning/not-found is the true frontier",
+        _SCANNING,
+        ap.ReadNotFound(),
+        _READING,
+        [ap.AdoptFrontier()],
+    ),
+    (
+        "scanning/a repeated scan request is a no-op: already scanning",
+        _SCANNING,
+        ap.ScanRequested(),
+        _SCANNING,
+        [],
+    ),
 ]
 
 
@@ -56,7 +89,12 @@ _CASES = [
     [case[1:] for case in _CASES],
     ids=[case[0] for case in _CASES],
 )
-def test_reader_scan_transition_table(start, event, expected_state, expected_effects):
+def test_reader_scan_transition_table(
+    start: ap.ReaderScan,
+    event: "ap.ScanEvent",
+    expected_state: ap.ReaderScan,
+    expected_effects: "list[ap.ScanEffect]",
+) -> None:
     new_state, effects = ap.step(start, event)
     assert new_state == expected_state
     assert effects == expected_effects
@@ -78,7 +116,7 @@ _EVENTS = st.one_of(
 
 @settings(max_examples=300, deadline=None)
 @given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
-def test_state_is_always_one_of_the_two(steps):
+def test_state_is_always_one_of_the_two(steps: "list[ap.ScanEvent]") -> None:
     scan = ap.ReaderScan(ap.ScanState.READING)
     for event in steps:
         scan, effects = ap.step(scan, event)
@@ -88,7 +126,9 @@ def test_state_is_always_one_of_the_two(steps):
 
 @settings(max_examples=300, deadline=None)
 @given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
-def test_ingest_effects_only_accompany_read_ok(steps):
+def test_ingest_effects_only_accompany_read_ok(
+    steps: "list[ap.ScanEvent]",
+) -> None:
     """An `Ingest` effect only ever appears when the triggering event was
     `ReadOk`, and always carries that exact payload -- `step` never invents
     or drops a payload."""
@@ -104,13 +144,14 @@ def test_ingest_effects_only_accompany_read_ok(steps):
 
 @settings(max_examples=300, deadline=None)
 @given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
-def test_step_is_deterministic(steps):
+def test_step_is_deterministic(steps: "list[ap.ScanEvent]") -> None:
     """Replaying the exact same sequence of events from the same starting
     state always reaches the same final state: `step` has no hidden state,
     no clock, and no randomness."""
-    def run():
+
+    def run() -> "list[tuple[ap.ReaderScan, tuple[ap.ScanEffect, ...]]]":
         scan = ap.ReaderScan(ap.ScanState.READING)
-        history = []
+        history: "list[tuple[ap.ReaderScan, tuple[ap.ScanEffect, ...]]]" = []
         for event in steps:
             scan, effects = ap.step(scan, event)
             history.append((scan, tuple(effects)))
@@ -121,7 +162,9 @@ def test_step_is_deterministic(steps):
 
 @settings(max_examples=300, deadline=None)
 @given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
-def test_scanning_is_only_ever_entered_by_scan_requested(steps):
+def test_scanning_is_only_ever_entered_by_scan_requested(
+    steps: "list[ap.ScanEvent]",
+) -> None:
     """The only transition that can move the state to SCANNING is
     ScanRequested; a bare ReadNotFound, however many arrive in a row,
     never does -- there is no elapsed-time path into SCANNING at all."""
@@ -129,13 +172,18 @@ def test_scanning_is_only_ever_entered_by_scan_requested(steps):
     for event in steps:
         before = scan
         scan, effects = ap.step(scan, event)
-        if scan.state is ap.ScanState.SCANNING and before.state is ap.ScanState.READING:
+        if (
+            scan.state is ap.ScanState.SCANNING
+            and before.state is ap.ScanState.READING
+        ):
             assert isinstance(event, ap.ScanRequested)
 
 
 @settings(max_examples=300, deadline=None)
 @given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
-def test_leaving_scanning_only_via_not_found(steps):
+def test_leaving_scanning_only_via_not_found(
+    steps: "list[ap.ScanEvent]",
+) -> None:
     """The only transition that can move the state from SCANNING back to
     READING is a ReadNotFound (the true frontier); ScanRequested while
     already scanning changes nothing, and Data/Tombstone keep scanning."""
@@ -143,21 +191,28 @@ def test_leaving_scanning_only_via_not_found(steps):
     for event in steps:
         before = scan
         scan, effects = ap.step(scan, event)
-        if before.state is ap.ScanState.SCANNING and scan.state is ap.ScanState.READING:
+        if (
+            before.state is ap.ScanState.SCANNING
+            and scan.state is ap.ScanState.READING
+        ):
             assert isinstance(event, ap.ReadNotFound)
             assert effects == [ap.AdoptFrontier()]
 
 
 @settings(max_examples=300, deadline=None)
 @given(steps=st.lists(_EVENTS, min_size=1, max_size=50))
-def test_reading_not_found_never_changes_anything(steps):
+def test_reading_not_found_never_changes_anything(
+    steps: "list[ap.ScanEvent]",
+) -> None:
     """ReadNotFound while READING is always a pure no-op, however many of
     them arrive in a row: it is exactly as indistinguishable from an
     ordinarily quiet stream as the spec says it is, and step() does not
     pretend otherwise by accumulating any hidden state across them."""
     scan = ap.ReaderScan(ap.ScanState.READING)
     for event in steps:
-        if scan.state is ap.ScanState.READING and isinstance(event, ap.ReadNotFound):
+        if scan.state is ap.ScanState.READING and isinstance(
+            event, ap.ReadNotFound
+        ):
             new_scan, effects = ap.step(scan, event)
             assert new_scan == scan
             assert effects == []
@@ -169,17 +224,18 @@ def test_reading_not_found_never_changes_anything(steps):
 # select_backfill
 # ---------------------------------------------------------------------------
 
-def test_select_backfill_boundary_excludes_current_epoch():
+
+def test_select_backfill_boundary_excludes_current_epoch() -> None:
     journal = [ap.SentBoxRecord(box_index=b"a", counter=1, written_epoch=5)]
     assert ap.select_backfill(journal, current_epoch=5) == []
 
 
-def test_select_backfill_boundary_includes_previous_epoch():
+def test_select_backfill_boundary_includes_previous_epoch() -> None:
     journal = [ap.SentBoxRecord(box_index=b"a", counter=1, written_epoch=4)]
     assert ap.select_backfill(journal, current_epoch=5) == journal
 
 
-def test_select_backfill_empty_journal():
+def test_select_backfill_empty_journal() -> None:
     assert ap.select_backfill([], current_epoch=5) == []
 
 
@@ -196,18 +252,31 @@ _journal_strategy = st.lists(
 
 
 @settings(max_examples=100, deadline=None)
-@given(journal=_journal_strategy, current_epoch=st.integers(min_value=-10, max_value=10_000))
-def test_select_backfill_is_exactly_the_stale_epoch_subset(journal, current_epoch):
+@given(
+    journal=_journal_strategy,
+    current_epoch=st.integers(min_value=-10, max_value=10_000),
+)
+def test_select_backfill_is_exactly_the_stale_epoch_subset(
+    journal: "list[ap.SentBoxRecord]",
+    current_epoch: int,
+) -> None:
     result = ap.select_backfill(journal, current_epoch)
-    assert result == [row for row in journal if row.written_epoch < current_epoch]
+    assert result == [
+        row for row in journal if row.written_epoch < current_epoch
+    ]
 
 
 @settings(max_examples=100, deadline=None)
 @given(
     journal=_journal_strategy,
-    epochs=st.lists(st.integers(min_value=-10, max_value=10_000), min_size=2, max_size=2),
+    epochs=st.lists(
+        st.integers(min_value=-10, max_value=10_000), min_size=2, max_size=2
+    ),
 )
-def test_select_backfill_is_monotonic_in_current_epoch(journal, epochs):
+def test_select_backfill_is_monotonic_in_current_epoch(
+    journal: "list[ap.SentBoxRecord]",
+    epochs: "list[int]",
+) -> None:
     """A row eligible at some epoch is still eligible at any later epoch:
     increasing `current_epoch` can only add rows to the result, never drop
     one, since `written_epoch < current_epoch` only becomes easier to
@@ -228,12 +297,17 @@ def test_select_backfill_is_monotonic_in_current_epoch(journal, epochs):
         st.just(2**63 - 1),
     ),
 )
-def test_select_backfill_handles_extreme_epoch_ids(journal, current_epoch):
+def test_select_backfill_handles_extreme_epoch_ids(
+    journal: "list[ap.SentBoxRecord]",
+    current_epoch: int,
+) -> None:
     """Nothing about this predicate depends on epoch numbers being small
     or positive -- it should behave the same at the extremes of a 64-bit
     range as anywhere else."""
     result = ap.select_backfill(journal, current_epoch)
-    assert result == [row for row in journal if row.written_epoch < current_epoch]
+    assert result == [
+        row for row in journal if row.written_epoch < current_epoch
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -253,19 +327,25 @@ def test_select_backfill_handles_extreme_epoch_ids(journal, current_epoch):
 # Bob uses the real ap.step for his own side.
 # ---------------------------------------------------------------------------
 
+
 def _run_joint_simulation(
-    n_positions, epoch_length, total_ticks, alice_online, bob_online, scan_request_ticks,
-):
+    n_positions: int,
+    epoch_length: int,
+    total_ticks: int,
+    alice_online: "list[bool]",
+    bob_online: "list[bool]",
+    scan_request_ticks: "set[int]",
+) -> "tuple[ap.ReaderScan, int, set[int]]":
     # Alice wrote everything long before the simulation starts, and it has
     # already gone stale by tick 0 -- the interesting case is recovering
     # from a gap that already exists, not merely keeping up with new
     # writes (which ordinary reading, unmodified, already handles).
     last_rewrite_epoch = [-1_000_000] * n_positions
 
-    def epoch_of(tick):
+    def epoch_of(tick: int) -> int:
         return tick // epoch_length
 
-    def exists(i, tick):
+    def exists(i: int, tick: int) -> bool:
         return epoch_of(tick) - last_rewrite_epoch[i] <= 1
 
     scan = ap.ReaderScan(ap.ScanState.READING)
@@ -295,8 +375,13 @@ def _run_joint_simulation(
         # an ordinary ReadNotFound retry is. While merely READING, one
         # ordinary read attempt per online tick, exactly as always.
         while True:
-            probe_index = next_index if scan.state is ap.ScanState.READING else scan_cursor
+            probe_index = (
+                next_index
+                if scan.state is ap.ScanState.READING
+                else scan_cursor
+            )
 
+            event: "ap.ScanEvent"
             if probe_index >= n_positions:
                 event = ap.ReadNotFound()
             elif exists(probe_index, tick):
@@ -323,15 +408,26 @@ def _run_joint_simulation(
     return scan, next_index, received
 
 
-def _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs):
+def _weakly_fair_schedule(
+    data: st.DataObject,
+    total_ticks: int,
+    epoch_length: int,
+    total_epochs: int,
+) -> "list[bool]":
     """One online tick per epoch, guaranteed, plus whatever extra ticks
     Hypothesis wants to add. Used for Alice's side: her periodic rewrite
     still needs this to guarantee anything survives to be found."""
-    schedule = data.draw(st.lists(
-        st.booleans(), min_size=total_ticks, max_size=total_ticks,
-    ))
+    schedule = data.draw(
+        st.lists(
+            st.booleans(),
+            min_size=total_ticks,
+            max_size=total_ticks,
+        )
+    )
     for e in range(total_epochs):
-        forced = data.draw(st.integers(min_value=0, max_value=epoch_length - 1))
+        forced = data.draw(
+            st.integers(min_value=0, max_value=epoch_length - 1)
+        )
         schedule[e * epoch_length + forced] = True
     return schedule
 
@@ -343,8 +439,10 @@ def _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs):
     data=st.data(),
 )
 def test_a_single_requested_scan_recovers_everything_given_alice_stayed_fair(
-    n_positions, epoch_length, data,
-):
+    n_positions: int,
+    epoch_length: int,
+    data: st.DataObject,
+) -> None:
     # Bob is deliberately online nowhere except the single tick where his
     # scan is requested and completes (Scanning races through the whole
     # backlog in one tick -- see _run_joint_simulation): there is no
@@ -355,13 +453,19 @@ def test_a_single_requested_scan_recovers_everything_given_alice_stayed_fair(
     total_ticks = total_epochs * epoch_length
     scan_tick = total_ticks - 1
 
-    alice_online = _weakly_fair_schedule(data, total_ticks, epoch_length, total_epochs)
+    alice_online = _weakly_fair_schedule(
+        data, total_ticks, epoch_length, total_epochs
+    )
     bob_online = [False] * total_ticks
     bob_online[scan_tick] = True
 
     scan, next_index, received = _run_joint_simulation(
-        n_positions, epoch_length, total_ticks,
-        alice_online, bob_online, {scan_tick},
+        n_positions,
+        epoch_length,
+        total_ticks,
+        alice_online,
+        bob_online,
+        {scan_tick},
     )
     note(f"final scan={scan!r} next_index={next_index} received={received}")
     assert received == set(range(n_positions)), (
@@ -378,8 +482,10 @@ def test_a_single_requested_scan_recovers_everything_given_alice_stayed_fair(
     data=st.data(),
 )
 def test_a_requested_scan_is_not_vacuously_satisfied_without_alice(
-    n_positions, epoch_length, data,
-):
+    n_positions: int,
+    epoch_length: int,
+    data: st.DataObject,
+) -> None:
     """The converse of the property above, hunted rather than assumed:
     with Alice never online at all, a requested scan still runs to
     completion, but recovers nothing -- confirming the mechanism does not
@@ -394,8 +500,12 @@ def test_a_requested_scan_is_not_vacuously_satisfied_without_alice(
     bob_online[scan_tick] = True
 
     scan, next_index, received = _run_joint_simulation(
-        n_positions, epoch_length, total_ticks,
-        alice_online, bob_online, {scan_tick},
+        n_positions,
+        epoch_length,
+        total_ticks,
+        alice_online,
+        bob_online,
+        {scan_tick},
     )
     note(f"final scan={scan!r} next_index={next_index} received={received}")
     assert received == set()
