@@ -1151,6 +1151,46 @@ async def test_an_introduction_of_ours_numbers_the_member_once_written() -> (
 
 
 @pytest.mark.asyncio
+async def test_an_induction_waits_for_our_earlier_introduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second new member is told its place only once the first one's
+    ``Introduction`` is written and has taken the place before it."""
+    chat, bob = await _two_members(read_to=None)
+    carol_cap = secrets.token_bytes(136)
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        voucher._add_peer(sess, conv, "carol", carol_cap)
+        await sess.commit()
+    queued = await voucher._write_introduction_log(
+        chat.conversation_id, "carol", carol_cap
+    )
+    asked: list[uuid.UUID] = []
+
+    async def sent(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
+        asked.append(pwal_id)
+        with persistent.Session(persistent._engine_sync) as sync:
+            pwal = sync.get(persistent.PlaintextWAL, pwal_id)
+            assert pwal is not None
+            persistent._record_sent_box(sync, _index(7), pwal)
+            sync.commit()
+        return True
+
+    monkeypatch.setattr(persistent, "wait_for_sent", sent)
+    assert await acks.wait_for_outgoing(chat.conversation_id, deadline_s=1.0)
+    assert asked == [queued]
+
+    reply = await _reply_from(chat)
+    assert reply.roster_size == 3
+    assert [entry.read_cap[:32] for entry in reply.please_adds if entry] == [
+        chat.own_key,
+        bob,
+        carol_cap[:32],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_removed_member_keeps_its_place_and_loses_its_key() -> None:
     chat, bob, carol = await _introducer()
     peer_id = chat.peers["bob"][0]

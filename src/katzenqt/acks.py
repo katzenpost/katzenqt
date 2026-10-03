@@ -591,9 +591,10 @@ async def _abandoned(sess: "AsyncSession", pwal_id: uuid.UUID) -> bool:
 async def wait_for_outgoing(
     conversation_id: int, *, deadline_s: float
 ) -> bool:
-    """Wait until every queued message of ours that carries acknowledgements
-    has been written. Until then our roster may still grow by them, and a
-    reply to a new member cannot say where its roster index will be."""
+    """Wait until every queued message of ours that will number someone has
+    been written: one that carries acknowledgements, or an ``Introduction``.
+    Until then our roster may still grow by them, and a reply to a new
+    member cannot say where its roster index will be."""
     async with persistent.asession() as sess:
         queued = (
             await sess.exec(
@@ -608,6 +609,12 @@ async def wait_for_outgoing(
                 await forget_outgoing(sess, pwal_id)
             else:
                 owed.append(pwal_id)
+        introducing = await sess.exec(
+            select(persistent.IntroductionSeen.pending_pwal).where(
+                persistent.IntroductionSeen.conversation_id == conversation_id
+            )
+        )
+        owed.extend(pwal_id for pwal_id in introducing if pwal_id is not None)
         await sess.commit()
     for pwal_id in owed:
         if not await persistent.wait_for_sent(pwal_id, deadline_s=deadline_s):
