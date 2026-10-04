@@ -19,6 +19,7 @@ restarts. All cap and key material is opaque bytes; the daemon does the crypto.
 import asyncio
 import logging
 import uuid
+from base64 import b64encode
 from typing import TYPE_CHECKING
 
 from katzenpost_thinclient import (
@@ -42,6 +43,26 @@ if TYPE_CHECKING:
     from ._thinclient import ThinClient
 
 logger = logging.getLogger("katzen.voucher")
+
+
+def voucher_code(token: bytes) -> str:
+    """The shareable base64 text of a voucher token.
+
+    >>> voucher_code(b"abc")
+    'YWJj'
+    """
+    return b64encode(token).decode()
+
+
+async def pending_voucher_token(conversation_id: int) -> "bytes | None":
+    async with persistent.asession() as sess:
+        row = (await sess.exec(
+            select(persistent.PendingVoucher).where(
+                persistent.PendingVoucher.conversation_id == conversation_id,
+                persistent.PendingVoucher.role == "joiner",
+            )
+        )).first()
+        return row.voucher if row is not None else None
 
 STEP_MINTED = "minted"
 STEP_AWAITING = "awaiting"
