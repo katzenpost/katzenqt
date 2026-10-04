@@ -50,7 +50,9 @@ from katzenpost_thinclient import ThinClientOfflineError
 from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
-                     pending_joiner_join_conversation_ids, pending_voucher_for)
+                     pending_joiner_join_conversation_ids,
+                     pending_voucher_for, pending_voucher_token,
+                     voucher_code)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (GroupChatFileUpload,
@@ -361,7 +363,8 @@ class VoucherDialog(QDialog):
         )
         self.label = QLabel(
             f"{intro}\nHand it out of band to an existing member, who will "
-            f"induct you:\n\n{code}",
+            f"induct you. Right-click the group chat to copy it again:"
+            f"\n\n{code}",
             self,
         )
         self.label.setWordWrap(True)
@@ -2179,6 +2182,12 @@ class MainWindow(QMainWindow):
         )
         mute.setChecked(was_muted)
         api.addSeparator()
+        copy_voucher = api.addAction("Copy voucher")
+        show_voucher = api.addAction("Show voucher...")
+        token = await self._pending_voucher(item)
+        copy_voucher.setEnabled(token is not None)
+        show_voucher.setEnabled(token is not None)
+        api.addSeparator()
         remove = api.addAction("Remove group chat...")
         chosen = await _menu_chosen(api, global_pos)
         if chosen is remove:
@@ -2187,6 +2196,21 @@ class MainWindow(QMainWindow):
             await self.iothread.run_in_io(
                 persistent.set_muted(conversation_id, muted=not was_muted),
             )
+        elif token is None:
+            return
+        elif chosen is copy_voucher:
+            QApplication.clipboard().setText(voucher_code(token))
+            self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
+        elif chosen is show_voucher:
+            await _dialog_finished(VoucherDialog(self, voucher_code(token)))
+
+    async def _pending_voucher(self, item: "ContactsItem") -> "bytes | None":
+        conversation_id = getattr(item, "conversation_id", None)
+        if conversation_id is None:
+            return None
+        return await self.iothread.run_in_io(
+            pending_voucher_token(conversation_id),
+        )
 
     async def _peer_menu(
         self, item: "ContactsItem", global_pos: QPoint,
@@ -2952,7 +2976,7 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        code = b64encode(voucher).decode()
+        code = voucher_code(voucher)
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
