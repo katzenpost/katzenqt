@@ -346,6 +346,10 @@ async def _qml_source_ready(widget: "QQuickWidget") -> None:
 
 
 class VoucherDialog(QDialog):
+    COPY_LABEL = "Copy voucher"
+    COPIED_LABEL = "Copied"
+    COPIED_SHOWN_MS = 1500
+
     def __init__(
         self,
         parent: "QWidget",
@@ -376,7 +380,7 @@ class VoucherDialog(QDialog):
             QDialogButtonBox.StandardButton.Close, self,
         )
         self.copy_button = buttons.addButton(
-            "Copy voucher", QDialogButtonBox.ButtonRole.ActionRole,
+            self.COPY_LABEL, QDialogButtonBox.ButtonRole.ActionRole,
         )
         self.copy_button.clicked.connect(self.copy_code)
         buttons.rejected.connect(self.reject)
@@ -386,7 +390,13 @@ class VoucherDialog(QDialog):
 
     def copy_code(self) -> None:
         QApplication.clipboard().setText(self.code)
-        self.copy_button.setText("Copied")
+        self.copy_button.setText(self.COPIED_LABEL)
+        QTimer.singleShot(
+            self.COPIED_SHOWN_MS, self.copy_button, self.restore_copy_label,
+        )
+
+    def restore_copy_label(self) -> None:
+        self.copy_button.setText(self.COPY_LABEL)
 
 
 async def _commit_new_conversation(
@@ -2961,6 +2971,9 @@ class MainWindow(QMainWindow):
 
         display_name = convo.own_peer_name
         if not display_name:
+            self.ui.statusbar.showMessage(
+                "Set your own name in this conversation first", 5000,
+            )
             return
         try:
             client = self.iothread.kp_client

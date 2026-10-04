@@ -20,3 +20,14 @@ def test_copy_code_copies_the_voucher_and_confirms_on_the_button(
     dialog.copy_code()
     assert QApplication.clipboard().text() == "voucher-abc123"
     assert dialog.copy_button.text() == "Copied"
+
+
+def test_the_copy_button_returns_to_its_label(
+    qt_app: QApplication,
+) -> None:
+    parent = QWidget()
+    dialog = katzen.VoucherDialog(parent, "voucher-abc123")
+    dialog.copy_code()
+    assert dialog.copy_button.text() == "Copied"
+    dialog.restore_copy_label()
+    assert dialog.copy_button.text() == "Copy voucher"
