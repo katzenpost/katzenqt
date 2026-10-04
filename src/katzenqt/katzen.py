@@ -353,6 +353,7 @@ class VoucherDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.code = code
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(f"Voucher: {APP_NAME}")
         intro = (
             f"Here is your voucher, {display_name}."
@@ -360,8 +361,7 @@ class VoucherDialog(QDialog):
         )
         self.label = QLabel(
             f"{intro}\nHand it out of band to an existing member, who will "
-            f"induct you. Reopen this from the contacts menu to copy it "
-            f"again:\n\n{code}",
+            f"induct you:\n\n{code}",
             self,
         )
         self.label.setWordWrap(True)
@@ -2934,15 +2934,15 @@ class MainWindow(QMainWindow):
             return
 
         code = b64encode(voucher).decode()
-        await _dialog_finished(
-            VoucherDialog(self, code, display_name=display_name),
-        )
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
         self._supervised_listener(
             "_await_voucher_join",
             lambda: self._await_voucher_join(convo),
+        )
+        await _dialog_finished(
+            VoucherDialog(self, code, display_name=display_name),
         )
 
     async def _await_voucher_join(self, convo: ConversationUIState) -> None:
