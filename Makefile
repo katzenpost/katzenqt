@@ -23,7 +23,7 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
-KATZENPOST_REV := ebc7e841f03712983448881069b496bf690cdc49
+KATZENPOST_REV := 97cef8b2eddc8b7e19b60bc982e95fd2b36fa58e
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
