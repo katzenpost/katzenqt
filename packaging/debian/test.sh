@@ -3,6 +3,7 @@ set -eu
 
 katzenqt-headless --help >/dev/null
 python3 -c "import pycrdt, katzenpost_thinclient"
+QT_QPA_PLATFORM=offscreen python3 -c "import katzenqt.katzen"
 test -x /usr/bin/kpclientd
 test -f /etc/katzenpost/kpclientd.toml
 test -f /usr/lib/systemd/user/kpclientd.service
