@@ -5,6 +5,8 @@ pure function of the ``votes`` map and the ``slots`` list. No counts are stored.
 """
 from __future__ import annotations
 
+import logging
+import math
 from dataclasses import dataclass
 from typing import cast
 
@@ -23,6 +25,23 @@ from .schema import (
     survey_id_of,
     votes_map,
 )
+
+
+
+logger = logging.getLogger("katzen.tally.engine")
+
+
+def _version_of(vmap: "Map[str | float]") -> int:
+    if _VERSION_KEY not in set(vmap.keys()):
+        return 0
+    raw = vmap[_VERSION_KEY]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        logger.warning("ignoring a non-numeric vote version %r", raw)
+        return 0
+    if not math.isfinite(raw):
+        logger.warning("ignoring a non-finite vote version %r", raw)
+        return 0
+    return int(raw)
 
 
 @dataclass(frozen=True)
@@ -69,8 +88,7 @@ def _stored_version(votes: VotesMap, key: str) -> int:
     """
     if key not in set(votes.keys()):
         return -1
-    existing = votes[key]
-    return cast(int, existing[_VERSION_KEY]) if _VERSION_KEY in set(existing.keys()) else 0
+    return _version_of(votes[key])
 
 
 def current_version(doc: SurveyDoc, voter_id: bytes) -> int:
@@ -111,7 +129,7 @@ def stored_choice(doc: SurveyDoc, voter_id: bytes) -> "tuple[int, dict[str, str]
         return None
     vmap = votes[key]
     choice = {k: cast(str, vmap[k]) for k in vmap.keys() if k != _VERSION_KEY}
-    version = cast(int, vmap[_VERSION_KEY]) if _VERSION_KEY in set(vmap.keys()) else 0
+    version = _version_of(vmap)
     return version, choice
 
 
@@ -192,7 +210,7 @@ def per_voter(doc: SurveyDoc) -> "list[VoterChoice]":
     for voter in sorted(votes.keys()):
         vmap = votes[voter]
         choice = {k: cast(str, vmap[k]) for k in vmap.keys() if k != _VERSION_KEY}
-        version = cast(int, vmap[_VERSION_KEY]) if _VERSION_KEY in set(vmap.keys()) else 0
+        version = _version_of(vmap)
         out.append(VoterChoice(
             voter_id=bytes.fromhex(voter), version=version, choices=choice,
         ))
