@@ -166,3 +166,28 @@ async def test_introduction_respects_member_limit(monkeypatch: pytest.MonkeyPatc
         )
         assert added is None
         assert not await persistent.peer_has_read_cap(sess, conv_id, cap)
+
+
+@pytest.mark.asyncio
+async def test_a_plain_chat_message_reports_no_peer_added() -> None:
+    async with persistent.asession() as sess:
+        conv_id, _own_id, _ = await _make_conversation(sess)
+        cap = _read_cap()
+        await _add_active_peer(sess, conv_id, name="alice", read_cap=cap)
+        peer = (await sess.exec(
+            select(persistent.ConversationPeer).where(
+                col(persistent.ConversationPeer.name) == "alice",
+            )
+        )).one()
+        gcm = models.GroupChatMessage(
+            version=0, membership_hash=b"0" * 32,
+            msg_type=models.GroupChatTypeEnum.TEXT,
+            text="hello",
+        )
+        added, _sig, peer_added, _tally = (
+            await conversation_handlers.dispatch(
+                sess, peer, gcm, b"F" + gcm.to_cbor(),
+            )
+        )
+        assert added is True
+        assert peer_added is None
