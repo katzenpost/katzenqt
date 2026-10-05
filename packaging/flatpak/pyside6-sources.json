@@ -1,0 +1,58 @@
+[
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/34/0e/1e9841cc46196c55ac3eac0b8e08044a88cc70c8cc29e9dc1e33b2ced2b7/pyside6-6.9.3-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "6485aebec8eba4e55d1ec1cebe68ca1413589880cc8ccd8a49acae852ec6cfb3",
+    "dest": "pip-cache",
+    "only-arches": ["x86_64"]
+  },
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/3d/6b/6aeb7124a5c08ac537776d7d0be1011cf22ccfc6f95cf901fe1eb1a16e91/pyside6-6.9.3-cp39-abi3-manylinux_2_39_aarch64.whl",
+    "sha256": "8f4ff61b24a64153373b68a96339bd765fc010d02c4d98d0f6dba2a6c9686e11",
+    "dest": "pip-cache",
+    "only-arches": ["aarch64"]
+  },
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/17/fe/d5c67665f866b8859d02aa1a859f101a1b2fd348cb61746a3e16fd98fb20/pyside6_addons-6.9.3-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "68932327e1c33d729d79b2b94242f97b77601efe0427e757cd3fd588939ea479",
+    "dest": "pip-cache",
+    "only-arches": ["x86_64"]
+  },
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/66/f2/66da0d8ba8e4eb934d2bb042f2199664d2366c121844e36376f724b53fd9/pyside6_addons-6.9.3-cp39-abi3-manylinux_2_39_aarch64.whl",
+    "sha256": "61f4f4859bd1711eea2202fe364a701597140ed4f3900ddf1f90d91ae631fdf9",
+    "dest": "pip-cache",
+    "only-arches": ["aarch64"]
+  },
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/85/e8/9396cf11a60f80175bb3c5c1d498d84e87b7af653ab4ea001acf821a3981/pyside6_essentials-6.9.3-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "c70d5544e892b201a677b615156fab6a0fef865e7fc287f55a0eae00a682e83f",
+    "dest": "pip-cache",
+    "only-arches": ["x86_64"]
+  },
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/57/a5/0187b2845a6fa534217988f9351c0b85ba1c04e8fd31f1e3c13ba1c4386e/pyside6_essentials-6.9.3-cp39-abi3-manylinux_2_39_aarch64.whl",
+    "sha256": "e22e517c592657e291c0cbe7d04078ab415cb225188d7e895f8f7adcdba755d2",
+    "dest": "pip-cache",
+    "only-arches": ["aarch64"]
+  },
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/be/82/c1c6932f9849bc5e75c93c38a29419505a6e3e0037261e28f3e7ecbf2751/shiboken6-6.9.3-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "f3f5337a3a8fc660ba1462265bd9a2bdda9588f8d90fbc3d5ac4ce3134c11e59",
+    "dest": "pip-cache",
+    "only-arches": ["x86_64"]
+  },
+  {
+    "type": "file",
+    "url": "https://files.pythonhosted.org/packages/4a/fc/026f4c8660494e513fd8c6d95d4d694d490795c6880f1fd23ec996a83e13/shiboken6-6.9.3-cp39-abi3-manylinux_2_39_aarch64.whl",
+    "sha256": "f66e82510e3a3170a42e3ef865329559b69811ce83102ad1ee57920319427c10",
+    "dest": "pip-cache",
+    "only-arches": ["aarch64"]
+  }
+]

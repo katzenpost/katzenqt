@@ -26,3 +26,9 @@ debian/files
 debian/katzenqt/
 debian/katzenqt.substvars
 debian/katzenqt.*.debhelper
+
+.flatpak-build/
+.flatpak-builder/
+.flatpak-export/
+.flatpak-repo/
+.flathub-dist/
