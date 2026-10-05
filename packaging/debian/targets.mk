@@ -1,7 +1,7 @@
 PYCRDT_URL := https://github.com/y-crdt/pycrdt.git
 PYCRDT_REV := 7fc0f7330fd55a0e99b91683b2820ebcd02a50a2
 THINCLIENT_URL := https://github.com/katzenpost/thin_client.git
-THINCLIENT_REV := 536bfb705a947be4ddc0c3cb16ed0f248de1daa5
+THINCLIENT_REV := 7c7de9128033554ecff355020dcccb22b4d5bb25
 PIP_VER := 24.2
 MATURIN_VER := 1.8.2
 RUSTIC_AUDIO_URL := https://github.com/katzenpost/Rustic_Audio_PyO3
