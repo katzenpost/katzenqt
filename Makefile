@@ -23,6 +23,7 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
+KATZENPOST_REV := 97cef8b2eddc8b7e19b60bc982e95fd2b36fa58e
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
@@ -53,6 +54,8 @@ KQT_INTEGRATION_PARALLEL ?= 4
 	clean clean-venv deps deps-audio
 
 deps: deps-audio default_uv_setup
+
+-include packaging/*/targets.mk
 
 default: default_uv_setup
 
@@ -102,6 +105,7 @@ help:
 		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
 		'  make kpclientd.service     Install and enable user systemd service for kpclientd' \
+		$(PACKAGING_HELP) \
 		'' \
 		'Maintenance:' \
 		'  make clean-venv            Remove only .venv and force setup next time' \

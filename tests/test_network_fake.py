@@ -959,6 +959,18 @@ def _make_F_file_payload(blob: bytes, basename: str = "blob.bin",
     return b"F" + gcm.to_cbor()
 
 
+async def _wait_until_read_armed(
+    fake: FakeThinClient, *, budget_s: float = 10.0,
+) -> None:
+    deadline = asyncio.get_running_loop().time() + budget_s
+    while fake.call_count("start_resending_encrypted_message") == 0:
+        assert asyncio.get_running_loop().time() < deadline, (
+            "the drain never sent its read"
+        )
+        await asyncio.sleep(0.001)
+    await asyncio.sleep(0.001)
+
+
 class TestDrainMixwalReadSingle:
     @pytest.mark.asyncio
     async def test_success_with_final_prefix(self, fake_thinclient: FakeThinClient) -> None:
@@ -1097,7 +1109,7 @@ class TestDrainMixwalReadSingle:
         draining: set[uuid.UUID] = {setup["bacap_stream"]}
 
         async def simulate_reconnect() -> None:
-            await asyncio.sleep(0.02)
+            await _wait_until_read_armed(fake_thinclient)
             await network.on_connection_status({"is_connected": False, "err": None})
             await network.on_connection_status({"is_connected": True, "err": None})
 
@@ -1142,7 +1154,7 @@ class TestDrainMixwalReadSingle:
             return {"payload": cbor2.dumps({"Epoch": epoch})}
 
         async def simulate_epoch_rollover() -> None:
-            await asyncio.sleep(0.02)
+            await _wait_until_read_armed(fake_thinclient)
             await network.on_new_pki_document(_pki_event(1))
             await network.on_new_pki_document(_pki_event(2))
 
