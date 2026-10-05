@@ -25,3 +25,6 @@ katzenpost/
 .flatpak-export/
 .flatpak-repo/
 .flathub-dist/
+.go-cache/
+dist/
+.kpclientd-build-revision
