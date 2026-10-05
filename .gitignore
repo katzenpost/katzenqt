@@ -28,3 +28,10 @@ katzenpost/
 .go-cache/
 dist/
 .kpclientd-build-revision
+.pybuild/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/katzenqt/
+debian/katzenqt.substvars
+debian/katzenqt.*.debhelper

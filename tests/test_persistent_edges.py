@@ -99,20 +99,27 @@ def test_mark_sent_txn_reaps_the_mixwal_when_the_pwal_is_gone() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_for_sent_polls_until_the_row_appears() -> None:
+async def test_wait_for_sent_polls_until_the_row_appears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pwal_id = uuid.uuid4()
+    real_sleep = asyncio.sleep
+    polls = 0
 
-    async def insert_later() -> None:
-        await asyncio.sleep(0)
-        async with persistent.asession() as sess:
-            sess.add(persistent.SentLog(id=pwal_id))
-            await sess.commit()
+    async def insert_on_the_first_poll(delay: float) -> None:
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            async with persistent.asession() as sess:
+                sess.add(persistent.SentLog(id=pwal_id))
+                await sess.commit()
+        await real_sleep(0)
 
-    waiter = asyncio.ensure_future(
-        persistent.wait_for_sent(pwal_id, deadline_s=5.0, poll_s=0.01)
-    )
-    await insert_later()
-    assert await waiter is True
+    monkeypatch.setattr(asyncio, "sleep", insert_on_the_first_poll)
+    assert await persistent.wait_for_sent(
+        pwal_id, deadline_s=5.0, poll_s=0.01,
+    ) is True
+    assert polls >= 1
 
 
 def test_mark_sent_txn_logs_a_missing_write_cap_and_a_stream_mismatch(

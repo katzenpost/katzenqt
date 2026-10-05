@@ -483,7 +483,8 @@ async def test_a_tampered_payload_is_refused_by_induction(
     mint = daemon.mints[-1]
     index0 = mint.voucher_write_cap[-_INDEX:]
     daemon.box_store[(mint.voucher_read_cap, index0)] = (
-        b"x" + mint.voucher_payload[1:]
+        bytes([mint.voucher_payload[0] ^ 0xFF])
+        + mint.voucher_payload[1:]
     )
     with pytest.raises(Exception):
         await voucher.derive_read_and_induct(
