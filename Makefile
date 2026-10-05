@@ -44,7 +44,8 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 KQT_INTEGRATION_PARALLEL ?= 4
 
 .PHONY: default default_uv_setup default_pip_setup help \
-	system-setup install-debian-packages install-uv clean-system-stamp \
+	system-setup install-debian-packages apt-install install-uv \
+	clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
 	run test mypy status code-generator regen-code \
 	run-uv run-pip test-uv test-pip mypy-uv mypy-pip \
@@ -71,6 +72,7 @@ help:
 		'Usage:' \
 		'  make deps                  Install system packages and venv' \
 		'  make system-setup          Install system packages (Debian/Ubuntu) and uv (via pipx)' \
+		'  make apt-install           Install APT_PACKAGES as root or sudo' \
 		'  make setup-uv              Create or update .venv using uv' \
 		'  make setup-pip             Create or update .venv using pip/venv' \
 		'' \
@@ -121,18 +123,30 @@ $(SYSTEM_STAMP):
 clean-system-stamp:
 	@rm -f $(SYSTEM_STAMP)
 
+APT_DEPS := libxcb-cursor0 libegl1 libpulse0 libfontconfig1 \
+	libxkbcommon0 build-essential pkg-config git podman pipx \
+	python3 python3-venv
+
 install-debian-packages:
-	@sudo apt install -y \
-		libxcb-cursor0 libegl1 libpulse0 libfontconfig1 libxkbcommon0 \
-		build-essential pkg-config \
-		git podman \
-		pipx python3 python3-venv >/dev/null
+	@$(MAKE) apt-install APT_PACKAGES="$(APT_DEPS)"
+
+apt-install:
+	@if [[ "$$(id -u)" == 0 ]]; then \
+		apt install -y $(APT_PACKAGES) >/dev/null; \
+	elif command -v sudo >/dev/null 2>&1 && sudo -v 2>/dev/null; then \
+		sudo apt install -y $(APT_PACKAGES) >/dev/null; \
+	else \
+		printf '%s\n' \
+			"error: this user cannot use sudo, so run as root:" \
+			"  su -c 'apt install -y $(APT_PACKAGES)'" >&2; \
+		exit 1; \
+	fi
 
 install-uv:
 	@pipx install -f uv >/dev/null
 
 deps-audio:
-	@sudo apt install -y libasound2-dev cargo >/dev/null
+	@$(MAKE) apt-install APT_PACKAGES="libasound2-dev cargo"
 
 setup:
 	@$(MAKE) setup-status
