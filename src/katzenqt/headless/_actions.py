@@ -366,7 +366,10 @@ async def _send_one_gcm(
         await sess.commit()
 
     headroom_s = max(120.0, num_pwals * 60.0)
-    budget_s = epochs.budget_s(headroom_s) if timeout is None else timeout
+    budget_s = (
+        epochs.budget_s(network.epoch_period_seconds(), headroom_s)
+        if timeout is None else timeout
+    )
     connection, bg = await _connect_and_start()
     try:
         await network.check_for_new()
@@ -649,6 +652,7 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
                 # single-role baseline.
                 if not await persistent.wait_for_sent(
                     final_pwal_id, deadline_s=600.0,
+                    epoch_s=network.epoch_period_seconds(),
                 ):
                     logger.error(f"STEP_FAIL:{step_idx}:send-timeout:{payload}")
                     return 3
