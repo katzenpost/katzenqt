@@ -133,7 +133,6 @@ def stage(tag, destination, remote=False):
     destination.mkdir(parents=True)
     paths = [
         "packaging/flatpak/LICENSE",
-        "packaging/flatpak/README.md",
         "packaging/flatpak/flathub.json",
         "packaging/flatpak/pyside6-sources.json",
         "packaging/flatpak/python3-deps.json",
