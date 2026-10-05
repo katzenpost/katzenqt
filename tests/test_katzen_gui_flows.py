@@ -46,6 +46,7 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> Sent:
         recorded.append(kwargs)
 
     monkeypatch.setattr(network, "notify_outbound_chat_sent", record)
+    monkeypatch.setattr(network, "notify_outbound_text_sent", record)
     return recorded
 
 
@@ -138,10 +139,8 @@ async def test_a_single_line_message_reaches_the_send_path(
     loaded_window.ui.chat_lineEdit.setText("hello mixnet")
     await loaded_window.chat_msg_single_line()
     assert len(sent) == 1
-    payload = sent[0]["payload"]
-    assert isinstance(payload, bytes)
-    assert payload[:1] == b"F"
-    gcm = katzen.GroupChatMessage.from_cbor(payload[1:])
+    gcm = sent[0]["gcm"]
+    assert isinstance(gcm, katzen.GroupChatMessage)
     assert gcm.text == "hello mixnet"
     assert sent[0]["conversation_id"] == (
         loaded_window.convo_state().conversation_id

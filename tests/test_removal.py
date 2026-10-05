@@ -12,7 +12,7 @@ from katzenqt import network, persistent, removal
 from katzenqt.qt_models import ConversationLogModel
 from katzenqt.tally.presenter import first_unread_order
 from katzenqt.tally import controller as tally_controller
-from tests.test_membership_hash import _make_conversation
+from tests._conversation import make_conversation as _make_conversation
 
 if TYPE_CHECKING:
     from katzenqt.tally.schema import SurveyDoc
@@ -409,7 +409,7 @@ async def test_remove_peer_unknown_conversation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_remove_peer_leaves_the_membership_hash_until_deleted() -> None:
+async def test_a_silenced_peer_stays_active_until_deleted() -> None:
     conv_id = await _make_conversation()
     alice = await _alice(conv_id)
     await removal._silence_peers(conv_id, alice.id)

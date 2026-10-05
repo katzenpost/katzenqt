@@ -86,7 +86,6 @@ def _raw(
 ) -> GroupChatMessage:
     return GroupChatMessage(
         version=0,
-        membership_hash=bytes(32),
         msg_type=kind,
         tally=tally,
     )
@@ -540,7 +539,7 @@ async def test_a_buffered_invalid_ballot_is_logged_not_raised(
 async def test_reconcile_skips_rows_it_cannot_use() -> None:
     ctrl = TallyController()
     survey_id = uuid.uuid4().bytes
-    text = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
+    text = GroupChatMessage(version=0, text="hi")
     payloads = [
         b"C" + events.build_vote(survey_id, {"s0": "yes"}).to_cbor(),
         b"F" + b"not cbor at all",

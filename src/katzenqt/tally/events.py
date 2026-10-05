@@ -7,11 +7,7 @@ network and no database.
 """
 from __future__ import annotations
 
-from ..models import GroupChatMessage, GroupChatTally, GroupChatTypeEnum
-
-# A tally message is not a membership event, so it carries no membership hash;
-# the field is required to be 32 bytes, so we supply a fixed zero block.
-_NO_MEMBERSHIP = bytes(32)
+from ..models import GROUP_CHAT_VERSION, GroupChatMessage, GroupChatTally, GroupChatTypeEnum
 
 
 def _message(kind: GroupChatTypeEnum, tally: GroupChatTally) -> GroupChatMessage:
@@ -21,13 +17,11 @@ def _message(kind: GroupChatTypeEnum, tally: GroupChatTally) -> GroupChatMessage
     ...     GroupChatTypeEnum.TALLY_CLOSE, GroupChatTally(survey_id=bytes(16)))
     >>> msg.msg_type
     <GroupChatTypeEnum.TALLY_CLOSE: 7>
-    >>> msg.membership_hash == bytes(32)
-    True
     >>> msg.text is None
     True
     """
     return GroupChatMessage(
-        version=0, membership_hash=_NO_MEMBERSHIP, msg_type=kind, tally=tally,
+        version=GROUP_CHAT_VERSION, msg_type=kind, tally=tally,
     )
 
 

@@ -32,7 +32,6 @@ def _message(
 ) -> GroupChatMessage:
     return GroupChatMessage(
         version=0,
-        membership_hash=bytes(32),
         msg_type=kind,
         tally=GroupChatTally(
             survey_id=survey_id,
@@ -106,7 +105,7 @@ def test_a_voter_row_with_no_marked_slots_says_so() -> None:
 
 
 def test_a_message_without_a_tally_payload_renders_as_malformed() -> None:
-    gcm = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
+    gcm = GroupChatMessage(version=0, text="hi")
     row = presenter.tally_row_text(
         gcm, actor_name="alice", survey_summary=None
     )

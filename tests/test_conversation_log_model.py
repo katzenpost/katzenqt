@@ -39,7 +39,7 @@ def test_data_exposes_attachment_roles_from_a_persisted_row() -> None:
         "v": 0, "kind": "file_marker", "basename": "note.opus",
         "filetype": "audio/opus", "size": 1,
         "rel_path": "attachments/900/x.opus",
-        "sha256": b"\x00" * 32, "membership_hash": b"m",
+        "sha256": b"\x00" * 32,
     })
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(persistent.ConversationLog(

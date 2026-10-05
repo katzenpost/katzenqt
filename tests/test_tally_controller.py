@@ -168,7 +168,7 @@ async def test_dispatch_logs_tally_rows_and_routes_chat_too() -> None:
         assert added is True
         assert tally_added is True
 
-        text = models.GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
+        text = models.GroupChatMessage(version=0, text="hi")
         added, _sig, _pa, tally_added = await conversation_handlers.dispatch(
             sess, peers["alice"], text, b"F" + text.to_cbor(),
         )

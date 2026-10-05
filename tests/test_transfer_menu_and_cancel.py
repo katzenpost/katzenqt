@@ -5,7 +5,7 @@ import pytest
 from sqlmodel import col, select
 
 from katzenqt import network, persistent
-from tests.test_membership_hash import _make_conversation
+from tests._conversation import make_conversation as _make_conversation
 
 
 def _write_mixwal(stream: uuid.UUID, *, plaintextwal: uuid.UUID | None = None,

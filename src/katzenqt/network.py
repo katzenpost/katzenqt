@@ -81,7 +81,7 @@ from .katzen_util import create_task
 from ._thinclient import ThinClient
 from . import epochs
 from pydantic.dataclasses import dataclass
-from . import attachment_images, conversation_handlers, models, persistent
+from . import acks, attachment_images, conversation_handlers, models, persistent
 from sqlmodel import col, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -677,6 +677,36 @@ async def notify_outbound_chat_sent(
         final_pwal_id=final_pwal_id,
         log_id=log_id,
     )
+    await _announce_outbound(conversation_id, upload, payload)
+
+
+async def notify_outbound_text_sent(
+    *,
+    conversation_id: int,
+    conversation_peer_id: int,
+    gcm: "models.GroupChatMessage",
+) -> None:
+    """Queue an outbound text message, with whatever acknowledgements are
+    pending, and wake the receive-side listeners, all in one io-loop hop.
+
+    The message is serialized here, on the io loop, rather than by the
+    caller: its acknowledgements are decided and recorded in the same
+    transaction that queues it, so a message that is never queued
+    acknowledges nothing.
+    """
+    upload = await acks.append_outbound_text(
+        conversation_id=conversation_id,
+        conversation_peer_id=conversation_peer_id,
+        gcm=gcm,
+    )
+    await _announce_outbound(conversation_id, upload, b"F" + gcm.to_cbor())
+
+
+async def _announce_outbound(
+    conversation_id: int,
+    upload: "persistent.OutboundUpload | None",
+    payload: bytes,
+) -> None:
     await conversation_update_queue.put((conversation_id, False))
     if upload is not None:
         # Capture the filename label now: the I-chunk row linking the agg
@@ -1793,7 +1823,6 @@ def _safe_basename(name: str) -> str:
 
 def _spill_attachment(
     file_upload: "models.GroupChatFileUpload",
-    membership_hash: bytes,
     conversation_id: int,
 ) -> bytes:
     """Write the attachment bytes to disk and return the CBOR marker
@@ -1823,7 +1852,6 @@ def _spill_attachment(
             "size": len(blob),
             "basename": safe,
             "filetype": file_upload.filetype,
-            "membership_hash": membership_hash,
         })
 
     sha = hashlib.sha256(blob).digest()
@@ -1854,7 +1882,6 @@ def _spill_attachment(
         "size": len(blob),
         "rel_path": rel_path,
         "sha256": sha,
-        "membership_hash": membership_hash,
     }
     if attachment_images.is_image_attachment(file_upload.filetype, safe):
         thumb_rel_path = attachment_images.spill_image_thumbnail(
@@ -1931,6 +1958,12 @@ async def _try_assemble(
     chunks = [(rp.chunk_type, rp.chunk) for rp in chain]
     try:
         gcm = models.unserialize(chunks)
+    except models.UnsupportedVersion as exc:
+        logger.warning(
+            "dropping a message from a newer client at rcw=%s terminal=%s: %s",
+            rcw_id, terminal_idx_8b.hex(), exc,
+        )
+        return None
     except Exception as exc:  # malformed CBOR or framing: leave RPs for retry
         logger.warning(
             "could not assemble chain at rcw=%s terminal=%s: %s",
@@ -2004,11 +2037,13 @@ async def _record_substream_miss(
     return False
 
 
-async def _discard_substream_release(
+async def _substream_release_pieces(
     sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
     read_cap: bytes,
-) -> None:
-    pieces = (await sess.exec(
+) -> "Sequence[persistent.ReceivedPiece]":
+    """The parent stream's indirection pieces that point at the substream
+    read by ``read_cap``."""
+    return (await sess.exec(
         select(persistent.ReceivedPiece).where(
             persistent.ReceivedPiece.read_cap == parent_cap_id,
             persistent.ReceivedPiece.chunk_type == b"I",
@@ -2020,7 +2055,25 @@ async def _discard_substream_release(
             ) == read_cap,
         )
     )).all()
-    for piece in pieces:
+
+
+async def _substream_release_position(
+    sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
+    read_cap: bytes,
+) -> "int | None":
+    """Where on the parent's own stream the message carried by this
+    substream sits: the position of the box that announced it."""
+    pieces = await _substream_release_pieces(sess, parent_cap_id, read_cap)
+    if not pieces:
+        return None
+    return min(int.from_bytes(piece.bacap_index, "little") for piece in pieces)
+
+
+async def _discard_substream_release(
+    sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
+    read_cap: bytes,
+) -> None:
+    for piece in await _substream_release_pieces(sess, parent_cap_id, read_cap):
         await sess.delete(piece)
 
 
@@ -2384,7 +2437,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             )
             spilled_payload = await asyncio.to_thread(
                 _spill_attachment,
-                spill_gcm.file_upload, spill_gcm.membership_hash, spill_conv_id,
+                spill_gcm.file_upload, spill_conv_id,
             )
 
     try:
@@ -2413,13 +2466,27 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # Substream's terminal F: commit the assembled message into the
                     # parent peer's ConversationLog, prune the parent's indirection
                     # piece, and retire this synthetic peer.
-                    added, sig, pa, ta = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
+                    assert rcw.read_cap is not None
+                    added, sig, pa, ta = await conversation_handlers.dispatch(
+                        sess, parent_peer, gcm, full_payload,
+                        position=await _substream_release_position(
+                            sess, parent_peer.read_cap_id, rcw.read_cap,
+                        ),
+                    )
                     signal_send = signal_send or sig
                     peer_added = peer_added or pa
                     tally_added = tally_added or ta
                     await _discard_substream_release(
                         sess, parent_peer.read_cap_id, rcw.read_cap,
                     )
+                    # The parent's stream may now be acknowledged past the
+                    # box that announced this message.
+                    parent_rcw = await sess.get(
+                        persistent.ReadCapWAL, parent_peer.read_cap_id,
+                    )
+                    if parent_rcw is not None:
+                        await sess.flush()
+                        await acks.settle(sess, parent_peer, parent_rcw)
                     cp.active = False
                     rcw.substream_failure = None
                     rcw.substream_missing_since = None
@@ -2437,7 +2504,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # Top-level F (single-box or contiguous on the parent stream):
                     # route by message type, chat into the log, tally into the
                     # controller.
-                    convlog_added, sig, peer_added, tally_added2 = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
+                    convlog_added, sig, peer_added, tally_added2 = await conversation_handlers.dispatch(
+                        sess, cp, gcm, full_payload,
+                        position=persistent.box_position(mw.current_message_index),
+                    )
                     signal_send = signal_send or sig
                     tally_added = tally_added or tally_added2
             for rp in chain:
@@ -2508,6 +2578,14 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     substream_progress.append(TransferFailed(
                         rcw_id=new_rcw.id, reason=_OVER_CAP_FAILURE,
                     ))
+
+        # A box that ends a message on a member's own stream: note how far
+        # that stream has been read, for the next acknowledgement we send.
+        if (
+            chunk_type in (b"F", b"I")
+            and not cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+        ):
+            await acks.box_read(sess, cp, rcw, mw.current_message_index)
 
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
@@ -2877,6 +2955,8 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
         ))).first()
         if convlog is not None:
             await sess.delete(convlog)
+        # What the message acknowledged goes unsent with it.
+        await acks.forget_outgoing(sess, i_chunk_id)
         await sess.delete(i_chunk_row)
         rcw_row = await sess.get(persistent.ReadCapWAL, rcw_id)
         if rcw_row is not None:
@@ -2933,6 +3013,12 @@ async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
                 await _discard_substream_release(
                     sess, parent.read_cap_id, rcw.read_cap,
                 )
+                parent_rcw = await sess.get(
+                    persistent.ReadCapWAL, parent.read_cap_id,
+                )
+                if parent_rcw is not None:
+                    await sess.flush()
+                    await acks.settle(sess, parent, parent_rcw)
             peer.active = False
             sess.add(peer)
         for piece in (await sess.exec(select(persistent.ReceivedPiece).where(

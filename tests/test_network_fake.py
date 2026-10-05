@@ -85,7 +85,7 @@ def _make_F_payload(text: str = "hello") -> bytes:
     receive-side coalescer parses the CBOR; tests that simulate a
     final-message arrival must produce something decodable."""
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"X" * 32, text=text,
+        version=0, text=text,
     )
     return b"F" + gcm.to_cbor()
 
@@ -951,7 +951,7 @@ def _make_F_file_payload(blob: bytes, basename: str = "blob.bin",
     """``b'F'``-framed GroupChatMessage carrying a small file_upload that
     fits in a single BACAP box."""
     gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"Y" * 32,
+        version=0,
         file_upload=models.GroupChatFileUpload(
             payload=blob, filetype=filetype, basename=basename,
         ),
@@ -1305,8 +1305,8 @@ class TestDrainMixwalReadSingle:
         file_upload = models.GroupChatFileUpload(
             basename="dup.bin", filetype="arbitrary", payload=blob,
         )
-        marker1 = network._spill_attachment(file_upload, b"m" * 32, 4242)
-        marker2 = network._spill_attachment(file_upload, b"m" * 32, 4242)
+        marker1 = network._spill_attachment(file_upload, 4242)
+        marker2 = network._spill_attachment(file_upload, 4242)
         import cbor2
         m1 = cbor2.loads(marker1[1:])
         m2 = cbor2.loads(marker2[1:])
@@ -1977,7 +1977,7 @@ class TestDrainMixwalReadSingle:
         # Monkeypatch conversation_handlers.dispatch to raise an exception.
         # This simulates a processing error (e.g., CBOR decode failure, CRDT
         # error) that gets caught by the generic exception handler.
-        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes) -> None:
+        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes, position: "int | None" = None) -> None:
             raise ValueError("malformed chunk data")
         
         monkeypatch.setattr(conversation_handlers, "dispatch", failing_dispatch)
@@ -2019,7 +2019,7 @@ class TestDrainMixwalReadSingle:
             plaintext=_make_F_payload("test"),  # F-chunk triggers dispatch
         )
         
-        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes) -> None:
+        async def failing_dispatch(sess: "AsyncSession", peer: persistent.ConversationPeer, gcm: models.GroupChatMessage, full_payload: bytes, position: "int | None" = None) -> None:
             raise ValueError("bad data")
         
         monkeypatch.setattr(conversation_handlers, "dispatch", failing_dispatch)
@@ -2717,7 +2717,7 @@ class TestDrainMixwal2:
             display_name="carol", read_cap=b"\xaa" * 136,
         )
         intro = models.GroupChatMessage(
-            version=0, membership_hash=b"X" * 32,
+            version=0,
             msg_type=models.GroupChatTypeEnum.INTRODUCTION,
             introduction=announced,
         )
@@ -2754,7 +2754,7 @@ class TestDrainMixwal2:
         setup = await _set_up_read_flow(fake_thinclient)
         own_cap = setup["write_cap"][32:]
         intro = models.GroupChatMessage(
-            version=0, membership_hash=b"X" * 32,
+            version=0,
             msg_type=models.GroupChatTypeEnum.INTRODUCTION,
             introduction=models.GroupChatPleaseAdd(
                 display_name="self", read_cap=own_cap,

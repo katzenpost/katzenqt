@@ -102,7 +102,7 @@ class TestHandleIntroductionSelfRecognition:
             own_peer = await sess.get(persistent.ConversationPeer, own_peer_id)
             assert own_peer is not None
             gcm = models.GroupChatMessage(
-                version=0, membership_hash=b"m" * 32,
+                version=0,
                 msg_type=models.GroupChatTypeEnum.INTRODUCTION,
                 introduction=models.GroupChatPleaseAdd(
                     display_name="self", read_cap=own_read_cap,
@@ -132,7 +132,7 @@ class TestHandleIntroductionSelfRecognition:
             assert own_peer is not None
             newcomer_rc = _read_cap()
             gcm = models.GroupChatMessage(
-                version=0, membership_hash=b"m" * 32,
+                version=0,
                 msg_type=models.GroupChatTypeEnum.INTRODUCTION,
                 introduction=models.GroupChatPleaseAdd(
                     display_name="carol", read_cap=newcomer_rc,
@@ -157,7 +157,7 @@ async def test_introduction_respects_member_limit(monkeypatch: pytest.MonkeyPatc
         assert peer is not None
         cap = _read_cap()
         gcm = models.GroupChatMessage(
-            version=0, membership_hash=b"0" * 32,
+            version=0,
             msg_type=models.GroupChatTypeEnum.INTRODUCTION,
             introduction=models.GroupChatPleaseAdd(display_name="bob", read_cap=cap),
         )

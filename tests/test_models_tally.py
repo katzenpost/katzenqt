@@ -45,7 +45,7 @@ def _to_chunks(
 
 def test_msg_type_is_an_integer_on_the_wire() -> None:
     gcm = GroupChatMessage(
-        version=0, membership_hash=MH, msg_type=GroupChatTypeEnum.TALLY_VOTE,
+        version=0, msg_type=GroupChatTypeEnum.TALLY_VOTE,
         tally=GroupChatTally(survey_id=b"sid", choice={"s0": "yes"}),
     )
     raw = cbor2.loads(gcm.to_cbor())
@@ -71,7 +71,7 @@ def test_each_tally_kind_round_trips_through_cbor(kind: GroupChatTypeEnum) -> No
             GroupChatTypeEnum.TALLY_SYNC_RESP,
         ) else None,
     )
-    gcm = GroupChatMessage(version=0, membership_hash=MH, msg_type=kind, tally=tally)
+    gcm = GroupChatMessage(version=0, msg_type=kind, tally=tally)
 
     back = GroupChatMessage.from_cbor(gcm.to_cbor())
     assert back.msg_type is kind
@@ -86,7 +86,7 @@ def test_large_crdt_blob_round_trips_through_send_operation() -> None:
     """A create blob too big for one box must chunk across boxes and reassemble."""
     blob = bytes((i * 7 + 3) & 0xFF for i in range(5000))
     gcm = GroupChatMessage(
-        version=0, membership_hash=MH, msg_type=GroupChatTypeEnum.TALLY_CREATE,
+        version=0, msg_type=GroupChatTypeEnum.TALLY_CREATE,
         tally=GroupChatTally(survey_id=b"sid", crdt=blob),
     )
     op = SendOperation(bacap_stream=uuid.uuid4(), messages=[gcm])
@@ -132,6 +132,6 @@ def test_legacy_payload_without_msg_type_infers_introduction() -> None:
 
 
 def test_plain_text_message_defaults_to_text_type() -> None:
-    gcm = GroupChatMessage(version=0, membership_hash=MH, text="hello")
+    gcm = GroupChatMessage(version=0, text="hello")
     assert gcm.msg_type is GroupChatTypeEnum.TEXT
     assert GroupChatMessage.from_cbor(gcm.to_cbor()).msg_type is GroupChatTypeEnum.TEXT
