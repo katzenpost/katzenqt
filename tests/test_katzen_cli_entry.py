@@ -248,22 +248,32 @@ def test_cli_starts_the_io_thread_and_hands_off_to_qtasyncio(
     assert cli_probe.handed_off == [f"main for {window!r}"]
 
 
-def test_a_requested_level_is_applied_and_an_unknown_one_disables(
+def test_a_requested_level_is_applied_and_off_disables(
     cli_probe: CliProbe,
 ) -> None:
     good = f"katzenqt.test.cli.good.{uuid.uuid4().hex}"
-    bad = f"katzenqt.test.cli.bad.{uuid.uuid4().hex}"
-    cli_probe.levels = [(good, "debug"), (bad, "nosuchlevel")]
+    quiet = f"katzenqt.test.cli.quiet.{uuid.uuid4().hex}"
+    cli_probe.levels = [(good, "debug"), (quiet, "off")]
     try:
         katzen.cli()
         assert logging.getLogger(good).level == logging.DEBUG
-        assert logging.getLogger(good).disabled is False
-        assert logging.getLogger(bad).disabled is True
+        assert logging.getLogger(quiet).disabled is True
     finally:
-        for name in (good, bad):
+        for name in (good, quiet):
             leftover = logging.getLogger(name)
             leftover.disabled = False
             leftover.setLevel(logging.NOTSET)
+
+
+def test_an_unknown_level_stops_the_application(
+    cli_probe: CliProbe,
+) -> None:
+    unknown = f"katzenqt.test.cli.unknown.{uuid.uuid4().hex}"
+    cli_probe.levels = [(unknown, "nosuchlevel")]
+    with pytest.raises(SystemExit) as caught:
+        katzen.cli()
+    assert "unknown log level" in str(caught.value)
+    assert logging.getLogger(unknown).disabled is False
 
 
 def test_a_failed_migration_reports_the_error_and_exits(

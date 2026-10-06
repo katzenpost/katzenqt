@@ -3644,6 +3644,34 @@ def error_and_exit(app: QApplication, why: str, main_window: QMainWindow | None=
 def get_all_loggers() -> "set[str]":
     return set(logging.root.manager.loggerDict.keys())
 
+LOG_LEVELS = (
+    "notset", "debug", "info", "warning", "error", "critical", "off",
+)
+
+
+def resolve_log_level(level: str) -> "int | None":
+    """The level a name means, None for "off", refusing anything else.
+
+    >>> resolve_log_level("debug"), resolve_log_level("notset")
+    (10, 0)
+    >>> resolve_log_level("off") is None
+    True
+    >>> resolve_log_level("dbug")
+    Traceback (most recent call last):
+        ...
+    ValueError: unknown log level: 'dbug'; choose from notset, debug, info, warning, error, critical, off
+    """
+    if level.lower() not in LOG_LEVELS:
+        raise ValueError(
+            f"unknown log level: {level!r}; choose from "
+            + ", ".join(LOG_LEVELS)
+        )
+    if level.lower() == "off":
+        return None
+    resolved: int = getattr(logging, level.upper())
+    return resolved
+
+
 def install_log_handlers() -> None:
     for ln in get_all_loggers():
         lnlog = logging.getLogger(ln)
@@ -3719,15 +3747,18 @@ def cli() -> object:
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
 
-    if levels:
-        for logger_name, level in levels:
-            log_level = getattr(logging, level.upper(), None)
-            if log_level:
-                logging.getLogger(logger_name).disabled = False
-                logging.getLogger(logger_name).setLevel(log_level)
-                logging.getLogger(logger_name).critical(f"set to {level.upper()}({log_level})")
-            else:
-                logging.getLogger(logger_name).disabled = True
+    for logger_name, level in levels:
+        try:
+            log_level = resolve_log_level(level)
+        except ValueError as e:
+            raise SystemExit(f"{e}") from None
+        target = logging.getLogger(logger_name)
+        if log_level is None:
+            target.disabled = True
+            continue
+        target.disabled = False
+        target.setLevel(log_level)
+        target.critical(f"set to {level.upper()}({log_level})")
 
     logger.critical("checking for instance")
     if is_there_already_an_instance_running():
