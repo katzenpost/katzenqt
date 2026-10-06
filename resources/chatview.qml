@@ -192,12 +192,11 @@ TreeView {
           //property bool isTreeNode
           //anchors.fill: parent
 
+          id: msgDelegate
+
           implicitWidth: parent.parent.width || 1
 
-          // NB: without this, it looks like shit if you scroll up:
-          implicitHeight: Math.max(messageColumn.implicitHeight,
-	                    Math.max(contact_name.implicitHeight, (entry_picture.visible ? entry_picture.height : 0)
-			    )) // tallest element
+          implicitHeight: rowBody.implicitHeight + 6
 
           background: Rectangle {
             // Themed row background so contact names (sysPalette.text) are
@@ -224,10 +223,13 @@ TreeView {
             }
           }
 
-          contentItem: Row {  /// contentItem is the thing that gets displayed
+          contentItem: RowLayout {  /// the thing that gets displayed
+          id: rowBody
+          spacing: 8
 
           Text {
             id: contact_name
+            Layout.alignment: Qt.AlignTop
             textFormat: Text.PlainText
             text: (
               model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "\u2713 " : "")
@@ -238,26 +240,25 @@ TreeView {
 	    color: (model.network_status > 0 ? "red" : (model.is_tally ? sysPalette.highlight : sysPalette.text))
           }
 
-	  RowLayout {
-	       spacing: 1
-	       id : entry_picture_row
-	       visible: model.picture_path ? true : false
-	       Image {
-	         id: entry_picture
-	         source: model.picture_path ? "image://ChatImageProvider/" + model.picture_path : ""
-	         // QQmlEngine.addImageProvider(QQuickImageProvider(def requestImage())
-	         // https://stackoverflow.com/a/20693161
-	         asynchronous: true
-	         fillMode: Image.PreserveAspectFit
-	     }
-	  }
-
           // Text and attachment controls stack vertically so the action row
           // is not clipped by the greedy TextArea width.
           Column {
             id: messageColumn
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignTop
             spacing: 2
-            width: parent.width - contact_name.width
+
+          Image {
+            id: entry_picture
+            visible: model.picture_path ? true : false
+            source: model.picture_path
+                    ? "image://ChatImageProvider/" + model.picture_path : ""
+            // QQmlEngine.addImageProvider(QQuickImageProvider(requestImage))
+            // https://stackoverflow.com/a/20693161
+            asynchronous: true
+            fillMode: Image.PreserveAspectFit
+            width: Math.min(implicitWidth, messageColumn.width)
+          }
 
           TextArea {
             id: itemMessageTextArea
@@ -274,7 +275,11 @@ TreeView {
 	    // hovered: when mouse is over
             //Layout.fillWidth: parent
             //property alias maxWidth: "chatTreeView"
-            width: parent.width
+            width: messageColumn.width
+            leftPadding: 0
+            rightPadding: 0
+            topPadding: 0
+            bottomPadding: 0
             //implicitWidth: 100;
             //anchors.fill: parent
             //openExternalLinks: false
@@ -324,7 +329,7 @@ TreeView {
           } // Row attachmentActions
 
           } // Column messageColumn
-} // contentItem: Row
+} // contentItem: RowLayout
 
           // A tally row (poll create/vote/close/sync) opens its survey in the
           // Polls panel. Chat rows leave tally_survey_id unset.
