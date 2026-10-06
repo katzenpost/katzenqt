@@ -563,5 +563,99 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
     return None
 
 
+
+def frame_opaque(blob: bytes, chunk_size: int) -> "list[bytes]":
+    """Frame an opaque blob as box payloads, all of them or none.
+
+    Uses the same framing as :meth:`SendOperation.serialize`: one byte
+    of marker per box, ``b'C'`` for every box but the last and ``b'F'``
+    for the last. A blob that fits is a single ``b'F'`` box.
+
+    The all-or-nothing property is on the reading side:
+    :func:`unserialize_opaque` yields the blob only once every box is
+    present, so a run that was interrupted part way through is absent
+    to a reader rather than truncated.
+
+    >>> frame_opaque(b"hello", 8)
+    [b'Fhello']
+    >>> frame_opaque(b"hello", 4)
+    [b'Chel', b'Flo']
+    >>> frame_opaque(b"hello", 2)
+    [b'Ch', b'Ce', b'Cl', b'Cl', b'Fo']
+    >>> frame_opaque(b"", 8)
+    [b'F']
+    >>> frame_opaque(b"hello", 1)
+    Traceback (most recent call last):
+        ...
+    ValueError: chunk_size must leave room for the marker and a byte
+    """
+    if chunk_size <= 1:
+        raise ValueError(
+            "chunk_size must leave room for the marker and a byte"
+        )
+    body = chunk_size - 1
+    if len(blob) <= body:
+        return [b"F" + blob]
+    boxes = [
+        b"C" + blob[off:off + body]
+        for off in range(0, len(blob) - body, body)
+    ]
+    return boxes + [b"F" + blob[len(boxes) * body:]]
+
+
+def unserialize_opaque(
+    chunks: "Iterable[bytes]",
+) -> "bytes | None":
+    """The blob a run of opaque box payloads carries, or None.
+
+    None means "not all of it is here", which is the whole point: a
+    reader that holds a prefix of the run has nothing to act on, so a
+    write that stopped half way cannot be mistaken for a shorter blob.
+
+    >>> boxes = frame_opaque(b"a sealed reply", 6)
+    >>> unserialize_opaque(boxes)
+    b'a sealed reply'
+    >>> unserialize_opaque(boxes[:-1]) is None
+    True
+    >>> unserialize_opaque([]) is None
+    True
+    >>> unserialize_opaque([b"Fone box"])
+    b'one box'
+    >>> unserialize_opaque([b"Fa", b"Cb"])
+    Traceback (most recent call last):
+        ...
+    ValueError: 'F' chunk at index 0 but 1 chunk(s) follow
+    >>> unserialize_opaque([b"Xa"])
+    Traceback (most recent call last):
+        ...
+    ValueError: unknown chunk type: b'X'
+    >>> unserialize_opaque([b""])
+    Traceback (most recent call last):
+        ...
+    ValueError: empty box payload carries no marker
+    """
+    parts = []
+    boxes = list(chunks)
+    for i, box in enumerate(boxes):
+        if not box:
+            raise ValueError("empty box payload carries no marker")
+        kind, data = box[:1], box[1:]
+        if kind == b"C":
+            if i == len(boxes) - 1:
+                return None
+            parts.append(data)
+        elif kind == b"F":
+            if i != len(boxes) - 1:
+                raise ValueError(
+                    f"'F' chunk at index {i} but {len(boxes) - 1 - i} "
+                    "chunk(s) follow"
+                )
+            parts.append(data)
+            return b"".join(parts)
+        else:
+            raise ValueError(f"unknown chunk type: {kind!r}")
+    return None
+
+
 # ConversationUIState moved to katzenqt.qt_models; see banner near the
 # top of this file for rationale.
