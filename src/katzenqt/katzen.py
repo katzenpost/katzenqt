@@ -3526,8 +3526,6 @@ def install_log_handlers() -> None:
             logging.Formatter("%(asctime)s %(name)s: %(levelname)s: %(message)s"),
         )
         lnlog.addHandler(ch)
-        print("log fmt set", ln)
-        lnlog.critical("test")
 
 
 def log_level_command() -> click.Command:
