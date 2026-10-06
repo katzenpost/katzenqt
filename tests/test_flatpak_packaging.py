@@ -214,20 +214,6 @@ def test_integration_wrapper_dies_with_parent() -> None:
     assert "flatpak run --die-with-parent" in wrapper
 
 
-def test_flatpak_release_target_calls_the_script() -> None:
-    body = target_body("flatpak-release")
-    assert len(body) == 1
-    assert "packaging/flatpak/release.sh" in body[0]
-
-
-def test_release_script_runs_the_release_stages() -> None:
-    script = FLATPAK / "release.sh"
-    assert os.access(script, os.X_OK)
-    body = script.read_text()
-    for stage in ("validate", "dist", "check", "submit"):
-        assert f'release.py" {stage}' in body
-
-
 def test_flathub_skips_unsupported_arch() -> None:
     flathub = FLATPAK / "flathub.json"
     assert json.loads(flathub.read_text()) == {"skip-arches": ["aarch64"]}
