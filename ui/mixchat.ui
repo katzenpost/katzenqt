@@ -2854,26 +2854,9 @@ QToolButton {
    <addaction name="action_accept_invitation"/>
    <addaction name="actionDocumentation"/>
    <addaction name="action_quit"/>
-   <addaction name="action_testme"/>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
-  <action name="action_testme">
-   <property name="text">
-    <string>Testme</string>
-   </property>
-   <property name="iconText">
-    <string> Testme</string>
-   </property>
-   <property name="toolTip">
-    <string>I am going away</string>
-   </property>
-   <property name="statusTip">
-    <string>Accept invitation received from contact</string>
-   </property>
-   <property name="menuRole">
-    <enum>QAction::MenuRole::ApplicationSpecificRole</enum>
-   </property>
-  </action>
+  
   <action name="action_accept_invitation">
    <property name="icon">
     <iconset>
