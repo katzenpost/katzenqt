@@ -525,7 +525,7 @@ requires-dist = [
     { name = "pydantic", specifier = "~=2.11.7" },
     { name = "pynacl", specifier = "==1.6.0" },
     { name = "pyside6", specifier = "~=6.9.3" },
-    { name = "rustic-audio-tool", git = "https://github.com/katzenpost/Rustic_Audio_PyO3?rev=2158e2a5cc5e58f430b4c0bf2f5603d8909becc6" },
+    { name = "rustic-audio-tool", git = "https://github.com/katzenpost/Rustic_Audio_PyO3?rev=a7f5c4877f1aa84f312cc7a23fd85a445225393b" },
     { name = "sqlmodel", specifier = ">=0" },
 ]
 
@@ -1153,7 +1153,7 @@ wheels = [
 [[package]]
 name = "rustic-audio-tool"
 version = "0.0.2"
-source = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3?rev=2158e2a5cc5e58f430b4c0bf2f5603d8909becc6#2158e2a5cc5e58f430b4c0bf2f5603d8909becc6" }
+source = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3?rev=a7f5c4877f1aa84f312cc7a23fd85a445225393b#a7f5c4877f1aa84f312cc7a23fd85a445225393b" }
 
 [[package]]
 name = "shiboken6"
