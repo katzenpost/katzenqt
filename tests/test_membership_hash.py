@@ -11,8 +11,11 @@ import logging
 import uuid
 
 import pytest
+from sqlmodel import select
 
-from katzenqt import conversation_handlers, models, persistent
+from katzenqt import conversation_handlers, models, persistent, voucher
+from katzenqt.tally import events as tally_events
+from katzenqt.tally import send as tally_send
 from katzenqt.models import GroupChatMessage, SendOperation
 
 
@@ -120,3 +123,100 @@ async def test_send_stamps_the_real_membership_hash() -> None:
     assert sent.text == "hello"
     assert not models.is_membership_sentinel(sent.membership_hash)
     assert sent.membership_hash == expected
+
+
+_JOINER_CAP = b"\x07" * 136
+
+
+async def _add_joiner(conv_id: int) -> None:
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
+        rcw = persistent.ReadCapWAL(
+            id=uuid.uuid4(), read_cap=_JOINER_CAP, next_index=b"\x00" * 104,
+        )
+        sess.add(rcw)
+        sess.add(persistent.ConversationPeer(
+            name="bob", read_cap_id=rcw.id, active=True, conversation=convo,
+        ))
+        await sess.commit()
+
+
+@pytest.mark.asyncio
+async def test_local_membership_hash_can_exclude_one_member() -> None:
+    conv_id = await _make_conversation("excl")
+    await _add_joiner(conv_id)
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
+        full = await conversation_handlers.local_membership_hash(sess, convo)
+        without = await conversation_handlers.local_membership_hash(
+            sess, convo, exclude_read_cap=_JOINER_CAP,
+        )
+    assert full == models.canonical_membership_hash(
+        [b"\x02" * 136, b"\x01" * 136, _JOINER_CAP],
+    )
+    assert without == models.canonical_membership_hash(
+        [b"\x02" * 136, b"\x01" * 136],
+    )
+
+
+@pytest.mark.asyncio
+async def test_introduction_carries_the_group_before_the_addition() -> None:
+    conv_id = await _make_conversation("intro")
+    await _add_joiner(conv_id)
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
+        pre_add = await conversation_handlers.local_membership_hash(
+            sess, convo, exclude_read_cap=_JOINER_CAP,
+        )
+        post_add = await conversation_handlers.local_membership_hash(
+            sess, convo,
+        )
+    await voucher._write_introduction_log(conv_id, "bob", _JOINER_CAP)
+    async with persistent.asession() as sess:
+        pwals = (await sess.exec(
+            select(persistent.PlaintextWAL).where(
+                persistent.PlaintextWAL.conversation_id == conv_id
+            )
+        )).all()
+    finals = [p for p in pwals if p.bacap_payload[:1] == b"F"]
+    assert len(finals) == 1
+    gcm = GroupChatMessage.from_cbor(finals[0].bacap_payload[1:])
+    assert gcm.msg_type is models.GroupChatTypeEnum.INTRODUCTION
+    assert gcm.introduction is not None
+    assert gcm.introduction.read_cap == _JOINER_CAP
+    assert gcm.membership_hash == pre_add
+    assert gcm.membership_hash != post_add
+    assert not models.is_membership_sentinel(gcm.membership_hash)
+
+
+@pytest.mark.asyncio
+async def test_tally_send_replaces_the_placeholder_with_a_real_hash() -> None:
+    conv_id = await _make_conversation("tallyhash")
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
+        expected = await conversation_handlers.local_membership_hash(
+            sess, convo,
+        )
+        gcm = tally_events.build_create(b"s" * 32, b"state")
+        assert models.is_membership_sentinel(gcm.membership_hash)
+        await tally_send.stage_outbound(sess, convo, gcm)
+        await sess.commit()
+    assert gcm.membership_hash == expected
+    assert not models.is_membership_sentinel(gcm.membership_hash)
+
+
+@pytest.mark.asyncio
+async def test_tally_send_leaves_a_deliberate_hash_alone() -> None:
+    conv_id = await _make_conversation("tallykeep")
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
+        gcm = tally_events.build_create(b"s" * 32, b"state")
+        gcm.membership_hash = bytes(range(32))
+        await tally_send.stage_outbound(sess, convo, gcm)
+        await sess.commit()
+    assert gcm.membership_hash == bytes(range(32))

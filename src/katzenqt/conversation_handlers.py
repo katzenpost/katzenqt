@@ -65,12 +65,17 @@ async def _conversation_peers(
 
 
 async def local_membership_hash(
-    sess: AsyncSession, conv: persistent.Conversation
+    sess: AsyncSession, conv: persistent.Conversation,
+    exclude_read_cap: "bytes | None" = None,
 ) -> bytes:
     """Our own view of the conversation membership as the canonical hash
     (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
     plus ourself as ``write_cap[32:]`` rather than the possibly stale own-peer
-    read cap."""
+    read cap.
+
+    ``exclude_read_cap`` drops one member from the set, which an
+    INTRODUCTION needs because it must describe the group as it stood
+    before the addition it announces (GROUP_CHAT_PROTOCOL.md 6b.5)."""
     peers = await _conversation_peers(sess, conv.id)
     caps: "set[bytes]" = set()
     for p in peers:
@@ -80,7 +85,8 @@ async def local_membership_hash(
             continue
         rcw = await sess.get(persistent.ReadCapWAL, p.read_cap_id)
         if rcw is not None and rcw.read_cap is not None:
-            caps.add(rcw.read_cap)
+            if rcw.read_cap != exclude_read_cap:
+                caps.add(rcw.read_cap)
     wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
     if wcw is not None and wcw.write_cap is not None:
         caps.add(wcw.write_cap[32:])
