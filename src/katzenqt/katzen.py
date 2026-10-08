@@ -1,5 +1,6 @@
 APP_ORGANIZATION = "Mixnetwork"
 APP_NAME = "KatzenQt"
+GROUP_TINT_SETTING = "chat.groupTint"
 
 import asyncio
 import fcntl
@@ -1299,6 +1300,33 @@ class MainWindow(QMainWindow):
         if duration_time_ns() - convo.last_push_to_talk_ns > 100_000_000:
             self.push_to_talk_finish(cancel=False)
 
+    def set_group_tint(self, enabled: bool) -> None:
+        """Turn the membership tint on or off, and remember the choice."""
+        logger.info("membership tint %s", "on" if enabled else "off")
+        self.settings = {
+            **self.settings, GROUP_TINT_SETTING: int(bool(enabled)),
+        }
+        try:
+            with persistent.Session(persistent._engine_sync) as sess:
+                row = sess.get(persistent.AppSetting, GROUP_TINT_SETTING)
+                if not row:
+                    row = persistent.AppSetting(id=GROUP_TINT_SETTING)
+                row.type = "int"
+                row.value = str(int(bool(enabled)))
+                sess.add(row)
+                sess.commit()
+        except Exception as e:
+            logger.warning("could not persist the membership tint: %s", e)
+        for state in self.conversation_state_by_id.values():
+            state.conversation_log_model.set_group_tint(bool(enabled))
+
+    def restore_group_tint(self) -> None:
+        """Apply the persisted tint choice, which is off where unset."""
+        enabled = bool(self.settings.get(GROUP_TINT_SETTING, 0))
+        self.group_tint_action.setChecked(enabled)
+        for state in self.conversation_state_by_id.values():
+            state.conversation_log_model.set_group_tint(enabled)
+
     def font_settings_dialog(self) -> None:
         def font_example(qtoolbtn: QToolButton) -> None:
             ok, font = QFontDialog.getFont() # returns a QFont
@@ -1519,6 +1547,12 @@ class MainWindow(QMainWindow):
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
         self.ui.action_invite_contact.triggered.connect(self.generate_voucher)
         self.ui.action_pending_vouchers.triggered.connect(self.show_pending_vouchers)
+        self.group_tint_action = self.ui.menuSettings.addAction(
+            "Tint rows by membership",
+        )
+        self.group_tint_action.setCheckable(True)
+        self.group_tint_action.setChecked(False)
+        self.group_tint_action.toggled.connect(self.set_group_tint)
         # Mixnet status: enable the (otherwise disabled) menu and add the
         # Stats window action.
         self.ui.menuMixnetStatus.setEnabled(True)
@@ -3506,6 +3540,7 @@ async def main(window: MainWindow) -> None:
         for convo in a:
             await add_conversation(window, convo)
 
+    window.restore_group_tint()
     window.show()
     window._supervised_listener(
         "receive_msg_listener", window.receive_msg_listener, restart_on_finish=True,
