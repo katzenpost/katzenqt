@@ -17,7 +17,9 @@ import hashlib
 import os
 import subprocess
 import sys
+import struct
 import time
+import wave
 from pathlib import Path
 
 import pytest
@@ -132,9 +134,6 @@ def test_file_roundtrip(
 
 def _make_wav(path: Path, n_samples: int = 1_000) -> None:
     """A mono 8 kHz WAV of n_samples, deterministic so the hash is stable."""
-    import struct
-    import wave
-
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
