@@ -203,6 +203,25 @@ TreeView {
             // Themed row background so contact names (sysPalette.text) are
             // legible in dark mode rather than light-on-white.
             color: sysPalette.base
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              width: 6
+              visible: model.group_color !== ""
+              color: model.group_color !== "" ? model.group_color
+                                              : sysPalette.base
+            }
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              height: 2
+              visible: model.group_boundary === true
+              color: sysPalette.mid
+            }
           }
 
           contentItem: Row {  /// contentItem is the thing that gets displayed
@@ -211,7 +230,7 @@ TreeView {
             id: contact_name
             textFormat: Text.PlainText
             text: (
-              model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "    " : "")
+              model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "\u2713 " : "")
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
 	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)

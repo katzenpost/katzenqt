@@ -238,6 +238,9 @@ def test_cli_starts_the_io_thread_and_hands_off_to_qtasyncio(
     app = cli_probe.apps[0]
     assert app.styles == ["Fusion"]
     assert len(app.icons) == 1
+    assert app.desktop_files == ["network.katzenpost.katzenqt"]
+    installed = REPO_ROOT / "packaging" / f"{app.desktop_files[0]}.desktop"
+    assert installed.is_file()
     assert cli_probe.threads[0].starts == 1
     window = cli_probe.windows[0]
     assert window.app is app

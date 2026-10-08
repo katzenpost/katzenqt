@@ -19,6 +19,7 @@ restarts. All cap and key material is opaque bytes; the daemon does the crypto.
 import asyncio
 import logging
 import uuid
+from base64 import b64encode
 from typing import TYPE_CHECKING
 
 from katzenpost_thinclient import (
@@ -34,6 +35,7 @@ from .network import (
     _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _box_position,
     _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
     check_for_new, conversation_update_queue, ConnectionLifeInterruptedError,
+    epoch_period_seconds,
     PacketContext,
     _delivery_racing_connection_life,
 )
@@ -42,6 +44,26 @@ if TYPE_CHECKING:
     from ._thinclient import ThinClient
 
 logger = logging.getLogger("katzen.voucher")
+
+
+def voucher_code(token: bytes) -> str:
+    """The shareable base64 text of a voucher token.
+
+    >>> voucher_code(b"abc")
+    'YWJj'
+    """
+    return b64encode(token).decode()
+
+
+async def pending_voucher_token(conversation_id: int) -> "bytes | None":
+    async with persistent.asession() as sess:
+        row = (await sess.exec(
+            select(persistent.PendingVoucher).where(
+                persistent.PendingVoucher.conversation_id == conversation_id,
+                persistent.PendingVoucher.role == "joiner",
+            )
+        )).first()
+        return row.voucher if row is not None else None
 
 STEP_MINTED = "minted"
 STEP_AWAITING = "awaiting"
@@ -717,7 +739,9 @@ async def _wait_intro_acked(
     Fire-and-forget: a timeout is logged, never raised, so the induction
     result stands even if the announcement never gets delivered.
     """
-    if not await persistent.wait_for_sent(final_pwal_id, deadline_s=180.0):
+    if not await persistent.wait_for_sent(
+        final_pwal_id, deadline_s=180.0, epoch_s=epoch_period_seconds(),
+    ):
         logger.error(
             "introduction for %r not acked within 180s (conversation %d)",
             display_name, conversation_id,

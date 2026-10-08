@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 from sqlmodel import SQLModel
 
-from katzenqt import epochs, network, persistent
+from katzenqt import network, persistent
 from katzenqt.tally import controller as tally_controller
 
 from tests.fakes.thinclient import FakeThinClient
@@ -119,7 +119,6 @@ def _reset_network_module_state() -> Iterator[None]:
         # transition-only logging and dedupe epoch bumps across tests.
         setattr(network, "_last_connected", None)
         setattr(network, "_last_epoch", None)
-        epochs.forget_period()
 
     restore()
     yield
