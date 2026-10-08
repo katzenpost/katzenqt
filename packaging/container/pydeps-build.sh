@@ -15,6 +15,24 @@ export SOURCE_DATE_EPOCH
 RUSTIC_AUDIO_URL=$(sed -n 's/^RUSTIC_AUDIO_URL := //p' "$mk")
 RUSTIC_AUDIO_REV=$(sed -n 's/^RUSTIC_AUDIO_REV := //p' "$mk")
 
+CARGO_NET_RETRY=10
+CARGO_HTTP_TIMEOUT=120
+export CARGO_NET_RETRY CARGO_HTTP_TIMEOUT
+
+retry() {
+	attempt=1
+	until "$@"; do
+		if [ "$attempt" -ge 3 ]; then
+			printf 'giving up after %s attempts: %s\n' \
+				"$attempt" "$1" >&2
+			return 1
+		fi
+		printf 'attempt %s failed, retrying: %s\n' "$attempt" "$1" >&2
+		sleep $((attempt * 5))
+		attempt=$((attempt + 1))
+	done
+}
+
 mkdir -p "$out"
 work=$(mktemp -d)
 python3 -m venv "$work/venv"
@@ -48,17 +66,17 @@ CTRL
 		"$out/${debname}_${ver}_${arch}.deb"
 }
 
-git clone --quiet "$PYCRDT_URL" "$work/pycrdt"
+retry git clone --quiet "$PYCRDT_URL" "$work/pycrdt"
 git -C "$work/pycrdt" -c advice.detachedHead=false \
   switch --detach "$PYCRDT_REV"
 mkdir -p "$work/wh-pycrdt"
-"$PIP" wheel --no-deps -w "$work/wh-pycrdt" "$work/pycrdt"
+retry "$PIP" wheel --no-deps -w "$work/wh-pycrdt" "$work/pycrdt"
 build_deb python3-pycrdt amd64 "$work/wh-pycrdt" "python3, python3-anyio"
 
-git clone --quiet "$RUSTIC_AUDIO_URL" "$work/audio"
+retry git clone --quiet "$RUSTIC_AUDIO_URL" "$work/audio"
 git -C "$work/audio" -c advice.detachedHead=false \
   switch --detach "$RUSTIC_AUDIO_REV"
 mkdir -p "$work/wh-audio"
-"$PIP" wheel --no-deps -w "$work/wh-audio" "$work/audio"
+retry "$PIP" wheel --no-deps -w "$work/wh-audio" "$work/audio"
 build_deb python3-rustic-audio-tool amd64 "$work/wh-audio" \
 	"python3, libasound2t64 | libasound2"
