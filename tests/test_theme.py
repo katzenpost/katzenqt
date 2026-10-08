@@ -494,7 +494,7 @@ def test_load_mode_survives_a_broken_session(
 
     harness = make_theme("none")
     monkeypatch.setattr(persistent, "Session", boom)
-    caplog.set_level(logging.WARNING, logger="katzenqt.theme")
+    caplog.set_level(logging.WARNING, logger="katzen.theme")
     harness.manager.restore()
     assert harness.manager.mode == "system"
     assert "could not load theme mode: no database" in caplog.text
@@ -510,7 +510,7 @@ def test_save_mode_survives_a_broken_session(
 
     harness = make_theme("none")
     monkeypatch.setattr(persistent, "Session", boom)
-    caplog.set_level(logging.WARNING, logger="katzenqt.theme")
+    caplog.set_level(logging.WARNING, logger="katzen.theme")
     harness.manager.apply("dark")
     assert harness.manager.mode == "dark"
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(

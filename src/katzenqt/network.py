@@ -20,7 +20,6 @@ import time
 import types
 import nacl.public
 import secrets
-import random
 import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
 import asyncio
@@ -749,7 +748,6 @@ async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     if epoch is None or epoch == _last_epoch:
         return
     previous, _last_epoch = _last_epoch, epoch
-    epochs.remember_period(derive_epoch_period_seconds(epoch))
     logger.info("PKI epoch advanced to %s (from %s)", epoch, previous)
     old_event, _epoch_event = _epoch_event, asyncio.Event()
     old_event.set()
@@ -1469,7 +1467,8 @@ class RetryPacer:
     def delay_s(self, key: Hashable) -> float:
         ceiling = next_ceiling_s(self.ceilings.get(key, 0.0), self.bounds)
         self.ceilings[key] = ceiling
-        return random.uniform(ceiling / 2.0, ceiling)
+        span_ms = int(ceiling * 500.0)
+        return ceiling / 2.0 + secrets.randbelow(span_ms + 1) / 1000.0
 
     def reset(self, key: Hashable) -> None:
         self.ceilings.pop(key, None)
@@ -3803,6 +3802,19 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
     )
 
 
+def epoch_period_seconds(now: "datetime | None" = None) -> float:
+    override = os.environ.get("KQT_EPOCH_DURATION_S")
+    period = epochs.period_s(
+        derive_epoch_period_seconds(_last_epoch, now), override,
+    )
+    if period == 0.0 and override:
+        logger.warning(
+            "ignoring KQT_EPOCH_DURATION_S=%r: not a period between 0 and "
+            "a week", override,
+        )
+    return period
+
+
 # from katzenpost_thinclient import ThinClient, Config
 async def reconnect(config_path: "str | Path | None" = None) -> ThinClient:
     resolved = resolve_thinclient_config(config_path)
@@ -3863,32 +3875,6 @@ def create_new_keypair(seed: bytes) -> "tuple[bytes, bytes]":
     assert len(read_cap)  == 32 + 104
     return write_cap, read_cap
 
-async def test_keypair(connection: ThinClient, write_cap: bytes,
-                       read_cap: bytes) -> None:
-    """Test that create_new_keypair() results in usable+matching write/read caps."""
-    wcr = await connection.encrypt_write(
-        plaintext=b'hello',
-        write_cap=write_cap,
-        message_box_index=write_cap[-104:])
-    await connection.start_resending_encrypted_message(
-        read_cap=None, write_cap=write_cap, message_box_index=None,
-        reply_index=None,
-        envelope_descriptor=wcr.envelope_descriptor,
-        message_ciphertext=wcr.message_ciphertext,
-        envelope_hash=wcr.envelope_hash)
-
-    await asyncio.sleep(20)
-
-    rcr = await connection.encrypt_read(
-        read_cap=read_cap,
-        message_box_index=read_cap[-104:])
-    await connection.start_resending_encrypted_message(
-        read_cap=read_cap, write_cap=None,
-        message_box_index=read_cap[-104:],
-        reply_index=None,
-        envelope_descriptor=rcr.envelope_descriptor,
-        message_ciphertext=rcr.message_ciphertext,
-        envelope_hash=rcr.envelope_hash)
 __all__ = [
     "Awaitable",
     "BACAPDecryptionFailedError",
@@ -3997,7 +3983,6 @@ __all__ = [
     "persist_first_unread",
     "persistent",
     "provision_read_caps",
-    "random",
     "readables_to_mixwal",
     "readables_to_mixwal_event",
     "readables_to_mixwal_supervised",
@@ -4023,7 +4008,6 @@ __all__ = [
     "substream_progress_queue",
     "summarize_pki_document",
     "tally_update_queue",
-    "test_keypair",
     "threading",
     "time",
     "timezone",
