@@ -26,6 +26,12 @@ _CHUNK_SIZE = 1530
 async def stage_outbound(sess: "AsyncSession", conversation: "persistent.Conversation", gcm: "models.GroupChatMessage") -> uuid.UUID:
     """Serialise ``gcm`` and stage its rows in ``sess``. Returns the id of the
     final PlaintextWAL, which lands in SentLog once the message has cleared."""
+    from .. import conversation_handlers
+
+    if models.is_membership_sentinel(gcm.membership_hash):
+        gcm.membership_hash = await (
+            conversation_handlers.local_membership_hash(sess, conversation)
+        )
     send_op = models.SendOperation(bacap_stream=conversation.write_cap, messages=[gcm])
     new_write_caps, db_entries = await send_op.serialize_async(
         chunk_size=_CHUNK_SIZE, conversation_id=conversation.id,
