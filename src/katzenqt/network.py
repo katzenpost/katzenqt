@@ -20,7 +20,6 @@ import time
 import types
 import nacl.public
 import secrets
-import random
 import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
 import asyncio
@@ -1468,7 +1467,8 @@ class RetryPacer:
     def delay_s(self, key: Hashable) -> float:
         ceiling = next_ceiling_s(self.ceilings.get(key, 0.0), self.bounds)
         self.ceilings[key] = ceiling
-        return random.uniform(ceiling / 2.0, ceiling)
+        span_ms = int(ceiling * 500.0)
+        return ceiling / 2.0 + secrets.randbelow(span_ms + 1) / 1000.0
 
     def reset(self, key: Hashable) -> None:
         self.ceilings.pop(key, None)
@@ -3916,7 +3916,6 @@ __all__ = [
     "persist_first_unread",
     "persistent",
     "provision_read_caps",
-    "random",
     "readables_to_mixwal",
     "readables_to_mixwal_event",
     "readables_to_mixwal_supervised",
