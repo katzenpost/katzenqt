@@ -192,11 +192,9 @@ TreeView {
           //property bool isTreeNode
           //anchors.fill: parent
 
-          id: msgDelegate
-
           implicitWidth: parent.parent.width || 1
 
-          implicitHeight: rowBody.implicitHeight + 6
+          implicitHeight: rowBody.implicitHeight + rowBody.spacing
 
           background: Rectangle {
             // Themed row background so contact names (sysPalette.text) are
