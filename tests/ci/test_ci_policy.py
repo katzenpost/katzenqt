@@ -181,3 +181,29 @@ def test_final_command_checks_skipped_lanes(
     text = summary.read_text(encoding="ascii")
     assert f"Docker fallback: {docker}." in text
     assert f"Epoch tests: {epoch}." in text
+
+
+def test_an_advisory_epoch_does_not_sink_the_verdict() -> None:
+    """The merge queue builds a whole mixnet with 30-second epochs inside
+    the job, which is the most fragile thing it runs. There it reports
+    rather than gates; a pull request still has to pass it."""
+    assert integration_passed(
+        "success", "passed", "success", "failure", False, True,
+    )
+    assert not integration_passed("success", "passed", "success", "failure")
+
+
+def test_advisory_epoch_still_requires_docker_in_the_queue() -> None:
+    assert not integration_passed(
+        "success", "passed", "failure", "failure", True, True,
+    )
+    assert integration_passed(
+        "success", "passed", "success", "failure", True, True,
+    )
+
+
+def test_the_workflow_passes_the_advisory_flag_only_in_the_queue() -> None:
+    body = WORKFLOW.read_text(encoding="utf-8")
+    assert "ADVISORY_EPOCH:" in body
+    assert "merge_group' && '--advisory-epoch'" in body
+    assert "$REQUIRE_DOCKER $ADVISORY_EPOCH" in body
