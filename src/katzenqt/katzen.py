@@ -842,6 +842,16 @@ class PacketsDialog(QDialog):
     def hideEvent(self, event: "QHideEvent") -> None:
         self._timer.stop()
         super().hideEvent(event)
+# Fixed, not theme-driven: theme.py has no semantic "status" color yet, and
+# both read at a contrast that stays legible against either palette.
+_MIXNET_CONNECTED_COLOR = "#268bd2"
+_MIXNET_OFFLINE_COLOR = "#dc322f"
+
+
+def mixnet_status_text(connected: bool) -> "tuple[str, str]":
+    if connected:
+        return ("Mixnet: connected", _MIXNET_CONNECTED_COLOR)
+    return ("Mixnet: offline", _MIXNET_OFFLINE_COLOR)
 
 
 class MainWindow(QMainWindow):
@@ -862,6 +872,8 @@ class MainWindow(QMainWindow):
     def X_keyReleaseEvent(self, ev: "QEvent") -> None:
         key = ev.key()  # type: ignore[attr-defined]
         print("key released", key)
+
+    mixnet_status_changed = Signal(bool)
 
     def _push_to_talk_audio(self) -> PttAudioBridge | None:
         if getattr(self, "_ptt_audio_failed", False):
@@ -1062,7 +1074,9 @@ class MainWindow(QMainWindow):
 
         if isinstance(decoded, dict) and "kind" in decoded:
             kind = decoded.get("kind")
-            basename = decoded.get("basename") or "unnamed"
+            basename = decoded.get("basename")
+            if not isinstance(basename, str) or not basename:
+                basename = "unnamed"
             filetype = decoded.get("filetype")
 
             if kind == "file_oversized":
@@ -1881,6 +1895,26 @@ class MainWindow(QMainWindow):
                 logger.error(
                     "tally_listener: dropping an item after %s", e, exc_info=e,
                 )
+        self.mixnet_status_label: QLabel = QLabel()
+        self.ui.statusbar.addPermanentWidget(self.mixnet_status_label)
+        self.mixnet_status_changed.connect(self.render_mixnet_status)
+        status_listener = self.mixnet_status_changed.emit
+        network.add_status_listener(status_listener)
+        self.destroyed.connect(
+            lambda *_: network.remove_status_listener(status_listener)
+        )
+        self.render_mixnet_status(network.mixnet_connected())
+
+    @Slot(bool)
+    def render_mixnet_status(self, connected: bool) -> None:
+        text, color = mixnet_status_text(connected)
+        self.mixnet_status_label.setText(text)
+        self.mixnet_status_label.setStyleSheet(f"color: {color};")
+        menu = self.ui.menuMixnetStatus
+        menu.setEnabled(True)
+        menu.clear()
+        current = menu.addAction(text)
+        current.setEnabled(False)
 
     async def _enqueue_outgoing_gcm(
         self,

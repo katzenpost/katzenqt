@@ -88,6 +88,7 @@ async def test_the_row_is_marked_while_the_group_is_not_being_read(
         ui=SimpleNamespace(contacts_treeWidget=None),
         iothread=SimpleNamespace(run_in_io=AsyncMock(side_effect=_await)),
         _remove_conversation=AsyncMock(),
+        _pending_voucher=AsyncMock(return_value=None),
     )
 
     chosen: list[str] = []
@@ -162,7 +163,9 @@ async def test_a_row_without_a_conversation_cannot_be_paused(
     )
     window = SimpleNamespace(
         ui=SimpleNamespace(contacts_treeWidget=None),
+        iothread=SimpleNamespace(run_in_io=AsyncMock(side_effect=_await)),
         _remove_conversation=AsyncMock(),
+        _pending_voucher=AsyncMock(return_value=None),
     )
     await katzen.MainWindow._conversation_menu(
         cast(katzen.MainWindow, window),
