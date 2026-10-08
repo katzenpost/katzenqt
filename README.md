@@ -122,6 +122,20 @@ seconds to minutes (the docker mixnet is near-instant). The full set of verbs,
 `info`, `multi-send`, `send-file`, `read-file`, `chat-session`, `tally-list`, and
 so on, is listed by `--help`; see HACKING.md for the fuller reference.
 
+## Two GUIs against the docker mixnet
+
+The katzenpost docker mixnet gives two instances on one machine a network to
+talk over, with epochs of minutes rather than hours. Each instance is its own
+`KQT_STATE`, and both dial the mixnet's `kpclientd` on TCP `127.0.0.1:64331`
+through `config/thinclient.docker.toml`:
+
+```shell
+make mixnet-up                  # clone ./katzenpost if needed, start it
+make run-docker INSTANCE=alice  # one GUI, state file alice.sqlite3
+make run-docker INSTANCE=bob    # a second GUI, state file bob.sqlite3
+make mixnet-down
+```
+
 ## Warning
 
 DO NOT USE THIS SOFTWARE UNLESS YOU ARE DEVELOPING IT AND AWARE OF THE TECHNICAL
