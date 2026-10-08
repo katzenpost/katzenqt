@@ -661,17 +661,23 @@ async def await_and_open(
 async def _write_introduction_log(conversation_id: int, display_name: str, read_cap: bytes) -> "uuid.UUID":
     """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
     final PlaintextWAL id, for the caller to wait on the ack."""
-    gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8,
-        msg_type=models.GroupChatTypeEnum.INTRODUCTION,
-        introduction=models.GroupChatPleaseAdd(
-            display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,
-        ),
-    )
+    from . import conversation_handlers
+
     async with persistent.conversation_log_order_lock(conversation_id):
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
             assert conv is not None
+            before_add = await conversation_handlers.local_membership_hash(
+                sess, conv, exclude_read_cap=read_cap,
+            )
+            gcm = models.GroupChatMessage(
+                version=0, membership_hash=before_add,
+                msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+                introduction=models.GroupChatPleaseAdd(
+                    display_name=_sanitize_peer_name(display_name)[:30],
+                    read_cap=read_cap,
+                ),
+            )
             send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
             new_write_caps, db_entries = await send_op.serialize_async(
                 chunk_size=1530, conversation_id=conversation_id,
