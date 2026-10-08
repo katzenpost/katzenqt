@@ -34,6 +34,7 @@ from .network import (
     _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _box_position,
     _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
     check_for_new, conversation_update_queue, ConnectionLifeInterruptedError,
+    epoch_period_seconds,
     PacketContext,
     _delivery_racing_connection_life,
 )
@@ -723,7 +724,9 @@ async def _wait_intro_acked(
     Fire-and-forget: a timeout is logged, never raised, so the induction
     result stands even if the announcement never gets delivered.
     """
-    if not await persistent.wait_for_sent(final_pwal_id, deadline_s=180.0):
+    if not await persistent.wait_for_sent(
+        final_pwal_id, deadline_s=180.0, epoch_s=epoch_period_seconds(),
+    ):
         logger.error(
             "introduction for %r not acked within 180s (conversation %d)",
             display_name, conversation_id,

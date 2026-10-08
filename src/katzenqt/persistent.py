@@ -737,9 +737,10 @@ async def own_read_cap(
 
 
 async def wait_for_sent(
-    pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25,
+    pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float,
+    poll_s: float = 0.25,
 ) -> bool:
-    """Poll SentLog for ``pwal_id`` until one epoch plus ``deadline_s``
+    """Poll SentLog for ``pwal_id`` until ``epoch_s`` plus ``deadline_s``
     elapses. Returns True if acked in time, False on timeout.
 
     Shared by every caller that needs to block until an outbound
@@ -749,9 +750,12 @@ async def wait_for_sent(
 
     ``deadline_s`` is slack on top of one epoch, not the whole wait: an ack
     may have to ride out a PKI rollover, and an epoch is two minutes on the
-    local mixnet and twenty on a live one. The period comes from the PKI
-    document, so nothing needs setting per network."""
-    deadline = asyncio.get_event_loop().time() + epochs.budget_s(deadline_s)
+    local mixnet and twenty on a live one. ``epoch_s`` is that period, which
+    the caller reads from the PKI document via
+    ``network.epoch_period_seconds``; pass 0.0 to wait only ``deadline_s``."""
+    deadline = (
+        asyncio.get_event_loop().time() + epochs.budget_s(epoch_s, deadline_s)
+    )
     while asyncio.get_event_loop().time() < deadline:
         async with asession() as sess:
             hit = (await sess.exec(
