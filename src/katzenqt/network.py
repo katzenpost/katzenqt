@@ -1964,6 +1964,19 @@ def _substream_miss_state(
     return started, None
 
 
+async def _advance_past_tombstone(mw_id: uuid.UUID) -> None:
+    async with persistent.asession() as sess:
+        mw_row = await sess.get(persistent.MixWAL, mw_id)
+        if mw_row is None:
+            return
+        rcw = await sess.get(persistent.ReadCapWAL, mw_row.bacap_stream)
+        if rcw is not None and rcw.next_index == mw_row.current_message_index:
+            rcw.next_index = mw_row.next_message_index
+            sess.add(rcw)
+        await sess.delete(mw_row)
+        await sess.commit()
+
+
 async def _record_substream_miss(
     bacap_stream: uuid.UUID, *, terminal: bool,
     now_s: float, budget_s: float,
@@ -2201,11 +2214,25 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
-  except (BoxIDNotFoundError, TombstoneError) as e:
+  except TombstoneError as e:
+    if is_substream:
+      logger.info("tombstoned substream box at %s: %s", bacap_uuid, e)
+      await _record_substream_miss(
+          bacap_uuid, terminal=True,
+          now_s=time.time(), budget_s=read_watchdog_s,
+      )
+    else:
+      logger.info("tombstone at %s; advancing past it: %s", bacap_uuid, e)
+      await _advance_past_tombstone(mw.id)
+    __resend_queue.discard(bacap_uuid)
+    _pacer.reset(bacap_uuid)
+    give_up()
+    return
+  except BoxIDNotFoundError as e:
     failed = False
     if is_substream:
       failed = await _record_substream_miss(
-          bacap_uuid, terminal=isinstance(e, TombstoneError),
+          bacap_uuid, terminal=False,
           now_s=time.time(), budget_s=read_watchdog_s,
       )
     if not failed:
