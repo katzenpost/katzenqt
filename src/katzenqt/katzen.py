@@ -1371,30 +1371,6 @@ class MainWindow(QMainWindow):
         # Modal chooser; applies and persists on accept (see theme.py).
         theme.ThemeDialog(self.theme, self).exec()
 
-    @async_cb
-    async def testme(self) -> None:
-        logger.info("testing")
-        import secrets
-        x = secrets.token_bytes(32)
-        import base64
-        #print(base64.z85encode(x))
-        print(base64.b64encode(x))
-        write_cap , read_cap = network.create_new_keypair(x)
-        logger.critical(write_cap)
-        logger.critical(read_cap)
-        client = self.iothread.kp_client
-        assert client is not None
-        await self.iothread.run_in_io(network.test_keypair(client, write_cap, read_cap))
-        # we want to make a regular conversation,
-        # give it a name,
-        # pick a name for ourselves
-        # set up Conversation + ConversationLog in persistent
-        # make RCW + WCW
-        # upload the RCW to the deterministic stream via a models.GroupChatPleaseAdd
-        # or even better a GroupChatReplyWho(please_adds=...) for the conversation
-        
-        
-
     def push_to_talk_pressed(self) -> bool:
         """The shortcut has autoRepeat=True, so we will keep getting these at regular intervals.
         Instead of relying on receiving a keyReleased event, we do a "dead man's switch" thing
@@ -1547,7 +1523,6 @@ class MainWindow(QMainWindow):
         self.ui.action_theme.triggered.connect(self.theme_settings_dialog)
         self.theme = theme.ThemeManager(self.app, self)
         self.theme.restore()
-        self.ui.action_testme.triggered.connect(self.testme)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
