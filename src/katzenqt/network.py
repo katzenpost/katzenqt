@@ -2222,12 +2222,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
           bacap_uuid, terminal=True,
           now_s=time.time(), budget_s=read_watchdog_s,
       )
-      __resend_queue.discard(bacap_uuid)
-      _pacer.reset(bacap_uuid)
-      give_up()
-      return
-    logger.info("tombstone at %s; advancing past it: %s", bacap_uuid, e)
-    await _advance_past_tombstone(mw.id)
+    else:
+      logger.info("tombstone at %s; advancing past it: %s", bacap_uuid, e)
+      await _advance_past_tombstone(mw.id)
     __resend_queue.discard(bacap_uuid)
     _pacer.reset(bacap_uuid)
     give_up()
