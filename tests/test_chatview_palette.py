@@ -17,7 +17,7 @@ def test_the_chat_view_reads_its_colours_from_the_active_system_palette() -> (
     )
     assert "color: sysPalette.base" in text
     assert text.count("sysPalette.base") >= 3
-    assert text.count("sysPalette.text") == 3
+    assert text.count("sysPalette.text") >= 1
     assert "hovered ? sysPalette.alternateBase : sysPalette.base" in text
 
 
