@@ -2307,9 +2307,21 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       draining_right_now.discard(bacap_uuid)  # otherwise this stream is wedged forever with no exception needed
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
+    if idx_new != idx_old + 1:
+      logger.warning(
+          "not advancing idx to %s from old %s: a reply that skips a box "
+          "would move this stream past one we never read", idx_new, idx_old,
+      )
+      try:
+        await sess.delete(mw)
+        await sess.commit()
+      except Exception as e:  # pragma: no cover - defensive
+        logger.critical("error deleting skipping MW: %s", e, exc_info=True)
+      draining_right_now.discard(bacap_uuid)
+      readables_to_mixwal_event.set()
+      return
     logger.info(f"advancing read to idx {idx_new}")
     _pacer.reset(bacap_uuid)
-    assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = rcr.next_message_box_index
     rcw.substream_missing_since = None
     sess.add(rcw)
