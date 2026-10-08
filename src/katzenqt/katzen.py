@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     _P = ParamSpec("_P")
 
 logger = logging.getLogger("katzen")
+DELIVERY_TICK = "\u2713"
 logger.setLevel("INFO")
 
 
@@ -1380,6 +1381,7 @@ class MainWindow(QMainWindow):
         self.systray = None
         super(MainWindow, self).__init__()
         self.conversation_state_by_id : Dict[int, ConversationUIState] = dict()
+        self._ticked_conversations: "set[int]" = set()
         self.app = app
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
@@ -1974,6 +1976,39 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
+    def _note_first_delivery_mark(self, conversation_id: int) -> None:
+        """Say once per conversation what the first delivery mark means.
+
+        A mark is a courier or replica acknowledgement, which is the only
+        delivery this client can observe. It is not a peer having read
+        anything, and until a second acknowledgement exists we hold the
+        only copy anyone can fetch, so the message has to be kept.
+        """
+        if conversation_id in self._ticked_conversations:
+            return
+        with persistent.Session(persistent._engine_sync) as sess:
+            marked = sess.exec(
+                select(persistent.ConversationLog).where(
+                    persistent.ConversationLog.conversation_id
+                    == conversation_id,
+                    persistent.ConversationLog.network_status == 2,
+                )
+            ).first()
+        if marked is None:
+            return
+        self._ticked_conversations.add(conversation_id)
+        logger.info(
+            "conversation %s carries its first courier or replica "
+            "acknowledgement; the message is kept until a second one exists",
+            conversation_id,
+        )
+        self._show_status_message(
+            "",
+            f"{DELIVERY_TICK} means a courier or replica has the message, "
+            "not that anyone read it; it is kept until a second mark "
+            "appears",
+        )
+
     async def _process_conversation_update(
         self, conversation_id: int, redraw_only: bool,
     ) -> None:
@@ -1982,6 +2017,7 @@ class MainWindow(QMainWindow):
         convo_state = self.conversation_state_by_id[conversation_id]
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
+            self._note_first_delivery_mark(conversation_id)
             return
         reset = convo_state.conversation_log_model.refresh_row_count()
 
