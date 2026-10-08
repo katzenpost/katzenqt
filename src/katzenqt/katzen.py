@@ -53,7 +53,9 @@ from katzenpost_thinclient import ThinClientOfflineError
 from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
-                     pending_joiner_join_conversation_ids, pending_voucher_for)
+                     pending_joiner_join_conversation_ids,
+                     pending_voucher_for, pending_voucher_token,
+                     voucher_code)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (NAME_POLICY_HASH, NAME_POLICY_KEEP,
@@ -396,6 +398,60 @@ async def _qml_source_ready(widget: "QQuickWidget") -> None:
         await fut
     finally:
         widget.statusChanged.disconnect(_on_status)
+
+
+class VoucherDialog(QDialog):
+    COPY_LABEL = "Copy voucher"
+    COPIED_LABEL = "Copied"
+    COPIED_SHOWN_MS = 1500
+
+    def __init__(
+        self,
+        parent: "QWidget",
+        code: str,
+        *,
+        display_name: "str | None" = None,
+    ) -> None:
+        super().__init__(parent)
+        self.code = code
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(f"Voucher: {APP_NAME}")
+        intro = (
+            f"Here is your voucher, {display_name}."
+            if display_name else "Here is your voucher."
+        )
+        self.label = QLabel(
+            f"{intro}\nHand it out of band to an existing member, who will "
+            f"induct you. Right-click the group chat to copy it again:"
+            f"\n\n{code}",
+            self,
+        )
+        self.label.setWordWrap(True)
+        self.label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard,
+        )
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close, self,
+        )
+        self.copy_button = buttons.addButton(
+            self.COPY_LABEL, QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        self.copy_button.clicked.connect(self.copy_code)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.label)
+        layout.addWidget(buttons)
+
+    def copy_code(self) -> None:
+        QApplication.clipboard().setText(self.code)
+        self.copy_button.setText(self.COPIED_LABEL)
+        QTimer.singleShot(
+            self.COPIED_SHOWN_MS, self.copy_button, self.restore_copy_label,
+        )
+
+    def restore_copy_label(self) -> None:
+        self.copy_button.setText(self.COPY_LABEL)
 
 
 async def _commit_new_conversation(
@@ -2124,6 +2180,11 @@ class MainWindow(QMainWindow):
             # TODO we should flash the contact entry somehow
             # TODO we should bump "unread message" counter
 
+        if await self.iothread.run_in_io(
+            persistent.is_muted(conversation_id),
+        ):
+            return
+
         # if the main window is not in focus, we should issue a notification:
         if not self.app.focusWidget():
             self.app.alert(self)
@@ -2237,10 +2298,23 @@ class MainWindow(QMainWindow):
                     )
                 )
         api = QMenu(self.ui.contacts_treeWidget)
+        mute = api.addAction("Mute notifications")
+        mute.setCheckable(True)
+        mute.setEnabled(conversation_id is not None)
+        was_muted = conversation_id is not None and await (
+            self.iothread.run_in_io(persistent.is_muted(conversation_id))
+        )
+        mute.setChecked(was_muted)
         stop = api.addAction("Do not read from this group chat any more")
         start = api.addAction("Resume reading from this group chat")
         stop.setEnabled(conversation_id is not None and not paused)
         start.setEnabled(conversation_id is not None and paused)
+        api.addSeparator()
+        copy_voucher = api.addAction("Copy voucher")
+        show_voucher = api.addAction("Show voucher...")
+        token = await self._pending_voucher(item)
+        copy_voucher.setEnabled(token is not None)
+        show_voucher.setEnabled(token is not None)
         api.addSeparator()
         remove = api.addAction("Remove group chat...")
         chosen = await _menu_chosen(api, global_pos)
@@ -2260,6 +2334,25 @@ class MainWindow(QMainWindow):
                 ),
             )
             item.setText(paused_label(item.text(), False))
+        elif chosen is mute and conversation_id is not None:
+            await self.iothread.run_in_io(
+                persistent.set_muted(conversation_id, muted=not was_muted),
+            )
+        elif token is None:
+            return
+        elif chosen is copy_voucher:
+            QApplication.clipboard().setText(voucher_code(token))
+            self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
+        elif chosen is show_voucher:
+            await _dialog_finished(VoucherDialog(self, voucher_code(token)))
+
+    async def _pending_voucher(self, item: "ContactsItem") -> "bytes | None":
+        conversation_id = getattr(item, "conversation_id", None)
+        if conversation_id is None:
+            return None
+        return await self.iothread.run_in_io(
+            pending_voucher_token(conversation_id),
+        )
 
     async def _peer_menu(
         self, item: "ContactsItem", global_pos: QPoint,
@@ -3035,17 +3128,12 @@ class MainWindow(QMainWindow):
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
-        display_dialog = QInputDialog(self)
-        display_dialog.setWindowTitle("Generate voucher")
-        display_dialog.setLabelText(
-            "Choose (your) name shown to the contact who inducts you:",
-        )
-        if not await _dialog_finished(display_dialog):
-            return
-        display_name = display_dialog.textValue().strip()
+        display_name = convo.own_peer_name
         if not display_name:
+            self.ui.statusbar.showMessage(
+                "Set your own name in this conversation first", 5000,
+            )
             return
-
         try:
             client = self.iothread.kp_client
             assert client is not None
@@ -3060,18 +3148,16 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        code = b64encode(voucher).decode()
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Voucher: {APP_NAME}",
-            f"Here is your voucher, {display_name}.\nHand it out of band to an "
-            f"existing member, who will induct you:\n\n{code}",
-        ))
+        code = voucher_code(voucher)
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
         self._supervised_listener(
             "_await_voucher_join",
             lambda: self._await_voucher_join(convo),
+        )
+        await _dialog_finished(
+            VoucherDialog(self, code, display_name=display_name),
         )
 
     async def _await_voucher_join(self, convo: ConversationUIState) -> None:

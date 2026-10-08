@@ -413,6 +413,34 @@ class AppSetting(SQLModel, table=True):
     type: str = Field(nullable=False)  # "str" or "int", I guess
     value: str = Field(nullable=True)  # value or NULL
 
+MUTED_PREFIX = "mute:"
+
+
+def muted_key(conversation_id: int) -> str:
+    """The AppSetting id under which one conversation's mute is recorded.
+
+    >>> muted_key(7)
+    'mute:7'
+    """
+    return f"{MUTED_PREFIX}{conversation_id}"
+
+
+async def is_muted(conversation_id: int) -> bool:
+    async with asession() as sess:
+        row = await sess.get(AppSetting, muted_key(conversation_id))
+    return row is not None
+
+
+async def set_muted(conversation_id: int, *, muted: bool) -> None:
+    key = muted_key(conversation_id)
+    async with asession() as sess:
+        row = await sess.get(AppSetting, key)
+        if muted and row is None:
+            sess.add(AppSetting(id=key, type="str", value="1"))
+        elif not muted and row is not None:
+            await sess.delete(row)
+        await sess.commit()
+
 class MixWAL(SQLModel, table=True):
     """
     Stores EncryptWriteResult/EncryptReadResult from ThinClient.encrypt_read() and encrypt_write()
