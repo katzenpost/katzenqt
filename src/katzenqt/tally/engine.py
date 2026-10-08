@@ -27,7 +27,6 @@ from .schema import (
 )
 
 
-
 logger = logging.getLogger("katzen.tally.engine")
 
 
