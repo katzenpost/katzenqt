@@ -51,7 +51,7 @@ KQT_INTEGRATION_PARALLEL ?= 4
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	clean clean-venv deps deps-audio
+	clean clean-venv deps deps-audio mixnet-up mixnet-down run-docker
 
 deps: deps-audio default_uv_setup
 
@@ -101,6 +101,9 @@ help:
 		'' \
 		'Katzenpost / kpclientd:' \
 		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
+		'  make mixnet-up             Start the katzenpost docker mixnet' \
+		'  make mixnet-down           Stop the katzenpost docker mixnet' \
+		'  make run-docker            Run one GUI against that mixnet' \
 		'  make kpclientd             Build kpclientd (golang native build; falls back to podman)' \
 		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
@@ -331,6 +334,19 @@ $(KATZENPOST_DIR):
 
 katzenpost-update: $(KATZENPOST_DIR)
 	@cd $(KATZENPOST_DIR) && git pull --ff-only >/dev/null 2>&1
+
+INSTANCE ?= alice
+
+mixnet-up: $(KATZENPOST_DIR)
+	@$(MAKE) -C $(KATZENPOST_DIR)/docker start
+
+mixnet-down: $(KATZENPOST_DIR)
+	@$(MAKE) -C $(KATZENPOST_DIR)/docker stop
+
+run-docker:
+	@KQT_STATE=docker-$(INSTANCE) \
+		KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml \
+		$(MAKE) run
 
 kpclientd: $(KATZENPOST_DIR)
 	@set +e; \
