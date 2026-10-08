@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
@@ -13,6 +14,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from sqlmodel import select  # noqa: E402
 
 from katzenqt import katzen, network, persistent  # noqa: E402
 from katzenqt.tally import presenter as tally_presenter  # noqa: E402
@@ -113,6 +116,55 @@ async def test_a_redraw_only_update_only_restyles_the_rows(
     before = systray_of(loaded_window).new_messages
     await loaded_window._process_conversation_update(convo_id, True)
     assert systray_of(loaded_window).new_messages == before
+
+
+CHATVIEW = Path(__file__).resolve().parents[1] / "resources" / "chatview.qml"
+
+
+def test_the_chat_view_draws_the_same_mark_the_status_bar_names() -> None:
+    line = next(
+        one for one in CHATVIEW.read_text(encoding="utf-8").splitlines()
+        if "network_status == 2" in one
+    )
+    assert f"\\u{ord(katzen.DELIVERY_TICK):04x}" in line
+
+
+@pytest.mark.asyncio
+async def test_the_first_delivery_mark_is_explained_once(
+    loaded_window: katzen.MainWindow,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    convo_id = loaded_window.convo_state().conversation_id
+    await loaded_window._process_conversation_update(convo_id, True)
+    assert loaded_window._ticked_conversations == set()
+
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.exec(
+            select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == convo_id,
+            )
+        ).first()
+        assert row is not None
+        row.network_status = 2
+        sess.add(row)
+        sess.commit()
+
+    with caplog.at_level(logging.INFO, logger=katzen.logger.name):
+        await loaded_window._process_conversation_update(convo_id, True)
+    assert loaded_window._ticked_conversations == {convo_id}
+    assert any(
+        "first courier or replica acknowledgement" in r.message
+        for r in caplog.records
+    )
+    said = loaded_window.statusBar().currentMessage()
+    assert katzen.DELIVERY_TICK in said
+    assert "not that anyone read it" in said
+
+    loaded_window.statusBar().clearMessage()
+    caplog.clear()
+    await loaded_window._process_conversation_update(convo_id, True)
+    assert loaded_window.statusBar().currentMessage() == ""
+    assert caplog.records == []
 
 
 @pytest.mark.asyncio
