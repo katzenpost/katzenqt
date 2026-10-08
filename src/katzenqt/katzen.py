@@ -763,11 +763,7 @@ class MainWindow(QMainWindow):
             self._ptt_audio_failed = True
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.warning(
-                    self,
-                    APP_NAME,
-                    str(exc),
-                ),
+                partial(QMessageBox.warning, self, APP_NAME, str(exc)),
             )
             return None
         # The attachment controls are created before the audio engine is lazily
@@ -1186,9 +1182,8 @@ class MainWindow(QMainWindow):
         except AudioEngineError as exc:
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.critical(
-                    self,
-                    f"ERROR: {APP_NAME}",
+                partial(
+                    QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                     f"Failed to start push-to-talk capture.\n\n{exc}",
                 ),
             )
@@ -1221,9 +1216,8 @@ class MainWindow(QMainWindow):
             except AudioEngineError as exc:
                 QTimer.singleShot(
                     0,
-                    lambda: QMessageBox.critical(
-                        self,
-                        f"ERROR: {APP_NAME}",
+                    partial(
+                        QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                         f"Failed to cancel push-to-talk capture.\n\n{exc}",
                     ),
                 )
@@ -1234,9 +1228,8 @@ class MainWindow(QMainWindow):
         except AudioEngineError as exc:
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.critical(
-                    self,
-                    f"ERROR: {APP_NAME}",
+                partial(
+                    QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                     f"Failed to finalize push-to-talk capture.\n\n{exc}",
                 ),
             )
