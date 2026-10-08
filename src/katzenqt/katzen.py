@@ -27,8 +27,9 @@ from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel
                             QModelIndex, QObject, QPoint, QSettings,
                             QSize, Property, Slot, QThread, QUrl,
                             Signal, QTimer)
-from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
-                           QPixmap, QShortcut, QStandardItem, QStandardItemModel)
+from PySide6.QtGui import (QAction, QActionGroup, QDesktopServices, QIcon,
+                           QKeySequence, QPixmap, QShortcut, QStandardItem,
+                           QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
@@ -54,8 +55,10 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      pending_joiner_join_conversation_ids, pending_voucher_for)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
-from .models import (GroupChatFileUpload,
-                     GroupChatMessage, GroupChatPleaseAdd, SendOperation)
+from .models import (NAME_POLICY_HASH, NAME_POLICY_KEEP,
+                     NAME_POLICY_SETTING, GroupChatFileUpload,
+                     GroupChatMessage, GroupChatPleaseAdd, SendOperation,
+                     outgoing_basename)
 #from ui_mixchat_chatview import Ui_ChatForm
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
@@ -1507,6 +1510,20 @@ class MainWindow(QMainWindow):
 
         # item delegates define custom looks for view items
         self.ui.action_display_font.triggered.connect(self.font_settings_dialog)
+        self.name_policy_menu = self.ui.menuSettings.addMenu(
+            "Outgoing file names"
+        )
+        self.name_policy_group = QActionGroup(self)
+        self.name_policy_group.setExclusive(True)
+        for label, policy in (
+            ("Keep original names", NAME_POLICY_KEEP),
+            ("Hash all names", NAME_POLICY_HASH),
+        ):
+            action = self.name_policy_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(policy)
+            self.name_policy_group.addAction(action)
+        self.name_policy_group.triggered.connect(self.set_name_policy)
         # Theme: enable the (otherwise disabled) menu action, wire its dialog,
         # then restore the persisted light/dark/system choice.
         self.ui.action_theme.setEnabled(True)
@@ -2408,6 +2425,28 @@ class MainWindow(QMainWindow):
                 network.resume_peer_reads(bacap_stream=rcw_id),
             )
 
+    def set_name_policy(self, action: "QAction") -> None:
+        """Persist the outgoing-name policy the user picked."""
+        policy = str(action.data())
+        self.settings = {**self.settings, NAME_POLICY_SETTING: policy}
+        try:
+            with persistent.Session(persistent._engine_sync) as sess:
+                row = sess.get(persistent.AppSetting, NAME_POLICY_SETTING)
+                if row is None:
+                    row = persistent.AppSetting(id=NAME_POLICY_SETTING)
+                row.type = "str"
+                row.value = policy
+                sess.add(row)
+                sess.commit()
+        except Exception as e:
+            logger.warning("could not persist the name policy: %s", e)
+
+    def restore_name_policy(self) -> None:
+        """Check the menu entry matching the persisted policy."""
+        current = self.settings.get(NAME_POLICY_SETTING, NAME_POLICY_KEEP)
+        for action in self.name_policy_group.actions():
+            action.setChecked(action.data() == current)
+
     async def transfers_listener(self) -> None:
         """Drain network.substream_progress_queue into the Transfers model.
 
@@ -2546,6 +2585,11 @@ class MainWindow(QMainWindow):
                 continue
 
             upload = GroupChatFileUpload.from_path(f_path)
+            policy = self.settings.get(NAME_POLICY_SETTING)
+            upload.basename = outgoing_basename(
+                upload.payload, upload.basename, upload.filetype,
+                hash_all=policy == NAME_POLICY_HASH,
+            )
             gcm = GroupChatMessage(
                 version=0,
                 membership_hash=membership_hash,
@@ -3506,6 +3550,7 @@ async def main(window: MainWindow) -> None:
         for convo in a:
             await add_conversation(window, convo)
 
+    window.restore_name_policy()
     window.show()
     window._supervised_listener(
         "receive_msg_listener", window.receive_msg_listener, restart_on_finish=True,
