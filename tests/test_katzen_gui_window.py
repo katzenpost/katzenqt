@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import os
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -994,6 +995,42 @@ async def test_a_failing_finalize_is_reported(
         "Failed to finalize push-to-talk capture.\n\nstop_capture failed"
     )
     assert loaded_window.convo_state().attached_files == set()
+
+
+@pytest.mark.parametrize(
+    ("raise_on", "cancel", "headline"),
+    [
+        ("start_capture", None, "Failed to start push-to-talk capture."),
+        ("cancel_capture", True, "Failed to cancel push-to-talk capture."),
+        ("stop_capture", False, "Failed to finalize push-to-talk capture."),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_capture_error_survives_until_the_timer_fires(
+    loaded_window: katzen.MainWindow,
+    audio: FakeAudio,
+    boxes: type[FakeMessageBox],
+    monkeypatch: pytest.MonkeyPatch,
+    raise_on: str,
+    cancel: bool | None,
+    headline: str,
+) -> None:
+    pending: list[Callable[[], None]] = []
+    monkeypatch.setattr(
+        katzen.QTimer,
+        "singleShot",
+        staticmethod(lambda _msec, callback: pending.append(callback)),
+    )
+    loaded_window.push_to_talk_start()
+    pending.clear()
+    audio.raise_on.add(raise_on)
+    if cancel is None:
+        loaded_window.push_to_talk_start()
+    else:
+        loaded_window.push_to_talk_finish(cancel=cancel)
+    assert len(pending) == 1
+    pending[0]()
+    assert boxes.seen[0].text == f"{headline}\n\n{raise_on} failed"
 
 
 def test_finishing_without_an_engine_just_resets_the_ui(
