@@ -1760,6 +1760,34 @@ async def _substream_parent(
 # operator; it is generous enough for photos, audio clips, and
 # short documents.
 _ATTACHMENT_HARD_CAP = 200 * 1024 * 1024
+_ASSEMBLY_HARD_CAP = _ATTACHMENT_HARD_CAP + 1024 * 1024
+_MAX_INDIRECTION_DEPTH = 8
+_MAX_OPEN_PIECES_PER_STREAM = 300_000
+
+
+async def _indirection_depth(
+    sess: persistent.AsyncSession, peer: persistent.ConversationPeer,
+) -> int:
+    """Nested substream hops this peer sits behind; 0 when read directly."""
+    depth = 0
+    cur: "persistent.ConversationPeer | None" = peer
+    while cur is not None and cur.name.startswith(_SUBSTREAM_NAME_PREFIX):
+        depth += 1
+        if depth > _MAX_INDIRECTION_DEPTH:
+            break
+        cur = await _substream_parent(sess, cur.name)
+    return depth
+
+
+async def _open_piece_count(
+    sess: persistent.AsyncSession, bacap_stream: uuid.UUID,
+) -> int:
+    """Un-coalesced pieces this stream is holding."""
+    return len((await sess.exec(
+        select(persistent.ReceivedPiece).where(
+            persistent.ReceivedPiece.read_cap == bacap_stream,
+        )
+    )).all())
 
 
 def _attachments_root() -> Path:
@@ -1915,6 +1943,7 @@ async def _try_assemble(
         return None  # a lone 'C', chain not yet terminated
 
     chain = [cur]
+    held = len(cur.chunk)
     counter = int.from_bytes(terminal_idx_8b, "little")
     while counter > 0:
         counter -= 1
@@ -1925,6 +1954,14 @@ async def _try_assemble(
             break  # either gap or substream start; let CBOR decode decide
         if prev.chunk_type in (b"F", b"I"):
             break  # boundary with a prior assembled message
+        held += len(prev.chunk)
+        if held > _ASSEMBLY_HARD_CAP:
+            logger.warning(
+                "chain at rcw=%s terminal=%s holds %d bytes, past the %d "
+                "byte ceiling; refusing it", rcw_id,
+                terminal_idx_8b.hex(), held, _ASSEMBLY_HARD_CAP,
+            )
+            return None
         chain.insert(0, prev)
 
     chunks = [(rp.chunk_type, rp.chunk) for rp in chain]
@@ -2348,6 +2385,29 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       return
 
     cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
+    held_pieces = await _open_piece_count(sess, mw.bacap_stream)
+    if held_pieces >= _MAX_OPEN_PIECES_PER_STREAM:
+      logger.warning(
+          "stream %s holds %d un-coalesced pieces; dropping this chunk",
+          mw.bacap_stream, held_pieces,
+      )
+      await sess.delete(mw)
+      await sess.commit()
+      draining_right_now.discard(bacap_uuid)
+      __mixwal_updated.set()
+      return
+    if await _indirection_depth(sess, cp) > _MAX_INDIRECTION_DEPTH:
+      logger.warning(
+          "peer %s is more than %d substream hops deep; retiring it",
+          cp.id, _MAX_INDIRECTION_DEPTH,
+      )
+      cp.active = False
+      sess.add(cp)
+      await sess.delete(mw)
+      await sess.commit()
+      draining_right_now.discard(bacap_uuid)
+      __mixwal_updated.set()
+      return
     sess.add(persistent.ReceivedPiece(
                 read_cap=mw.bacap_stream,
                 bacap_index=mw.current_message_index[:8],
