@@ -157,6 +157,23 @@ class _ResolvedAttachment(NamedTuple):
 # stale or deleted conversation_id must not starve every later item forever.
 _CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
 
+PAUSE_MARK = "\u23f8"
+
+
+def paused_label(name: str, paused: bool) -> str:
+    """A conversation row's text, marked when nothing is being read.
+
+    >>> paused_label("friends", False)
+    'friends'
+    >>> paused_label("friends", True) == "\u23f8 friends"
+    True
+    >>> paused_label(paused_label("friends", True), True) == "\u23f8 friends"
+    True
+    """
+    bare = name.removeprefix(f"{PAUSE_MARK} ")
+    return f"{PAUSE_MARK} {bare}" if paused else bare
+
+
 class ContactsItem(QStandardItem):
     conversation_id: int
     peer_read_cap_id: uuid.UUID
@@ -2200,10 +2217,40 @@ class MainWindow(QMainWindow):
     async def _conversation_menu(
         self, item: "ContactsItem", global_pos: QPoint,
     ) -> None:
+        conversation_id = getattr(item, "conversation_id", None)
+        paused = False
+        if conversation_id is not None:
+            with persistent.Session(persistent._engine_sync) as sess:
+                convo = sess.get(persistent.Conversation, conversation_id)
+                paused = convo is not None and (
+                    network.conversation_reads_paused(
+                        sess, conversation_id, convo.own_peer_id,
+                    )
+                )
         api = QMenu(self.ui.contacts_treeWidget)
+        stop = api.addAction("Do not read from this group chat any more")
+        start = api.addAction("Resume reading from this group chat")
+        stop.setEnabled(conversation_id is not None and not paused)
+        start.setEnabled(conversation_id is not None and paused)
+        api.addSeparator()
         remove = api.addAction("Remove group chat...")
-        if await _menu_chosen(api, global_pos) is remove:
+        chosen = await _menu_chosen(api, global_pos)
+        if chosen is remove:
             await self._remove_conversation(item)
+        elif chosen is stop and conversation_id is not None:
+            await self.iothread.run_in_io(
+                network.pause_conversation_reads(
+                    conversation_id=conversation_id,
+                ),
+            )
+            item.setText(paused_label(item.text(), True))
+        elif chosen is start and conversation_id is not None:
+            await self.iothread.run_in_io(
+                network.resume_conversation_reads(
+                    conversation_id=conversation_id,
+                ),
+            )
+            item.setText(paused_label(item.text(), False))
 
     async def _peer_menu(
         self, item: "ContactsItem", global_pos: QPoint,
@@ -3432,7 +3479,11 @@ async def add_conversation(
 
     contacts = window.ui.contacts_treeWidget
     #qtwi = QTreeWidgetItem([convo.name])
-    qtwi = ContactsItem(convo.name)
+    with persistent.Session(persistent._engine_sync) as sess:
+        quiet = network.conversation_reads_paused(
+            sess, convo.id, convo.own_peer_id,
+        )
+    qtwi = ContactsItem(paused_label(convo.name, quiet))
     qtwi.conversation_id = convo.id
     clm = ConversationLogModel(convo.id)
     convo_state = ConversationUIState(

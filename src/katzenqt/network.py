@@ -2827,6 +2827,73 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         )
 
 
+def _is_member(
+    peer: persistent.ConversationPeer, own_peer_id: int,
+) -> bool:
+    """Whether this conversation peer is one whose stream we poll."""
+    return (
+        peer.id != own_peer_id
+        and peer.active
+        and not peer.name.startswith(_SUBSTREAM_NAME_PREFIX)
+    )
+
+
+async def _member_streams(conversation_id: int) -> "list[uuid.UUID]":
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return []
+        peers = (await sess.exec(
+            select(persistent.ConversationPeer)
+            .join(persistent.ConversationPeerLink)
+            .where(
+                persistent.ConversationPeerLink.conversation_id
+                == conversation_id,
+            )
+        )).all()
+        return [
+            peer.read_cap_id for peer in peers
+            if _is_member(peer, conv.own_peer_id)
+        ]
+
+
+def conversation_reads_paused(
+    sess: "persistent.Session", conversation_id: int, own_peer_id: int,
+) -> bool:
+    """Whether every member of this conversation is paused. An empty
+    conversation is not paused: there is nothing to have stopped."""
+    rows = sess.exec(
+        select(persistent.ConversationPeer, persistent.ReadCapWAL)
+        .join(persistent.ConversationPeerLink)
+        .where(
+            persistent.ConversationPeerLink.conversation_id
+            == conversation_id,
+            persistent.ConversationPeer.read_cap_id
+            == persistent.ReadCapWAL.id,
+        )
+    ).all()
+    members = [rcw for peer, rcw in rows if _is_member(peer, own_peer_id)]
+    return bool(members) and all(rcw.paused for rcw in members)
+
+
+async def pause_conversation_reads(*, conversation_id: int) -> None:
+    """Stop polling every member of one conversation.
+
+    Reading is what costs a round trip per member, so a user in many
+    groups pauses the whole conversation rather than each member. This is
+    not muting: nothing about notifications changes, and the streams stay
+    joined so a resume picks up from each saved cursor.
+    """
+    for stream in await _member_streams(conversation_id):
+        await pause_peer_reads(bacap_stream=stream)
+
+
+async def resume_conversation_reads(*, conversation_id: int) -> None:
+    """Poll every member of one conversation again."""
+    for stream in await _member_streams(conversation_id):
+        await resume_peer_reads(bacap_stream=stream)
+
+
 async def pause_upload(*, rcw_id: uuid.UUID) -> None:
     """Pause an outbound substream.
 
