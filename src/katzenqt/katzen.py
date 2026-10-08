@@ -3533,15 +3533,15 @@ def resolve_log_level(level: str) -> "int | None":
         ...
     ValueError: unknown log level: 'dbug'; choose from notset, debug, info, warning, error, critical, off
     """
-    if level.lower() not in LOG_LEVELS:
+    wanted = level.lower()
+    if wanted not in LOG_LEVELS:
         raise ValueError(
             f"unknown log level: {level!r}; choose from "
             + ", ".join(LOG_LEVELS)
         )
-    if level.lower() == "off":
+    if wanted == "off":
         return None
-    resolved: int = getattr(logging, level.upper())
-    return resolved
+    return logging.getLevelNamesMapping()[wanted.upper()]
 
 
 def install_log_handlers() -> None:
