@@ -125,6 +125,39 @@ async def test_send_stamps_the_real_membership_hash() -> None:
     assert sent.membership_hash == expected
 
 
+@pytest.mark.asyncio
+async def test_a_mismatched_membership_hash_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    conv_id = await _make_conversation()
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
+        peer = convo.own_peer
+        real = await conversation_handlers.local_membership_hash(sess, convo)
+        with caplog.at_level(
+            logging.INFO, logger=conversation_handlers.logger.name,
+        ):
+            await conversation_handlers._verify_membership_advisory(
+                sess, peer,
+                GroupChatMessage(
+                    version=0, membership_hash=b"\xff" * 32, text="hi",
+                ),
+            )
+        assert any(
+            "membership_hash mismatch" in r.message for r in caplog.records
+        )
+        caplog.clear()
+        with caplog.at_level(
+            logging.INFO, logger=conversation_handlers.logger.name,
+        ):
+            await conversation_handlers._verify_membership_advisory(
+                sess, peer,
+                GroupChatMessage(version=0, membership_hash=real, text="hi"),
+            )
+        assert not any(
+            "membership_hash mismatch" in r.message for r in caplog.records
+        )
 _JOINER_CAP = b"\x07" * 136
 
 

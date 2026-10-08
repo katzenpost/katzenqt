@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from collections.abc import Collection
 from typing import NamedTuple, Optional, TYPE_CHECKING, assert_never, cast
 
 import cbor2
@@ -84,7 +85,40 @@ if TYPE_CHECKING:
     _P = ParamSpec("_P")
 
 logger = logging.getLogger("katzen")
+DELIVERY_TICK = "\u2713"
 logger.setLevel("INFO")
+
+
+def contact_label(
+    name: str, read_cap_id: "uuid.UUID | None", taken: "Collection[str]",
+) -> str:
+    """The label a contact row shows, suffixed when the name is taken.
+
+    >>> contact_label("alice", None, [])
+    'alice'
+    >>> import uuid
+    >>> cap = uuid.UUID("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+    >>> contact_label("alice", cap, ["alice"])
+    'alice #3f2504'
+    >>> contact_label("alice", None, ["alice"])
+    'alice'
+    """
+    if name not in taken or read_cap_id is None:
+        return name
+    return f"{name} #{str(read_cap_id)[:6]}"
+
+
+def sibling_labels(parent: "QStandardItem") -> "list[str]":
+    """The labels already on a contact row's children.
+
+    >>> sibling_labels(ContactsItem("empty"))
+    []
+    """
+    return [
+        child.text()
+        for row in range(parent.rowCount())
+        if (child := parent.child(row)) is not None
+    ]
 
 
 def _peer_is_displayable(peer: persistent.ConversationPeer) -> bool:
@@ -763,11 +797,7 @@ class MainWindow(QMainWindow):
             self._ptt_audio_failed = True
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.warning(
-                    self,
-                    APP_NAME,
-                    str(exc),
-                ),
+                partial(QMessageBox.warning, self, APP_NAME, str(exc)),
             )
             return None
         # The attachment controls are created before the audio engine is lazily
@@ -1186,9 +1216,8 @@ class MainWindow(QMainWindow):
         except AudioEngineError as exc:
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.critical(
-                    self,
-                    f"ERROR: {APP_NAME}",
+                partial(
+                    QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                     f"Failed to start push-to-talk capture.\n\n{exc}",
                 ),
             )
@@ -1221,9 +1250,8 @@ class MainWindow(QMainWindow):
             except AudioEngineError as exc:
                 QTimer.singleShot(
                     0,
-                    lambda: QMessageBox.critical(
-                        self,
-                        f"ERROR: {APP_NAME}",
+                    partial(
+                        QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                         f"Failed to cancel push-to-talk capture.\n\n{exc}",
                     ),
                 )
@@ -1234,9 +1262,8 @@ class MainWindow(QMainWindow):
         except AudioEngineError as exc:
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.critical(
-                    self,
-                    f"ERROR: {APP_NAME}",
+                partial(
+                    QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                     f"Failed to finalize push-to-talk capture.\n\n{exc}",
                 ),
             )
@@ -1387,6 +1414,7 @@ class MainWindow(QMainWindow):
         self.systray = None
         super(MainWindow, self).__init__()
         self.conversation_state_by_id : Dict[int, ConversationUIState] = dict()
+        self._ticked_conversations: "set[int]" = set()
         self.app = app
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
@@ -1981,6 +2009,39 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
+    def _note_first_delivery_mark(self, conversation_id: int) -> None:
+        """Say once per conversation what the first delivery mark means.
+
+        A mark is a courier or replica acknowledgement, which is the only
+        delivery this client can observe. It is not a peer having read
+        anything, and until a second acknowledgement exists we hold the
+        only copy anyone can fetch, so the message has to be kept.
+        """
+        if conversation_id in self._ticked_conversations:
+            return
+        with persistent.Session(persistent._engine_sync) as sess:
+            marked = sess.exec(
+                select(persistent.ConversationLog).where(
+                    persistent.ConversationLog.conversation_id
+                    == conversation_id,
+                    persistent.ConversationLog.network_status == 2,
+                )
+            ).first()
+        if marked is None:
+            return
+        self._ticked_conversations.add(conversation_id)
+        logger.info(
+            "conversation %s carries its first courier or replica "
+            "acknowledgement; the message is kept until a second one exists",
+            conversation_id,
+        )
+        self._show_status_message(
+            "",
+            f"{DELIVERY_TICK} means a courier or replica has the message, "
+            "not that anyone read it; it is kept until a second mark "
+            "appears",
+        )
+
     async def _process_conversation_update(
         self, conversation_id: int, redraw_only: bool,
     ) -> None:
@@ -1989,6 +2050,7 @@ class MainWindow(QMainWindow):
         convo_state = self.conversation_state_by_id[conversation_id]
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
+            self._note_first_delivery_mark(conversation_id)
             return
         reset = convo_state.conversation_log_model.refresh_row_count()
 
@@ -3346,7 +3408,9 @@ async def add_conversation(
         #ptwi = QTreeWidgetItem([peer.name])
         if not _peer_is_displayable(peer):
             continue
-        ptwi = ContactsItem(peer.name)
+        ptwi = ContactsItem(
+            contact_label(peer.name, peer.read_cap_id, sibling_labels(qtwi)),
+        )
         # The peer row is the per-peer pause/resume target:
         # tag it with its read cap (the bacap_stream the drain reads on) so
         # the contacts-tree context menu can resolve the right stream, and

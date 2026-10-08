@@ -29,7 +29,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from . import conversation_handlers, models, network, persistent
 from .tally import controller as tally_controller
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("katzen.removal")
 
 
 class RemovalError(ValueError):

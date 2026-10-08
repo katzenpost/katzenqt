@@ -20,7 +20,7 @@ from . import models, persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
 from .tally import controller as tally_controller
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("katzen.conversation_handlers")
 
 
 class PeerAnnouncement(NamedTuple):

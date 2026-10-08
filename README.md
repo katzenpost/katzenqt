@@ -13,7 +13,10 @@ warning at the end of this document.
 
 ## Running the GUI
 
-On Debian GNU/Linux, install `git` and `make`, clone the repo, and build:
+On Debian GNU/Linux, install `git` and `make`, clone the repo, and build.
+Debian may not add the first user to `sudoers`, so if `sudo` refuses you,
+run the `apt` steps as root instead (`su -c 'apt install -y git make'`);
+`make deps` does the same for the packages it installs.
 
 ```shell
 sudo apt install -y git make
