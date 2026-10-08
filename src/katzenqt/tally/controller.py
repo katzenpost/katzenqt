@@ -33,7 +33,7 @@ from .schema import SurveyDoc
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("katzen.tally.controller")
 
 _MAX_SURVEY_ID_LEN = 64
 
