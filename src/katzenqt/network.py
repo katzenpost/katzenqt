@@ -22,6 +22,7 @@ import nacl.public
 import secrets
 import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
+from collections.abc import Callable
 import asyncio
 import traceback
 import uuid
@@ -995,6 +996,31 @@ def _is_duplicate_arming(exc: "OperationalError | IntegrityError") -> bool:
 
 
 __on_message_queues: "dict[bytes, asyncio.Queue[Mapping[str, object]]]" = {}
+
+__status_listeners: "list[Callable[[bool], None]]" = []
+
+
+def mixnet_connected() -> bool:
+    return __mixnet_connected.is_set()
+
+
+def add_status_listener(callback: Callable[[bool], None]) -> None:
+    """Subscribe to daemon connection status updates."""
+    __status_listeners.append(callback)
+
+
+def remove_status_listener(callback: Callable[[bool], None]) -> None:
+    """Remove a subscription if it is still registered."""
+    if callback in __status_listeners:
+        __status_listeners.remove(callback)
+
+
+def _notify_status(connected: bool) -> None:
+    for callback in tuple(__status_listeners):
+        try:
+            callback(connected)
+        except Exception:
+            logger.exception("connection status listener failed")
 
 __should_quit = asyncio.Event()
 def shutdown() -> None:
@@ -3844,6 +3870,7 @@ async def on_connection_status(status: "Mapping[str, object]") -> None:
             # instead of logging the same single event twice.
             logger.warning("daemon reports disconnected from mixnet; ARQ rides out and retries")
     _last_connected = connected
+    _notify_status(connected)
     if err:
         logger.error("ON_CONNECTION_STATUS err: %s", status)
         #ON_CONNECTION_STATUS err: {'is_connected': False, 'err': {'Op': 'read', 'Net': 'tcp', 'Source': {'IP': b'\x7f\x00\x00\x01', 'Port': 51718, 'Zone': ''}, 'Addr': {'IP': b'\x7f\x00\x00\x01', 'Port': 30004, 'Zone': ''}, 'Err': {}}}
@@ -3904,10 +3931,9 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
       2. ``$KATZENQT_THINCLIENT_CONFIG``,
       3. ``$XDG_CONFIG_HOME/katzenqt/thinclient.toml`` (default
          ``~/.config/katzenqt/thinclient.toml``),
-      4. the bundled copy shipped under ``katzenqt/data/thinclient.toml``
-         (resolved via ``importlib.resources``),
-      5. the development-tree fallback at
-         ``<repo>/config/thinclient.toml``.
+      4. the copy shipped as package data under
+         ``katzenqt/data/thinclient.toml`` (resolved via
+         ``importlib.resources``, independent of the repo location).
     """
     if explicit is not None:
         explicit_path = Path(explicit)
@@ -3923,14 +3949,9 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
         candidates.append(Path(env))
     xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     candidates.append(Path(xdg) / "katzenqt" / "thinclient.toml")
-    try:
-        bundled = importlib.resources.files("katzenqt") / "data" / "thinclient.toml"
-        candidates.append(Path(str(bundled)))
-    except (ModuleNotFoundError, FileNotFoundError):
-        pass
-    candidates.append(
-        Path(__file__).resolve().parent.parent.parent / "config" / "thinclient.toml"
-    )
+    package = importlib.resources.files("katzenqt")
+    bundled = package / "data" / "thinclient.toml"
+    candidates.append(Path(str(bundled)))
 
     for c in candidates:
         if c.is_file():
