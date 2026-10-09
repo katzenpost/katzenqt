@@ -2073,6 +2073,40 @@ async def _discard_substream_release(
         await sess.delete(piece)
 
 
+READ_FANOUT_LIMIT = 64
+_read_fanout_slots: "dict[asyncio.AbstractEventLoop, asyncio.Semaphore]" = {}
+
+
+def read_fanout_slot() -> asyncio.Semaphore:
+  """The read-concurrency limiter for the running loop.
+
+  Per loop, because the async engine is driven from both the Qt loop and
+  the io thread's loop, and an asyncio primitive belongs to whichever
+  loop first awaits it (see persistent.warm_async_engine).
+  """
+  loop = asyncio.get_running_loop()
+  slot = _read_fanout_slots.get(loop)
+  if slot is None:
+    slot = asyncio.Semaphore(READ_FANOUT_LIMIT)
+    _read_fanout_slots[loop] = slot
+  return slot
+
+
+async def drain_mixwal_read_bounded(**kwargs: "Any") -> None:
+  """Run one stream's read, waiting for a slot first.
+
+  The drain starts one task per readable box with nothing between the
+  calls, so concurrency is the number of streams: a member's stream each,
+  plus one per transfer substream, over every conversation. Each read
+  opens its own session, and aiosqlite gives every connection an OS
+  thread, so an unbounded pass turns a large group into a thread and
+  connection spike before sqlite serialises anything. It is also a
+  traffic burst the network can see.
+  """
+  async with read_fanout_slot():
+    await drain_mixwal_read_single(**kwargs)
+
+
 async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS, reconnect_grace_s: float = _RECONNECT_GRACE_SECONDS) -> None:
   """Given a single persisten.MixWAL with is_read==True:
     - Send it to the network.
@@ -3227,7 +3261,13 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                             draining_right_now.discard(mw.bacap_stream)
                             __resend_queue.discard(mw.bacap_stream)
                             continue
-                        read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
+                        read_task = create_task(
+                            drain_mixwal_read_bounded(
+                                connection=connection,
+                                rcw_read_cap=rcw.read_cap, mw=mw,
+                                draining_right_now=draining_right_now,
+                            )
+                        )
                         requests.add(read_task)
                         read_task.add_done_callback(requests.discard)
                         _inflight_reads[mw.bacap_stream] = read_task
