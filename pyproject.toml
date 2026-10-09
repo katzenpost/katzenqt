@@ -68,7 +68,7 @@ build-backend = "flit_core.buildapi"
 name = "katzenqt"
 
 [tool.uv.sources]
-rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "2158e2a5cc5e58f430b4c0bf2f5603d8909becc6" }
+rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "a7f5c4877f1aa84f312cc7a23fd85a445225393b" }
 
 [tool.mypy]
 python_version = "3.11"
