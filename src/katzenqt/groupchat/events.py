@@ -50,9 +50,20 @@ class BoxRead:
 class IndexesDerived:
     """The result of :class:`DeriveIndexes`."""
 
-    purpose: str
     stream: Key
     indexes: tuple[bytes, ...]
+
+
+@dataclass(frozen=True)
+class Walked:
+    """The result of :class:`Walk`: the furthest target met, or None, how
+    many steps it took to meet it, and the indexes stepped past on the way,
+    the last ``keep`` of them."""
+
+    stream: Key
+    target: bytes | None
+    skipped: tuple[bytes, ...]
+    steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -82,7 +93,7 @@ class EpochChanged:
 
 
 Event: TypeAlias = (
-    Send | Read | Scan | BoxRead | IndexesDerived | Invite | Introduce
+    Send | Read | Scan | BoxRead | IndexesDerived | Walked | Invite | Introduce
     | Remove | EpochChanged
 )
 
@@ -111,22 +122,31 @@ class ReadBox:
 
 @dataclass(frozen=True)
 class DeriveIndexes:
-    """``count`` indexes of ``read_cap``'s stream, starting ``skip`` boxes
-    after ``start``."""
+    """The ``count`` indexes that follow ``start`` on our own stream."""
 
-    purpose: str
     stream: Key
     start: bytes
-    skip: int
     count: int
 
 
 @dataclass(frozen=True)
+class Walk:
+    """Step ``stream`` forward from ``start`` until meeting each of
+    ``targets`` it can, by BACAP's derivation and index equality."""
+
+    stream: Key
+    start: bytes
+    targets: tuple[bytes, ...]
+    keep: int
+
+
+@dataclass(frozen=True)
 class Deliver:
-    """Content read from ``sender``'s stream, for the user."""
+    """Content read from the box ``index`` of ``sender``'s stream, for the
+    user."""
 
     sender: Key
-    position: int
+    index: bytes
     content: bytes
 
 
@@ -135,7 +155,7 @@ class Expire:
     """The retention policy deletes content previously delivered."""
 
     sender: Key
-    position: int
+    index: bytes
 
 
 @dataclass(frozen=True)
@@ -145,7 +165,7 @@ class SendJoinReply:
 
 
 Effect: TypeAlias = (
-    WriteBox | WriteTombstone | ReadBox | DeriveIndexes | Deliver | Expire
+    WriteBox | WriteTombstone | ReadBox | DeriveIndexes | Walk | Deliver | Expire
     | SendJoinReply
 )
 
@@ -159,14 +179,14 @@ class JoinReply:
 
     ``members``: each member's read cap and start index, or None for a slot
     the introducer cannot or will not fill. ``rosters``: each member's
-    roster as the introducer knows it, as (index, place, position the
-    member numbered it at, or -1 if it started with it); None when unknown.
-    ``introductions``: (introducer place, position, member place).
+    roster as the introducer knows it, as (index, place); None when
+    unknown. ``introductions``: (introducer place, ``MessageBoxIndex``,
+    member place).
     """
 
     members: tuple[tuple[bytes, bytes] | None, ...]
-    rosters: tuple[tuple[tuple[int, int | None, int], ...] | None, ...]
-    introductions: tuple[tuple[int, int, int], ...]
+    rosters: tuple[tuple[tuple[int, int | None], ...] | None, ...]
+    introductions: tuple[tuple[int, bytes, int], ...]
     introducer: int
     """The introducer's place."""
     newcomer: int

@@ -2057,18 +2057,6 @@ async def _substream_release_pieces(
     )).all()
 
 
-async def _substream_release_position(
-    sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
-    read_cap: bytes,
-) -> "int | None":
-    """Where on the parent's own stream the message carried by this
-    substream sits: the position of the box that announced it."""
-    pieces = await _substream_release_pieces(sess, parent_cap_id, read_cap)
-    if not pieces:
-        return None
-    return min(int.from_bytes(piece.bacap_index, "little") for piece in pieces)
-
-
 async def _discard_substream_release(
     sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
     read_cap: bytes,
@@ -2468,10 +2456,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # piece, and retire this synthetic peer.
                     assert rcw.read_cap is not None
                     added, sig, pa, ta = await conversation_handlers.dispatch(
-                        sess, parent_peer, gcm, full_payload,
-                        position=await _substream_release_position(
-                            sess, parent_peer.read_cap_id, rcw.read_cap,
-                        ),
+                        sess, parent_peer, gcm, full_payload, substream=rcw.read_cap,
                     )
                     signal_send = signal_send or sig
                     peer_added = peer_added or pa
@@ -2505,8 +2490,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # route by message type, chat into the log, tally into the
                     # controller.
                     convlog_added, sig, peer_added, tally_added2 = await conversation_handlers.dispatch(
-                        sess, cp, gcm, full_payload,
-                        position=persistent.box_position(mw.current_message_index),
+                        sess, cp, gcm, full_payload, box=mw.current_message_index,
                     )
                     signal_send = signal_send or sig
                     tally_added = tally_added or tally_added2
@@ -2585,7 +2569,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             chunk_type in (b"F", b"I")
             and not cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
         ):
-            await acks.box_read(sess, cp, rcw, mw.current_message_index)
+            await acks.box_read(
+                sess, cp, rcw, mw.current_message_index,
+                substream=chunk_body[-136:] if chunk_type == b"I" else None,
+            )
 
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream

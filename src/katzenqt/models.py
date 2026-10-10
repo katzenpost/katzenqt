@@ -131,8 +131,8 @@ class GroupChatReplyWho(BaseModel):
         'validate_assignment': True
     }
     please_adds : list[GroupChatPleaseAdd | None] = Field()
-    rosters: list[list[tuple[int, int | None, int]] | None] | None = Field(default=None)
-    introductions: list[tuple[int, int, int]] | None = Field(default=None)
+    rosters: list[list[tuple[int, int | None]] | None] | None = Field(default=None)
+    introductions: list[tuple[int, bytes, int]] | None = Field(default=None)
     introducer: int | None = Field(default=None, ge=0)
     newcomer: int | None = Field(default=None, ge=0)
     def to_cbor(self) -> bytes:
@@ -155,8 +155,8 @@ class GroupChatReplyWho(BaseModel):
         >>> GroupChatReplyWho.from_cbor(who.to_cbor()).please_adds[0].display_name
         'alice'
         >>> handed = GroupChatReplyWho(
-        ...     please_adds=[alice, None], rosters=[[(0, 0, -1), (1, None, 5)], None],
-        ...     introductions=[(0, 5, 1)], introducer=0, newcomer=2,
+        ...     please_adds=[alice, None], rosters=[[(0, 0), (1, None)], None],
+        ...     introductions=[(0, bytes(104), 1)], introducer=0, newcomer=2,
         ... )
         >>> GroupChatReplyWho.from_cbor(handed.to_cbor()) == handed
         True

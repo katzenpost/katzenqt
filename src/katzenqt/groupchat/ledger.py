@@ -1,6 +1,7 @@
 """Acknowledgements: what this member has published, what others have
-acknowledged of its stream, and how far others have read every stream. An
-induction holds publishing back. See "Joining" in the group chat spec.
+acknowledged of its stream, and what others have acknowledged of every
+stream. An induction holds publishing back. See "Joining" in the group chat
+spec.
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
-from .wire import Key, position
+from .wire import Key
 
 
 class Induction(enum.Enum):
@@ -18,20 +19,14 @@ class Induction(enum.Enum):
 
 
 @dataclass
-class Heard:
-    index: bytes
-    by: Key
-
-
-@dataclass
 class Ledger:
     published: dict[Key, bytes] = field(default_factory=dict)
     """The last index acknowledged of each stream."""
     acked_by: dict[Key, int] = field(default_factory=dict)
-    """How far each member has acknowledged our stream, after the Sent-box
-    check."""
-    heard: dict[Key, Heard] = field(default_factory=dict)
-    """The furthest box any member has acknowledged of each stream."""
+    """How far each member has acknowledged our stream, in the order we
+    wrote it, after the Sent-box check."""
+    heard: dict[Key, dict[Key, bytes]] = field(default_factory=dict)
+    """For each stream, the last box each other member acknowledged of it."""
     induction: Induction = Induction.IDLE
     invitee: tuple[str, bytes] | None = None
     """The name and read cap of the member being inducted."""
@@ -54,9 +49,13 @@ class Ledger:
         self.published[stream] = index
 
     def hear(self, stream: Key, index: bytes, by: Key) -> None:
-        heard = self.heard.get(stream)
-        if heard is None or position(index) > position(heard.index):
-            self.heard[stream] = Heard(index, by)
+        self.heard.setdefault(stream, {})[by] = index
 
-    def acked(self, member: Key, at: int) -> None:
-        self.acked_by[member] = max(self.acked_by.get(member, -1), at)
+    def acked(self, member: Key, seq: int) -> None:
+        self.acked_by[member] = max(self.acked_by.get(member, -1), seq)
+
+    def forget(self, member: Key) -> None:
+        self.acked_by.pop(member, None)
+        self.heard.pop(member, None)
+        for by in self.heard.values():
+            by.pop(member, None)

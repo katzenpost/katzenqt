@@ -130,9 +130,9 @@ class _Stored(NamedTuple):
     row: persistent.GroupState
     group: Group
     held: list[dict[str, Any]]
-    """Boxes read but not yet told: each a stream, a position, and once
-    known its index, the next index, its plaintext and whether its content
-    is still arriving through a substream."""
+    """Boxes read but not yet told, in the order read: each a stream, its
+    index and, once read, the index after it, its plaintext, and the read
+    cap of the substream its content is still arriving through, if any."""
     outgoing: dict[uuid.UUID, int]
     """Which queued message, by its final PlaintextWAL, carries which
     token."""
@@ -348,22 +348,21 @@ async def append_outbound_text(
 # Reading.
 
 
-def _held_at(stored: _Stored, stream: bytes, at: int) -> dict[str, Any]:
+def _held_at(stored: _Stored, stream: bytes, index: bytes) -> dict[str, Any]:
     for box in stored.held:
-        if box["stream"] == stream and box["at"] == at:
+        if box["stream"] == stream and box["index"] == index:
             return box
-    box = {"stream": stream, "at": at, "index": None, "next": None,
-           "plaintext": None, "waiting": False}
+    box = {"stream": stream, "index": index, "next": None, "plaintext": None,
+           "substream": None}
     stored.held.append(box)
     return box
 
 
 def _release(stored: _Stored, stream: bytes) -> None:
-    """Tell the state machine every box of ``stream`` that is ready, in
-    order, up to the first still waiting."""
-    boxes = sorted((b for b in stored.held if b["stream"] == stream), key=lambda b: b["at"])
-    for box in boxes:
-        if box["index"] is None or box["waiting"]:
+    """Tell the state machine every box of ``stream`` that is ready, in the
+    order read, up to the first still waiting."""
+    for box in [b for b in stored.held if b["stream"] == stream]:
+        if box["next"] is None or box["substream"] is not None:
             break
         stored.group.observe(stream, box["index"], box["plaintext"], box["next"])
         stored.held.remove(box)
@@ -373,10 +372,13 @@ async def on_message(
     sess: "AsyncSession",
     peer: persistent.ConversationPeer,
     gcm: models.GroupChatMessage,
-    position: int,
+    *,
+    box: bytes | None = None,
+    substream: bytes | None = None,
 ) -> None:
-    """A message read at ``position`` on ``peer``'s stream. It is told to
-    the state machine with its box, in order."""
+    """A message read on ``peer``'s stream: in the box ``box``, or arrived
+    through the substream read by ``substream``, which a box announced. It
+    is told to the state machine with its box, in order."""
     rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id)
     if rcw is None or rcw.read_cap is None:
         return
@@ -384,25 +386,36 @@ async def on_message(
     if stored is None:
         return
     stream = member_key(rcw.read_cap)
-    _held_at(stored, stream, position)["plaintext"] = gcm.to_cbor()
+    if box is not None:
+        _held_at(stored, stream, box)["plaintext"] = gcm.to_cbor()
+    for held in stored.held:
+        if held["stream"] == stream and substream is not None and held["substream"] == substream:
+            held.update(plaintext=gcm.to_cbor(), substream=None)
     _release(stored, stream)
     await _save(sess, stored)
 
 
-async def _fetching(sess: "AsyncSession", rcw_id: uuid.UUID, box_index: bytes) -> bool:
-    """Whether the message whose indirection is the box at ``box_index`` is
-    still on its way through a substream that has not failed."""
-    piece = await sess.get(persistent.ReceivedPiece, (rcw_id, box_index[:8]))
-    if piece is None or piece.chunk_type != b"I":
-        return False
-    substream = (
+async def _arriving(sess: "AsyncSession", rcw_id: uuid.UUID, substream: bytes) -> bool:
+    """Whether a message is still on its way through the substream read by
+    ``substream``: the box of ``rcw_id``'s stream that announced it is still
+    held, and the substream has not failed."""
+    announced = (
         await sess.exec(
-            select(persistent.ReadCapWAL).where(
-                persistent.ReadCapWAL.read_cap == piece.chunk[-136:]
+            select(persistent.ReceivedPiece).where(
+                persistent.ReceivedPiece.read_cap == rcw_id,
+                persistent.ReceivedPiece.chunk_type == b"I",
+                persistent.sa.func.substr(persistent.ReceivedPiece.chunk, -136) == substream,
             )
         )
     ).first()
-    return substream is not None and substream.substream_failure is None
+    if announced is None:
+        return False
+    reader = (
+        await sess.exec(
+            select(persistent.ReadCapWAL).where(persistent.ReadCapWAL.read_cap == substream)
+        )
+    ).first()
+    return reader is not None and reader.substream_failure is None
 
 
 async def box_read(
@@ -410,18 +423,23 @@ async def box_read(
     peer: persistent.ConversationPeer,
     rcw: persistent.ReadCapWAL,
     box_index: bytes,
+    substream: bytes | None = None,
 ) -> None:
-    """A box that ends a message, or announces one through a substream, was
-    read on ``peer``'s own stream; ``rcw.next_index`` already follows it."""
+    """A box that ends a message, or announces one arriving through the
+    substream read by ``substream``, was read on ``peer``'s own stream;
+    ``rcw.next_index`` already follows it."""
     if rcw.read_cap is None or rcw.next_index is None:
         return
     stored = await _load(sess, peer.conversation.id)
     if stored is None:
         return
     stream = member_key(rcw.read_cap)
-    box = _held_at(stored, stream, persistent.box_position(box_index))
-    box.update(index=box_index, next=rcw.next_index,
-               waiting=await _fetching(sess, rcw.id, box_index))
+    box = _held_at(stored, stream, box_index)
+    box["next"] = rcw.next_index
+    if substream is not None and box["plaintext"] is None and await _arriving(
+        sess, rcw.id, substream
+    ):
+        box["substream"] = substream
     _release(stored, stream)
     await _save(sess, stored)
 
@@ -440,8 +458,12 @@ async def settle(
         return
     stream = member_key(rcw.read_cap)
     for box in stored.held:
-        if box["stream"] == stream and box["waiting"]:
-            box["waiting"] = await _fetching(sess, rcw.id, box["index"])
+        if (
+            box["stream"] == stream
+            and box["substream"] is not None
+            and not await _arriving(sess, rcw.id, box["substream"])
+        ):
+            box["substream"] = None
     _release(stored, stream)
     await _save(sess, stored)
 
@@ -566,10 +588,6 @@ async def hand_over(
     )
 
 
-def _valid_position(position: int) -> bool:
-    return 0 <= position < 2**64
-
-
 def _join_reply(reply: models.GroupChatReplyWho) -> JoinReply | None:
     """The reply as the state machine takes it, or None if it carries no
     rosters or cannot be read."""
@@ -587,15 +605,13 @@ def _join_reply(reply: models.GroupChatReplyWho) -> JoinReply | None:
     if len(set(keys)) != len(keys):
         return None
     for roster in reply.rosters:
-        for index, slot, at in roster or ():
+        for index, slot in roster or ():
             if not 0 <= index < wire.ROSTER_MAX or not (slot is None or 0 <= slot < places):
                 return None
-            if not (at == -1 or _valid_position(at)):
-                return None
     introductions = tuple(
-        (by, at, member)
-        for by, at, member in reply.introductions or ()
-        if 0 <= by < places and 0 <= member < places and _valid_position(at)
+        (by, index, member)
+        for by, index, member in reply.introductions or ()
+        if 0 <= by < places and 0 <= member < places and len(index) == wire.INDEX_SIZE
     )
     return JoinReply(
         members=tuple(

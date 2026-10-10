@@ -8,6 +8,7 @@ import pytest
 
 from katzenqt.groupchat import events, sim, state, wire
 from katzenqt.groupchat.group import Group
+from katzenqt.groupchat.ledger import Ledger
 from katzenqt.groupchat.numbering import Rosters
 
 
@@ -26,7 +27,7 @@ def test_unknown_events_and_streams_do_nothing() -> None:
     effects = alice.handle(events.BoxRead(stranger, bytes(104), events.Missing.NOT_FOUND))
     assert all(isinstance(effect, events.DeriveIndexes) for effect in effects)
     assert alice.observe(stranger, bytes(104), None, bytes(104)) == []
-    assert alice.handle(events.IndexesDerived("jump", stranger, ())) == []
+    assert alice.handle(events.Walked(stranger, None, ())) == []
 
 
 def test_a_stale_read_is_ignored() -> None:
@@ -72,19 +73,19 @@ def test_numbering_waits_for_the_introducer() -> None:
     world.run("new-group alice bob")
     alice = world.group("alice")
     stranger, newcomer = b"\x01" * 32, b"\x02" * 32
-    alice.rosters.introductions[stranger, 5] = newcomer
-    alice.unnumbered.append((stranger, 5))
+    alice.rosters.introductions[stranger, b"i5"] = newcomer
+    alice.unnumbered.append((stranger, b"i5"))
     bob = world.members["bob"].key
-    alice.rosters.introductions[bob, 3] = b"\x03" * 32
-    alice.unnumbered.append((bob, 3))
+    alice.rosters.introductions[bob, b"i3"] = b"\x03" * 32
+    alice.unnumbered.append((bob, b"i3"))
     world.run("send alice hi")
-    assert alice.unnumbered == [(stranger, 5)]
+    assert alice.unnumbered == [(stranger, b"i5")]
 
 
 def test_numbering_through_an_unknown_introducer() -> None:
     rosters = Rosters()
     rosters.found([b"a"])
-    rosters.number(b"a", 1, None, at=3)
+    rosters.number(b"a", 1, None)
     assert rosters.resolve(b"a", 1) is None
     assert rosters.resolve(b"a", 7) is None
 
@@ -92,12 +93,12 @@ def test_numbering_through_an_unknown_introducer() -> None:
 def test_retiring_renames_every_mention() -> None:
     rosters = Rosters()
     rosters.found([b"a", b"b"])
-    rosters.introductions[b"b", 4] = b"c"
-    rosters.number(b"a", 2, (b"b", 4), at=1)
-    rosters.started[b"c"] = (b"b", 4)
+    rosters.introductions[b"b", b"i4"] = b"c"
+    rosters.number(b"a", 2, (b"b", b"i4"))
+    rosters.started[b"c"] = (b"b", 2)
     rosters.retire(b"b", b"gone")
-    assert rosters.entries[b"a"][2].introduced == (b"gone", 4)
-    assert rosters.started[b"c"] == (b"gone", 4)
+    assert rosters.entries[b"a"][2].introduced == (b"gone", b"i4")
+    assert rosters.started[b"c"] == (b"gone", 2)
     assert rosters.resolve(b"a", 2) == b"c"
     assert b"gone" in rosters.entries
 
@@ -118,12 +119,12 @@ def test_bad_commands() -> None:
         world.run("option window 2")
 
 
-def test_where_and_who_for_unknown_positions() -> None:
+def test_where_and_who_for_unknown_boxes() -> None:
     world = sim.World()
     world.run("new-group alice")
     assert world.where(bytes(104)) == "?"
     assert world.name_of(None) == "?"
-    assert world.introduced(0) == "?"
+    assert world.introduced(bytes(104)) == "?"
     world.run("new-group bob")
     assert world.run("acks alice bob 0") == ["not read"]
 
@@ -184,3 +185,12 @@ def test_state_that_cannot_be_read() -> None:
         state.load(b"\xff")
     with pytest.raises(state.StateError, match="version 7"):
         state.load(cbor2.dumps([7, {}]))
+
+
+def test_forgetting_a_member_drops_what_it_acknowledged() -> None:
+    ledger = Ledger()
+    ledger.hear(b"alice", b"i1", by=b"bob")
+    ledger.hear(b"bob", b"i2", by=b"carol")
+    ledger.acked(b"bob", 3)
+    ledger.forget(b"bob")
+    assert ledger.heard == {b"alice": {}} and ledger.acked_by == {}

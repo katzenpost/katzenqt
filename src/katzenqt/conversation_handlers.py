@@ -42,16 +42,20 @@ async def dispatch(
     peer: persistent.ConversationPeer,
     gcm: models.GroupChatMessage,
     full_payload: bytes,
-    position: "int | None" = None,
+    *,
+    box: "bytes | None" = None,
+    substream: "bytes | None" = None,
 ) -> DispatchResult:
     """Handle ``gcm`` for ``peer``. See :class:`DispatchResult` for what each
     field means.
 
-    ``position`` is where the message sits on ``peer``'s own stream. When it
-    is known, what the message says about rosters (whom it acknowledges, whom
+    ``box`` is the index of the box on ``peer``'s own stream the message
+    was read from; ``substream`` is the read cap of the substream it arrived
+    through instead, which a box of that stream announced. When either is
+    known, what the message says about rosters (whom it acknowledges, whom
     it introduces) is recorded before it is routed."""
-    if position is not None:
-        await acks.on_message(sess, peer, gcm, position)
+    if box is not None or substream is not None:
+        await acks.on_message(sess, peer, gcm, box=box, substream=substream)
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
 

@@ -601,7 +601,7 @@ class TestReadSubstreamFailures:
             peer: object,
             gcm: object,
             full_payload: object,
-            position: int | None = None,
+            **_: object,
         ) -> tuple[bool, bool, None, bool]:
             raise _fatal_db_error()
 

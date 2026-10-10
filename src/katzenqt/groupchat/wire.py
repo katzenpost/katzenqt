@@ -1,6 +1,9 @@
 """What a group chat message says to the protocol, and the hand-made
 encodings of its control fields. See "Opportunistic acknowledgements and
 backfill" in the group chat spec.
+
+A box is named by its ``MessageBoxIndex``: an opaque BACAP value, compared
+only for equality and moved forward only by BACAP.
 """
 
 from __future__ import annotations
@@ -21,38 +24,31 @@ INDEX_SIZE = 104
 ROSTER_MAX = 256
 """The most entries a roster holds: roster indexes are one byte."""
 
-THIS_MESSAGE = 0
-"""The position a ``Numbers`` entry gives the ``Introduction`` carried in
-the same message, whose own position is unknown when it is encoded. Stream
-counters start at a random point, so no real box is at 0."""
+_ENTRY = 2 + INDEX_SIZE
 
 
 def key_of(read_cap: bytes) -> Key:
     return read_cap[:KEY_SIZE]
 
 
-def position(index: bytes) -> int:
-    """The position a ``MessageBoxIndex`` names: its little-endian counter.
-
-    >>> position((7).to_bytes(8, "little") + bytes(96))
-    7
-    """
-    return int.from_bytes(index[:8], "little")
-
-
 @dataclass(frozen=True)
 class IntroRef:
     """An ``Introduction``: its introducer's roster index in the sender's
-    roster, and its position on the introducer's stream."""
+    roster, and its ``MessageBoxIndex``."""
 
     introducer: int
-    position: int
+    index: bytes
 
 
 @dataclass(frozen=True)
 class Introduction:
     name: str
     read_cap: bytes
+
+
+Numbers = tuple[tuple[int, IntroRef | None], ...]
+"""Roster indexes assigned, each with the ``Introduction`` of the member
+assigned it; None for the ``Introduction`` the message itself carries."""
 
 
 @dataclass(frozen=True)
@@ -62,7 +58,7 @@ class Message:
 
     content: bytes | None = None
     introduction: Introduction | None = None
-    numbers: tuple[tuple[int, IntroRef], ...] = ()
+    numbers: Numbers = ()
     introduced_at: IntroRef | None = None
     acks: Mapping[int, bytes] = field(default_factory=dict)
 
@@ -73,31 +69,38 @@ class Message:
         )
 
 
-def encode_numbers(numbers: tuple[tuple[int, IntroRef], ...]) -> bytes:
+def encode_numbers(numbers: Numbers) -> bytes:
     """
-    >>> decode_numbers(encode_numbers(((3, IntroRef(1, 9)),)))
-    ((3, IntroRef(introducer=1, position=9)),)
+    >>> ref = IntroRef(1, bytes(104))
+    >>> decode_numbers(encode_numbers(((3, ref),))) == ((3, ref),)
+    True
+    >>> encode_numbers(((4, None),))
+    b'\\x04'
     """
+    if len(numbers) == 1 and numbers[0][1] is None:
+        return bytes([numbers[0][0]])
     return b"".join(
-        bytes([index, ref.introducer]) + ref.position.to_bytes(8, "little")
+        bytes([index, ref.introducer]) + ref.index
         for index, ref in numbers
+        if ref is not None
     )
 
 
-def decode_numbers(field: bytes) -> tuple[tuple[int, IntroRef], ...]:
+def decode_numbers(field: bytes) -> Numbers:
     """Empty when the field is malformed.
 
-    >>> decode_numbers(bytes(11)), decode_numbers(bytes(20))
+    >>> decode_numbers(b"\\x04")
+    ((4, None),)
+    >>> decode_numbers(bytes(107)), decode_numbers(bytes(212))
     ((), ())
     """
-    if len(field) % 10:
+    if len(field) == 1:
+        return ((field[0], None),)
+    if len(field) % _ENTRY:
         return ()
-    numbers = tuple(
-        (
-            field[i],
-            IntroRef(field[i + 1], int.from_bytes(field[i + 2 : i + 10], "little")),
-        )
-        for i in range(0, len(field), 10)
+    numbers: Numbers = tuple(
+        (field[i], IntroRef(field[i + 1], field[i + 2 : i + _ENTRY]))
+        for i in range(0, len(field), _ENTRY)
     )
     indexes = [index for index, _ in numbers]
     if any(a >= b for a, b in zip(indexes, indexes[1:])):
@@ -106,19 +109,20 @@ def decode_numbers(field: bytes) -> tuple[tuple[int, IntroRef], ...]:
 
 
 def encode_introduced_at(ref: IntroRef) -> bytes:
-    return encode_numbers(((0, ref),))[1:]
+    return bytes([ref.introducer]) + ref.index
 
 
 def decode_introduced_at(field: bytes) -> IntroRef | None:
     """
-    >>> decode_introduced_at(encode_introduced_at(IntroRef(2, 5)))
-    IntroRef(introducer=2, position=5)
+    >>> ref = IntroRef(2, bytes(104))
+    >>> decode_introduced_at(encode_introduced_at(ref)) == ref
+    True
     >>> decode_introduced_at(b"short") is None
     True
     """
-    if len(field) != 9:
+    if len(field) != 1 + INDEX_SIZE:
         return None
-    return decode_numbers(b"\0" + field)[0][1]
+    return IntroRef(field[0], field[1:])
 
 
 class Codec(Protocol):

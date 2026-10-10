@@ -85,7 +85,8 @@ def _alices_group(conn: sa.Connection) -> None:
         sql("INSERT INTO conversationpeerlink VALUES (?, 1)", (peer,))
     sql("UPDATE readcapwal SET last_read_index = ?, acked_index = ? WHERE id = 'rb'",
         (_index(208), _index(207)))
-    sql("UPDATE conversationpeer SET acked_position = ? WHERE id = 11", (_at(103),))
+    sql("UPDATE conversationpeer SET acked_position = ? WHERE id = 11", (_at(105),))
+    sql("UPDATE conversationpeer SET acked_position = ? WHERE id = 12", (_at(99),))
     for key, seen, base_roster, introducer, position in (
         (ALICE, 106, cbor2.dumps([ALICE]), None, None),
         (BOB, 208, None, ALICE, 105),
@@ -102,10 +103,11 @@ def _alices_group(conn: sa.Connection) -> None:
             (f"i{position}", introducer, _at(position), member),
         )
     sql("INSERT INTO acklevel VALUES (1, ?, ?, 1, ?, NULL)", (ALICE, _at(106), _at(207)))
-    sql(
-        "INSERT INTO sentbox VALUES ('s', 1, 'w', ?, ?, 0.0)",
-        (_index(105), _at(105)),
-    )
+    for row, position in (("s1", 105), ("s0", 104)):
+        sql(
+            "INSERT INTO sentbox VALUES (?, 1, 'w', ?, ?, 0.0)",
+            (row, _index(position), _at(position)),
+        )
 
 
 def test_old_rosters_become_explicit() -> None:
@@ -128,13 +130,14 @@ def test_old_rosters_become_explicit() -> None:
         for owner in (ALICE, BOB):
             assert group.rosters.known(owner) == {0: ALICE, 1: BOB, 2: CAROL}
         assert group.rosters.known(CAROL) == {0: ALICE, 1: BOB, 2: CAROL, 3: DAVE}
-        assert group.unnumbered == [(CAROL, 303)]
+        assert group.unnumbered == [] and group.rosters.introductions == {}
         assert set(group.readers) == {BOB, CAROL}
         assert group.readers[BOB].last == _index(208)
         assert group.readers[CAROL].last is None
         assert group.ledger.published == {BOB: _index(207)}
-        assert group.ledger.acked_by == {BOB: 103}
-        assert group.sent.check(105, _index(105))
+        assert group.ledger.acked_by == {BOB: 1}
+        assert group.sent.check(_index(105)) == 1
+        assert group.sent.check(_index(104)) == 0
         assert "frontier_index" not in {
             c["name"] for c in sa.inspect(conn).get_columns("readcapwal")
         }

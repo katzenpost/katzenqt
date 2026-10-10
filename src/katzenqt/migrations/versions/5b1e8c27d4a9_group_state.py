@@ -8,9 +8,11 @@ A conversation's group state becomes one ``katzenqt.groupchat`` state
 blob, with explicit rosters, and where each of our messages landed is noted
 beside it until the blob next takes it in. Rosters kept by the old rules are worked out
 here, once, with a frozen copy of those rules, and written as explicit
-ones; the tables they were kept in are dropped. A downgrade restores the
-old tables empty: explicit rosters cannot be turned back into the old
-facts.
+ones; the tables they were kept in are dropped. The old tables named an
+Introduction by position, never by its MessageBoxIndex, so introductions
+read and numbering still owed for them are not carried over. A downgrade
+restores the old tables empty: explicit rosters cannot be turned back into
+the old facts.
 """
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence, Union
@@ -117,22 +119,17 @@ def _position(data) -> int:
     return -1 if data is None else int.from_bytes(data, "big")
 
 
-def _counter(index: bytes) -> int:
-    return int.from_bytes(index[:8], "little")
-
-
 # The new state, built as plain data in the shape katzenqt.groupchat.state
 # writes it (state version 1).
 
 def _reader(key: bytes, read_cap: bytes, next_index: bytes, last) -> dict:
     return {
         "stream": key, "read_cap": read_cap, "next": next_index, "last": last,
-        "kept": [], "mode": "idle", "scanned_to": -1,
+        "passed": 0, "kept": [], "mode": "idle", "tried": [],
     }
 
 
-def _state(own_cap: bytes, entries, introductions, unnumbered, readers, published,
-           acked_by, records) -> bytes:
+def _state(own_cap: bytes, entries, readers, published, acked_by, records) -> bytes:
     group = {
         "read_cap": own_cap,
         "policy": {"window": 3, "discard_acked": True, "keep_sent": None, "keep_received": None},
@@ -140,18 +137,19 @@ def _state(own_cap: bytes, entries, introductions, unnumbered, readers, publishe
         "auto_scan": True,
         "rosters": {
             "entries": [
-                [owner, [[i, {"key": k, "introduced": None, "at": -1}] for i, k in roster.items()]]
+                [owner, [[i, {"key": k, "introduced": None}] for i, k in roster.items()]]
                 for owner, roster in entries.items()
             ],
             "started": [],
-            "introductions": [[[i, p], m] for (i, p), m in introductions.items()],
+            "introductions": [],
         },
         "readers": [[key, reader] for key, reader in readers.items()],
         "sent": {
             "records": [
-                [at, {"index": index, "plaintext": None, "control": False, "written": 0}]
-                for at, index in records.items()
+                [index, {"seq": seq, "plaintext": None, "control": False, "written": 0}]
+                for seq, index in enumerate(records)
             ],
+            "count": len(records),
             "backfilled": -1,
         },
         "ledger": {
@@ -170,7 +168,7 @@ def _state(own_cap: bytes, entries, introductions, unnumbered, readers, publishe
         "outbox": [],
         "pending": [],
         "tokens": 0,
-        "unnumbered": [[i, p] for i, p in unnumbered],
+        "unnumbered": [],
         "introduced_at": None,
         "joined_through": None,
         "awaiting_start": [],
@@ -213,13 +211,7 @@ def _convert(conn) -> None:
             followed = _follow(old, key, None, frozenset())
             if followed is not None:
                 entries[key] = dict(enumerate(followed[0]))
-        own_roster = set(entries.get(me, {}).values())
-        unnumbered = [
-            at for at, member in old.introductions.items()
-            if member not in own_roster and member != me
-        ]
-
-        readers, published, acked_by = {}, {}, {}
+        readers, published, acked_at = {}, {}, {}
         for peer_id, name, active, acked_position, read_cap, next_index, last, acked in conn.execute(sa.text(
             "SELECT p.id, p.name, p.active, p.acked_position, r.read_cap, r.next_index, "
             "r.last_read_index, r.acked_index FROM conversationpeer p "
@@ -235,16 +227,19 @@ def _convert(conn) -> None:
             if acked is not None:
                 published[key] = acked
             if acked_position is not None:
-                acked_by[key] = _position(acked_position)
+                acked_at[key] = _position(acked_position)
 
-        records = {
-            _counter(index): index
-            for (index,) in conn.execute(sa.text(
-                "SELECT box_index FROM sentbox WHERE conversation_id = :c AND bacap_stream = :s"),
+        written = sorted(
+            (_position(position), index)
+            for index, position in conn.execute(sa.text(
+                "SELECT box_index, position FROM sentbox "
+                "WHERE conversation_id = :c AND bacap_stream = :s"),
                 {"c": conv_id, "s": stream})
-        }
-        state = _state(own_cap, entries, old.introductions, unnumbered, readers,
-                       published, acked_by, records)
+        )
+        seq_at = {position: seq for seq, (position, _) in enumerate(written)}
+        acked_by = {key: seq_at[at] for key, at in acked_at.items() if at in seq_at}
+        state = _state(own_cap, entries, readers, published, acked_by,
+                       [index for _, index in written])
         conn.execute(sa.text(
             "INSERT INTO groupstate (conversation_id, state, held, outgoing) "
             "VALUES (:c, :s, :h, :o)"),

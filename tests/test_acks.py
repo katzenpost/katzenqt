@@ -4,6 +4,7 @@ driving the group state machine as katzenqt reads and writes."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import secrets
 import uuid
 from typing import TYPE_CHECKING, Any, cast
@@ -33,9 +34,10 @@ if TYPE_CHECKING:
     from katzenqt._thinclient import ThinClient
 
 
-def _index(position: int) -> bytes:
-    """A box index naming ``position``, random in the rest."""
-    return position.to_bytes(8, "little") + secrets.token_bytes(96)
+def _index(n: int) -> bytes:
+    """A stand-in ``MessageBoxIndex`` for a stream's nth box: opaque here,
+    and the same every time, so a test can say which box it expects."""
+    return hashlib.shake_256(b"box %d" % n).digest(104)
 
 
 def _text(text: str = "hi") -> models.GroupChatMessage:
@@ -129,9 +131,7 @@ class _Chat:
             await sess.commit()
             return stored.group
 
-    async def receive(
-        self, sender: str, gcm: models.GroupChatMessage, position: int
-    ) -> None:
+    async def receive(self, sender: str, gcm: models.GroupChatMessage, n: int) -> None:
         """Deliver ``gcm`` as the network does: dispatched, then its box
         read, with the stream's next index moved past it."""
         peer_id, rcw_id, _ = self.peers[sender]
@@ -139,11 +139,11 @@ class _Chat:
             peer = await sess.get(persistent.ConversationPeer, peer_id)
             rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
             assert peer is not None and rcw is not None
-            rcw.next_index = _index(position + 1)
+            rcw.next_index = _index(n + 1)
             await conversation_handlers.dispatch(
-                sess, peer, gcm, b"F" + gcm.to_cbor(), position=position,
+                sess, peer, gcm, b"F" + gcm.to_cbor(), box=_index(n),
             )
-            await acks.box_read(sess, peer, rcw, _index(position))
+            await acks.box_read(sess, peer, rcw, _index(n))
             await sess.commit()
 
     async def queue(self, gcm: models.GroupChatMessage) -> list[persistent.PlaintextWAL]:
@@ -256,7 +256,7 @@ async def test_a_message_carries_what_was_read_since_the_last_one() -> None:
     acked = ack_codec.decode(_sent(first).acks or b"")
     bob_place = (await chat.group()).rosters.index_of(chat.own_key, bob)
     assert bob_place is not None and list(acked) == [bob_place]
-    assert persistent.box_position(acked[bob_place]) == 3
+    assert acked[bob_place] == _index(3)
     (second,) = await chat.queue(_text())
     assert _sent(second).acks is None
 
@@ -275,7 +275,7 @@ async def test_a_box_that_cannot_be_read_still_counts_as_read() -> None:
         await sess.commit()
     (sent,) = await chat.queue(_text())
     acked = ack_codec.decode(_sent(sent).acks or b"")
-    assert [persistent.box_position(v) for v in acked.values()] == [4]
+    assert list(acked.values()) == [_index(4)]
 
 
 @pytest.mark.asyncio
@@ -293,7 +293,7 @@ async def test_a_stream_is_not_acknowledged_past_a_message_still_arriving() -> N
         rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
         assert peer is not None and rcw is not None
         rcw.next_index = _index(6)
-        await acks.box_read(sess, peer, rcw, _index(5))
+        await acks.box_read(sess, peer, rcw, _index(5), substream=substream_cap)
         await sess.commit()
     await chat.receive("bob", _text("later"), 6)
     (held,) = await chat.queue(_text())
@@ -307,13 +307,44 @@ async def test_a_stream_is_not_acknowledged_past_a_message_still_arriving() -> N
         rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
         assert peer is not None and rcw is not None
         await conversation_handlers.dispatch(
-            sess, peer, _text("big"), b"F", position=5,
+            sess, peer, _text("big"), b"F", substream=substream_cap,
         )
         await acks.settle(sess, peer, rcw)
         await sess.commit()
     (released,) = await chat.queue(_text())
     acked = ack_codec.decode(_sent(released).acks or b"")
-    assert [persistent.box_position(v) for v in acked.values()] == [6]
+    assert list(acked.values()) == [_index(6)]
+
+
+@pytest.mark.asyncio
+async def test_a_message_given_up_on_releases_what_waited_on_it() -> None:
+    chat, bob = await _with_bob()
+    peer_id, rcw_id, _ = chat.peers["bob"]
+    substream_cap = secrets.token_bytes(136)
+    async with persistent.asession() as sess:
+        sess.add(persistent.ReadCapWAL(id=uuid.uuid4(), read_cap=substream_cap))
+        sess.add(persistent.ReceivedPiece(
+            read_cap=rcw_id, bacap_index=b"8 bytes.", chunk_type=b"I", chunk=substream_cap,
+        ))
+        peer = await sess.get(persistent.ConversationPeer, peer_id)
+        rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+        assert peer is not None and rcw is not None
+        rcw.next_index = _index(6)
+        await acks.box_read(sess, peer, rcw, _index(5), substream=substream_cap)
+        await sess.commit()
+    (held,) = await chat.queue(_text())
+    assert _sent(held).acks is None
+    async with persistent.asession() as sess:
+        for piece in (await sess.exec(select(persistent.ReceivedPiece))).all():
+            await sess.delete(piece)
+        await sess.flush()
+        peer = await sess.get(persistent.ConversationPeer, peer_id)
+        rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+        assert peer is not None and rcw is not None
+        await acks.settle(sess, peer, rcw)
+        await sess.commit()
+    (released,) = await chat.queue(_text())
+    assert list(ack_codec.decode(_sent(released).acks or b"").values()) == [_index(5)]
 
 
 @pytest.mark.asyncio
@@ -329,10 +360,14 @@ async def test_a_failed_transfer_does_not_hold_acknowledgements_back() -> None:
             read_cap=rcw_id, bacap_index=(5).to_bytes(8, "little"),
             chunk_type=b"I", chunk=substream_cap,
         ))
+        peer = await sess.get(persistent.ConversationPeer, chat.peers["bob"][0])
+        rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+        assert peer is not None and rcw is not None
+        rcw.next_index = _index(6)
+        await acks.box_read(sess, peer, rcw, _index(5), substream=substream_cap)
         await sess.commit()
-    await chat.receive("bob", _text("announced"), 5)
     (sent,) = await chat.queue(_text())
-    assert _sent(sent).acks is not None
+    assert list(ack_codec.decode(_sent(sent).acks or b"").values()) == [_index(5)]
 
 
 @pytest.mark.asyncio
@@ -346,11 +381,11 @@ async def test_settling_a_stream_we_do_not_follow_does_nothing() -> None:
         assert peer is not None and rcw is not None
         await acks.settle(sess, peer, rcw)
         await acks.box_read(sess, peer, rcw, _index(1))
-        await acks.on_message(sess, peer, _text(), 1)
+        await acks.on_message(sess, peer, _text(), box=_index(1))
         rcw.read_cap = None
         await acks.settle(sess, peer, rcw)
         await acks.box_read(sess, peer, rcw, _index(1))
-        await acks.on_message(sess, peer, _text(), 1)
+        await acks.on_message(sess, peer, _text(), box=_index(1))
 
 
 # The Sent-box check.
@@ -367,13 +402,13 @@ async def test_an_acknowledgement_of_a_box_we_wrote_is_accepted() -> None:
         version=2, text="seen", acks=ack_codec.encode({me: index}),
     ), 1)
     group = await chat.group()
-    assert group.ledger.acked_by == {bob: persistent.box_position(index)}
+    assert group.ledger.acked_by == {bob: 0}
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, chat.conversation_id)
         assert conv is not None
         names, acked = await acks.summary(sess, conv)
     assert sorted(names or ()) == ["bob", "me"]
-    assert acked == {"bob": persistent.box_position(index)}
+    assert acked == {"bob": 0}
 
 
 @pytest.mark.asyncio
@@ -536,10 +571,10 @@ async def test_a_new_member_carries_on_from_what_it_was_handed() -> None:
         intro = await sess.get(persistent.PlaintextWAL, final)
         assert intro is not None
         numbers = wire.decode_numbers(_sent(intro).numbers or b"")
-    assert numbers == ((2, wire.IntroRef(0 if chat.own_key < bob else 1, wire.THIS_MESSAGE)),)
+    assert numbers == ((2, None),)
     assert reply.newcomer == 2 and reply.introducer is not None
     bob_slot = reply.please_adds[1 - reply.introducer]
-    assert bob_slot is not None and bob_slot.read_cap[32:40] == (4).to_bytes(8, "little")
+    assert bob_slot is not None and bob_slot.read_cap[32:] == _index(4)
 
     joiner = await _Chat().create()
     async with persistent.asession() as sess:
@@ -601,8 +636,8 @@ def _alice_and_bob_reply() -> models.GroupChatReplyWho:
     bob = models.GroupChatPleaseAdd(display_name="bob", read_cap=b"\x02" * 136)
     return models.GroupChatReplyWho(
         please_adds=[alice, bob],
-        rosters=[[(0, 0, -1), (1, 1, -1)], None],
-        introductions=[(0, 7, 1), (5, 7, 1)],
+        rosters=[[(0, 0), (1, 1)], None],
+        introductions=[(0, bytes(104), 1), (5, bytes(104), 1), (0, b"short", 1)],
         introducer=0,
         newcomer=2,
     )
@@ -616,9 +651,8 @@ def _alice_and_bob_reply() -> models.GroupChatReplyWho:
         {"newcomer": 3},
         {"introducer": 5},
         {"rosters": [None]},
-        {"rosters": [[(300, 0, -1)], None]},
-        {"rosters": [[(0, 9, -1)], None]},
-        {"rosters": [[(0, 0, -5)], None]},
+        {"rosters": [[(300, 0)], None]},
+        {"rosters": [[(0, 9)], None]},
         {"please_adds": [None, models.GroupChatPleaseAdd(display_name="b", read_cap=b"\x02" * 136)]},
         {"please_adds": [
             models.GroupChatPleaseAdd(display_name="a", read_cap=b"\x02" * 136),
@@ -651,9 +685,9 @@ async def test_a_reply_that_already_lists_us_is_not_adopted() -> None:
 async def test_the_reply_leaves_out_a_member_it_cannot_name() -> None:
     chat, bob = await _with_bob()
     group = await chat.group()
-    group.rosters.introductions[bob, 9] = b"\x07" * 32
-    group.rosters.number(chat.own_key, 2, (bob, 9), at=10)
-    group.rosters.number(chat.own_key, 3, None, at=11)
+    group.rosters.introductions[bob, _index(9)] = b"\x07" * 32
+    group.rosters.number(chat.own_key, 2, (bob, _index(9)))
+    group.rosters.number(chat.own_key, 3, None)
     async with persistent.asession() as sess:
         row = await sess.get(persistent.GroupState, chat.conversation_id)
         assert row is not None
@@ -744,13 +778,13 @@ async def test_records_older_than_the_window_are_let_go(
 
 def test_the_codec_reads_what_it_writes() -> None:
     control = wire.Message(
-        numbers=((2, wire.IntroRef(0, 9)),), introduced_at=wire.IntroRef(1, 5),
+        numbers=((2, wire.IntroRef(0, _index(9))),), introduced_at=wire.IntroRef(1, _index(5)),
         acks={1: _index(3)},
     )
     assert acks.CODEC.decode(acks.CODEC.encode(control)) == control
     intro = wire.Message(
         introduction=wire.Introduction("dave", b"\x04" * 136),
-        numbers=((3, wire.IntroRef(0, wire.THIS_MESSAGE)),),
+        numbers=((3, None),),
     )
     assert acks.CODEC.decode(acks.CODEC.encode(intro)) == intro
     text = _text().to_cbor()

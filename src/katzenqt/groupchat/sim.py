@@ -9,8 +9,9 @@ shadows what came before.
 
 A scenario is a text file of commands, one per line. A command followed by
 a ``----`` line has its output checked against the lines after that, up to
-a blank line. ``#`` starts a comment. Positions are printed relative to the
-start of each stream.
+a blank line. ``#`` starts a comment. A box is printed as ``owner@n``: the
+nth box of its stream, found by stepping the stream forward from its first
+index, for reading the output only.
 
 >>> print(run('''
 ... new-group alice bob
@@ -48,6 +49,7 @@ from .events import (
     IndexesDerived,
     Introduce,
     Invite,
+    JoinReply,
     Missing,
     Read,
     ReadBox,
@@ -55,15 +57,20 @@ from .events import (
     Scan,
     Send,
     SendJoinReply,
+    Walk,
+    Walked,
     WriteBox,
     WriteTombstone,
 )
 from .group import Group, Outgoing
 from .ledger import Induction
 from .sentbox import Retention
-from .wire import THIS_MESSAGE, CborCodec, Key, Message, key_of, position
+from .wire import CborCodec, Key, Message, key_of
 
 CTX = b"pigeonhole context"
+
+WALK_LIMIT = 256
+"""How far a walk steps a stream forward looking for an index."""
 
 
 @dataclass(frozen=True)
@@ -117,24 +124,31 @@ def seeded(name: str) -> Callable[[int], bytes]:
     return rng
 
 
+def step(index: bytes) -> bytes:
+    """The index after ``index``, by BACAP's derivation."""
+    return MessageBoxIndex.from_bytes(index).next_index().to_bytes()
+
+
 @dataclass
 class Member:
     name: str
     cap: WriteCap
     group: Group | None = None
-    inbox: list[tuple[Key, int, str]] = field(default_factory=list)
-    seen: dict[tuple[Key, int], Message] = field(default_factory=dict)
-    """Every message this member has read, for ``acks``."""
+    inbox: list[tuple[Key, bytes, str]] = field(default_factory=list)
+    seen: dict[tuple[Key, bytes], Message] = field(default_factory=dict)
+    """Every message this member has read, by stream and box, for ``acks``."""
     reported: int = -1
-    """The last of its own boxes a command has printed."""
+    """The last of its own boxes, in the order written, a command printed."""
     passive: bool = False
     """Driven as a client that reads and writes for itself would drive it."""
     unwritten: list[Outgoing] = field(default_factory=list)
     """Messages composed but not yet landed, when driven passively."""
     next_own: bytes = b""
-    """The index our next message lands at, when driven passively."""
+    """The box our next message lands in, when driven passively."""
     cursors: dict[Key, bytes] = field(default_factory=dict)
-    """Where we read each stream next, when driven passively."""
+    """The box we read next on each stream, when driven passively."""
+    chain: list[bytes] = field(default_factory=list)
+    """Our stream's indexes from its first, as far as anything has asked."""
 
     @property
     def read_cap(self) -> bytes:
@@ -144,9 +158,20 @@ class Member:
     def key(self) -> Key:
         return key_of(self.read_cap)
 
-    @property
-    def start(self) -> int:
-        return self.cap.message_box_index.idx_64
+    def nth(self, n: int) -> bytes:
+        """The index of our stream's nth box."""
+        if not self.chain:
+            self.chain = [self.cap.message_box_index.to_bytes()]
+        while len(self.chain) <= n:
+            self.chain.append(step(self.chain[-1]))
+        return self.chain[n]
+
+    def ordinal(self, index: bytes) -> int | None:
+        """Which box of our stream ``index`` names, by stepping forward."""
+        for n in range(WALK_LIMIT):
+            if self.nth(n) == index:
+                return n
+        return None
 
 
 class World:
@@ -190,20 +215,22 @@ class World:
         member = self.by_key(key) if key is not None else None
         return member.name if member else "?"
 
-    def at(self, key: Key, at: int) -> str:
+    def ordinal(self, key: Key, index: bytes) -> int | None:
+        member = self.by_key(key)
+        return member.ordinal(index) if member else None
+
+    def at(self, key: Key, index: bytes) -> str:
         member = self.by_key(key)
         assert member is not None
-        return f"{member.name}@{at - member.start}"
-
-    def stream_of(self, at: int) -> Member | None:
-        """Whose stream an absolute position is on, by brute force."""
-        return next(
-            (m for m in self.members.values() if 0 <= at - m.start < 1 << 18), None
-        )
+        return f"{member.name}@{member.ordinal(index)}"
 
     def where(self, index: bytes) -> str:
-        member = self.stream_of(position(index))
-        return self.at(member.key, position(index)) if member else "?"
+        """Which stream's box ``index`` names, by stepping each forward."""
+        for member in self.members.values():
+            n = member.ordinal(index)
+            if n is not None:
+                return f"{member.name}@{n}"
+        return "?"
 
     def settings(self) -> dict[str, Any]:
         options = {
@@ -241,18 +268,17 @@ class World:
                     result, next_index = self.fetch(read_cap, index)
                     out.extend(self.show_read(member, stream, index, result, recheck))
                     follow = BoxRead(stream, index, result, next_index)
-                case DeriveIndexes(purpose, stream, start, skip, count):
-                    derived = MessageBoxIndex.from_bytes(start)
-                    derived = derived.advance_index_to(derived.idx_64 + skip)
-                    indexes = []
-                    for _ in range(count):
-                        indexes.append(derived.to_bytes())
-                        derived = derived.next_index()
-                    follow = IndexesDerived(purpose, stream, tuple(indexes))
-                case Deliver(sender, at_, content):
-                    member.inbox.append((sender, at_, content.decode()))
-                case Expire(sender, at_):
-                    member.inbox = [m for m in member.inbox if m[:2] != (sender, at_)]
+                case DeriveIndexes(stream, start, count):
+                    indexes = [step(start)]
+                    while len(indexes) < count:
+                        indexes.append(step(indexes[-1]))
+                    follow = IndexesDerived(stream, tuple(indexes))
+                case Walk(stream, start, targets, keep):
+                    follow = self.walk(stream, start, targets, keep)
+                case Deliver(sender, index, content):
+                    member.inbox.append((sender, index, content.decode()))
+                case Expire(sender, index):
+                    member.inbox = [m for m in member.inbox if m[:2] != (sender, index)]
                 case SendJoinReply(to, reply):
                     new = self.by_key(key_of(to))
                     assert new is not None
@@ -261,7 +287,23 @@ class World:
                 pending[:0] = group.handle(follow)
         return out
 
-    def join(self, new: Member, reply: Any) -> list[str]:
+    @staticmethod
+    def walk(stream: Key, start: bytes, targets: tuple[bytes, ...], keep: int) -> Walked:
+        """Step forward from ``start`` to the furthest of ``targets`` met,
+        keeping the last ``keep`` indexes stepped past on the way."""
+        passed: list[bytes] = []
+        found: tuple[bytes, list[bytes]] | None = None
+        index = start
+        for _ in range(WALK_LIMIT):
+            if index in targets:
+                found = (index, list(passed))
+            passed.append(index)
+            index = step(index)
+        if found is None:
+            return Walked(stream, None, ())
+        return Walked(stream, found[0], tuple(found[1][-keep:]), len(found[1]))
+
+    def join(self, new: Member, reply: JoinReply) -> list[str]:
         if new.group is not None:
             return [f"{new.name} already joined"]
         new.group = Group.joined(new.read_cap, reply, **self.settings())
@@ -286,7 +328,7 @@ class World:
             written = self.replica.write(Stored(*at.encrypt(CTX, plaintext)))
             assert written in ("stored", "same"), written
             member.group.written(outgoing.token, member.next_own, plaintext)
-            member.next_own = at.index.next_index().to_bytes()
+            member.next_own = step(member.next_own)
         member.unwritten = []
 
     def queue(self, member: Member, outgoing: list[Outgoing]) -> None:
@@ -311,7 +353,7 @@ class World:
                 owner.key, cursor, result if isinstance(result, bytes) else None, next_index
             ):
                 if isinstance(effect, Deliver):
-                    member.inbox.append((effect.sender, effect.position, effect.content.decode()))
+                    member.inbox.append((effect.sender, effect.index, effect.content.decode()))
             cursor = next_index
         member.cursors[owner.key] = cursor
         return out
@@ -323,25 +365,27 @@ class World:
         if stored is None:
             return Missing.NOT_FOUND, None
         plaintext = at.open(CTX, stored.box_id, stored.payload, stored.signature)
-        next_index = at.index.next_index().to_bytes()
-        return (plaintext if plaintext else Missing.TOMBSTONE), next_index
+        return (plaintext if plaintext else Missing.TOMBSTONE), step(index)
 
     def show_read(
         self, member: Member, stream: Key, index: bytes, result: bytes | Missing, recheck: bool
     ) -> list[str]:
-        where = self.at(stream, position(index))
+        where = self.at(stream, index)
         if recheck and not isinstance(result, bytes):
             return [f"{where} recheck: {result.value}"]
         if isinstance(result, bytes):
             message = self.codec.decode(result)
             assert message is not None
-            member.seen[stream, position(index)] = message
+            member.seen[stream, index] = message
             return [f"{where} {self.show(message)}"]
         lines = [f"{where} {result.value}"]
         assert member.group is not None
-        heard = member.group.ledger.heard.get(stream)
-        if result is Missing.NOT_FOUND and heard and position(heard.index) >= position(index):
-            lines.append(f"  stuck: {self.name_of(heard.by)} acked {self.where(heard.index)}")
+        here = self.ordinal(stream, index)
+        if result is Missing.NOT_FOUND and here is not None:
+            for by, heard in member.group.ledger.heard.get(stream, {}).items():
+                there = self.ordinal(stream, heard)
+                if there is not None and there >= here:
+                    lines.append(f"  stuck: {self.name_of(by)} acked {self.at(stream, heard)}")
         return lines
 
     def show(self, message: Message) -> str:
@@ -351,40 +395,38 @@ class World:
         if message.introduction is not None:
             parts.append(f"introduces {message.introduction.name}")
         if message.introduced_at is not None:
-            parts.append(f"introduced-at {self.introduced(message.introduced_at.position)}")
+            parts.append(f"introduced-at {self.introduced(message.introduced_at.index)}")
         if message.numbers:
             parts.append(
                 "numbers "
                 + " ".join(
-                    f"{index}:"
+                    f"{number}:"
                     + (
                         message.introduction.name
-                        if message.introduction and ref.position == THIS_MESSAGE
-                        else self.introduced(ref.position)
+                        if message.introduction and ref is None
+                        else self.introduced(ref.index) if ref else "?"
                     )
-                    for index, ref in message.numbers
+                    for number, ref in message.numbers
                 )
             )
         if message.acks:
             parts.append(
                 "acks "
                 + " ".join(
-                    f"{index}:{self.where(value)}"
-                    for index, value in sorted(message.acks.items())
+                    f"{at}:{self.where(value)}" for at, value in sorted(message.acks.items())
                 )
             )
         return " ".join(parts) or "(empty)"
 
-    def introduced(self, at: int) -> str:
-        """Who the ``Introduction`` at absolute position ``at`` introduced:
-        the truth, from its introducer's records."""
-        member = self.stream_of(at)
-        record = member.group.sent.records.get(at) if member and member.group else None
-        message = (
-            self.codec.decode(record.plaintext) if record and record.plaintext else None
-        )
-        if message is not None and message.introduction is not None:
-            return message.introduction.name
+    def introduced(self, index: bytes) -> str:
+        """Who the ``Introduction`` in the box ``index`` introduced: the
+        truth, from its introducer's records."""
+        for member in self.members.values():
+            record = member.group.sent.records.get(index) if member.group else None
+            if record is not None and record.plaintext is not None:
+                message = self.codec.decode(record.plaintext)
+                if message is not None and message.introduction is not None:
+                    return message.introduction.name
         return "?"
 
     # Commands.
@@ -410,12 +452,13 @@ class World:
         """What ``member`` has written since a command last printed it."""
         lines = []
         assert member.group is not None
-        for at, record in sorted(member.group.sent.records.items()):
-            if at > member.reported and record.plaintext is not None:
+        records = sorted(member.group.sent.records.items(), key=lambda item: item[1].seq)
+        for index, record in records:
+            if record.seq > member.reported and record.plaintext is not None:
                 message = self.codec.decode(record.plaintext)
                 assert message is not None
-                lines.append(f"{self.at(member.key, at)} {self.show(message)}")
-                member.reported = at
+                lines.append(f"{self.at(member.key, index)} {self.show(message)}")
+                member.reported = record.seq
         return lines
 
     def do_send(self, who: str, *text: str) -> list[str]:
@@ -505,46 +548,46 @@ class World:
             return ["unknown"]
         return [" ".join(self.name_of(known.get(i)) for i in range(max(known) + 1))]
 
-    def do_acks(self, who: str, owner: str, at: str) -> list[str]:
-        """How ``who`` resolves the acks in ``owner``'s message at ``at``."""
+    def do_acks(self, who: str, owner: str, n: str) -> list[str]:
+        """How ``who`` resolves the acks in the nth box of ``owner``'s
+        stream."""
         sender = self.members[owner]
-        absolute = sender.start + int(at)
-        message = self.members[who].seen.get((sender.key, absolute))
+        message = self.members[who].seen.get((sender.key, sender.nth(int(n))))
         if message is None:
             return ["not read"]
         rosters = self.group(who).rosters
         return [
             " ".join(
-                f"{self.name_of(rosters.resolve(sender.key, index, absolute))}"
-                f"={self.where(value)}"
-                for index, value in sorted(message.acks.items())
+                f"{self.name_of(rosters.resolve(sender.key, at))}={self.where(value)}"
+                for at, value in sorted(message.acks.items())
             )
             or "none"
         ]
 
     def do_acked(self, who: str) -> list[str]:
         member = self.members[who]
+        group = self.group(who)
+        by_seq = {record.seq: index for index, record in group.sent.records.items()}
         return [
             " ".join(
-                f"{self.name_of(acker)}:{self.at(member.key, at)}"
-                for acker, at in sorted(self.group(who).ledger.acked_by.items())
+                f"{self.name_of(acker)}:{self.at(member.key, by_seq[seq])}"
+                for acker, seq in sorted(group.ledger.acked_by.items())
+                if seq in by_seq
             )
             or "none"
         ]
 
     def do_inbox(self, who: str) -> list[str]:
         return [
-            f'{self.at(sender, at)} "{text}"'
-            for sender, at, text in self.members[who].inbox
+            f'{self.at(sender, index)} "{text}"'
+            for sender, index, text in self.members[who].inbox
         ] or ["empty"]
 
-    def do_peek(self, owner: str, at: str) -> list[str]:
-        """What the replica holds at a position: the truth, not any
-        member's view."""
+    def do_peek(self, owner: str, n: str) -> list[str]:
+        """What the replica holds in the nth box of ``owner``'s stream: the
+        truth, not any member's view."""
         member = self.members[owner]
-        index = member.cap.message_box_index
-        index = index.advance_index_to(index.idx_64 + int(at))
-        result, _ = self.fetch(member.read_cap, index.to_bytes())
+        result, _ = self.fetch(member.read_cap, member.nth(int(n)))
         if isinstance(result, bytes):
             message = self.codec.decode(result)
             assert message is not None

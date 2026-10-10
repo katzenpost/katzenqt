@@ -19,7 +19,7 @@ from hypothesis.stateful import (
 from katzenqt.groupchat import sim, state
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.ledger import Induction
-from katzenqt.groupchat.wire import Key, position
+from katzenqt.groupchat.wire import Key
 
 FOUNDERS = ("alice", "bob", "carol")
 NEWCOMERS = ("dave", "erin")
@@ -39,7 +39,7 @@ class GroupChat(RuleBasedStateMachine):
             self.world.run("option delay-writes on")
         self.world.run("new-group " + " ".join(FOUNDERS))
         self.since: dict[str, int] = dict.fromkeys(FOUNDERS, 0)
-        """When each member could first read from its start positions."""
+        """When each member could first read from where it started."""
         self.inviting: dict[str, tuple[str, dict[Key, int]]] = {}
         """Who each introducer is inviting, and where it had read each
         stream when the invitation began."""
@@ -58,12 +58,18 @@ class GroupChat(RuleBasedStateMachine):
     def key(self, name: str) -> Key:
         return self.world.members[name].key
 
+    def n(self, owner: Key, index: bytes) -> int:
+        """Which box of ``owner``'s stream ``index`` names: for checking,
+        by stepping the stream forward."""
+        found = self.world.ordinal(owner, index)
+        assert found is not None
+        return found
+
     def end(self, owner: str) -> int:
-        """The position ``owner`` writes next."""
+        """Which box ``owner`` writes next."""
         member = self.world.members[owner]
-        if member.passive:
-            return position(member.next_own)
-        return position(self.group(owner).pool[0])
+        nxt = member.next_own if member.passive else self.group(owner).pool[0]
+        return self.n(member.key, nxt)
 
     @precondition(lambda self: self.passive)
     @rule(data=st.data())
@@ -126,7 +132,7 @@ class GroupChat(RuleBasedStateMachine):
                 return
             self.world.run(f"invite {introducer} {new}")
             assert group.ledger.induction is Induction.INDUCTING
-            stood = {key: reader.position for key, reader in group.readers.items()}
+            stood = {key: self.n(key, reader.next) for key, reader in group.readers.items()}
             self.inviting[introducer] = (new, stood)
             self.since[new] = self.epoch
             self.inherit(introducer, new)
@@ -138,7 +144,7 @@ class GroupChat(RuleBasedStateMachine):
         joiner = self.group(new)
         for key, start in starts.items():
             if key in joiner.readers:
-                assert joiner.readers[key].position <= start, (
+                assert self.n(key, joiner.readers[key].next) <= start, (
                     f"{new} starts {self.world.name_of(key)}'s stream after"
                     f" where {introducer} had read it when inviting"
                 )
@@ -152,7 +158,7 @@ class GroupChat(RuleBasedStateMachine):
             stream = group.readers.get(self.key(owner))
             if stream is None:
                 continue
-            if stream.position == self.end(owner):
+            if self.n(stream.stream, stream.next) == self.end(owner):
                 self.caught_up[new, owner] = self.epoch
             elif (introducer, owner) in self.caught_up:
                 self.caught_up[new, owner] = self.caught_up[introducer, owner]
@@ -172,7 +178,7 @@ class GroupChat(RuleBasedStateMachine):
             since = self.caught_up.get((reader, owner))
             if since is None and self.since[owner] >= self.since[reader]:
                 since = self.since[owner]
-            if stream.position == end:
+            if self.n(stream.stream, stream.next) == end:
                 self.caught_up[reader, owner] = self.epoch
             elif since is not None:
                 assert self.epoch - since > group.policy.window, (
@@ -229,12 +235,11 @@ class GroupChat(RuleBasedStateMachine):
             return
         for viewer in self.joined():
             rosters = self.group(viewer).rosters
-            for (sender, at), message in self.world.members[viewer].seen.items():
+            for (sender, _), message in self.world.members[viewer].seen.items():
                 for index, value in message.acks.items():
-                    acked = rosters.resolve(sender, index, at)
+                    acked = rosters.resolve(sender, index)
                     if acked is not None:
-                        stream = self.world.stream_of(position(value))
-                        assert stream is not None and stream.key == acked
+                        assert self.world.ordinal(acked, value) is not None
 
     @invariant()
     def acks_are_true(self) -> None:
@@ -243,10 +248,14 @@ class GroupChat(RuleBasedStateMachine):
         if not hasattr(self, "world"):
             return
         for owner in self.joined():
-            for acker, at in self.group(owner).ledger.acked_by.items():
+            group = self.group(owner)
+            by_seq = {r.seq: index for index, r in group.sent.records.items()}
+            for acker, seq in group.ledger.acked_by.items():
+                if seq not in by_seq:
+                    continue
                 reader = self.group(self.world.name_of(acker)).readers[self.key(owner)]
                 assert reader.last is not None
-                assert at <= position(reader.last)
+                assert self.n(self.key(owner), by_seq[seq]) <= self.n(self.key(owner), reader.last)
 
     @invariant()
     def nothing_owed_is_dropped(self) -> None:
@@ -261,8 +270,8 @@ class GroupChat(RuleBasedStateMachine):
                 stream = self.group(reader).readers.get(writer.key)
                 if stream is None:
                     continue
-                for at in range(stream.position, end):
-                    assert self.world.do_peek(owner, str(at - writer.start)) != [
+                for at in range(self.n(writer.key, stream.next), end):
+                    assert self.world.do_peek(owner, str(at)) != [
                         "tombstone"
                     ], f"{owner} tombstoned a box {reader} has not read"
 
