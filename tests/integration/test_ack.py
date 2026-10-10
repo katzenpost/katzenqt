@@ -18,9 +18,10 @@ What is checked, through the offline ``info`` verb:
 * an acknowledgement is accepted by the member it names, which needs the
   right roster index and a box that member really wrote;
 * Alice resolves Carol's acknowledgement although she never spoke to Carol:
-  she learns Carol's roster from Bob's ``Introduction``;
-* Alice numbers Carol only once she has sent a message acknowledging past
-  that ``Introduction``.
+  Carol's ``IntroducedAt`` names Bob's ``Introduction``, so Alice takes
+  Carol's roster from Bob's as it stood there;
+* Alice numbers Carol in a control message sent ahead of her next one, and
+  Carol is in her roster once that message is written.
 """
 
 from __future__ import annotations
@@ -128,8 +129,9 @@ def test_acknowledgements_are_named_by_roster_index(
     _read(carol, "from alice")
     _read(carol, "from bob")
 
-    # One message from Carol acknowledges both. Bob knows her roster because
-    # he introduced her; Alice has to work it out from his Introduction.
+    # Carol's next message acknowledges both, after a control message saying
+    # where she was introduced. Bob knows her roster because he introduced
+    # her; Alice takes it from his Introduction, which that message names.
     _send(carol, "from carol")
     _read(bob, "from carol")
     _read(alice, "from carol")
@@ -139,8 +141,8 @@ def test_acknowledgements_are_named_by_roster_index(
         "carol",
     ]
 
-    # Alice has read Bob's Introduction of Carol but numbers her only in the
-    # message that acknowledges past it.
+    # Alice has read Bob's Introduction of Carol but numbers her only with her
+    # next message.
     assert _demo(alice)["roster"] == ["alice", "bob"]
     _send(alice, "again from alice")
     assert _demo(alice)["roster"] == ["alice", "bob", "carol"]

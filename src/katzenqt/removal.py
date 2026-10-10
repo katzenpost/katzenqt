@@ -226,9 +226,10 @@ async def remove_peer(*, conversation_id: int, peer_id: int) -> None:
     doomed = await _silence_peers(conversation_id, peer_id)
     for stream in doomed.streams:
         await network.stop_stream(stream)
-    async with persistent.asession() as sess:
-        orphaned = await _delete_peer_rows(sess, conversation_id, doomed)
-        await sess.commit()
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            orphaned = await _delete_peer_rows(sess, conversation_id, doomed)
+            await sess.commit()
     _unlink_attachments(orphaned)
     _announce_removed(doomed.read_streams[1:])
     network.readables_to_mixwal_event.set()
@@ -340,11 +341,8 @@ async def _delete_conversation_rows(
     for model in (
         persistent.TallyState,
         persistent.PendingVoucher,
-        persistent.SentBox,
-        persistent.RosterMember,
-        persistent.IntroductionSeen,
-        persistent.AckLevel,
-        persistent.OutgoingAcks,
+        persistent.GroupWritten,
+        persistent.GroupState,
     ):
         await sess.exec(
             sa.delete(model).where(

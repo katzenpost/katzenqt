@@ -432,7 +432,7 @@ class World:
         if member.passive:
             assert member.group is not None
             self.land(member)
-            self.queue(member, member.group.begin_induction(new, self.member(new).read_cap))
+            self.queue(member, member.group.begin_induction())
             self.land(member)
             return self.written(member)
         out = self.drive(member, Invite(new, self.member(new).read_cap))
@@ -446,7 +446,7 @@ class World:
             if group.ledger.induction is not Induction.INDUCTING:
                 self.do_invite(who, new)
             reply = group.reply(member.next_own)
-            self.queue(member, [group.introduce_now()])
+            self.queue(member, [group.introduce_now(new, self.member(new).read_cap)])
             self.land(member)
             return self.join(self.member(new), reply) + self.written(member)
         out = self.drive(member, Introduce(new, self.member(new).read_cap))

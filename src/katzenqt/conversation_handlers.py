@@ -174,8 +174,18 @@ _TALLY_TYPES = (
     GroupChatTypeEnum.TALLY_SYNC_RESP,
 )
 
+async def _handle_control(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+    full_payload: bytes,
+) -> DispatchResult:
+    return DispatchResult(False, False, None, False)
+
+
 _HANDLERS = {
     GroupChatTypeEnum.INTRODUCTION: _handle_introduction,
+    GroupChatTypeEnum.CONTROL: _handle_control,
     **{t: _handle_chat for t in _CHAT_TYPES},
     **{t: _handle_tally for t in _TALLY_TYPES},
 }

@@ -1,30 +1,41 @@
 """Opportunistic acknowledgements and rosters, against the database.
 
-The rules are in :mod:`katzenqt.rosters` and :mod:`katzenqt.ack_codec`,
-which are pure. This module loads the facts they work from, applies what
-they decide, and is called from the send path, the read path and the
-voucher handshake. See "Opportunistic acknowledgements and backfill" in
-the group chat protocol spec. It is free of Qt.
+Every decision is the group state machine's (:mod:`katzenqt.groupchat`):
+this module drives it as a client that reads and writes for itself. It
+keeps each conversation's machine as a ``GroupState`` row, tells it every
+box read on a member's stream, in order, asks it what to send with each of
+our messages, and tells it where each landed. See "Opportunistic
+acknowledgements and backfill" in the group chat spec. It is free of Qt.
 
-A conversation takes part only once it has a roster of its own: one we
-started as its founder, or one handed to us when we joined. A conversation
-from before rosters existed has none, and neither sends nor reads
-acknowledgements.
+A conversation takes part only once it has a group state: one we started as
+its founder, or one handed to us when we joined. A conversation from before
+rosters existed has none, and neither sends nor reads acknowledgements.
+
+The state is loaded, changed and saved in the caller's transaction, so
+every change happens under the conversation's writer lock
+(``persistent.conversation_log_order_lock``). The send path, which runs off
+the event loop, only notes where a message landed (``GroupWritten``); the
+next load takes it in.
 """
 
 from __future__ import annotations
 
 import logging
-import secrets
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import cbor2
 from sqlmodel import col, select
 
-from . import ack_codec, models, persistent, rosters
+from . import ack_codec, models, persistent
+from .ack_protocol import REPLICA_EPOCH_SECONDS
+from .groupchat import state as group_state
+from .groupchat import wire
+from .groupchat.events import EpochChanged, JoinReply
+from .groupchat.group import Group, Outgoing
 
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
@@ -33,25 +44,9 @@ logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 1530
 
-inducting: set[int] = set()
-"""Conversations for which a reply to a new member is being built or its
-``Introduction`` is not yet queued. No message of ours may number anyone in
-between, or the place the reply promised the new member would be taken."""
-
-
-@asynccontextmanager
-async def held_back(conversation_id: int) -> AsyncIterator[None]:
-    """Hold this conversation's acknowledgements back while a new member is
-    inducted. It starts under the conversation's writer lock, which a
-    message keeps from taking its acknowledgements until it is committed:
-    so whatever got in first is queued by now, and ``wait_for_outgoing``
-    will see it."""
-    async with persistent.conversation_log_order_lock(conversation_id):
-        inducting.add(conversation_id)
-    try:
-        yield
-    finally:
-        inducting.discard(conversation_id)
+_inducting: set[int] = set()
+"""Conversations an induction is under way for in this process. A state
+saved mid-induction by a process that has since gone is released on load."""
 
 
 def member_key(read_cap: bytes) -> bytes:
@@ -63,72 +58,130 @@ def member_key(read_cap: bytes) -> bytes:
     return read_cap[:32]
 
 
-async def own_key(
-    sess: "AsyncSession", conv: persistent.Conversation
-) -> bytes | None:
-    cap = await persistent.own_read_cap(sess, conv)
-    return None if cap is None else member_key(cap)
+class GcmCodec:
+    """Between a ``GroupChatMessage`` and what the state machine reads of
+    it. Content is opaque to the machine: a message's own CBOR travels as
+    its content and comes back out unchanged."""
+
+    def decode(self, plaintext: bytes) -> wire.Message | None:
+        """
+        >>> codec = GcmCodec()
+        >>> text = models.GroupChatMessage(version=2, text="hi")
+        >>> codec.decode(text.to_cbor()).content is not None
+        True
+        >>> codec.decode(b"\\xff") is None
+        True
+        """
+        try:
+            gcm = models.GroupChatMessage.from_cbor(plaintext)
+        except Exception:
+            return None
+        try:
+            acks = ack_codec.decode(gcm.acks or b"")
+        except ack_codec.AcksError:
+            acks = {}
+        intro = gcm.as_introduction
+        control = gcm.msg_type in (
+            models.GroupChatTypeEnum.CONTROL, models.GroupChatTypeEnum.INTRODUCTION,
+        )
+        return wire.Message(
+            content=None if control else plaintext,
+            introduction=(
+                wire.Introduction(intro.display_name, intro.read_cap) if intro else None
+            ),
+            numbers=wire.decode_numbers(gcm.numbers or b""),
+            introduced_at=wire.decode_introduced_at(gcm.introduced_at or b""),
+            acks=acks,
+        )
+
+    def encode(self, message: wire.Message) -> bytes:
+        return self.gcm(message).to_cbor()
+
+    def gcm(self, message: wire.Message) -> models.GroupChatMessage:
+        if message.content is not None:
+            gcm = models.GroupChatMessage.from_cbor(message.content)
+        elif message.introduction is not None:
+            gcm = models.GroupChatMessage(
+                version=models.GROUP_CHAT_VERSION,
+                msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+                introduction=models.GroupChatPleaseAdd(
+                    display_name=message.introduction.name,
+                    read_cap=message.introduction.read_cap,
+                ),
+            )
+        else:
+            gcm = models.GroupChatMessage(
+                version=models.GROUP_CHAT_VERSION, msg_type=models.GroupChatTypeEnum.CONTROL,
+            )
+        gcm.acks = ack_codec.encode(message.acks) or None
+        gcm.numbers = wire.encode_numbers(message.numbers) or None
+        gcm.introduced_at = (
+            wire.encode_introduced_at(message.introduced_at)
+            if message.introduced_at is not None
+            else None
+        )
+        return gcm
 
 
-async def load_group(
-    sess: "AsyncSession", conversation_id: int
-) -> rosters.Group:
-    """Everything stored about this conversation's rosters."""
-    group = rosters.Group()
-    members = await sess.exec(
-        select(persistent.RosterMember).where(
-            persistent.RosterMember.conversation_id == conversation_id
+CODEC = GcmCodec()
+
+
+class _Stored(NamedTuple):
+    row: persistent.GroupState
+    group: Group
+    held: list[dict[str, Any]]
+    """Boxes read but not yet told: each a stream, a position, and once
+    known its index, the next index, its plaintext and whether its content
+    is still arriving through a substream."""
+    outgoing: dict[uuid.UUID, int]
+    """Which queued message, by its final PlaintextWAL, carries which
+    token."""
+    landed: list[persistent.GroupWritten]
+    """Where our messages landed, taken in: deleted when the state is saved,
+    so a load that is not saved takes them in again next time."""
+
+
+def _replica_epoch() -> int:
+    return int(time.time() // REPLICA_EPOCH_SECONDS)
+
+
+async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
+    row = await sess.get(persistent.GroupState, conversation_id)
+    if row is None:
+        return None
+    group = group_state.load(row.state, CODEC)
+    outgoing = {uuid.UUID(bytes=pwal): token for pwal, token in cbor2.loads(row.outgoing)}
+    landed = await sess.exec(
+        select(persistent.GroupWritten).where(
+            persistent.GroupWritten.conversation_id == conversation_id
         )
     )
-    for member in members:
-        group.seen[member.member_key] = persistent.position_int(member.seen)
-        if member.base_roster is not None:
-            group.bases[member.member_key] = tuple(
-                cbor2.loads(member.base_roster)
-            )
-        elif member.base_introducer is not None:
-            group.bases[member.member_key] = rosters.Inherited(
-                member.base_introducer,
-                persistent.position_int(member.base_position),
-            )
-    introductions = await sess.exec(
-        select(persistent.IntroductionSeen).where(
-            persistent.IntroductionSeen.conversation_id == conversation_id,
-            col(persistent.IntroductionSeen.position).is_not(None),
-        )
+    taken = list(landed.all())
+    for written in taken:
+        token = outgoing.pop(written.pwal_id, None)
+        if token is not None:
+            group.written(token, written.box_index)
+    if group.ledger.holding and conversation_id not in _inducting:
+        group.cancel_induction()
+    epoch = _replica_epoch()
+    if epoch > group.epoch:
+        group.handle(EpochChanged(epoch))
+    return _Stored(row, group, cbor2.loads(row.held), outgoing, taken)
+
+
+async def _save(sess: "AsyncSession", stored: _Stored) -> None:
+    stored.row.state = group_state.dump(stored.group)
+    stored.row.held = cbor2.dumps(stored.held)
+    stored.row.outgoing = cbor2.dumps(
+        [[pwal.bytes, token] for pwal, token in stored.outgoing.items()]
     )
-    for seen in introductions:
-        at = (seen.introducer_key, persistent.position_int(seen.position))
-        group.introductions[at] = seen.member_key
-    levels: dict[tuple[bytes, int], dict[int, int]] = {}
-    acked = await sess.exec(
-        select(persistent.AckLevel).where(
-            persistent.AckLevel.conversation_id == conversation_id
-        )
-    )
-    for level in acked:
-        at = (level.acker_key, persistent.position_int(level.position))
-        levels.setdefault(at, {})[level.roster_index] = (
-            persistent.position_int(level.reached)
-        )
-    group.acks.update(levels)
-    return group
+    sess.add(stored.row)
+    for written in stored.landed:
+        await sess.delete(written)
+    stored.landed.clear()
 
 
-async def _roster_row(
-    sess: "AsyncSession", conversation_id: int, key: bytes
-) -> persistent.RosterMember | None:
-    return (
-        await sess.exec(
-            select(persistent.RosterMember).where(
-                persistent.RosterMember.conversation_id == conversation_id,
-                persistent.RosterMember.member_key == key,
-            )
-        )
-    ).first()
-
-
-async def _other_members(
+async def _members(
     sess: "AsyncSession", conv: persistent.Conversation
 ) -> dict[bytes, tuple[persistent.ConversationPeer, persistent.ReadCapWAL]]:
     """The members of ``conv`` we read, by key: every active peer that is
@@ -137,8 +190,7 @@ async def _other_members(
         select(persistent.ConversationPeer, persistent.ReadCapWAL)
         .join(
             persistent.ReadCapWAL,
-            col(persistent.ReadCapWAL.id)
-            == persistent.ConversationPeer.read_cap_id,
+            col(persistent.ReadCapWAL.id) == persistent.ConversationPeer.read_cap_id,
         )
         .join(
             persistent.ConversationPeerLink,
@@ -158,27 +210,16 @@ async def _other_members(
     return members
 
 
-async def enabled(
+async def _founded(
     sess: "AsyncSession", conv: persistent.Conversation
-) -> bytes | None:
-    """Our own key if this conversation has rosters, else None."""
-    key = await own_key(sess, conv)
-    if key is None or await _roster_row(sess, conv.id, key) is None:
-        return None
-    return key
-
-
-async def ensure_own_roster(
-    sess: "AsyncSession", conv: persistent.Conversation
-) -> bytes | None:
-    """Our own key if this conversation has rosters, starting one first if
-    we are its founder: alone in it, and never joined through a voucher."""
-    key = await own_key(sess, conv)
-    if key is None:
-        return None
-    if await _roster_row(sess, conv.id, key) is not None:
-        return key
-    if conv.voucher_used or await _other_members(sess, conv):
+) -> _Stored | None:
+    """This conversation's group state, starting one first if we are its
+    founder: alone in it, and never joined through a voucher."""
+    stored = await _load(sess, conv.id)
+    if stored is not None:
+        return stored
+    own_cap = await persistent.own_read_cap(sess, conv)
+    if own_cap is None or conv.voucher_used or await _members(sess, conv):
         return None
     joining = await sess.exec(
         select(persistent.PendingVoucher).where(
@@ -188,77 +229,47 @@ async def ensure_own_roster(
     )
     if joining.first() is not None:
         return None
-    sess.add(
-        persistent.RosterMember(
-            conversation_id=conv.id,
-            member_key=key,
-            base_roster=cbor2.dumps([key]),
-        )
-    )
-    await sess.flush()
-    return key
+    group = Group.found(own_cap, [own_cap], codec=CODEC)
+    row = persistent.GroupState(conversation_id=conv.id, state=group_state.dump(group))
+    return _Stored(row, group, [], {}, [])
 
 
-async def _blocked(
-    sess: "AsyncSession", conv: persistent.Conversation, key: bytes
-) -> bool:
-    """Whether acknowledgements must wait: we are replying to a new member,
-    or its ``Introduction`` has not been written yet. An induction still
-    waiting for the joiner's voucher does not hold them back."""
-    if conv.id in inducting:
-        return True
-    unwritten = await sess.exec(
-        select(persistent.IntroductionSeen).where(
-            persistent.IntroductionSeen.conversation_id == conv.id,
-            persistent.IntroductionSeen.introducer_key == key,
-            col(persistent.IntroductionSeen.position).is_(None),
-        )
-    )
-    return unwritten.first() is not None
-
-
-class _Attached(NamedTuple):
-    key: bytes
-    levels: dict[int, int]
-
-
-async def _attach(
+async def _queue(
     sess: "AsyncSession",
     conv: persistent.Conversation,
-    gcm: models.GroupChatMessage,
-) -> _Attached | None:
-    """Give ``gcm`` every acknowledgement pending in ``conv``: for each
-    member we have numbered, the furthest box newly read on its stream."""
-    if gcm.as_introduction is not None or gcm.file_upload is not None:
-        return None
-    key = await ensure_own_roster(sess, conv)
-    if key is None or await _blocked(sess, conv, key):
-        return None
-    roster = rosters.roster_of(await load_group(sess, conv.id), key)
-    if roster is None:
-        return None
-    acks: dict[int, bytes] = {}
-    for other, (_, rcw) in (await _other_members(sess, conv)).items():
-        if (
-            rcw.last_read_index is None
-            or rcw.last_read_index == rcw.acked_index
-        ):
-            continue
-        if other not in roster:
-            continue
-        acks[roster.index(other)] = rcw.last_read_index
-        rcw.acked_index = rcw.last_read_index
-        sess.add(rcw)
-    if not acks:
-        return None
-    gcm.acks = ack_codec.encode(acks)
-    return _Attached(
-        key,
-        {
-            index: persistent.box_position(value)
-            for index, value in acks.items()
-        },
-    )
+    stored: _Stored,
+    outgoing: list[Outgoing],
+) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
+    """Serialize what the state machine asks to send, one message to a box
+    or substream, each written after the one before."""
+    write_caps: list[uuid.UUID] = []
+    entries: list[models.SerializedRow] = []
+    for item in outgoing:
+        send_op = models.SendOperation(
+            bacap_stream=conv.write_cap, messages=[CODEC.gcm(item.message)]
+        )
+        new_write_caps, db_entries = await send_op.serialize_async(
+            chunk_size=_CHUNK_SIZE, conversation_id=conv.id
+        )
+        last = db_entries[-1]
+        if entries:
+            assert isinstance(last, persistent.PlaintextWAL)
+            last.after_id = entries[-1].id
+        stored.outgoing[last.id] = item.token
+        write_caps += new_write_caps
+        entries += db_entries
+    return write_caps, entries
+
+
+def _store(
+    sess: "AsyncSession",
+    write_caps: list[uuid.UUID],
+    entries: "list[models.SerializedRow]",
+) -> None:
+    for cap_uuid in write_caps:
+        sess.add(persistent.WriteCapWAL(id=cap_uuid))
+    for obj in entries:
+        sess.add(obj)
 
 
 async def serialize_with_acks(
@@ -266,35 +277,38 @@ async def serialize_with_acks(
     conv: persistent.Conversation,
     gcm: models.GroupChatMessage,
 ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
-    """Attach the pending acknowledgements to ``gcm`` and serialize it for
-    ``conv``'s own stream. The caller adds the rows to ``sess`` and commits:
-    what was acknowledged is recorded in that same transaction, so a message
-    that is never queued acknowledges nothing. The caller holds
-    ``persistent.conversation_log_order_lock`` from before this call until
-    it has committed, so that an induction cannot begin in between (see
-    ``held_back``)."""
-    attached = await _attach(sess, conv, gcm)
-    send_op = models.SendOperation(
-        bacap_stream=conv.write_cap, messages=[gcm]
-    )
-    new_write_caps, db_entries = await send_op.serialize_async(
-        chunk_size=_CHUNK_SIZE, conversation_id=conv.id
-    )
-    if attached is not None:
-        logger.debug(
-            "acknowledging %d member(s) in conversation %d",
-            len(attached.levels),
-            conv.id,
-        )
-        sess.add(
-            persistent.OutgoingAcks(
-                pwal_id=db_entries[-1].id,
-                conversation_id=conv.id,
-                acker_key=attached.key,
-                levels=cbor2.dumps(attached.levels),
-            )
-        )
-    return new_write_caps, db_entries
+    """Serialize ``gcm`` for ``conv``'s own stream with the acknowledgements
+    it carries, after any control message the state machine owes. The caller
+    adds the rows to ``sess`` and commits, holding
+    ``persistent.conversation_log_order_lock`` from before this call; the
+    last row ends ``gcm``."""
+    stored = await _founded(sess, conv)
+    if stored is None:
+        send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
+        return await send_op.serialize_async(chunk_size=_CHUNK_SIZE, conversation_id=conv.id)
+    outgoing = stored.group.compose(gcm.to_cbor())
+    queued = await _queue(sess, conv, stored, outgoing)
+    await _save(sess, stored)
+    return queued
+
+
+async def serialize_introduction(
+    sess: "AsyncSession",
+    conv: persistent.Conversation,
+    gcm: models.GroupChatMessage,
+) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
+    """Serialize ``gcm``, the ``Introduction`` that commits the induction
+    under way, numbering the member it introduces. Called under the
+    conversation's writer lock."""
+    intro = gcm.as_introduction
+    stored = await _load(sess, conv.id)
+    if stored is None or intro is None:
+        send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
+        return await send_op.serialize_async(chunk_size=_CHUNK_SIZE, conversation_id=conv.id)
+    outgoing = stored.group.introduce_now(intro.display_name, intro.read_cap)
+    queued = await _queue(sess, conv, stored, [outgoing])
+    await _save(sess, stored)
+    return queued
 
 
 async def append_outbound_text(
@@ -312,13 +326,8 @@ async def append_outbound_text(
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
             assert conv is not None
-            new_write_caps, db_entries = await serialize_with_acks(
-                sess, conv, gcm
-            )
-            for cap_uuid in new_write_caps:
-                sess.add(persistent.WriteCapWAL(id=cap_uuid))
-            for obj in db_entries:
-                sess.add(obj)
+            new_write_caps, db_entries = await serialize_with_acks(sess, conv, gcm)
+            _store(sess, new_write_caps, db_entries)
             upload = await persistent._outbound_upload_from_entries(
                 sess, conversation_id, db_entries
             )
@@ -326,9 +335,7 @@ async def append_outbound_text(
                 persistent.ConversationLog(
                     conversation_id=conversation_id,
                     conversation_peer_id=conversation_peer_id,
-                    conversation_order=persistent.next_conversation_order(
-                        conversation_id
-                    ),
+                    conversation_order=persistent.next_conversation_order(conversation_id),
                     payload=b"F" + gcm.to_cbor(),
                     network_status=1,
                     outgoing_pwal=db_entries[-1].id,
@@ -338,88 +345,64 @@ async def append_outbound_text(
             return upload
 
 
+# Reading.
+
+
+def _held_at(stored: _Stored, stream: bytes, at: int) -> dict[str, Any]:
+    for box in stored.held:
+        if box["stream"] == stream and box["at"] == at:
+            return box
+    box = {"stream": stream, "at": at, "index": None, "next": None,
+           "plaintext": None, "waiting": False}
+    stored.held.append(box)
+    return box
+
+
+def _release(stored: _Stored, stream: bytes) -> None:
+    """Tell the state machine every box of ``stream`` that is ready, in
+    order, up to the first still waiting."""
+    boxes = sorted((b for b in stored.held if b["stream"] == stream), key=lambda b: b["at"])
+    for box in boxes:
+        if box["index"] is None or box["waiting"]:
+            break
+        stored.group.observe(stream, box["index"], box["plaintext"], box["next"])
+        stored.held.remove(box)
+
+
 async def on_message(
     sess: "AsyncSession",
     peer: persistent.ConversationPeer,
     gcm: models.GroupChatMessage,
     position: int,
 ) -> None:
-    """Record what a message read at ``position`` on ``peer``'s stream says
-    about rosters: whom it acknowledges, and whom it introduces."""
-    conv = peer.conversation
-    own = await enabled(sess, conv)
+    """A message read at ``position`` on ``peer``'s stream. It is told to
+    the state machine with its box, in order."""
     rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id)
-    if own is None or rcw is None or rcw.read_cap is None:
+    if rcw is None or rcw.read_cap is None:
         return
-    sender = member_key(rcw.read_cap)
-    at = persistent.position_bytes(position)
-    if gcm.acks:
-        try:
-            named = ack_codec.decode(gcm.acks)
-        except ack_codec.AcksError as error:
-            logger.warning(
-                "ignoring malformed acks from %r in conversation %d: %s",
-                peer.name,
-                conv.id,
-                error,
-            )
-            named = {}
-        for index, value in named.items():
-            await sess.merge(
-                persistent.AckLevel(
-                    conversation_id=conv.id,
-                    acker_key=sender,
-                    position=at,
-                    roster_index=index,
-                    reached=persistent.position_bytes(
-                        persistent.box_position(value)
-                    ),
-                    value=value,
-                )
-            )
-    if (intro := gcm.as_introduction) is not None:
-        await _record_introduction(
-            sess, conv.id, own, sender, at, member_key(intro.read_cap)
-        )
+    stored = await _load(sess, peer.conversation.id)
+    if stored is None:
+        return
+    stream = member_key(rcw.read_cap)
+    _held_at(stored, stream, position)["plaintext"] = gcm.to_cbor()
+    _release(stored, stream)
+    await _save(sess, stored)
 
 
-async def _record_introduction(
-    sess: "AsyncSession",
-    conversation_id: int,
-    own: bytes,
-    introducer: bytes,
-    at: bytes,
-    member: bytes,
-) -> None:
-    known = await sess.exec(
-        select(persistent.IntroductionSeen).where(
-            persistent.IntroductionSeen.conversation_id == conversation_id,
-            persistent.IntroductionSeen.introducer_key == introducer,
-            persistent.IntroductionSeen.position == at,
-        )
-    )
-    if known.first() is None:
-        sess.add(
-            persistent.IntroductionSeen(
-                conversation_id=conversation_id,
-                introducer_key=introducer,
-                position=at,
-                member_key=member,
+async def _fetching(sess: "AsyncSession", rcw_id: uuid.UUID, box_index: bytes) -> bool:
+    """Whether the message whose indirection is the box at ``box_index`` is
+    still on its way through a substream that has not failed."""
+    piece = await sess.get(persistent.ReceivedPiece, (rcw_id, box_index[:8]))
+    if piece is None or piece.chunk_type != b"I":
+        return False
+    substream = (
+        await sess.exec(
+            select(persistent.ReadCapWAL).where(
+                persistent.ReadCapWAL.read_cap == piece.chunk[-136:]
             )
         )
-    if (
-        member != own
-        and await _roster_row(sess, conversation_id, member) is None
-    ):
-        sess.add(
-            persistent.RosterMember(
-                conversation_id=conversation_id,
-                member_key=member,
-                base_introducer=introducer,
-                base_position=at,
-            )
-        )
-    await sess.flush()
+    ).first()
+    return substream is not None and substream.substream_failure is None
 
 
 async def box_read(
@@ -428,9 +411,19 @@ async def box_read(
     rcw: persistent.ReadCapWAL,
     box_index: bytes,
 ) -> None:
-    """A box that ends a message was read on ``peer``'s own stream."""
-    rcw.frontier_index = box_index
-    await settle(sess, peer, rcw)
+    """A box that ends a message, or announces one through a substream, was
+    read on ``peer``'s own stream; ``rcw.next_index`` already follows it."""
+    if rcw.read_cap is None or rcw.next_index is None:
+        return
+    stored = await _load(sess, peer.conversation.id)
+    if stored is None:
+        return
+    stream = member_key(rcw.read_cap)
+    box = _held_at(stored, stream, persistent.box_position(box_index))
+    box.update(index=box_index, next=rcw.next_index,
+               waiting=await _fetching(sess, rcw.id, box_index))
+    _release(stored, stream)
+    await _save(sess, stored)
 
 
 async def settle(
@@ -438,145 +431,35 @@ async def settle(
     peer: persistent.ConversationPeer,
     rcw: persistent.ReadCapWAL,
 ) -> None:
-    """Bring forward how far ``peer``'s stream may be acknowledged: to the
-    last message read, unless an earlier one is still being fetched through
-    a substream. Then take any acknowledgement that has become readable."""
-    if rcw.frontier_index is None or await _fetching(sess, rcw.id):
+    """A substream of ``peer``'s stream has finished, one way or another:
+    whatever waited on it can be told."""
+    if rcw.read_cap is None:
         return
-    rcw.last_read_index = rcw.frontier_index
-    sess.add(rcw)
-    conv = peer.conversation
-    own = await enabled(sess, conv)
-    if own is None or rcw.read_cap is None:
+    stored = await _load(sess, peer.conversation.id)
+    if stored is None:
         return
-    member = await _roster_row(sess, conv.id, member_key(rcw.read_cap))
-    if member is not None:
-        reached = persistent.box_position(rcw.frontier_index)
-        if reached > persistent.position_int(member.seen):
-            member.seen = persistent.position_bytes(reached)
-            sess.add(member)
-    await sess.flush()
-    await claim(sess, conv, own)
+    stream = member_key(rcw.read_cap)
+    for box in stored.held:
+        if box["stream"] == stream and box["waiting"]:
+            box["waiting"] = await _fetching(sess, rcw.id, box["index"])
+    _release(stored, stream)
+    await _save(sess, stored)
 
 
-async def _fetching(sess: "AsyncSession", rcw_id: uuid.UUID) -> bool:
-    """Whether a message announced on this stream is still on its way
-    through a substream that has not failed."""
-    pieces = await sess.exec(
-        select(persistent.ReceivedPiece).where(
-            persistent.ReceivedPiece.read_cap == rcw_id,
-            persistent.ReceivedPiece.chunk_type == b"I",
-        )
-    )
-    for piece in pieces:
-        substream = (
-            await sess.exec(
-                select(persistent.ReadCapWAL).where(
-                    persistent.ReadCapWAL.read_cap == piece.chunk[-136:]
-                )
-            )
-        ).first()
-        if substream is not None and substream.substream_failure is None:
-            return True
-    return False
+# Writing.
 
 
-async def claim(
-    sess: "AsyncSession", conv: persistent.Conversation, own: bytes
+async def forget_outgoing(
+    sess: "AsyncSession", conversation_id: int, pwal_id: uuid.UUID
 ) -> None:
-    """Read every acknowledgement not yet placed. One that names us is
-    checked against the boxes we wrote, and raises how far its sender is
-    known to have read our stream."""
-    waiting = (
-        await sess.exec(
-            select(persistent.AckLevel).where(
-                persistent.AckLevel.conversation_id == conv.id,
-                col(persistent.AckLevel.value).is_not(None),
-            )
-        )
-    ).all()
-    if not waiting:
+    """The message ending in ``pwal_id`` will never be written: what it
+    acknowledged is owed again. Called under the conversation's writer
+    lock."""
+    stored = await _load(sess, conversation_id)
+    if stored is None or pwal_id not in stored.outgoing:
         return
-    group = await load_group(sess, conv.id)
-    members = await _other_members(sess, conv)
-    written = persistent.position_int(
-        (
-            await _roster_row(sess, conv.id, own) or persistent.RosterMember()
-        ).seen
-    )
-    for level in waiting:
-        roster = rosters.roster_of(group, level.acker_key)
-        if roster is None or level.roster_index >= len(roster):
-            continue
-        assert level.value is not None
-        if roster[level.roster_index] != own:
-            level.value = None
-        elif await _accept(
-            sess, conv, members.get(level.acker_key), level.value
-        ):
-            level.value = None
-        elif persistent.position_int(level.reached) <= written:
-            # Names a position we have written, with an index we did not:
-            # stale, forged or misnumbered. Later ones may yet be ours.
-            level.value = None
-        sess.add(level)
-
-
-async def _accept(
-    sess: "AsyncSession",
-    conv: persistent.Conversation,
-    acker: "tuple[persistent.ConversationPeer, persistent.ReadCapWAL] | None",
-    value: bytes,
-) -> bool:
-    """The Sent-box check: ``value`` must be the index of a box we wrote."""
-    box = (
-        await sess.exec(
-            select(persistent.SentBox).where(
-                persistent.SentBox.bacap_stream == conv.write_cap,
-                persistent.SentBox.box_index == value,
-            )
-        )
-    ).first()
-    if box is None or acker is None:
-        return False
-    peer = acker[0]
-    if persistent.position_int(box.position) > persistent.position_int(
-        peer.acked_position
-    ):
-        peer.acked_position = box.position
-        sess.add(peer)
-        logger.info(
-            "ACKED conversation=%d peer=%s position=%d",
-            conv.id,
-            peer.name,
-            persistent.position_int(box.position),
-        )
-    return True
-
-
-async def forget_outgoing(sess: "AsyncSession", pwal_id: uuid.UUID) -> None:
-    """The message ending in ``pwal_id`` will never be written, so neither
-    will its acknowledgements. Each is owed again on the next message,
-    unless a later one has since acknowledged further."""
-    queued = await sess.get(persistent.OutgoingAcks, pwal_id)
-    if queued is None:
-        return
-    await sess.delete(queued)
-    conv = await sess.get(persistent.Conversation, queued.conversation_id)
-    assert conv is not None
-    group = await load_group(sess, conv.id)
-    roster = rosters.roster_of(group, queued.acker_key) or ()
-    members = await _other_members(sess, conv)
-    for index, reached in cbor2.loads(queued.levels).items():
-        if index >= len(roster) or roster[index] not in members:
-            continue
-        _, rcw = members[roster[index]]
-        if (
-            rcw.acked_index is not None
-            and persistent.box_position(rcw.acked_index) == reached
-        ):
-            rcw.acked_index = None
-            sess.add(rcw)
+    stored.group.abandoned(stored.outgoing.pop(pwal_id))
+    await _save(sess, stored)
 
 
 async def _abandoned(sess: "AsyncSession", pwal_id: uuid.UUID) -> bool:
@@ -588,87 +471,98 @@ async def _abandoned(sess: "AsyncSession", pwal_id: uuid.UUID) -> bool:
     return await sess.get(persistent.SentLog, pwal_id) is None
 
 
-async def wait_for_outgoing(
-    conversation_id: int, *, deadline_s: float
-) -> bool:
-    """Wait until every queued message of ours that will number someone has
-    been written: one that carries acknowledgements, or an ``Introduction``.
-    Until then our roster may still grow by them, and a reply to a new
-    member cannot say where its roster index will be."""
-    async with persistent.asession() as sess:
-        queued = (
-            await sess.exec(
-                select(persistent.OutgoingAcks.pwal_id).where(
-                    persistent.OutgoingAcks.conversation_id == conversation_id
-                )
-            )
-        ).all()
-        owed = []
-        for pwal_id in queued:
-            if await _abandoned(sess, pwal_id):
-                await forget_outgoing(sess, pwal_id)
-            else:
-                owed.append(pwal_id)
-        introducing = await sess.exec(
-            select(persistent.IntroductionSeen.pending_pwal).where(
-                persistent.IntroductionSeen.conversation_id == conversation_id
-            )
-        )
-        owed.extend(pwal_id for pwal_id in introducing if pwal_id is not None)
-        await sess.commit()
+async def wait_for_outgoing(conversation_id: int, *, deadline_s: float) -> bool:
+    """Wait until every message the state machine is waiting on has been
+    written: until then a reply to a new member cannot say what our roster
+    will be."""
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            stored = await _load(sess, conversation_id)
+            if stored is None:
+                return True
+            owed = []
+            for pwal_id in list(stored.outgoing):
+                if await _abandoned(sess, pwal_id):
+                    stored.group.abandoned(stored.outgoing.pop(pwal_id))
+                else:
+                    owed.append(pwal_id)
+            await _save(sess, stored)
+            await sess.commit()
     for pwal_id in owed:
         if not await persistent.wait_for_sent(pwal_id, deadline_s=deadline_s):
             return False
     return True
 
 
+# Inducting.
+
+
+@asynccontextmanager
+async def held_back(conversation_id: int) -> AsyncIterator[None]:
+    """Hold this conversation's acknowledgements and numbering back while a
+    new member is inducted, starting it on each stream where we have read
+    it now. Anything owed is queued first: wait for it with
+    ``wait_for_outgoing`` before ``hand_over``."""
+    _inducting.add(conversation_id)
+    try:
+        async with persistent.conversation_log_order_lock(conversation_id):
+            async with persistent.asession() as sess:
+                conv = await sess.get(persistent.Conversation, conversation_id)
+                assert conv is not None
+                stored = await _founded(sess, conv)
+                if stored is not None:
+                    outgoing = stored.group.begin_induction()
+                    _store(sess, *await _queue(sess, conv, stored, outgoing))
+                    await _save(sess, stored)
+                    await sess.commit()
+        yield
+    finally:
+        _inducting.discard(conversation_id)
+        async with persistent.conversation_log_order_lock(conversation_id):
+            async with persistent.asession() as sess:
+                stored = await _load(sess, conversation_id)
+                if stored is not None:
+                    await _save(sess, stored)
+                    await sess.commit()
+
+
 async def hand_over(
     sess: "AsyncSession", conv: persistent.Conversation
 ) -> models.GroupChatReplyWho | None:
     """The reply to a new member, for a conversation that keeps rosters:
-    our roster in order, then anyone we have read of but not yet numbered,
-    with what the new member needs to follow every roster from here on.
-    None when this conversation keeps no rosters."""
-    own = await ensure_own_roster(sess, conv)
-    own_cap = await persistent.own_read_cap(sess, conv)
-    if own is None or own_cap is None:
+    our roster in order, each member's read cap starting where the new
+    member is to start reading, and what it needs to follow every roster
+    from here on. None when this conversation keeps no rosters."""
+    stored = await _founded(sess, conv)
+    wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
+    if stored is None or wcw is None or wcw.next_index is None:
         return None
-    group = await load_group(sess, conv.id)
-    roster = rosters.roster_of(group, own)
-    if roster is None:
-        return None
-    members = await _other_members(sess, conv)
-    unnumbered = sorted(
-        (key for key in members if key not in roster),
-        key=lambda key: members[key][0].id,
-    )
-    known = [*roster, *unnumbered]
+    if stored.row not in sess:
+        sess.add(stored.row)
+    reply = stored.group.reply(wcw.next_index)
+    members = await _members(sess, conv)
+    own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
     please_adds: list[models.GroupChatPleaseAdd | None] = []
-    for key in known:
-        if key == own:
-            please_adds.append(
-                models.GroupChatPleaseAdd(
-                    display_name=conv.own_peer.name, read_cap=own_cap
-                )
-            )
-        elif key in members and members[key][1].read_cap is not None:
-            peer, rcw = members[key]
-            assert rcw.read_cap is not None
-            please_adds.append(
-                models.GroupChatPleaseAdd(
-                    display_name=peer.name, read_cap=rcw.read_cap
-                )
-            )
+    for member in reply.members:
+        if member is None:
+            please_adds.append(None)
+            continue
+        read_cap, start = member
+        key = member_key(read_cap)
+        if key == stored.group.me:
+            name = own_peer.name if own_peer is not None else "?"
+        elif key in members:
+            name = members[key][0].name
         else:
             please_adds.append(None)
-    handed = rosters.hand_over(group, known)
+            continue
+        please_adds.append(models.GroupChatPleaseAdd(display_name=name, read_cap=key + start))
     return models.GroupChatReplyWho(
         please_adds=please_adds,
-        roster_size=len(roster),
-        rosters=handed.rosters,
-        seen=handed.seen,
-        introductions=handed.introductions,
-        unsettled=handed.unsettled,
+        rosters=[list(roster) if roster is not None else None for roster in reply.rosters],
+        introductions=list(reply.introductions),
+        introducer=reply.introducer,
+        newcomer=reply.newcomer,
     )
 
 
@@ -676,276 +570,121 @@ def _valid_position(position: int) -> bool:
     return 0 <= position < 2**64
 
 
+def _join_reply(reply: models.GroupChatReplyWho) -> JoinReply | None:
+    """The reply as the state machine takes it, or None if it carries no
+    rosters or cannot be read."""
+    places = len(reply.please_adds)
+    if (
+        reply.rosters is None
+        or reply.introducer is None
+        or reply.newcomer != places
+        or not reply.introducer < places < wire.ROSTER_MAX
+        or reply.please_adds[reply.introducer] is None
+        or len(reply.rosters) != places
+    ):
+        return None
+    keys = [member_key(p.read_cap) for p in reply.please_adds if p is not None]
+    if len(set(keys)) != len(keys):
+        return None
+    for roster in reply.rosters:
+        for index, slot, at in roster or ():
+            if not 0 <= index < wire.ROSTER_MAX or not (slot is None or 0 <= slot < places):
+                return None
+            if not (at == -1 or _valid_position(at)):
+                return None
+    introductions = tuple(
+        (by, at, member)
+        for by, at, member in reply.introductions or ()
+        if 0 <= by < places and 0 <= member < places and _valid_position(at)
+    )
+    return JoinReply(
+        members=tuple(
+            (p.read_cap, p.read_cap[32:]) if p is not None else None for p in reply.please_adds
+        ),
+        rosters=tuple(tuple(r) if r is not None else None for r in reply.rosters),
+        introductions=introductions,
+        introducer=reply.introducer,
+        newcomer=reply.newcomer,
+    )
+
+
 async def adopt(
     sess: "AsyncSession",
     conv: persistent.Conversation,
-    own: bytes,
+    own_read_cap: bytes,
     reply: models.GroupChatReplyWho,
 ) -> bool:
-    """Start this conversation's rosters from the reply that let us in: our
-    own roster is the introducer's with ourselves after it, and every other
-    member's is as the introducer handed it over. False, and nothing stored,
-    when the reply carries no rosters or cannot be read."""
-    size = reply.roster_size
-    places = len(reply.please_adds)
-    if (
-        size is None
-        or reply.rosters is None
-        or reply.seen is None
-        or not size <= places <= rosters.ROSTER_MAX
-        or len(reply.rosters) != places
-        or len(reply.seen) != places
-    ):
+    """Start this conversation's group state from the reply that let us in.
+    False, and nothing stored, when the reply carries no rosters or cannot
+    be read."""
+    handed = _join_reply(reply)
+    if handed is None or len(own_read_cap) != 136 or member_key(own_read_cap) in {
+        member_key(m[0]) for m in handed.members if m
+    }:
         return False
-    known = [
-        rosters.placeholder(place)
-        if entry is None
-        else member_key(entry.read_cap)
-        for place, entry in enumerate(reply.please_adds)
-    ]
-    if own in known or len(set(known)) != places:
-        return False
-    group = rosters.adopt(
-        known,
-        rosters.Handover(
-            rosters=reply.rosters,
-            seen=reply.seen,
-            introductions=[
-                (introducer, position, member)
-                for introducer, position, member in reply.introductions or ()
-                if _valid_position(position)
-            ],
-            unsettled=[
-                (sender, position, levels)
-                for sender, position, levels in reply.unsettled or ()
-                if _valid_position(position)
-                and all(
-                    0 <= index < rosters.ROSTER_MAX
-                    and _valid_position(reached)
-                    for index, reached in levels.items()
-                )
-            ],
-        ),
-    )
-    for table in (
-        persistent.RosterMember,
-        persistent.IntroductionSeen,
-        persistent.AckLevel,
-    ):
-        for row in await sess.exec(
-            select(table).where(table.conversation_id == conv.id)
-        ):
-            await sess.delete(row)
-    await sess.flush()
-    sess.add(
-        persistent.RosterMember(
-            conversation_id=conv.id,
-            member_key=own,
-            base_roster=cbor2.dumps([*known[:size], own]),
-        )
-    )
-    for key in known:
-        base = group.bases.get(key)
-        seen = group.seen.get(key, -1)
-        inherited = base if isinstance(base, rosters.Inherited) else None
-        sess.add(
-            persistent.RosterMember(
-                conversation_id=conv.id,
-                member_key=key,
-                seen=persistent.position_bytes(seen)
-                if _valid_position(seen)
-                else None,
-                base_roster=(
-                    cbor2.dumps(list(base))
-                    if isinstance(base, tuple)
-                    else None
-                ),
-                base_introducer=inherited.introducer if inherited else None,
-                base_position=(
-                    persistent.position_bytes(inherited.position)
-                    if inherited
-                    else None
-                ),
-            )
-        )
-    for (introducer, position), member in group.introductions.items():
-        sess.add(
-            persistent.IntroductionSeen(
-                conversation_id=conv.id,
-                introducer_key=introducer,
-                position=persistent.position_bytes(position),
-                member_key=member,
-            )
-        )
-    for (sender, position), levels in group.acks.items():
-        for index, reached in levels.items():
-            sess.add(
-                persistent.AckLevel(
-                    conversation_id=conv.id,
-                    acker_key=sender,
-                    position=persistent.position_bytes(position),
-                    roster_index=index,
-                    reached=persistent.position_bytes(reached),
-                )
-            )
+    group = Group.joined(own_read_cap, handed, codec=CODEC)
+    row = await sess.get(persistent.GroupState, conv.id)
+    if row is None:
+        row = persistent.GroupState(conversation_id=conv.id, state=b"")
+    await _save(sess, _Stored(row, group, [], {}, []))
     await sess.flush()
     return True
 
 
-async def introduced(
-    sess: "AsyncSession",
-    conv: persistent.Conversation,
-    read_cap: bytes,
-    pending_pwal: uuid.UUID,
-) -> None:
-    """We have queued an ``Introduction`` of the member read by
-    ``read_cap``. It takes the next place in our roster once that message is
-    written, and its own roster starts as ours with itself after it."""
-    own = await enabled(sess, conv)
-    if own is None:
-        return
-    member = member_key(read_cap)
-    roster = rosters.roster_of(await load_group(sess, conv.id), own)
-    if roster is None or member in roster:
-        return
-    sess.add(
-        persistent.IntroductionSeen(
-            conversation_id=conv.id,
-            introducer_key=own,
-            member_key=member,
-            pending_pwal=pending_pwal,
-        )
-    )
-    if await _roster_row(sess, conv.id, member) is None:
-        sess.add(
-            persistent.RosterMember(
-                conversation_id=conv.id,
-                member_key=member,
-                base_roster=cbor2.dumps([*roster, member]),
-            )
-        )
-    await sess.flush()
+# Membership.
 
 
 async def forget_member(
     sess: "AsyncSession", conv: persistent.Conversation, read_cap: bytes
 ) -> None:
-    """A member is being removed. Every roster still counts from the place
-    it held, so the place is kept and only the key is forgotten: wherever
-    the key is stored it is replaced by a placeholder."""
-    own = await enabled(sess, conv)
-    if own is None:
+    """A member is being removed: stop following it, keeping the places it
+    holds in every roster. Called under the conversation's writer lock."""
+    stored = await _load(sess, conv.id)
+    if stored is None:
         return
-    key = member_key(read_cap)
-    roster = rosters.roster_of(await load_group(sess, conv.id), own)
-    if roster is not None and key in roster:
-        token = rosters.placeholder(roster.index(key))
-    else:
-        token = b"retired:" + secrets.token_bytes(8)
-    members = await sess.exec(
-        select(persistent.RosterMember).where(
-            persistent.RosterMember.conversation_id == conv.id
-        )
-    )
-    for row in members.all():
-        base = row.base_roster
-        if base is not None and key in (entries := cbor2.loads(base)):
-            base = cbor2.dumps([token if e == key else e for e in entries])
-        introducer = (
-            token if row.base_introducer == key else row.base_introducer
-        )
-        if row.member_key != key:
-            row.base_roster, row.base_introducer = base, introducer
-            sess.add(row)
-            continue
-        await sess.delete(row)
-        await sess.flush()
-        sess.add(
-            persistent.RosterMember(
-                conversation_id=conv.id,
-                member_key=token,
-                seen=row.seen,
-                base_roster=base,
-                base_introducer=introducer,
-                base_position=row.base_position,
-            )
-        )
-    introductions = await sess.exec(
-        select(persistent.IntroductionSeen).where(
-            persistent.IntroductionSeen.conversation_id == conv.id
-        )
-    )
-    for seen in introductions.all():
-        if key in (seen.introducer_key, seen.member_key):
-            if seen.introducer_key == key:
-                seen.introducer_key = token
-            if seen.member_key == key:
-                seen.member_key = token
-            sess.add(seen)
-    levels = await sess.exec(
-        select(persistent.AckLevel).where(
-            persistent.AckLevel.conversation_id == conv.id,
-            persistent.AckLevel.acker_key == key,
-        )
-    )
-    for level in levels.all():
-        await sess.delete(level)
-        await sess.flush()
-        sess.add(
-            persistent.AckLevel(
-                conversation_id=conv.id,
-                acker_key=token,
-                position=level.position,
-                roster_index=level.roster_index,
-                reached=level.reached,
-            )
-        )
-    await sess.flush()
+    stored.group.remove(member_key(read_cap))
+    stored.held[:] = [b for b in stored.held if b["stream"] != member_key(read_cap)]
+    await _save(sess, stored)
 
 
 async def summary(
     sess: "AsyncSession", conv: persistent.Conversation
 ) -> "tuple[list[str] | None, dict[str, int]]":
     """For inspection: our roster as display names in order, with "?" where
-    a member is no longer known, and how far each member has acknowledged
+    a member is not known by name, and how far each member has acknowledged
     our stream. The roster is None for a conversation that keeps none."""
-    members = await _other_members(sess, conv)
-    acked = {
-        peer.name: persistent.position_int(peer.acked_position)
-        for peer, _ in members.values()
-        if peer.acked_position is not None
-    }
-    own = await enabled(sess, conv)
-    if own is None:
-        return None, acked
-    roster = rosters.roster_of(await load_group(sess, conv.id), own) or ()
+    stored = await _load(sess, conv.id)
+    if stored is None:
+        return None, {}
+    members = await _members(sess, conv)
     own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
     names = []
-    for key in roster:
-        if key == own:
+    for key in stored.group.rosters.known(stored.group.me).values():
+        if key == stored.group.me:
             names.append(own_peer.name if own_peer is not None else "?")
         else:
             names.append(members[key][0].name if key in members else "?")
+    acked = {
+        members[key][0].name: at
+        for key, at in stored.group.ledger.acked_by.items()
+        if key in members
+    }
     return names, acked
 
 
 __all__ = [
+    "CODEC",
+    "GcmCodec",
     "adopt",
     "append_outbound_text",
     "box_read",
-    "claim",
-    "enabled",
-    "ensure_own_roster",
     "forget_member",
     "forget_outgoing",
     "hand_over",
     "held_back",
-    "inducting",
-    "introduced",
-    "load_group",
     "member_key",
     "on_message",
-    "own_key",
+    "serialize_introduction",
     "serialize_with_acks",
     "settle",
     "summary",

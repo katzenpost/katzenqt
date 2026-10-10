@@ -18,6 +18,8 @@ Key = bytes
 
 KEY_SIZE = 32
 INDEX_SIZE = 104
+ROSTER_MAX = 256
+"""The most entries a roster holds: roster indexes are one byte."""
 
 THIS_MESSAGE = 0
 """The position a ``Numbers`` entry gives the ``Introduction`` carried in

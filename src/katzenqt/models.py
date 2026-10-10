@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 SUBSTREAM_NAME_PREFIX = ":substream:"
 
 # Version 1 carries acknowledgements and drops the membership hash.
-GROUP_CHAT_VERSION = 1
+# Version 2 numbers members explicitly, in control messages.
+GROUP_CHAT_VERSION = 2
 
 
 class UnsupportedVersion(ValueError):
@@ -118,23 +119,22 @@ class GroupChatReplyWho(BaseModel):
     the group keeps rosters, how each of them numbers the others.
 
     With rosters, ``please_adds`` is the introducer's own roster in order,
-    so that a member's place in the list is its roster index, followed by
-    any member the introducer has read of but not yet numbered. A place
-    whose member the introducer no longer reads is None. ``roster_size`` is
-    where the roster ends: the new member takes that roster index. The
-    remaining fields are a ``katzenqt.rosters.Handover``, with every member
-    written as its place in ``please_adds``. They are absent in a reply
-    from a client that keeps no rosters.
+    so that a member's place in the list is its roster index; each read cap
+    starts where the new member is to start reading. A place the introducer
+    cannot fill is None. The other fields are a
+    :class:`katzenqt.groupchat.events.JoinReply`, with every member written
+    as its place in ``please_adds``; the new member takes place
+    ``newcomer``. They are absent in a reply from a client that keeps no
+    rosters.
     """
     model_config = {
         'validate_assignment': True
     }
     please_adds : list[GroupChatPleaseAdd | None] = Field()
-    roster_size: int | None = Field(default=None, ge=0)
-    rosters: list[bytes] | None = Field(default=None)
-    seen: list[int] | None = Field(default=None)
+    rosters: list[list[tuple[int, int | None, int]] | None] | None = Field(default=None)
     introductions: list[tuple[int, int, int]] | None = Field(default=None)
-    unsettled: list[tuple[int, int, dict[int, int]]] | None = Field(default=None)
+    introducer: int | None = Field(default=None, ge=0)
+    newcomer: int | None = Field(default=None, ge=0)
     def to_cbor(self) -> bytes:
         """The CBOR encoding of the announced member list.
 
@@ -155,9 +155,8 @@ class GroupChatReplyWho(BaseModel):
         >>> GroupChatReplyWho.from_cbor(who.to_cbor()).please_adds[0].display_name
         'alice'
         >>> handed = GroupChatReplyWho(
-        ...     please_adds=[alice, None], roster_size=2,
-        ...     rosters=[bytes([0]), bytes()], seen=[4, -1],
-        ...     introductions=[(0, 1, 1)], unsettled=[(0, 2, {1: 7})],
+        ...     please_adds=[alice, None], rosters=[[(0, 0, -1), (1, None, 5)], None],
+        ...     introductions=[(0, 5, 1)], introducer=0, newcomer=2,
         ... )
         >>> GroupChatReplyWho.from_cbor(handed.to_cbor()) == handed
         True
@@ -179,6 +178,8 @@ class GroupChatTypeEnum(Enum):
     TALLY_CLOSE = 7
     TALLY_SYNC_REQ = 8
     TALLY_SYNC_RESP = 9
+    # Numbers members or says where the sender was introduced; never shown.
+    CONTROL = 10
 
 class SendOperation(BaseModel):
     messages: "List[GroupChatMessage]"
@@ -364,6 +365,11 @@ class GroupChatMessage(BaseModel):
     # MessageBoxIndex for each; see ``katzenqt.ack_codec``. Absent when there
     # is nothing to acknowledge.
     acks: bytes | None = Field(default=None)
+    # Roster indexes this message assigns, and where the sender was
+    # introduced; see ``katzenqt.groupchat.wire``. Only in control messages
+    # and Introductions.
+    numbers: bytes | None = Field(default=None)
+    introduced_at: bytes | None = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -454,7 +460,7 @@ class GroupChatMessage(BaseModel):
         >>> GroupChatMessage.from_cbor(newer)
         Traceback (most recent call last):
             ...
-        katzenqt.models.UnsupportedVersion: message version 2 is newer than version 1, the newest this client reads
+        katzenqt.models.UnsupportedVersion: message version 3 is newer than version 2, the newest this client reads
         """
         fields = cbor2.loads(cbor_bytes)
         if isinstance(fields, dict):

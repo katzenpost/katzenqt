@@ -246,16 +246,17 @@ class Group:
         if pending.introduced is None:
             self.unnumbered.extend(intro for _, intro in pending.numbers)
 
-    def begin_induction(self, name: str, read_cap: bytes) -> list[Outgoing]:
+    def begin_induction(self) -> list[Outgoing]:
         """Begin inducting a member, starting each stream where we have read
         it now. Anything owed goes out first; send it before :meth:`reply`."""
         outgoing = self.compose()
-        self._hold(name, read_cap)
+        self._hold()
         return outgoing
 
-    def introduce_now(self) -> Outgoing:
-        """Commit the induction under way: the ``Introduction`` to send."""
-        message, pending = self._introduction()
+    def introduce_now(self, name: str, read_cap: bytes) -> Outgoing:
+        """Commit the induction under way: the ``Introduction`` of the
+        member read by ``read_cap``, to send."""
+        message, pending = self._introduction(name, read_cap)
         return self._stage(message, pending)
 
     def cancel_induction(self) -> None:
@@ -386,9 +387,7 @@ class Group:
         self.introduced_at = None
         return message, Pending(numbers=tuple(assigned), control=True)
 
-    def _introduction(self) -> tuple[Message, Pending]:
-        assert self.ledger.invitee is not None
-        name, read_cap = self.ledger.invitee
+    def _introduction(self, name: str, read_cap: bytes) -> tuple[Message, Pending]:
         new = key_of(read_cap)
         numbers: tuple[tuple[int, IntroRef], ...] = ()
         assigned: tuple[tuple[int, At], ...] = ()
@@ -435,8 +434,7 @@ class Group:
         catching up, commit an induction."""
         effects = self._flush()
         if self.ledger.induction is Induction.CATCHING_UP and self._settled():
-            assert self.ledger.invitee is not None
-            self._hold(*self.ledger.invitee)
+            self._hold()
         if (
             self.ledger.induction is Induction.INDUCTING
             and self.ledger.commit
@@ -484,9 +482,8 @@ class Group:
             effects += reader.read()
         return effects + self._progress()
 
-    def _hold(self, name: str, read_cap: bytes) -> None:
+    def _hold(self) -> None:
         self.ledger.induction = Induction.INDUCTING
-        self.ledger.invitee = (name, read_cap)
         self.ledger.starts = {key: r.next for key, r in self.readers.items()}
 
     def _release(self) -> None:
@@ -497,9 +494,9 @@ class Group:
 
     def _commit(self) -> list[Effect]:
         assert self.ledger.invitee is not None
-        read_cap = self.ledger.invitee[1]
+        name, read_cap = self.ledger.invitee
         reply = self.reply(self.pool[0])
-        effects = self._write(self.introduce_now())
+        effects = self._write(self.introduce_now(name, read_cap))
         return effects + [SendJoinReply(read_cap, reply)] + self._flush()
 
     def reply(self, own_start: bytes) -> JoinReply:

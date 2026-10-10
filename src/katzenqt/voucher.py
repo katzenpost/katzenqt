@@ -657,9 +657,7 @@ async def _adopt_rosters(
     never the join: whatever it had begun to store is rolled back."""
     try:
         async with sess.begin_nested():
-            adopted = await acks.adopt(
-                sess, conv, acks.member_key(own_read_cap), reply_who,
-            )
+            adopted = await acks.adopt(sess, conv, own_read_cap, reply_who)
     except Exception as e:
         logger.warning(
             "could not read the rosters handed over for conversation %d; it "
@@ -687,18 +685,14 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
             assert conv is not None
-            send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
-            new_write_caps, db_entries = await send_op.serialize_async(
-                chunk_size=1530, conversation_id=conversation_id,
-            )
+            # The new member takes the next place in our roster once this
+            # message is written.
+            new_write_caps, db_entries = await acks.serialize_introduction(sess, conv, gcm)
             final_pwal_id = db_entries[-1].id
             for cap_uuid in new_write_caps:
                 sess.add(persistent.WriteCapWAL(id=cap_uuid))
             for obj in db_entries:
                 sess.add(obj)
-            # The new member takes the next place in our roster once this
-            # message is written.
-            await acks.introduced(sess, conv, read_cap, final_pwal_id)
             sess.add(persistent.ConversationLog(
                 conversation_id=conversation_id,
                 conversation_peer_id=conv.own_peer_id,
@@ -786,6 +780,7 @@ async def derive_read_and_induct(
     pending = await _read_joiner_payload(connection, conversation_id, peer_name, voucher)
     lock = _induction_locks.setdefault(conversation_id, asyncio.Lock())
     async with lock, acks.held_back(conversation_id):
+        await check_for_new()
         return await _reply_and_introduce(
             connection, conversation_id, peer_name, voucher, pending,
         )

@@ -84,7 +84,8 @@ class TestBuildWhoReplyOmitsUnprovisionedSelf:
         reply = await voucher._build_who_reply(conv_id)
         assert len(reply.please_adds) == 1
         own = reply.please_adds[0]
-        assert own is not None and own.read_cap == b"\x02" * 136
+        # Our own key, starting where our stream continues.
+        assert own is not None and own.read_cap == b"\x02" * 32 + b"\x00" * 104
 
 
 class TestSendIntroductionMessageNeverRaises:

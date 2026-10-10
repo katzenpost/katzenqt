@@ -164,7 +164,7 @@ def test_an_induction_can_be_called_off() -> None:
     world.run("option passive on")
     world.run("new-group alice bob")
     alice = world.group("alice")
-    alice.begin_induction("dave", world.member("dave").read_cap)
+    alice.begin_induction()
     assert alice.ledger.holding
     alice.cancel_induction()
     assert not alice.ledger.holding

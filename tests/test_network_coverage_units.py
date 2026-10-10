@@ -495,7 +495,10 @@ class TestTryAssemble:
         assert assembled is None
         (record,) = caplog.records
         assert "from a newer client" in record.message
-        assert "version 2 is newer than version 1" in record.message
+        assert (
+            f"version {models.GROUP_CHAT_VERSION + 1} is newer than version "
+            f"{models.GROUP_CHAT_VERSION}"
+        ) in record.message
         assert record.exc_info is None
 
     @pytest.mark.asyncio

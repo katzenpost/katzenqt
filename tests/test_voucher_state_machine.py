@@ -278,18 +278,18 @@ async def _induct(
     assert joiner_view[joiner.name] == (await joiner.current_write_cap())[32:]
 
 
+_written: "dict[object, int]" = {}
+
+
 async def _write_queued(*_: object, **__: object) -> None:
     """Stand in for the send loop: whatever is queued is written at once,
     each box at the next position on its stream. An inductor waits for its
     last ``Introduction`` to be written before it inducts again."""
     with persistent.Session(persistent._engine_sync) as sess:
         for pwal in sess.exec(select(persistent.PlaintextWAL)).all():
-            written = sess.exec(
-                select(persistent.SentBox).where(
-                    persistent.SentBox.bacap_stream == pwal.bacap_stream
-                )
-            ).all()
-            index = len(written).to_bytes(8, "little") + bytes(_INDEX - 8)
+            at = _written.get(pwal.bacap_stream, 0)
+            _written[pwal.bacap_stream] = at + 1
+            index = at.to_bytes(8, "little") + bytes(_INDEX - 8)
             persistent._ensure_sent_log_and_flip_status(sess, pwal)
             persistent._record_sent_box(sess, index, pwal)
             sess.delete(pwal)

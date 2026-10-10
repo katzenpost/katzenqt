@@ -2920,7 +2920,7 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
                 logger.exception("write drain failed during cancel of %s", agg)
     _inflight_writes.pop(agg, None)
     __resend_queue.discard(agg)
-    async with persistent.asession() as sess:
+    async with persistent.conversation_log_order_lock(conv_id), persistent.asession() as sess:
         # Re-check in the same transaction as the deletes: a chunk ACK that
         # landed while the write task was winding down can complete the
         # upload, which makes it uncancellable.
@@ -2956,7 +2956,7 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
         if convlog is not None:
             await sess.delete(convlog)
         # What the message acknowledged goes unsent with it.
-        await acks.forget_outgoing(sess, i_chunk_id)
+        await acks.forget_outgoing(sess, conv_id, i_chunk_id)
         await sess.delete(i_chunk_row)
         rcw_row = await sess.get(persistent.ReadCapWAL, rcw_id)
         if rcw_row is not None:
@@ -2992,6 +2992,7 @@ async def _upload_stream_for_rcw(rcw_id: uuid.UUID) -> "uuid.UUID | None":
 
 
 async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
+    released: "list[tuple[int, int, uuid.UUID]]" = []
     async with persistent.asession() as sess:
         rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
         if rcw is None:
@@ -3013,12 +3014,9 @@ async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
                 await _discard_substream_release(
                     sess, parent.read_cap_id, rcw.read_cap,
                 )
-                parent_rcw = await sess.get(
-                    persistent.ReadCapWAL, parent.read_cap_id,
+                released.append(
+                    (parent.conversation.id, parent.id, parent.read_cap_id)
                 )
-                if parent_rcw is not None:
-                    await sess.flush()
-                    await acks.settle(sess, parent, parent_rcw)
             peer.active = False
             sess.add(peer)
         for piece in (await sess.exec(select(persistent.ReceivedPiece).where(
@@ -3035,6 +3033,15 @@ async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
         rcw.paused = False
         sess.add(rcw)
         await sess.commit()
+    # Whatever waited on the dismissed message can now be acknowledged.
+    for conversation_id, parent_id, parent_rcw_id in released:
+        async with persistent.conversation_log_order_lock(conversation_id):
+            async with persistent.asession() as sess:
+                parent_peer = await sess.get(persistent.ConversationPeer, parent_id)
+                parent_rcw = await sess.get(persistent.ReadCapWAL, parent_rcw_id)
+                if parent_peer is not None and parent_rcw is not None:
+                    await acks.settle(sess, parent_peer, parent_rcw)
+                    await sess.commit()
 
 
 async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool:
