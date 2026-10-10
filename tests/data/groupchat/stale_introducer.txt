@@ -1,0 +1,21 @@
+# Flaw (e): a new member starts each stream at the box after its
+# introducer's last published ack. Acks are only published with messages,
+# so they can trail what the introducer has read by any amount. Bob has
+# read alice to the end but never sent anything; when he introduces dave
+# four epochs later, dave starts on alice@0, which has long expired, and is
+# stuck there for good.
+
+new-group alice bob carol
+send alice a0
+read bob alice
+tick 4
+introduce bob dave
+read dave alice
+----
+alice@0 not found
+
+send alice a1
+read dave alice
+scan dave alice
+----
+alice@0 not found

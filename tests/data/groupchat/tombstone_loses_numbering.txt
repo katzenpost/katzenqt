@@ -1,0 +1,43 @@
+# Flaw (a): disappearing messages erase roster events. Alice numbers dave in
+# a message whose plaintext her retention policy then deletes; backfill
+# rewrites it as an empty tombstone. Bob reaches the tombstone without ever
+# having read the message, so he can never learn that alice numbered dave.
+
+new-group alice bob carol
+introduce carol dave
+read alice carol
+send alice hi            # numbers dave
+----
+alice@0 "hi" acks 0:carol@0
+
+purge alice
+tick
+read bob carol
+read bob alice
+----
+alice@0 tombstone
+alice@1 not found
+
+send dave hello
+read alice dave
+send alice again         # acks dave as index 3
+----
+alice@1 "again" acks 3:dave@0
+
+read bob dave
+read bob alice
+roster alice alice
+----
+carol alice bob dave
+
+roster bob alice
+----
+carol alice bob (+1 unsettled)
+
+acks alice alice 1
+----
+dave@0
+
+acks bob alice 1
+----
+none

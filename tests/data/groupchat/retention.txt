@@ -1,0 +1,31 @@
+# Retention. A sent message's plaintext is dropped once every member we
+# read has acked it, and backfill then writes it as a tombstone. A
+# retention policy can also expire received messages after a number of
+# epochs.
+
+option keep-received 2
+new-group alice bob carol
+send alice hello
+read bob alice
+read carol alice
+send bob b0              # acks alice@0
+read alice bob
+tick
+peek alice 0             # carol has not acked yet
+----
+"hello"
+
+inbox bob
+----
+alice@0 "hello"
+
+send carol c0
+read alice carol
+tick
+peek alice 0
+----
+tombstone
+
+inbox bob                # received two epochs ago
+----
+empty

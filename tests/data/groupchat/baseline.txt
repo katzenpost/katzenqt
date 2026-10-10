@@ -1,0 +1,56 @@
+# Normal operation: numbering through an Introduction, acks resolved by
+# every reader, and backfill keeping a stream readable for a member who
+# returns within the Sent-box window.
+
+new-group alice bob carol
+introduce carol dave
+----
+carol@0 introduces dave
+
+read alice carol
+----
+carol@0 introduces dave
+carol@1 not found
+
+send alice hi            # acks carol past the Introduction: alice numbers dave
+----
+alice@0 "hi" acks 0:carol@0
+
+roster alice alice
+----
+carol alice bob dave
+
+read bob carol
+read bob alice
+----
+alice@0 "hi" acks 0:carol@0
+alice@1 not found
+
+roster bob alice
+----
+carol alice bob dave
+
+send dave hello
+read alice dave
+send alice again         # dave is alice's index 3
+----
+alice@1 "again" acks 3:dave@0
+
+read bob dave
+read bob alice
+acks bob alice 1
+----
+dave@0
+
+read carol alice
+acked carol
+----
+alice:carol@0
+
+# Bob is away for three epochs; alice's backfill keeps her boxes alive.
+send alice while-bob-away
+tick 3
+read bob alice
+----
+alice@2 "while-bob-away"
+alice@3 not found

@@ -1,0 +1,44 @@
+# Flaw (d): two introducers of one member. Bob introduces erin, and carol
+# numbers her. Alice, who has not read bob, introduces dave; then carol
+# introduces dave too. Dave started from alice's roster, but a watcher that
+# reads carol's Introduction first takes carol's roster as dave's starting
+# point, and from then on reads dave's indexes wrongly. As with a jump, the
+# BACAP check shows the misread ack is not on the stream it was given to.
+
+new-group alice bob carol
+introduce bob erin
+read carol bob
+send carol c0            # carol numbers erin
+introduce alice dave
+introduce carol dave
+----
+carol@1 introduces dave
+dave already joined
+
+roster dave dave
+----
+carol alice bob dave
+
+read bob carol
+read bob alice
+roster bob dave
+----
+carol alice bob erin dave
+
+read dave bob
+send dave d0             # acks bob past erin's Introduction: dave numbers erin
+send erin e0
+read dave erin
+send dave d1             # acks erin@0 as dave's index 4
+----
+dave@1 "d1" acks 4:erin@0
+
+read bob erin
+read bob dave
+acks dave dave 1
+----
+erin@0
+
+acks bob dave 1
+----
+dave:not-on-stream

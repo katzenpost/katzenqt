@@ -1,0 +1,54 @@
+# Flaw (c): skipping boxes breaks roster following. Carol introduces erin;
+# alice numbers erin by acking past that Introduction. Bob never reads it:
+# carol's early boxes are gone by the time he looks. After jumping past the
+# hole, bob believes alice numbered nobody there, so he gives alice's next
+# member, frank, the index alice gave erin, and misattributes alice's acks.
+# The ack values are BACAP indexes on erin's stream, so bob can at least
+# tell that the one he gives to frank is not on frank's stream.
+
+option ack-jump on
+new-group alice bob carol
+send carol c0
+introduce carol erin
+----
+carol@1 introduces erin
+
+read alice carol
+send alice a0            # acks carol@1: alice numbers erin as index 3
+----
+alice@0 "a0" acks 0:carol@1
+
+read bob alice           # bob cannot settle a0's acks until he reads carol
+roster bob alice
+----
+carol alice bob (+1 unsettled)
+
+tick 6
+send carol c2
+read alice carol
+send alice a1            # acks carol@2
+introduce alice frank    # alice numbers frank as index 4
+----
+alice@2 introduces frank
+
+read bob alice
+scan bob carol           # jumps past the hole to carol@2
+roster alice alice
+----
+carol alice bob erin frank
+
+roster bob alice
+----
+carol alice bob frank
+
+send erin e0
+read alice erin
+send alice a2            # acks erin@0 as index 3
+read bob alice
+acks alice alice 3
+----
+erin@0
+
+acks bob alice 3
+----
+frank:not-on-stream

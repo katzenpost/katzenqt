@@ -1,0 +1,24 @@
+# While an induction is under way the introducer sends no acks. Its last
+# published acks fix where the new member starts on each stream, so holding
+# them back gives the new member everything written since the invitation.
+
+new-group alice bob carol
+send carol c0
+read alice carol
+invite alice dave
+send alice a0            # no acks while inducting
+----
+alice@0 "a0"
+
+introduce alice dave
+send carol c1
+read dave carol          # dave starts where alice's acks of carol stopped
+----
+carol@0 "c0"
+carol@1 "c1"
+carol@2 not found
+
+read alice carol
+send alice a1            # acks resume
+----
+alice@2 "a1" acks 0:carol@1
