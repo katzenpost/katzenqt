@@ -27,6 +27,7 @@ class Retention:
 class Record:
     index: bytes
     plaintext: bytes | None
+    """None once the plaintext is gone, or if it was never handed over."""
     control: bool
     written: int
 
@@ -36,7 +37,9 @@ class SentBox:
     records: dict[int, Record] = field(default_factory=dict)
     backfilled: int = -1
 
-    def record(self, at: int, index: bytes, plaintext: bytes, control: bool, epoch: int) -> None:
+    def record(
+        self, at: int, index: bytes, plaintext: bytes | None, control: bool, epoch: int
+    ) -> None:
         self.records[at] = Record(index, plaintext, control, epoch)
 
     def check(self, at: int, index: bytes) -> bool:

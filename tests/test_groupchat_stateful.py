@@ -16,7 +16,7 @@ from hypothesis.stateful import (
     rule,
 )
 
-from katzenqt.groupchat import sim
+from katzenqt.groupchat import sim, state
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.ledger import Induction
 from katzenqt.groupchat.wire import Key, position
@@ -27,13 +27,22 @@ NAMES = FOUNDERS + NEWCOMERS
 
 
 class GroupChat(RuleBasedStateMachine):
+    passive = False
+    """Drive members as a client that reads and writes for itself would,
+    with its writes landing late."""
+
     @initialize()
     def found(self) -> None:
         self.world = sim.World()
+        if self.passive:
+            self.world.run("option passive on")
+            self.world.run("option delay-writes on")
         self.world.run("new-group " + " ".join(FOUNDERS))
         self.since: dict[str, int] = dict.fromkeys(FOUNDERS, 0)
         """When each member could first read from its start positions."""
-        self.inviting: dict[str, str] = {}
+        self.inviting: dict[str, tuple[str, dict[Key, int]]] = {}
+        """Who each introducer is inviting, and where it had read each
+        stream when the invitation began."""
         self.caught_up: dict[tuple[str, str], int] = {}
 
     @property
@@ -48,6 +57,23 @@ class GroupChat(RuleBasedStateMachine):
 
     def key(self, name: str) -> Key:
         return self.world.members[name].key
+
+    def end(self, owner: str) -> int:
+        """The position ``owner`` writes next."""
+        member = self.world.members[owner]
+        if member.passive:
+            return position(member.next_own)
+        return position(self.group(owner).pool[0])
+
+    @precondition(lambda self: self.passive)
+    @rule(data=st.data())
+    def land(self, data: st.DataObject) -> None:
+        self.world.run(f"land {data.draw(st.sampled_from(self.joined()))}")
+
+    @precondition(lambda self: self.passive)
+    @rule(data=st.data())
+    def abandon(self, data: st.DataObject) -> None:
+        self.world.run(f"abandon {data.draw(st.sampled_from(self.joined()))}")
 
     def pair(self, data: st.DataObject) -> tuple[str, str]:
         reader = data.draw(st.sampled_from(self.joined()))
@@ -96,18 +122,18 @@ class GroupChat(RuleBasedStateMachine):
         group = self.group(introducer)
         new = next(name for name in NEWCOMERS if name not in self.world.joined)
         if introducer not in self.inviting:
-            if new in self.inviting.values():
+            if new in (name for name, _ in self.inviting.values()):
                 return
             self.world.run(f"invite {introducer} {new}")
             assert group.ledger.induction is Induction.INDUCTING
-            self.inviting[introducer] = new
+            stood = {key: reader.position for key, reader in group.readers.items()}
+            self.inviting[introducer] = (new, stood)
             self.since[new] = self.epoch
             self.inherit(introducer, new)
             if invite:
                 return
-        new = self.inviting.pop(introducer)
+        new, starts = self.inviting.pop(introducer)
         self.caught_up[new, introducer] = self.epoch
-        starts = {key: position(index) for key, index in group.ledger.starts.items()}
         self.world.run(f"introduce {introducer} {new}")
         joiner = self.group(new)
         for key, start in starts.items():
@@ -126,7 +152,7 @@ class GroupChat(RuleBasedStateMachine):
             stream = group.readers.get(self.key(owner))
             if stream is None:
                 continue
-            if stream.position == position(self.group(owner).pool[0]):
+            if stream.position == self.end(owner):
                 self.caught_up[new, owner] = self.epoch
             elif (introducer, owner) in self.caught_up:
                 self.caught_up[new, owner] = self.caught_up[introducer, owner]
@@ -142,7 +168,7 @@ class GroupChat(RuleBasedStateMachine):
             if stream is None:
                 continue
             self.world.run(f"read {reader} {owner}")
-            end = position(self.group(owner).pool[0])
+            end = self.end(owner)
             since = self.caught_up.get((reader, owner))
             if since is None and self.since[owner] >= self.since[reader]:
                 since = self.since[owner]
@@ -153,6 +179,19 @@ class GroupChat(RuleBasedStateMachine):
                     f"{reader} is stuck on {owner}'s stream although it"
                     f" could read to the end in epoch {since}, now {self.epoch}"
                 )
+
+    @invariant()
+    def survives_a_restart(self) -> None:
+        """Every member's state comes back the same from its bytes, and the
+        run carries on from the copy."""
+        if not hasattr(self, "world"):
+            return
+        for name in self.joined():
+            member = self.world.members[name]
+            assert member.group is not None
+            restored = state.load(state.dump(member.group))
+            assert restored == member.group
+            member.group = restored
 
     @invariant()
     def rosters_agree(self) -> None:
@@ -217,7 +256,7 @@ class GroupChat(RuleBasedStateMachine):
             return
         for owner in self.joined():
             writer = self.world.members[owner]
-            end = position(self.group(owner).pool[0])
+            end = self.end(owner)
             for reader in self.joined():
                 stream = self.group(reader).readers.get(writer.key)
                 if stream is None:
@@ -234,8 +273,28 @@ TestGroupChat.settings = settings(
 )
 
 
+class PassiveGroupChat(GroupChat):
+    passive = True
+
+
+TestPassiveGroupChat = PassiveGroupChat.TestCase
+TestPassiveGroupChat.settings = settings(
+    max_examples=25, stateful_step_count=40, deadline=None
+)
+
+
 class GroupChatAtLength(GroupChat):
     pass
+
+
+class PassiveGroupChatAtLength(GroupChat):
+    passive = True
+
+
+TestPassiveGroupChatAtLength = pytest.mark.nightly(PassiveGroupChatAtLength.TestCase)
+TestPassiveGroupChatAtLength.settings = settings(
+    max_examples=500, stateful_step_count=60, deadline=None
+)
 
 
 TestGroupChatAtLength = pytest.mark.nightly(GroupChatAtLength.TestCase)

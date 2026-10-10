@@ -25,6 +25,7 @@ roster dave dave
 ----
 carol alice bob dave
 
+read dave alice
 send dave d0             # a control message stating where dave joined goes first
 read bob alice
 read bob carol
@@ -53,6 +54,7 @@ carol alice bob dave erin
 new-group fred gina hal
 introduce fred ivy
 introduce hal ivy
+read ivy fred
 send ivy i0              # introduced-at fred's Introduction goes first
 read gina hal
 read gina ivy

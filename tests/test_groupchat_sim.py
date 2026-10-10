@@ -6,7 +6,7 @@ from __future__ import annotations
 import cbor2
 import pytest
 
-from katzenqt.groupchat import events, sim, wire
+from katzenqt.groupchat import events, sim, state, wire
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.numbering import Rosters
 
@@ -23,7 +23,9 @@ def test_unknown_events_and_streams_do_nothing() -> None:
     assert alice.handle(object()) == []  # type: ignore[arg-type]
     assert alice.handle(events.Read(stranger)) == []
     assert alice.handle(events.Scan(stranger)) == []
-    assert alice.handle(events.BoxRead(stranger, bytes(104), events.Missing.NOT_FOUND)) == []
+    effects = alice.handle(events.BoxRead(stranger, bytes(104), events.Missing.NOT_FOUND))
+    assert all(isinstance(effect, events.DeriveIndexes) for effect in effects)
+    assert alice.observe(stranger, bytes(104), None, bytes(104)) == []
     assert alice.handle(events.IndexesDerived("jump", stranger, ())) == []
 
 
@@ -131,3 +133,54 @@ def test_a_founder_alone() -> None:
     alice.run("new-group alice")
     group: Group = alice.group("alice")
     assert group.rosters.known(group.me) == {0: group.me}
+
+
+def test_unknown_tokens_are_ignored() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    alice.written(99, bytes(104))
+    alice.abandoned(99)
+    assert alice.pending == {}
+
+
+def test_abandoning_restores_the_earlier_ack() -> None:
+    world = sim.World()
+    world.run("option passive on")
+    world.run("option delay-writes on")
+    world.run("new-group alice bob")
+    for line in ("send bob b0", "land bob", "read alice bob", "send alice a0", "land alice"):
+        world.run(line)
+    bob = world.members["bob"].key
+    alice = world.group("alice")
+    first = alice.ledger.published[bob]
+    for line in ("send bob b1", "land bob", "read alice bob", "send alice upload", "abandon alice"):
+        world.run(line)
+    assert alice.ledger.published[bob] == first
+
+
+def test_an_induction_can_be_called_off() -> None:
+    world = sim.World()
+    world.run("option passive on")
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    alice.begin_induction("dave", world.member("dave").read_cap)
+    assert alice.ledger.holding
+    alice.cancel_induction()
+    assert not alice.ledger.holding
+
+
+def test_passive_reads_of_a_stream_not_followed() -> None:
+    world = sim.World()
+    world.run("option passive on")
+    world.run("new-group alice bob")
+    world.run("new-group carol")
+    assert world.run("read alice carol") == []
+    assert world.run("send alice hi") == ['alice@0 "hi"']
+
+
+def test_state_that_cannot_be_read() -> None:
+    with pytest.raises(state.StateError):
+        state.load(b"\xff")
+    with pytest.raises(state.StateError, match="version 7"):
+        state.load(cbor2.dumps([7, {}]))

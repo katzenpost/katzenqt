@@ -19,6 +19,11 @@ Key = bytes
 KEY_SIZE = 32
 INDEX_SIZE = 104
 
+THIS_MESSAGE = 0
+"""The position a ``Numbers`` entry gives the ``Introduction`` carried in
+the same message, whose own position is unknown when it is encoded. Stream
+counters start at a random point, so no real box is at 0."""
+
 
 def key_of(read_cap: bytes) -> Key:
     return read_cap[:KEY_SIZE]

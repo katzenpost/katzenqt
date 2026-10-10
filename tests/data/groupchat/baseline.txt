@@ -35,6 +35,7 @@ roster bob alice
 ----
 carol alice bob dave
 
+read dave carol
 send dave hello
 read alice dave
 send alice again         # dave is alice's index 3

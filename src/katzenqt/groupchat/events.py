@@ -152,8 +152,10 @@ Effect: TypeAlias = (
 
 @dataclass(frozen=True)
 class JoinReply:
-    """What an introducer hands a new member. Members are named by their
-    place in ``members``, which is the introducer's roster.
+    """What an introducer hands a new member, before it knows the new
+    member's read cap or where its ``Introduction`` will land. Members are
+    named by their place in ``members``, which is the introducer's roster;
+    the new member's own place is ``newcomer``, the next one.
 
     ``members``: each member's read cap and start index, or None for a slot
     the introducer cannot or will not fill. ``rosters``: each member's
@@ -167,5 +169,5 @@ class JoinReply:
     introductions: tuple[tuple[int, int, int], ...]
     introducer: int
     """The introducer's place."""
-    introduction: int
-    """The position of the ``Introduction`` on the introducer's stream."""
+    newcomer: int
+    """The new member's place."""

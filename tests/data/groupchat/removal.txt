@@ -24,6 +24,7 @@ peek alice 0             # dropped: bob, the only member alice reads, acked
 tombstone
 
 introduce alice dave
+read dave alice
 roster dave alice
 ----
 removed alice bob dave

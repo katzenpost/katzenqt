@@ -20,6 +20,7 @@ alice@0 numbers 3:dave acks 0:carol@0
 alice@1 tombstone
 alice@2 not found
 
+read dave carol
 send dave hello
 read alice dave
 send alice again         # acks dave

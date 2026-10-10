@@ -35,10 +35,11 @@ roster bob alice
 ----
 carol alice bob ? frank
 
+read erin carol
 send erin e0
 read alice erin
 send alice a3            # acks erin as index 3
 read bob alice
 acks bob alice 4
 ----
-?=erin@1
+?=erin@0

@@ -58,9 +58,10 @@ from .events import (
     WriteBox,
     WriteTombstone,
 )
-from .group import Group
+from .group import Group, Outgoing
+from .ledger import Induction
 from .sentbox import Retention
-from .wire import CborCodec, Key, Message, key_of, position
+from .wire import THIS_MESSAGE, CborCodec, Key, Message, key_of, position
 
 CTX = b"pigeonhole context"
 
@@ -126,6 +127,14 @@ class Member:
     """Every message this member has read, for ``acks``."""
     reported: int = -1
     """The last of its own boxes a command has printed."""
+    passive: bool = False
+    """Driven as a client that reads and writes for itself would drive it."""
+    unwritten: list[Outgoing] = field(default_factory=list)
+    """Messages composed but not yet landed, when driven passively."""
+    next_own: bytes = b""
+    """The index our next message lands at, when driven passively."""
+    cursors: dict[Key, bytes] = field(default_factory=dict)
+    """Where we read each stream next, when driven passively."""
 
     @property
     def read_cap(self) -> bytes:
@@ -197,7 +206,9 @@ class World:
         return self.at(member.key, position(index)) if member else "?"
 
     def settings(self) -> dict[str, Any]:
-        options = dict(self.options)
+        options = {
+            k: v for k, v in self.options.items() if k not in ("passive", "delay_writes")
+        }
         policy = {
             name: options.pop(name)
             for name in list(options)
@@ -245,13 +256,64 @@ class World:
                 case SendJoinReply(to, reply):
                     new = self.by_key(key_of(to))
                     assert new is not None
-                    if new.group is not None:
-                        out.append(f"{new.name} already joined")
-                    else:
-                        new.group = Group.joined(to, reply, **self.settings())
-                        new.group.handle(EpochChanged(self.replica.epoch))
+                    out.extend(self.join(new, reply))
             if follow is not None:
                 pending[:0] = group.handle(follow)
+        return out
+
+    def join(self, new: Member, reply: Any) -> list[str]:
+        if new.group is not None:
+            return [f"{new.name} already joined"]
+        new.group = Group.joined(new.read_cap, reply, **self.settings())
+        new.group.handle(EpochChanged(self.replica.epoch))
+        self.make_passive(new)
+        return []
+
+    def make_passive(self, member: Member) -> None:
+        if self.options.get("passive"):
+            member.passive = True
+            member.next_own = member.cap.message_box_index.to_bytes()
+
+    # Driving a member passively.
+
+    def land(self, member: Member) -> None:
+        """Write what ``member`` has composed, in order, as a client's own
+        write queue would."""
+        assert member.group is not None
+        for outgoing in member.unwritten:
+            plaintext = self.codec.encode(outgoing.message)
+            at = member.cap.position_at(MessageBoxIndex.from_bytes(member.next_own))
+            written = self.replica.write(Stored(*at.encrypt(CTX, plaintext)))
+            assert written in ("stored", "same"), written
+            member.group.written(outgoing.token, member.next_own, plaintext)
+            member.next_own = at.index.next_index().to_bytes()
+        member.unwritten = []
+
+    def queue(self, member: Member, outgoing: list[Outgoing]) -> None:
+        member.unwritten += outgoing
+        if not self.options.get("delay_writes"):
+            self.land(member)
+
+    def read_passively(self, member: Member, owner: Member) -> list[str]:
+        group = member.group
+        assert group is not None
+        reader = group.readers.get(owner.key)
+        if reader is None:
+            return []
+        cursor = member.cursors.get(owner.key, reader.next)
+        out = []
+        while True:
+            result, next_index = self.fetch(reader.read_cap, cursor)
+            out.extend(self.show_read(member, owner.key, cursor, result, False))
+            if next_index is None:
+                break
+            for effect in group.observe(
+                owner.key, cursor, result if isinstance(result, bytes) else None, next_index
+            ):
+                if isinstance(effect, Deliver):
+                    member.inbox.append((effect.sender, effect.position, effect.content.decode()))
+            cursor = next_index
+        member.cursors[owner.key] = cursor
         return out
 
     def fetch(self, read_cap: bytes, index: bytes) -> tuple[bytes | Missing, bytes | None]:
@@ -294,7 +356,12 @@ class World:
             parts.append(
                 "numbers "
                 + " ".join(
-                    f"{index}:{self.introduced(ref.position)}"
+                    f"{index}:"
+                    + (
+                        message.introduction.name
+                        if message.introduction and ref.position == THIS_MESSAGE
+                        else self.introduced(ref.position)
+                    )
                     for index, ref in message.numbers
                 )
             )
@@ -337,6 +404,7 @@ class World:
         caps = [founder.read_cap for founder in founders]
         for founder in founders:
             founder.group = Group.found(founder.read_cap, caps, **self.settings())
+            self.make_passive(founder)
 
     def written(self, member: Member) -> list[str]:
         """What ``member`` has written since a command last printed it."""
@@ -352,26 +420,66 @@ class World:
 
     def do_send(self, who: str, *text: str) -> list[str]:
         member = self.members[who]
-        return self.drive(member, Send(" ".join(text).encode())) + self.written(member)
+        content = " ".join(text).encode()
+        if member.passive:
+            assert member.group is not None
+            self.queue(member, member.group.compose(content))
+            return self.written(member)
+        return self.drive(member, Send(content)) + self.written(member)
 
     def do_invite(self, who: str, new: str) -> list[str]:
         member = self.members[who]
+        if member.passive:
+            assert member.group is not None
+            self.land(member)
+            self.queue(member, member.group.begin_induction(new, self.member(new).read_cap))
+            self.land(member)
+            return self.written(member)
         out = self.drive(member, Invite(new, self.member(new).read_cap))
         return out + self.written(member)
 
     def do_introduce(self, who: str, new: str) -> list[str]:
         member = self.members[who]
+        if member.passive:
+            group = member.group
+            assert group is not None
+            if group.ledger.induction is not Induction.INDUCTING:
+                self.do_invite(who, new)
+            reply = group.reply(member.next_own)
+            self.queue(member, [group.introduce_now()])
+            self.land(member)
+            return self.join(self.member(new), reply) + self.written(member)
         out = self.drive(member, Introduce(new, self.member(new).read_cap))
         return out + self.written(member)
+
+    def do_land(self, who: str) -> None:
+        self.land(self.members[who])
+
+    def do_abandon(self, who: str) -> None:
+        """Drop ``who``'s last unwritten content message, as a cancelled
+        upload is."""
+        member = self.members[who]
+        assert member.group is not None
+        for outgoing in reversed(member.unwritten):
+            if not outgoing.message.control:
+                member.unwritten.remove(outgoing)
+                member.group.abandoned(outgoing.token)
+                return
 
     def do_remove(self, who: str, gone: str) -> list[str]:
         return self.drive(self.members[who], Remove(self.members[gone].key))
 
     def do_read(self, who: str, owner: str) -> list[str]:
-        return self.drive(self.members[who], Read(self.members[owner].key))
+        member = self.members[who]
+        if member.passive:
+            return self.read_passively(member, self.members[owner])
+        return self.drive(member, Read(self.members[owner].key))
 
     def do_scan(self, who: str, owner: str) -> list[str]:
-        return self.drive(self.members[who], Scan(self.members[owner].key))
+        member = self.members[who]
+        if member.passive:
+            return self.read_passively(member, self.members[owner])
+        return self.drive(member, Scan(self.members[owner].key))
 
     def do_epoch(self, epochs: str = "1") -> None:
         """Replica epochs pass; nobody backfills."""
