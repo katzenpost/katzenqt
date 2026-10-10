@@ -1,6 +1,8 @@
-# While an induction is under way the introducer sends no acks. Its last
-# published acks fix where the new member starts on each stream, so holding
-# them back gives the new member everything written since the invitation.
+# An invitation begins with the introducer catching up on every stream; the
+# new member starts each one where the introducer had read it then. Until
+# the Introduction is committed the introducer sends no acks, so no member
+# drops a box the new member is owed, and the new member gets everything
+# written since the invitation.
 
 new-group alice bob carol
 send carol c0
@@ -12,9 +14,8 @@ alice@0 "a0"
 
 introduce alice dave
 send carol c1
-read dave carol          # dave starts where alice's acks of carol stopped
+read dave carol          # dave starts where alice had read carol when inviting
 ----
-carol@0 "c0"
 carol@1 "c1"
 carol@2 not found
 

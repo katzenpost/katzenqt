@@ -1,6 +1,7 @@
-"""Random runs of the group chat simulator, checking the spec's claims after
-every step. Only what the spec promises loses nothing is run here: no
-removal, no retention policy beyond dropping acked plaintext, no jumps."""
+"""Random runs of the group chat state machine against the simulated
+Pigeonhole, checking the spec's claims after every step. Only what the spec
+promises loses nothing is run here: no removal and no retention policy
+beyond dropping acked plaintext."""
 
 from __future__ import annotations
 
@@ -16,7 +17,9 @@ from hypothesis.stateful import (
 )
 
 from katzenqt.groupchat import sim
-from katzenqt.groupchat.member import CTX, Member
+from katzenqt.groupchat.group import Group
+from katzenqt.groupchat.ledger import Induction
+from katzenqt.groupchat.wire import Key, position
 
 FOUNDERS = ("alice", "bob", "carol")
 NEWCOMERS = ("dave", "erin")
@@ -28,10 +31,9 @@ class GroupChat(RuleBasedStateMachine):
     def found(self) -> None:
         self.world = sim.World()
         self.world.run("new-group " + " ".join(FOUNDERS))
-        self.joined_at = dict.fromkeys(FOUNDERS, 0)
-        self.inviting: dict[str, tuple[str, dict[bytes, int]]] = {}
-        """Who each introducer is inviting, and where it stood on each
-        stream when the invitation began."""
+        self.since: dict[str, int] = dict.fromkeys(FOUNDERS, 0)
+        """When each member could first read from its start positions."""
+        self.inviting: dict[str, str] = {}
         self.caught_up: dict[tuple[str, str], int] = {}
 
     @property
@@ -41,8 +43,11 @@ class GroupChat(RuleBasedStateMachine):
     def joined(self) -> list[str]:
         return [name for name in NAMES if name in self.world.joined]
 
-    def member(self, name: str) -> Member:
-        return self.world.members[name]
+    def group(self, name: str) -> Group:
+        return self.world.group(name)
+
+    def key(self, name: str) -> Key:
+        return self.world.members[name].key
 
     def pair(self, data: st.DataObject) -> tuple[str, str]:
         reader = data.draw(st.sampled_from(self.joined()))
@@ -88,68 +93,95 @@ class GroupChat(RuleBasedStateMachine):
     @rule(data=st.data(), invite=st.booleans())
     def introduce(self, data: st.DataObject, invite: bool) -> None:
         introducer = data.draw(st.sampled_from(self.joined()))
-        me = self.member(introducer)
-        stood = {
-            key: cursor.next.index.idx_64 for key, cursor in me.cursors.items()
-        }
+        group = self.group(introducer)
         new = next(name for name in NEWCOMERS if name not in self.world.joined)
-        if invite and introducer not in self.inviting:
+        if introducer not in self.inviting:
+            if new in self.inviting.values():
+                return
             self.world.run(f"invite {introducer} {new}")
-            self.inviting[introducer] = (new, stood)
-            return
-        new, stood = self.inviting.pop(introducer, (new, stood))
-        if new in self.world.joined:
-            return
+            assert group.ledger.induction is Induction.INDUCTING
+            self.inviting[introducer] = new
+            self.since[new] = self.epoch
+            self.inherit(introducer, new)
+            if invite:
+                return
+        new = self.inviting.pop(introducer)
+        self.caught_up[new, introducer] = self.epoch
+        starts = {key: position(index) for key, index in group.ledger.starts.items()}
         self.world.run(f"introduce {introducer} {new}")
-        self.joined_at[new] = self.epoch
-        joiner = self.member(new)
-        for key, position in stood.items():
-            if key in joiner.cursors:
-                assert joiner.cursors[key].next.index.idx_64 <= position, (
+        joiner = self.group(new)
+        for key, start in starts.items():
+            if key in joiner.readers:
+                assert joiner.readers[key].position <= start, (
                     f"{new} starts {self.world.name_of(key)}'s stream after"
-                    f" where {introducer} stood when inviting it"
+                    f" where {introducer} had read it when inviting"
                 )
+
+    def inherit(self, introducer: str, new: str) -> None:
+        """A new member starts where its introducer has read, so it can only
+        be promised what its introducer could: each stream the introducer
+        has read to the end, from when it did."""
+        group = self.group(introducer)
+        for owner in self.joined():
+            stream = group.readers.get(self.key(owner))
+            if stream is None:
+                continue
+            if stream.position == position(self.group(owner).pool[0]):
+                self.caught_up[new, owner] = self.epoch
+            elif (introducer, owner) in self.caught_up:
+                self.caught_up[new, owner] = self.caught_up[introducer, owner]
 
     @rule(data=st.data())
     def catch_up(self, data: st.DataObject) -> None:
-        """``reader`` reads every stream it follows. One it read to the end
-        within the Sent-box window must be read to the end again. A stream
-        handed over at a join promises nothing until it has been read to the
-        end once: see stale_introducer.txt."""
+        """``reader`` reads every stream it follows. One it could read to
+        the end within the Sent-box window must be read to the end again."""
         reader = data.draw(st.sampled_from(self.joined()))
-        me = self.member(reader)
+        group = self.group(reader)
         for owner in self.joined():
-            if owner == reader or self.member(owner).key not in me.cursors:
+            stream = group.readers.get(self.key(owner))
+            if stream is None:
                 continue
             self.world.run(f"read {reader} {owner}")
-            end = self.member(owner).next.index.idx_64
-            at_end = me.cursors[self.member(owner).key].next.index.idx_64 == end
+            end = position(self.group(owner).pool[0])
             since = self.caught_up.get((reader, owner))
-            if since is None and self.joined_at[owner] >= self.joined_at[reader]:
-                since = self.joined_at[owner]
-            if at_end:
+            if since is None and self.since[owner] >= self.since[reader]:
+                since = self.since[owner]
+            if stream.position == end:
                 self.caught_up[reader, owner] = self.epoch
             elif since is not None:
-                assert self.epoch - since > me.settings.window, (
-                    f"{reader} is stuck on {owner}'s stream although it read"
-                    f" to the end in epoch {since}, now {self.epoch}"
+                assert self.epoch - since > group.policy.window, (
+                    f"{reader} is stuck on {owner}'s stream although it"
+                    f" could read to the end in epoch {since}, now {self.epoch}"
                 )
 
     @invariant()
     def rosters_agree(self) -> None:
-        """Everyone's view of a roster is a prefix of the roster itself."""
+        """Whoever a member can name at an index of a roster is whoever the
+        roster's owner put there."""
         if not hasattr(self, "world"):
             return
         for owner in self.joined():
-            truth = self.member(owner).roster(self.member(owner).key)
-            assert truth is not None
+            truth = self.group(owner).rosters.known(self.key(owner))
             for viewer in self.joined():
-                view = self.member(viewer).roster(self.member(owner).key)
-                if view is None:
-                    continue
-                assert truth.roster[: len(view.roster)] == view.roster, (
-                    f"{viewer}'s view of {owner}'s roster is wrong"
-                )
+                view = self.group(viewer).rosters.known(self.key(owner))
+                for index, key in view.items():
+                    if key is not None:
+                        assert truth.get(index) == key, (
+                            f"{viewer} thinks {owner}'s index {index} is"
+                            f" {self.world.name_of(key)}"
+                        )
+
+    @invariant()
+    def nobody_numbered_twice(self) -> None:
+        if not hasattr(self, "world"):
+            return
+        for owner in self.joined():
+            keys = [
+                key
+                for key in self.group(owner).rosters.known(self.key(owner)).values()
+                if key is not None
+            ]
+            assert len(keys) == len(set(keys)), f"{owner} numbered someone twice"
 
     @invariant()
     def acks_name_their_streams(self) -> None:
@@ -157,11 +189,13 @@ class GroupChat(RuleBasedStateMachine):
         if not hasattr(self, "world"):
             return
         for viewer in self.joined():
-            me = self.member(viewer)
-            for owner, position in me.ack_values:
-                for member, index in me.resolve(owner, position).items():
-                    target = self.world.by_key(member)
-                    target.read_cap.contains(index)
+            rosters = self.group(viewer).rosters
+            for (sender, at), message in self.world.members[viewer].seen.items():
+                for index, value in message.acks.items():
+                    acked = rosters.resolve(sender, index, at)
+                    if acked is not None:
+                        stream = self.world.stream_of(position(value))
+                        assert stream is not None and stream.key == acked
 
     @invariant()
     def acks_are_true(self) -> None:
@@ -170,32 +204,28 @@ class GroupChat(RuleBasedStateMachine):
         if not hasattr(self, "world"):
             return
         for owner in self.joined():
-            me = self.member(owner)
-            for acker, position in me.acked_by.items():
-                cursor = self.world.by_key(acker).cursors[me.key]
-                assert cursor.last is not None
-                assert position <= cursor.last.idx_64
+            for acker, at in self.group(owner).ledger.acked_by.items():
+                reader = self.group(self.world.name_of(acker)).readers[self.key(owner)]
+                assert reader.last is not None
+                assert at <= position(reader.last)
 
     @invariant()
     def nothing_owed_is_dropped(self) -> None:
-        """A box a member has yet to read is not tombstoned because its
-        plaintext was acked by everyone else."""
+        """A box a member has yet to read is never tombstoned: it is
+        dropped only once everyone who reads it has acked it."""
         if not hasattr(self, "world"):
             return
         for owner in self.joined():
-            writer = self.member(owner)
-            end = writer.next.index.idx_64
+            writer = self.world.members[owner]
+            end = position(self.group(owner).pool[0])
             for reader in self.joined():
-                cursor = self.member(reader).cursors.get(writer.key)
-                if cursor is None:
+                stream = self.group(reader).readers.get(writer.key)
+                if stream is None:
                     continue
-                at = cursor.next
-                while at.index.idx_64 < end:
-                    stored = self.world.replica.read(at.box_id(CTX))
-                    assert stored is None or stored.payload, (
-                        f"{owner} tombstoned a box {reader} has not read"
-                    )
-                    at = at.next()
+                for at in range(stream.position, end):
+                    assert self.world.do_peek(owner, str(at - writer.start)) != [
+                        "tombstone"
+                    ], f"{owner} tombstoned a box {reader} has not read"
 
 
 TestGroupChat = GroupChat.TestCase

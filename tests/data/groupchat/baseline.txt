@@ -1,20 +1,24 @@
-# Normal operation: numbering through an Introduction, acks resolved by
-# every reader, and backfill keeping a stream readable for a member who
-# returns within the Sent-box window.
+# Normal operation: an introducer catching up before it introduces, explicit
+# numbering in control messages, acks resolved by every reader, and backfill
+# keeping a stream readable for a member who returns within the Sent-box
+# window.
 
 new-group alice bob carol
 introduce carol dave
 ----
-carol@0 introduces dave
+alice@0 not found
+bob@0 not found
+carol@0 introduces dave numbers 3:dave
 
 read alice carol
 ----
-carol@0 introduces dave
+carol@0 introduces dave numbers 3:dave
 carol@1 not found
 
-send alice hi            # acks carol past the Introduction: alice numbers dave
+send alice hi            # a control message numbering dave goes first
 ----
-alice@0 "hi" acks 0:carol@0
+alice@0 numbers 3:dave acks 0:carol@0
+alice@1 "hi"
 
 roster alice alice
 ----
@@ -23,8 +27,9 @@ carol alice bob dave
 read bob carol
 read bob alice
 ----
-alice@0 "hi" acks 0:carol@0
-alice@1 not found
+alice@0 numbers 3:dave acks 0:carol@0
+alice@1 "hi"
+alice@2 not found
 
 roster bob alice
 ----
@@ -34,13 +39,13 @@ send dave hello
 read alice dave
 send alice again         # dave is alice's index 3
 ----
-alice@1 "again" acks 3:dave@0
+alice@2 "again" acks 3:dave@1
 
 read bob dave
 read bob alice
-acks bob alice 1
+acks bob alice 2
 ----
-dave@0
+dave=dave@1
 
 read carol alice
 acked carol
@@ -52,5 +57,5 @@ send alice while-bob-away
 tick 3
 read bob alice
 ----
-alice@2 "while-bob-away"
-alice@3 not found
+alice@3 "while-bob-away"
+alice@4 not found

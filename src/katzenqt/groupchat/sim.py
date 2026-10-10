@@ -1,5 +1,5 @@
-"""A simulated Pigeonhole and a scenario language for driving members
-against it.
+"""A simulated Pigeonhole, a driver that plays the thin client daemon with
+Python BACAP, and a scenario language for driving group members.
 
 The replica keeps the rules of katzenpost's ``replica/state.go``: boxes are
 stored by replica epoch and only the current and previous epochs are kept;
@@ -32,34 +32,44 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
-from hpqc.bacap import MessageBoxIndex, WriteCap
+from hpqc.bacap import MessageBoxIndex, ReadCap, WriteCap
 
-from .member import (
-    CTX,
+from .events import (
+    BoxRead,
+    Deliver,
+    DeriveIndexes,
     Effect,
     EpochChanged,
     Event,
-    Fetch,
-    Found,
-    HandOver,
+    Expire,
+    IndexesDerived,
     Introduce,
     Invite,
-    Key,
-    Member,
-    Message,
-    Purge,
+    Missing,
     Read,
+    ReadBox,
     Remove,
-    ScanRequested,
+    Scan,
     Send,
-    Settings,
-    Show,
-    Stored,
-    Write,
+    SendJoinReply,
+    WriteBox,
+    WriteTombstone,
 )
+from .group import Group
+from .sentbox import Retention
+from .wire import CborCodec, Key, Message, key_of, position
+
+CTX = b"pigeonhole context"
+
+
+@dataclass(frozen=True)
+class Stored:
+    box_id: bytes
+    payload: bytes
+    signature: bytes
 
 
 @dataclass
@@ -70,18 +80,15 @@ class Replica:
     def kept(self) -> list[int]:
         return [self.epoch, self.epoch - 1] if self.epoch else [0]
 
-    def write(self, write: Write) -> str:
-        if not MessageBoxIndex.verify_box(
-            write.box_id, write.payload, write.signature
-        ):
+    def write(self, stored: Stored) -> str:
+        if not MessageBoxIndex.verify_box(stored.box_id, stored.payload, stored.signature):
             return "bad signature"
-        stored = Stored(write.box_id, write.payload, write.signature)
-        if write.payload:
+        if stored.payload:
             for epoch in self.kept():
-                existing = self.buckets.get(epoch, {}).get(write.box_id)
+                existing = self.buckets.get(epoch, {}).get(stored.box_id)
                 if existing is not None:
                     return "same" if existing == stored else "refused"
-        self.buckets.setdefault(self.epoch, {})[write.box_id] = stored
+        self.buckets.setdefault(self.epoch, {})[stored.box_id] = stored
         return "stored"
 
     def read(self, box_id: bytes) -> Stored | None:
@@ -109,185 +116,262 @@ def seeded(name: str) -> Callable[[int], bytes]:
     return rng
 
 
+@dataclass
+class Member:
+    name: str
+    cap: WriteCap
+    group: Group | None = None
+    inbox: list[tuple[Key, int, str]] = field(default_factory=list)
+    seen: dict[tuple[Key, int], Message] = field(default_factory=dict)
+    """Every message this member has read, for ``acks``."""
+    reported: int = -1
+    """The last of its own boxes a command has printed."""
+
+    @property
+    def read_cap(self) -> bytes:
+        return self.cap.read_cap().to_bytes()
+
+    @property
+    def key(self) -> Key:
+        return key_of(self.read_cap)
+
+    @property
+    def start(self) -> int:
+        return self.cap.message_box_index.idx_64
+
+
 class World:
     def __init__(self) -> None:
         self.replica = Replica()
         self.members: dict[str, Member] = {}
-        self.joined: set[str] = set()
-        self.settings = Settings()
+        self.codec = CborCodec()
+        self.options: dict[str, Any] = {}
 
     def run(self, line: str) -> list[str]:
         command, *args = line.split()
         method = getattr(self, "do_" + command.replace("-", "_"), None)
         if method is None:
             raise ValueError(f"unknown command {command!r}")
-        return method(*args) or []
+        out: list[str] = method(*args) or []
+        return out
+
+    @property
+    def joined(self) -> set[str]:
+        return {name for name, m in self.members.items() if m.group is not None}
+
+    def member(self, name: str) -> Member:
+        return self.members.get(name) or self.new_member(name)
 
     def new_member(self, name: str) -> Member:
-        cap = WriteCap.generate(seeded(name))
-        member = Member(name, cap, self.settings)
+        member = Member(name, WriteCap.generate(seeded(name)))
         self.members[name] = member
         return member
 
-    def by_key(self, key: Key) -> Member:
-        return next(m for m in self.members.values() if m.key == key)
+    def group(self, name: str) -> Group:
+        group = self.members[name].group
+        assert group is not None, f"{name} has not joined"
+        return group
 
-    def name_of(self, key: Key) -> str:
-        """A member's name, or ``removed`` for a placeholder."""
-        found = [m.name for m in self.members.values() if m.key == key]
-        return found[0] if found else "removed"
+    def by_key(self, key: Key) -> Member | None:
+        return next((m for m in self.members.values() if m.key == key), None)
 
-    def at(self, key: Key, position: int) -> str:
-        """``name@n``: the ``n``th box of ``key``'s stream."""
-        owner = self.by_key(key)
-        return f"{owner.name}@{position - owner.cap.message_box_index.idx_64}"
+    def name_of(self, key: Key | None) -> str:
+        if key is not None and key.startswith(b"retired"):
+            return "removed"
+        member = self.by_key(key) if key is not None else None
+        return member.name if member else "?"
 
-    def owner_of(self, index: bytes) -> str:
-        """Which stream a ``MessageBoxIndex`` is on, by brute force."""
-        position = MessageBoxIndex.from_bytes(index).idx_64
-        for member in self.members.values():
-            start = member.cap.message_box_index.idx_64
-            if 0 <= position - start < 1 << 18:
-                return self.at(member.key, position)
-        return "?"
+    def at(self, key: Key, at: int) -> str:
+        member = self.by_key(key)
+        assert member is not None
+        return f"{member.name}@{at - member.start}"
+
+    def stream_of(self, at: int) -> Member | None:
+        """Whose stream an absolute position is on, by brute force."""
+        return next(
+            (m for m in self.members.values() if 0 <= at - m.start < 1 << 18), None
+        )
+
+    def where(self, index: bytes) -> str:
+        member = self.stream_of(position(index))
+        return self.at(member.key, position(index)) if member else "?"
+
+    def settings(self) -> dict[str, Any]:
+        options = dict(self.options)
+        policy = {
+            name: options.pop(name)
+            for name in list(options)
+            if name in Retention.__dataclass_fields__
+        }
+        return {"policy": Retention(**policy), **options}
+
+    # The driver.
 
     def drive(self, member: Member, event: Event) -> list[str]:
-        """Hand ``event`` to ``member`` and carry out its effects until it
-        has none left."""
+        """Hand ``event`` to ``member`` and carry out its effects, depth
+        first, until there are none left."""
+        group = member.group
+        assert group is not None
         out: list[str] = []
-        pending: list[Effect] = member.handle(event)
+        pending: list[Effect] = group.handle(event)
         while pending:
             effect = pending.pop(0)
+            follow: Event | None = None
             match effect:
-                case Write():
-                    result = self.replica.write(effect)
-                    if result not in ("stored", "same"):
-                        out.append(
-                            f"  {self.at(member.key, effect.position)}"
-                            f" write {result}"
-                        )
-                case Fetch(owner, position, box_id, recheck):
-                    stored = self.replica.read(box_id)
-                    if recheck and (stored is None or not stored.payload):
-                        out.append(
-                            f"{self.at(owner, position)} recheck:"
-                            f" {'not found' if stored is None else 'tombstone'}"
-                        )
-                    elif stored is None:
-                        out.append(f"{self.at(owner, position)} not found")
-                        out.extend(self.stuck(member, owner, position))
-                    found = Found(owner, position, stored)
-                    pending[:0] = member.handle(found)
-                case Show(owner, position, message):
-                    out.append(
-                        f"{self.at(owner, position)} {self.show(message)}"
-                    )
-                case HandOver(to, joined):
-                    new = self.by_key(to)
-                    if new.name in self.joined:
+                case WriteBox(index, plaintext):
+                    at = member.cap.position_at(MessageBoxIndex.from_bytes(index))
+                    written = self.replica.write(Stored(*at.encrypt(CTX, plaintext)))
+                    assert written in ("stored", "same"), written
+                case WriteTombstone(index):
+                    at = member.cap.position_at(MessageBoxIndex.from_bytes(index))
+                    box_id, signature = at.tombstone(CTX)
+                    self.replica.write(Stored(box_id, b"", signature))
+                case ReadBox(stream, read_cap, index, recheck):
+                    result, next_index = self.fetch(read_cap, index)
+                    out.extend(self.show_read(member, stream, index, result, recheck))
+                    follow = BoxRead(stream, index, result, next_index)
+                case DeriveIndexes(purpose, stream, start, skip, count):
+                    derived = MessageBoxIndex.from_bytes(start)
+                    derived = derived.advance_index_to(derived.idx_64 + skip)
+                    indexes = []
+                    for _ in range(count):
+                        indexes.append(derived.to_bytes())
+                        derived = derived.next_index()
+                    follow = IndexesDerived(purpose, stream, tuple(indexes))
+                case Deliver(sender, at_, content):
+                    member.inbox.append((sender, at_, content.decode()))
+                case Expire(sender, at_):
+                    member.inbox = [m for m in member.inbox if m[:2] != (sender, at_)]
+                case SendJoinReply(to, reply):
+                    new = self.by_key(key_of(to))
+                    assert new is not None
+                    if new.group is not None:
                         out.append(f"{new.name} already joined")
                     else:
-                        self.joined.add(new.name)
-                        new.handle(EpochChanged(self.replica.epoch))
-                        new.handle(joined)
+                        new.group = Group.joined(to, reply, **self.settings())
+                        new.group.handle(EpochChanged(self.replica.epoch))
+            if follow is not None:
+                pending[:0] = group.handle(follow)
         return out
 
-    def stuck(self, member: Member, owner: Key, position: int) -> list[str]:
-        heard = member.heard.get(owner)
-        if heard is None or heard.index.idx_64 < position:
-            return []
-        acker = self.by_key(heard.by).name
-        return [f"  stuck: {acker} acked {self.at(owner, heard.index.idx_64)}"]
+    def fetch(self, read_cap: bytes, index: bytes) -> tuple[bytes | Missing, bytes | None]:
+        cap = ReadCap.from_bytes(read_cap)
+        at = cap.position_at(MessageBoxIndex.from_bytes(index))
+        stored = self.replica.read(at.box_id(CTX))
+        if stored is None:
+            return Missing.NOT_FOUND, None
+        plaintext = at.open(CTX, stored.box_id, stored.payload, stored.signature)
+        next_index = at.index.next_index().to_bytes()
+        return (plaintext if plaintext else Missing.TOMBSTONE), next_index
 
-    def show(self, message: Message | None) -> str:
-        if message is None:
-            return "tombstone"
+    def show_read(
+        self, member: Member, stream: Key, index: bytes, result: bytes | Missing, recheck: bool
+    ) -> list[str]:
+        where = self.at(stream, position(index))
+        if recheck and not isinstance(result, bytes):
+            return [f"{where} recheck: {result.value}"]
+        if isinstance(result, bytes):
+            message = self.codec.decode(result)
+            assert message is not None
+            member.seen[stream, position(index)] = message
+            return [f"{where} {self.show(message)}"]
+        lines = [f"{where} {result.value}"]
+        assert member.group is not None
+        heard = member.group.ledger.heard.get(stream)
+        if result is Missing.NOT_FOUND and heard and position(heard.index) >= position(index):
+            lines.append(f"  stuck: {self.name_of(heard.by)} acked {self.where(heard.index)}")
+        return lines
+
+    def show(self, message: Message) -> str:
         parts = []
-        if message.text is not None:
-            parts.append(f'"{message.text}"')
+        if message.content is not None:
+            parts.append(f'"{message.content.decode()}"')
         if message.introduction is not None:
-            parts.append(f"introduces {message.introduction[0]}")
+            parts.append(f"introduces {message.introduction.name}")
+        if message.introduced_at is not None:
+            parts.append(f"introduced-at {self.introduced(message.introduced_at.position)}")
+        if message.numbers:
+            parts.append(
+                "numbers "
+                + " ".join(
+                    f"{index}:{self.introduced(ref.position)}"
+                    for index, ref in message.numbers
+                )
+            )
         if message.acks:
             parts.append(
                 "acks "
                 + " ".join(
-                    f"{index}:{self.owner_of(value)}"
+                    f"{index}:{self.where(value)}"
                     for index, value in sorted(message.acks.items())
                 )
             )
         return " ".join(parts) or "(empty)"
 
+    def introduced(self, at: int) -> str:
+        """Who the ``Introduction`` at absolute position ``at`` introduced:
+        the truth, from its introducer's records."""
+        member = self.stream_of(at)
+        record = member.group.sent.records.get(at) if member and member.group else None
+        message = (
+            self.codec.decode(record.plaintext) if record and record.plaintext else None
+        )
+        if message is not None and message.introduction is not None:
+            return message.introduction.name
+        return "?"
+
+    # Commands.
+
     def do_option(self, option: str, value: str) -> None:
         if self.members:
             raise ValueError("set options before new-group")
         parsed: Any = (
-            value == "on"
-            if value in ("on", "off")
-            else None
-            if value == "none"
+            value == "on" if value in ("on", "off")
+            else None if value == "none"
             else int(value)
         )
-        self.settings = replace(
-            self.settings, **{option.replace("-", "_"): parsed}
-        )
+        self.options[option.replace("-", "_")] = parsed
 
     def do_new_group(self, *names: str) -> None:
         founders = [self.new_member(name) for name in names]
         caps = [founder.read_cap for founder in founders]
         for founder in founders:
-            founder.found(caps)
-            self.joined.add(founder.name)
+            founder.group = Group.found(founder.read_cap, caps, **self.settings())
+
+    def written(self, member: Member) -> list[str]:
+        """What ``member`` has written since a command last printed it."""
+        lines = []
+        assert member.group is not None
+        for at, record in sorted(member.group.sent.records.items()):
+            if at > member.reported and record.plaintext is not None:
+                message = self.codec.decode(record.plaintext)
+                assert message is not None
+                lines.append(f"{self.at(member.key, at)} {self.show(message)}")
+                member.reported = at
+        return lines
 
     def do_send(self, who: str, *text: str) -> list[str]:
-        return self.drive(self.members[who], Send(" ".join(text)))
+        member = self.members[who]
+        return self.drive(member, Send(" ".join(text).encode())) + self.written(member)
 
     def do_invite(self, who: str, new: str) -> list[str]:
-        member = self.members.get(new) or self.new_member(new)
-        return self.drive(self.members[who], Invite(new, member.read_cap))
+        member = self.members[who]
+        out = self.drive(member, Invite(new, self.member(new).read_cap))
+        return out + self.written(member)
+
+    def do_introduce(self, who: str, new: str) -> list[str]:
+        member = self.members[who]
+        out = self.drive(member, Introduce(new, self.member(new).read_cap))
+        return out + self.written(member)
 
     def do_remove(self, who: str, gone: str) -> list[str]:
         return self.drive(self.members[who], Remove(self.members[gone].key))
-
-    def do_inbox(self, who: str) -> list[str]:
-        return [
-            f"{self.at(owner, position)} \"{text}\""
-            for (owner, position), (_, text) in sorted(
-                self.members[who].inbox.items(),
-                key=lambda item: (self.name_of(item[0][0]), item[0][1]),
-            )
-        ] or ["empty"]
-
-    def do_peek(self, owner: str, position: str) -> list[str]:
-        """What the replica holds at a position: the truth, not any
-        member's view."""
-        member = self.members[owner]
-        start = member.cap.message_box_index
-        at = member.read_cap.position_at(
-            start.advance_index_to(start.idx_64 + int(position))
-        )
-        stored = self.replica.read(at.box_id(CTX))
-        if stored is None:
-            return ["not found"]
-        if not stored.payload:
-            return ["tombstone"]
-        plaintext = at.open(
-            CTX, stored.box_id, stored.payload, stored.signature
-        )
-        return [self.show(Message.decode(plaintext))]
-
-    def do_introduce(self, who: str, new: str) -> list[str]:
-        member = self.members.get(new) or self.new_member(new)
-        return self.drive(
-            self.members[who], Introduce(new, member.read_cap)
-        )
 
     def do_read(self, who: str, owner: str) -> list[str]:
         return self.drive(self.members[who], Read(self.members[owner].key))
 
     def do_scan(self, who: str, owner: str) -> list[str]:
-        return self.drive(
-            self.members[who], ScanRequested(self.members[owner].key)
-        )
+        return self.drive(self.members[who], Scan(self.members[owner].key))
 
     def do_epoch(self, epochs: str = "1") -> None:
         """Replica epochs pass; nobody backfills."""
@@ -307,31 +391,25 @@ class World:
                 out.extend(self.do_backfill(name))
         return out
 
-    def do_purge(self, who: str) -> None:
-        self.drive(self.members[who], Purge())
-
     def do_roster(self, who: str, owner: str) -> list[str]:
-        followed = self.members[who].roster(self.members[owner].key)
-        if followed is None:
+        known = self.group(who).rosters.known(self.members[owner].key)
+        if not known:
             return ["unknown"]
-        line = " ".join(self.name_of(entry) for entry in followed.roster)
-        if followed.unsettled:
-            line += f" (+{len(followed.unsettled)} unsettled)"
-        return [line]
+        return [" ".join(self.name_of(known.get(i)) for i in range(max(known) + 1))]
 
-    def do_acks(self, who: str, owner: str, position: str) -> list[str]:
-        """How ``who`` resolves the acks in the message at ``position`` on
-        ``owner``'s stream."""
+    def do_acks(self, who: str, owner: str, at: str) -> list[str]:
+        """How ``who`` resolves the acks in ``owner``'s message at ``at``."""
         sender = self.members[owner]
-        start = sender.cap.message_box_index.idx_64
-        reader = self.members[who]
-        resolved = reader.resolve(sender.key, start + int(position))
+        absolute = sender.start + int(at)
+        message = self.members[who].seen.get((sender.key, absolute))
+        if message is None:
+            return ["not read"]
+        rosters = self.group(who).rosters
         return [
             " ".join(
-                self.at(member, index.idx_64)
-                if reader.on_stream(member, index)
-                else f"{self.by_key(member).name}:not-on-stream"
-                for member, index in resolved.items()
+                f"{self.name_of(rosters.resolve(sender.key, index, absolute))}"
+                f"={self.where(value)}"
+                for index, value in sorted(message.acks.items())
             )
             or "none"
         ]
@@ -340,11 +418,30 @@ class World:
         member = self.members[who]
         return [
             " ".join(
-                f"{self.by_key(acker).name}:{self.at(member.key, position)}"
-                for acker, position in sorted(member.acked_by.items())
+                f"{self.name_of(acker)}:{self.at(member.key, at)}"
+                for acker, at in sorted(self.group(who).ledger.acked_by.items())
             )
             or "none"
         ]
+
+    def do_inbox(self, who: str) -> list[str]:
+        return [
+            f'{self.at(sender, at)} "{text}"'
+            for sender, at, text in self.members[who].inbox
+        ] or ["empty"]
+
+    def do_peek(self, owner: str, at: str) -> list[str]:
+        """What the replica holds at a position: the truth, not any
+        member's view."""
+        member = self.members[owner]
+        index = member.cap.message_box_index
+        index = index.advance_index_to(index.idx_64 + int(at))
+        result, _ = self.fetch(member.read_cap, index.to_bytes())
+        if isinstance(result, bytes):
+            message = self.codec.decode(result)
+            assert message is not None
+            return [self.show(message)]
+        return [result.value]
 
 
 def run(script: str) -> str:

@@ -1,0 +1,23 @@
+# Fix for flaw (e). Bob read alice to the end long ago and never sent
+# anything since, so he has published no ack of her stream. When he
+# introduces dave, he first catches up on every stream, and dave starts
+# each one where bob has read it, not at bob's last published ack: on a
+# box that still exists.
+
+new-group alice bob carol
+send alice a0
+read bob alice
+tick 4
+send alice a1
+introduce bob dave
+----
+alice@1 "a1"
+alice@2 not found
+carol@0 not found
+bob@0 introduces dave numbers 3:dave
+
+send alice a2
+read dave alice
+----
+alice@2 "a2"
+alice@3 not found

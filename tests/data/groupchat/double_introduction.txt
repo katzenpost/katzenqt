@@ -1,44 +1,66 @@
-# Flaw (d): two introducers of one member. Bob introduces erin, and carol
-# numbers her. Alice, who has not read bob, introduces dave; then carol
-# introduces dave too. Dave started from alice's roster, but a watcher that
-# reads carol's Introduction first takes carol's roster as dave's starting
-# point, and from then on reads dave's indexes wrongly. As with a jump, the
-# BACAP check shows the misread ack is not on the stream it was given to.
+# Fix for flaw (d). Alice invites dave and catches up. Bob then introduces
+# erin and carol numbers her, so when alice commits, her roster has no erin
+# but carol's has. Carol introduces dave as well. Dave's roster began as a
+# copy of alice's, and his first message says so with IntroducedAt; bob
+# takes dave's roster from alice's Introduction, not carol's, and reads
+# dave's indexes right.
 
 new-group alice bob carol
+invite alice dave
 introduce bob erin
 read carol bob
 send carol c0            # carol numbers erin
 introduce alice dave
 introduce carol dave
 ----
-carol@1 introduces dave
+alice@0 introduces dave numbers 3:dave
+alice@1 not found
+bob@1 not found
+erin@0 not found
 dave already joined
+carol@2 numbers 4:dave acks 1:alice@0
+carol@3 introduces dave
 
 roster dave dave
 ----
 carol alice bob dave
 
-read bob carol
+send dave d0             # a control message stating where dave joined goes first
 read bob alice
+read bob carol
+read bob dave
 roster bob dave
 ----
-carol alice bob erin dave
+carol alice bob dave
 
 read dave bob
-send dave d0             # acks bob past erin's Introduction: dave numbers erin
+send dave d1             # numbers erin, acks bob
 send erin e0
 read dave erin
-send dave d1             # acks erin@0 as dave's index 4
-----
-dave@1 "d1" acks 4:erin@0
-
+send dave d2             # acks erin
 read bob erin
 read bob dave
-acks dave dave 1
+roster dave dave
 ----
-erin@0
+carol alice bob dave erin
 
-acks bob dave 1
+roster bob dave
 ----
-dave:not-on-stream
+carol alice bob dave erin
+
+# IntroducedAt can be read before the Introduction it names: gina learns of
+# ivy from hal's Introduction and reads ivy before fred's stream.
+new-group fred gina hal
+introduce fred ivy
+introduce hal ivy
+send ivy i0              # introduced-at fred's Introduction goes first
+read gina hal
+read gina ivy
+roster gina ivy          # not yet known
+----
+unknown
+
+read gina fred
+roster gina ivy
+----
+fred hal gina ivy

@@ -1,37 +1,36 @@
 # The backward recheck. Carol's boxes are missing for a while because she
-# has not yet backfilled this epoch. Bob jumps past them on alice's ack and
-# so misses the Introduction of erin that alice numbered. Bob kept the
-# indexes of the boxes he skipped, so once carol backfills, a second scan
-# fetches them and bob's view of alice's roster is put right.
+# has not yet backfilled this epoch. Bob jumps past them on alice's ack,
+# keeping the indexes he skipped, and so misses the Introduction of erin.
+# Once carol backfills, a second scan fetches the skipped boxes and bob
+# learns who alice's index 3 is.
 
-option ack-jump on
 new-group alice bob carol
 send carol c0
 introduce carol erin
 read alice carol
-send alice a0            # acks carol@1: alice numbers erin
+send alice a0            # numbers erin, then acks carol
 epoch 2                  # carol's first boxes expire
 backfill alice           # carol has not backfilled yet
 send carol c2
 read alice carol
 send alice a1            # acks carol@2
 read bob alice
-scan bob carol
+read bob carol           # stuck: scans and jumps
 ----
-carol@0 recheck: not found
-carol@1 recheck: not found
+carol@0 not found
+  stuck: alice acked carol@2
 carol@2 "c2"
 carol@3 not found
 
 roster bob alice
 ----
-carol alice bob
+carol alice bob ?
 
 backfill carol
 scan bob carol
 ----
 carol@0 "c0"
-carol@1 introduces erin
+carol@1 introduces erin numbers 3:erin
 carol@3 not found
 
 roster bob alice

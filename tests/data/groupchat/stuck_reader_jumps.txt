@@ -1,0 +1,27 @@
+# Fix for flaw (b). Bob stays away longer than alice's Sent-box window plus
+# the box lifetime, so alice's first boxes are gone for good. Carol has
+# acked a newer box. When bob's read finds nothing where carol's ack says
+# there is more, he scans on his own and jumps to the box carol acked,
+# losing only the boxes in between.
+
+new-group alice bob carol
+send alice m0
+send alice m1
+read carol alice         # carol keeps up
+tick 6
+send alice m2
+read carol alice
+send carol c0            # acks alice@2
+read bob carol
+read bob alice
+----
+alice@0 not found
+  stuck: carol acked alice@2
+alice@2 "m2"
+alice@3 not found
+
+send alice m3
+read bob alice
+----
+alice@3 "m3"
+alice@4 not found
