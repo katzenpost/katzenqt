@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,7 +62,7 @@ def test_the_lean_member_agrees(tmp_path: Path) -> None:
     member, which must give the same results and state at every call."""
     root = Path(os.environ["CRYPTWALKER"])
     tool = Path(__file__).parent.parent / "tools" / "groupchat_traces.py"
-    subprocess.run(["python", str(tool), str(tmp_path), "200"], check=True)
+    subprocess.run([sys.executable, str(tool), str(tmp_path), "200"], check=True)
     lake = shutil.which("lake") or str(Path.home() / ".elan" / "bin" / "lake")
     replay = subprocess.run(
         [lake, "exe", "CryptWalker.GroupChat.replay", str(tmp_path)],
