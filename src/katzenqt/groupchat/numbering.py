@@ -1,6 +1,7 @@
-"""Rosters with explicit numbering: every roster index is announced, so a
-missed message leaves an index unresolved and never shifts the others. See
-"Rosters" in the group chat spec.
+"""Rosters with explicit numbering: every roster index is announced, naming
+the member by a prefix of its key, so a missed message leaves an index
+unresolved and never shifts the others. See "Rosters" in the group chat
+spec.
 
 Indexes are assigned in order and never change, so a roster as it stood
 when it assigned index ``k`` is its entries up to ``k``: no record of when
@@ -20,7 +21,8 @@ At = tuple[Key, bytes]
 @dataclass
 class Entry:
     key: Key | None = None
-    introduced: At | None = None
+    prefix: bytes | None = None
+    """The start of the member's key, as a ``Numbers`` field names it."""
 
 
 @dataclass
@@ -34,21 +36,33 @@ class Rosters:
     """A member whose roster began as its introducer's, through the index
     the introducer assigned it."""
     introductions: dict[At, Key] = field(default_factory=dict)
+    keys: list[Key] = field(default_factory=list)
+    """Every member whose key this member knows: whom a prefix can name."""
 
     def found(self, founders: list[Key]) -> None:
         roster = {i: Entry(key) for i, key in enumerate(sorted(founders))}
         for founder in founders:
             self.entries[founder] = dict(roster)
+            self.learn(founder)
+
+    def learn(self, key: Key) -> None:
+        if key not in self.keys:
+            self.keys.append(key)
+
+    def named(self, prefix: bytes) -> Key | None:
+        """The one member known whose key starts with ``prefix``."""
+        matches = [key for key in self.keys if key.startswith(prefix)]
+        return matches[0] if len(matches) == 1 else None
 
     def resolve(self, owner: Key, index: int) -> Key | None:
         """Who ``owner`` numbered ``index``, if this member can tell.
 
         >>> rosters = Rosters()
         >>> rosters.found([b"a", b"b"])
-        >>> rosters.number(b"a", 2, (b"b", b"i7"))
+        >>> rosters.number(b"a", 2, Entry(prefix=b"c"))
         >>> rosters.resolve(b"a", 2) is None
         True
-        >>> rosters.introductions[b"b", b"i7"] = b"c"
+        >>> rosters.learn(b"c")
         >>> rosters.resolve(b"a", 2)
         b'c'
         >>> rosters.started[b"c"] = (b"a", 2)
@@ -62,7 +76,7 @@ class Rosters:
         if entry is not None:
             if entry.key is not None:
                 return entry.key
-            return self.introductions.get(entry.introduced) if entry.introduced else None
+            return self.named(entry.prefix) if entry.prefix else None
         start = self.started.get(owner)
         if start is None or index > start[1] or owner in seen:
             return None
@@ -94,8 +108,8 @@ class Rosters:
                 return index
         return None
 
-    def number(self, owner: Key, index: int, introduced: At | None) -> None:
-        self.entries.setdefault(owner, {}).setdefault(index, Entry(introduced=introduced))
+    def number(self, owner: Key, index: int, entry: Entry) -> None:
+        self.entries.setdefault(owner, {}).setdefault(index, entry)
 
     def retire(self, member: Key, token: Key) -> None:
         """Forget ``member``'s key, keeping every place it holds."""
@@ -105,10 +119,8 @@ class Rosters:
 
         for roster in self.entries.values():
             for entry in roster.values():
-                if entry.key == member:
-                    entry.key = token
-                if entry.introduced is not None:
-                    entry.introduced = (renamed(entry.introduced[0]), entry.introduced[1])
+                if entry.key == member or (entry.prefix and member.startswith(entry.prefix)):
+                    entry.key, entry.prefix = token, None
         if member in self.entries:
             self.entries[token] = self.entries.pop(member)
         self.started = {
@@ -119,3 +131,4 @@ class Rosters:
             (renamed(intro[0]), intro[1]): renamed(key)
             for intro, key in self.introductions.items()
         }
+        self.keys = [renamed(key) for key in self.keys]

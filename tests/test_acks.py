@@ -26,6 +26,7 @@ from katzenqt import (
 from katzenqt.groupchat import state as group_state
 from katzenqt.groupchat import wire
 from katzenqt.groupchat.group import Group
+from katzenqt.groupchat.numbering import Entry
 from katzenqt.headless import _actions
 from tests.fakes.thinclient import FakeThinClient
 from tests.test_network_fake import _set_up_read_flow, _set_up_write_flow
@@ -685,9 +686,8 @@ async def test_a_reply_that_already_lists_us_is_not_adopted() -> None:
 async def test_the_reply_leaves_out_a_member_it_cannot_name() -> None:
     chat, bob = await _with_bob()
     group = await chat.group()
-    group.rosters.introductions[bob, _index(9)] = b"\x07" * 32
-    group.rosters.number(chat.own_key, 2, (bob, _index(9)))
-    group.rosters.number(chat.own_key, 3, None)
+    group.rosters.number(chat.own_key, 2, Entry(b"\x07" * 32))
+    group.rosters.number(chat.own_key, 3, Entry())
     async with persistent.asession() as sess:
         row = await sess.get(persistent.GroupState, chat.conversation_id)
         assert row is not None
@@ -778,7 +778,7 @@ async def test_records_older_than_the_window_are_let_go(
 
 def test_the_codec_reads_what_it_writes() -> None:
     control = wire.Message(
-        numbers=((2, wire.IntroRef(0, _index(9))),), introduced_at=wire.IntroRef(1, _index(5)),
+        numbers=((2, b"\x07" * 8),), introduced_at=wire.IntroRef(1, _index(5)),
         acks={1: _index(3)},
     )
     assert acks.CODEC.decode(acks.CODEC.encode(control)) == control

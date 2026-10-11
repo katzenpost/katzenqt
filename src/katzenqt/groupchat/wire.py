@@ -23,12 +23,16 @@ KEY_SIZE = 32
 INDEX_SIZE = 104
 ROSTER_MAX = 256
 """The most entries a roster holds: roster indexes are one byte."""
-
-_ENTRY = 2 + INDEX_SIZE
+PREFIX_SIZE = 8
+"""How much of a member's key a ``Numbers`` field names it by."""
 
 
 def key_of(read_cap: bytes) -> Key:
     return read_cap[:KEY_SIZE]
+
+
+def prefix_of(key: Key) -> bytes:
+    return key[:PREFIX_SIZE]
 
 
 @dataclass(frozen=True)
@@ -46,9 +50,10 @@ class Introduction:
     read_cap: bytes
 
 
-Numbers = tuple[tuple[int, IntroRef | None], ...]
-"""Roster indexes assigned, each with the ``Introduction`` of the member
-assigned it; None for the ``Introduction`` the message itself carries."""
+Numbers = tuple[tuple[int, bytes | None], ...]
+"""Roster indexes assigned, consecutive, each with the key prefix of the
+member assigned it; None for the member the message's own ``Introduction``
+introduces."""
 
 
 @dataclass(frozen=True)
@@ -70,20 +75,21 @@ class Message:
 
 
 def encode_numbers(numbers: Numbers) -> bytes:
-    """
-    >>> ref = IntroRef(1, bytes(104))
-    >>> decode_numbers(encode_numbers(((3, ref),))) == ((3, ref),)
-    True
+    """The first index assigned, then the key prefix of each member, one per
+    consecutive index; a lone byte for the member an ``Introduction``
+    introduces.
+
+    >>> numbers = ((3, b"erin1234"), (4, b"dave5678"))
+    >>> len(encode_numbers(numbers)), decode_numbers(encode_numbers(numbers)) == numbers
+    (17, True)
     >>> encode_numbers(((4, None),))
     b'\\x04'
     """
     if len(numbers) == 1 and numbers[0][1] is None:
         return bytes([numbers[0][0]])
-    return b"".join(
-        bytes([index, ref.introducer]) + ref.index
-        for index, ref in numbers
-        if ref is not None
-    )
+    if not numbers:
+        return b""
+    return bytes([numbers[0][0]]) + b"".join(prefix for _, prefix in numbers if prefix)
 
 
 def decode_numbers(field: bytes) -> Numbers:
@@ -91,21 +97,18 @@ def decode_numbers(field: bytes) -> Numbers:
 
     >>> decode_numbers(b"\\x04")
     ((4, None),)
-    >>> decode_numbers(bytes(107)), decode_numbers(bytes(212))
-    ((), ())
+    >>> decode_numbers(bytes(8)), decode_numbers(b"\\xff" + bytes(16)), decode_numbers(bytes(17))
+    ((), (), ())
     """
     if len(field) == 1:
         return ((field[0], None),)
-    if len(field) % _ENTRY:
+    if len(field) < 1 + PREFIX_SIZE or (len(field) - 1) % PREFIX_SIZE:
         return ()
-    numbers: Numbers = tuple(
-        (field[i], IntroRef(field[i + 1], field[i + 2 : i + _ENTRY]))
-        for i in range(0, len(field), _ENTRY)
-    )
-    indexes = [index for index, _ in numbers]
-    if any(a >= b for a, b in zip(indexes, indexes[1:])):
+    first = field[0]
+    prefixes = [field[i : i + PREFIX_SIZE] for i in range(1, len(field), PREFIX_SIZE)]
+    if first + len(prefixes) > ROSTER_MAX or len(set(prefixes)) != len(prefixes):
         return ()
-    return numbers
+    return tuple((first + n, prefix) for n, prefix in enumerate(prefixes))
 
 
 def encode_introduced_at(ref: IntroRef) -> bytes:

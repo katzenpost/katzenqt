@@ -136,11 +136,14 @@ def _state(own_cap: bytes, entries, readers, published, acked_by, records) -> by
         "recheck": 256,
         "rosters": {
             "entries": [
-                [owner, [[i, {"key": k, "introduced": None}] for i, k in roster.items()]]
+                [owner, [[i, {"key": k, "prefix": None}] for i, k in roster.items()]]
                 for owner, roster in entries.items()
             ],
             "started": [],
             "introductions": [],
+            "keys": list(dict.fromkeys(
+                [*entries, *(k for roster in entries.values() for k in roster.values())]
+            )),
         },
         "readers": [[key, reader] for key, reader in readers.items()],
         "sent": {

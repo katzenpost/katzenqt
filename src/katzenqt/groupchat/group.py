@@ -54,6 +54,7 @@ from .wire import (
     Message,
     Numbers,
     key_of,
+    prefix_of,
 )
 
 POOL = 4
@@ -152,9 +153,13 @@ class Group:
                 }
         for by, index, member in reply.introductions:
             group.rosters.introductions[order[by], index] = order[member]
+        for slot in reply.members:
+            if slot:
+                group.rosters.learn(key_of(slot[0]))
+        group.rosters.learn(group.me)
         introducer = order[reply.introducer]
         group.rosters.entries[group.me] = {
-            index: Entry(entry.key, entry.introduced)
+            index: Entry(entry.key, entry.prefix)
             for index, entry in group.rosters.entries.get(introducer, {}).items()
         }
         group.rosters.entries[group.me][reply.newcomer] = Entry(group.me)
@@ -225,7 +230,10 @@ class Group:
         if pending is None:
             return
         for number, introduced in pending.numbers:
-            self.rosters.number(self.me, number, introduced or (self.me, index))
+            key = self.rosters.introductions.get(introduced) if introduced else pending.introduced
+            self.rosters.number(self.me, number, Entry(key))
+        if pending.introduced is not None:
+            self.rosters.learn(pending.introduced)
         if pending.introduced is not None:
             self.rosters.introductions[self.me, index] = pending.introduced
         self.sent.record(index, plaintext, pending.control, self.epoch)
@@ -289,13 +297,14 @@ class Group:
         message = self.codec.decode(plaintext)
         if message is None:
             return []
-        for number, ref in message.numbers:
-            if ref is None:
-                introduced: At | None = (sender, index) if message.introduction else None
+        for number, prefix in message.numbers:
+            if prefix is not None:
+                entry = Entry(prefix=prefix)
+            elif message.introduction is not None:
+                entry = Entry(key_of(message.introduction.read_cap))
             else:
-                introducer = self.rosters.resolve(sender, ref.introducer)
-                introduced = (introducer, ref.index) if introducer else None
-            self.rosters.number(sender, number, introduced)
+                entry = Entry()
+            self.rosters.number(sender, number, entry)
         if message.introduction is not None:
             self._introduced(sender, index, message.introduction)
         if message.introduced_at is not None:
@@ -316,6 +325,7 @@ class Group:
     def _introduced(self, introducer: Key, index: bytes, introduction: Introduction) -> None:
         new = key_of(introduction.read_cap)
         self.rosters.introductions[introducer, index] = new
+        self.rosters.learn(new)
         if new == self.me and introducer == self.joined_through:
             place = self.rosters.index_of(self.me, introducer)
             assert place is not None
@@ -368,23 +378,22 @@ class Group:
         if self.ledger.holding:
             return False
         return self.introduced_at is not None or any(
-            self.rosters.index_of(self.me, introducer) is not None
-            for introducer, _ in self.unnumbered
+            at in self.rosters.introductions for at in self.unnumbered
         )
 
     def _control(self) -> tuple[Message, Pending]:
-        """Number every member whose ``Introduction`` we have read and whose
-        introducer we have numbered, and say where we were introduced."""
-        numbers: list[tuple[int, IntroRef | None]] = []
+        """Number every member whose ``Introduction`` we have read, and say
+        where we were introduced."""
+        numbers: list[tuple[int, bytes | None]] = []
         assigned: list[tuple[int, At | None]] = []
         size = self._size()
-        for introducer, index in list(self.unnumbered):
-            place = self.rosters.index_of(self.me, introducer)
-            if place is None:
+        for at in list(self.unnumbered):
+            new = self.rosters.introductions.get(at)
+            if new is None:
                 continue
-            self.unnumbered.remove((introducer, index))
-            numbers.append((size, IntroRef(place, index)))
-            assigned.append((size, (introducer, index)))
+            self.unnumbered.remove(at)
+            numbers.append((size, prefix_of(new)))
+            assigned.append((size, at))
             size += 1
         message = Message(numbers=tuple(numbers), introduced_at=self.introduced_at)
         self.introduced_at = None

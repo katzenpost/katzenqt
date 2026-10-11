@@ -9,7 +9,7 @@ import pytest
 from katzenqt.groupchat import events, sim, state, wire
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.ledger import Ledger
-from katzenqt.groupchat.numbering import Rosters
+from katzenqt.groupchat.numbering import Entry, Rosters
 
 
 def test_a_malformed_message_is_ignored() -> None:
@@ -68,24 +68,36 @@ def test_a_second_read_waits_for_the_first() -> None:
     assert alice.handle(events.Read(bob)) == []
 
 
-def test_numbering_waits_for_the_introducer() -> None:
+def test_an_introduction_whose_member_is_not_known_waits() -> None:
     world = sim.World()
     world.run("new-group alice bob")
     alice = world.group("alice")
-    stranger, newcomer = b"\x01" * 32, b"\x02" * 32
-    alice.rosters.introductions[stranger, b"i5"] = newcomer
+    stranger = b"\x01" * 32
     alice.unnumbered.append((stranger, b"i5"))
     bob = world.members["bob"].key
     alice.rosters.introductions[bob, b"i3"] = b"\x03" * 32
     alice.unnumbered.append((bob, b"i3"))
     world.run("send alice hi")
     assert alice.unnumbered == [(stranger, b"i5")]
+    assert alice.rosters.resolve(alice.me, 2) == b"\x03" * 32
+
+
+def test_a_number_without_its_introduction_names_nobody() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    bob = world.members["bob"].key
+    reader = alice.readers[bob]
+    plaintext = alice.codec.encode(wire.Message(numbers=((5, None),)))
+    alice.observe(bob, reader.next, plaintext, sim.step(reader.next))
+    assert alice.rosters.entries[bob][5] == Entry()
+    assert alice.rosters.resolve(bob, 5) is None
 
 
 def test_numbering_through_an_unknown_introducer() -> None:
     rosters = Rosters()
     rosters.found([b"a"])
-    rosters.number(b"a", 1, None)
+    rosters.number(b"a", 1, Entry())
     assert rosters.resolve(b"a", 1) is None
     assert rosters.resolve(b"a", 7) is None
 
@@ -94,13 +106,16 @@ def test_retiring_renames_every_mention() -> None:
     rosters = Rosters()
     rosters.found([b"a", b"b"])
     rosters.introductions[b"b", b"i4"] = b"c"
-    rosters.number(b"a", 2, (b"b", b"i4"))
+    rosters.learn(b"c")
+    rosters.number(b"a", 2, Entry(prefix=b"c"))
+    rosters.number(b"a", 3, Entry(prefix=b"b"))
     rosters.started[b"c"] = (b"b", 2)
     rosters.retire(b"b", b"gone")
-    assert rosters.entries[b"a"][2].introduced == (b"gone", b"i4")
+    assert rosters.introductions[b"gone", b"i4"] == b"c"
     assert rosters.started[b"c"] == (b"gone", 2)
     assert rosters.resolve(b"a", 2) == b"c"
-    assert b"gone" in rosters.entries
+    assert rosters.resolve(b"a", 3) == b"gone"
+    assert b"gone" in rosters.entries and b"gone" in rosters.keys
 
 
 def test_the_replica_refuses_a_bad_signature() -> None:

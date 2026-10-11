@@ -33,6 +33,14 @@ def test_every_call_on_a_member_is_one_line() -> None:
     assert first["state"]["read_cap"] == first["args"]["read_cap"]
 
 
+def test_introduced_at_is_written_as_a_pair() -> None:
+    calls = lines((SCENARIOS / "double_introduction.txt").read_text())
+    written = [e["message"] for c in calls for e in c["result"] or [] if e["type"] == "WriteBox"]
+    assert any(m["introduced_at"] for m in written)
+    at = next(m["introduced_at"] for m in written if m["introduced_at"])
+    assert isinstance(at[0], int) and len(bytes.fromhex(at[1])) == 104
+
+
 def test_messages_are_written_decoded() -> None:
     calls = lines("new-group alice bob\nsend alice hi\nread bob alice\n")
     writes = [e for c in calls for e in c["result"] or [] if e["type"] == "WriteBox"]

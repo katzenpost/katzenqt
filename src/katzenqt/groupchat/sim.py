@@ -419,7 +419,7 @@ class World:
                     + (
                         message.introduction.name
                         if message.introduction and ref is None
-                        else self.introduced(ref.index) if ref else "?"
+                        else self.prefixed(ref) if ref else "?"
                     )
                     for number, ref in message.numbers
                 )
@@ -432,6 +432,11 @@ class World:
                 )
             )
         return " ".join(parts) or "(empty)"
+
+    def prefixed(self, prefix: bytes) -> str:
+        """Who has a key starting with ``prefix``: the truth."""
+        names = [m.name for m in self.members.values() if m.key.startswith(prefix)]
+        return names[0] if len(names) == 1 else "?"
 
     def introduced(self, index: bytes) -> str:
         """Who the ``Introduction`` in the box ``index`` introduced: the
