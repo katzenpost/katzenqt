@@ -493,10 +493,13 @@ async def _abandoned(sess: "AsyncSession", pwal_id: uuid.UUID) -> bool:
     return await sess.get(persistent.SentLog, pwal_id) is None
 
 
-async def wait_for_outgoing(conversation_id: int, *, deadline_s: float) -> bool:
+async def wait_for_outgoing(
+    conversation_id: int, *, deadline_s: float, epoch_s: float = 0.0,
+) -> bool:
     """Wait until every message the state machine is waiting on has been
     written: until then a reply to a new member cannot say what our roster
-    will be."""
+    will be. ``deadline_s`` and ``epoch_s`` are as for
+    ``persistent.wait_for_sent``."""
     async with persistent.conversation_log_order_lock(conversation_id):
         async with persistent.asession() as sess:
             stored = await _load(sess, conversation_id)
@@ -511,7 +514,7 @@ async def wait_for_outgoing(conversation_id: int, *, deadline_s: float) -> bool:
             await _save(sess, stored)
             await sess.commit()
     for pwal_id in owed:
-        if not await persistent.wait_for_sent(pwal_id, deadline_s=deadline_s):
+        if not await persistent.wait_for_sent(pwal_id, deadline_s=deadline_s, epoch_s=epoch_s):
             return False
     return True
 

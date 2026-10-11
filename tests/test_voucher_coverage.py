@@ -329,7 +329,9 @@ async def test_an_unacked_introduction_is_reported_not_raised(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def never_sent(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
+    async def never_sent(
+        pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float,
+    ) -> bool:
         return False
 
     monkeypatch.setattr(persistent, "wait_for_sent", never_sent)

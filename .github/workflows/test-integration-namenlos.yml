@@ -498,7 +498,8 @@ jobs:
           DOCKER: ${{ needs.docker-integration.result }}
           EPOCH: ${{ needs.epoch-integration.result }}
           REQUIRE_DOCKER: ${{ github.event_name == 'merge_group' && '--require-docker' || '' }}
+          ADVISORY_EPOCH: ${{ github.event_name == 'merge_group' && '--advisory-epoch' || '' }}
         run: |
           python3 -m tools.integration_result final \
             --live-job="$LIVE_JOB" --live="$LIVE" \
-            --docker="$DOCKER" --epoch="$EPOCH" $REQUIRE_DOCKER
+            --docker="$DOCKER" --epoch="$EPOCH" $REQUIRE_DOCKER $ADVISORY_EPOCH

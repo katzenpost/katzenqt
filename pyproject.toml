@@ -45,6 +45,7 @@ release = [
 [project.scripts]
 katzenqt = "katzenqt:cli"
 katzenqt-headless = "katzenqt.headless:cli"
+katzenqt-launcher = "katzenqt.launcher:main"
 
 #[tool.pyside6-project]
 #files = ["main.py", "main_window.py"]
@@ -70,7 +71,7 @@ name = "katzenqt"
 
 [tool.uv.sources]
 hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "21c7fad8c9eaf12ce5530aba717fb7545bc8ca7c", subdirectory = "py" }
-rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "2158e2a5cc5e58f430b4c0bf2f5603d8909becc6" }
+rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "a7f5c4877f1aa84f312cc7a23fd85a445225393b" }
 
 [tool.mypy]
 python_version = "3.11"

@@ -498,7 +498,7 @@ async def test_waiting_for_what_is_owed_clears_what_was_dropped(
         await sess.commit()
     waited: list[uuid.UUID] = []
 
-    async def sent(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
+    async def sent(pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float) -> bool:
         waited.append(pwal_id)
         return True
 
@@ -508,7 +508,7 @@ async def test_waiting_for_what_is_owed_clears_what_was_dropped(
     (again,) = await chat.queue(_text())
     assert _sent(again).acks is not None
 
-    async def never(pwal_id: uuid.UUID, *, deadline_s: float) -> bool:
+    async def never(pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float) -> bool:
         return False
 
     monkeypatch.setattr(persistent, "wait_for_sent", never)
@@ -898,7 +898,7 @@ async def test_an_induction_that_cannot_start_leaves_acknowledgements_free(
     async def payload(*_a: object, **_k: object) -> voucher._JoinerPayload:
         return voucher._JoinerPayload(uuid.uuid4(), b"w", b"p", b"i")
 
-    async def never(conversation_id: int, *, deadline_s: float) -> bool:
+    async def never(conversation_id: int, *, deadline_s: float, epoch_s: float) -> bool:
         return False
 
     monkeypatch.setattr(voucher, "_read_joiner_payload", payload)

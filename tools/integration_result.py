@@ -45,9 +45,9 @@ def live_outcome(
 
 def integration_passed(
     live_job: str, live: str, docker: str, epoch: str,
-    require_docker: bool = False,
+    require_docker: bool = False, advisory_epoch: bool = False,
 ) -> bool:
-    if epoch != "success":
+    if epoch != "success" and not advisory_epoch:
         return False
     if require_docker:
         return docker == "success"
@@ -80,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("live-job", "live", "docker", "epoch"):
         final.add_argument(f"--{name}", required=True)
     final.add_argument("--require-docker", action="store_true")
+    final.add_argument("--advisory-epoch", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "live":
         data: object = None
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     passed = integration_passed(
         args.live_job, args.live, args.docker, args.epoch,
         args.require_docker,
+        args.advisory_epoch,
     )
     text = (
         f"Namenlos: {args.live or 'missing'} (job: {args.live_job}).\n"

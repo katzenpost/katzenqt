@@ -1,0 +1,16 @@
+FROM docker.io/debian:13
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update \
+	&& apt install -y --no-install-recommends \
+		flatpak flatpak-builder ostree appstream desktop-file-utils \
+		ca-certificates elfutils git librsvg2-common python3 \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN flatpak remote-add --if-not-exists flathub \
+		https://flathub.org/repo/flathub.flatpakrepo \
+	&& flatpak install -y flathub \
+		org.kde.Platform//6.9 org.kde.Sdk//6.9 org.flatpak.Builder \
+		org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+WORKDIR /src

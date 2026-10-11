@@ -13,7 +13,10 @@ warning at the end of this document.
 
 ## Running the GUI
 
-On Debian GNU/Linux, install `git` and `make`, clone the repo, and build:
+On Debian GNU/Linux, install `git` and `make`, clone the repo, and build.
+Debian may not add the first user to `sudoers`, so if `sudo` refuses you,
+run the `apt` steps as root instead (`su -c 'apt install -y git make'`);
+`make deps` does the same for the packages it installs.
 
 ```shell
 sudo apt install -y git make
@@ -118,6 +121,20 @@ Every network step crosses the mixnet, so over a real network each can take from
 seconds to minutes (the docker mixnet is near-instant). The full set of verbs,
 `info`, `multi-send`, `send-file`, `read-file`, `chat-session`, `tally-list`, and
 so on, is listed by `--help`; see HACKING.md for the fuller reference.
+
+## Two GUIs against the docker mixnet
+
+The katzenpost docker mixnet gives two instances on one machine a network to
+talk over, with epochs of minutes rather than hours. Each instance is its own
+`KQT_STATE`, and both dial the mixnet's `kpclientd` on TCP `127.0.0.1:64331`
+through `config/thinclient.docker.toml`:
+
+```shell
+make mixnet-up                  # clone ./katzenpost if needed, start it
+make run-docker INSTANCE=alice  # one GUI, state file alice.sqlite3
+make run-docker INSTANCE=bob    # a second GUI, state file bob.sqlite3
+make mixnet-down
+```
 
 ## Warning
 

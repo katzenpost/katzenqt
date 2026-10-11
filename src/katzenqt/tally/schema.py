@@ -123,6 +123,8 @@ def meta_map(doc: SurveyDoc) -> MetaMap:
     ['mode', 'n_slots', 'status', 'survey_id', 'topic']
     >>> meta_map(doc)["mode"]
     'approval'
+    >>> meta_map(doc)["n_slots"]
+    1.0
     """
     root = doc.get(_META, type=Map)
     assert isinstance(root, Map)

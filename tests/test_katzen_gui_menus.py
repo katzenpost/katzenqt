@@ -463,29 +463,6 @@ async def test_a_confirmed_upload_cancel_is_dispatched(
     assert pauses["cancel_upload"] == [stream]
 
 
-@pytest.mark.asyncio
-async def test_the_test_shortcut_round_trips_a_keypair(
-    window: katzen.MainWindow,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tested: list[tuple[bytes, bytes]] = []
-
-    def create(seed: bytes) -> tuple[bytes, bytes]:
-        return b"write", b"read"
-
-    async def test_keypair(
-        client: object,
-        write_cap: bytes,
-        read_cap: bytes,
-    ) -> None:
-        tested.append((write_cap, read_cap))
-
-    monkeypatch.setattr(network, "create_new_keypair", create)
-    monkeypatch.setattr(network, "test_keypair", test_keypair)
-    await window.testme()
-    assert tested == [(b"write", b"read")]
-
-
 def test_the_nanosecond_clock_falls_back_to_monotonic_ns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

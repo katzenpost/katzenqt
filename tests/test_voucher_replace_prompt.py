@@ -65,6 +65,7 @@ class _Loop:
 
 class _Convo:
     conversation_id = 7
+    own_peer_name = "me"
 
 
 def _fake_window() -> SimpleNamespace:

@@ -20,9 +20,9 @@ import time
 import types
 import nacl.public
 import secrets
-import random
 import logging
 # https://github.com/katzenpost/thin_client/blob/main/examples/echo_ping.py
+from collections.abc import Callable
 import asyncio
 import traceback
 import uuid
@@ -779,7 +779,6 @@ async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     if epoch is None or epoch == _last_epoch:
         return
     previous, _last_epoch = _last_epoch, epoch
-    epochs.remember_period(derive_epoch_period_seconds(epoch))
     logger.info("PKI epoch advanced to %s (from %s)", epoch, previous)
     old_event, _epoch_event = _epoch_event, asyncio.Event()
     old_event.set()
@@ -1027,6 +1026,31 @@ def _is_duplicate_arming(exc: "OperationalError | IntegrityError") -> bool:
 
 
 __on_message_queues: "dict[bytes, asyncio.Queue[Mapping[str, object]]]" = {}
+
+__status_listeners: "list[Callable[[bool], None]]" = []
+
+
+def mixnet_connected() -> bool:
+    return __mixnet_connected.is_set()
+
+
+def add_status_listener(callback: Callable[[bool], None]) -> None:
+    """Subscribe to daemon connection status updates."""
+    __status_listeners.append(callback)
+
+
+def remove_status_listener(callback: Callable[[bool], None]) -> None:
+    """Remove a subscription if it is still registered."""
+    if callback in __status_listeners:
+        __status_listeners.remove(callback)
+
+
+def _notify_status(connected: bool) -> None:
+    for callback in tuple(__status_listeners):
+        try:
+            callback(connected)
+        except Exception:
+            logger.exception("connection status listener failed")
 
 __should_quit = asyncio.Event()
 def shutdown() -> None:
@@ -1499,7 +1523,8 @@ class RetryPacer:
     def delay_s(self, key: Hashable) -> float:
         ceiling = next_ceiling_s(self.ceilings.get(key, 0.0), self.bounds)
         self.ceilings[key] = ceiling
-        return random.uniform(ceiling / 2.0, ceiling)
+        span_ms = int(ceiling * 500.0)
+        return ceiling / 2.0 + secrets.randbelow(span_ms + 1) / 1000.0
 
     def reset(self, key: Hashable) -> None:
         self.ceilings.pop(key, None)
@@ -1791,6 +1816,34 @@ async def _substream_parent(
 # operator; it is generous enough for photos, audio clips, and
 # short documents.
 _ATTACHMENT_HARD_CAP = 200 * 1024 * 1024
+_ASSEMBLY_HARD_CAP = _ATTACHMENT_HARD_CAP + 1024 * 1024
+_MAX_INDIRECTION_DEPTH = 8
+_MAX_OPEN_PIECES_PER_STREAM = 300_000
+
+
+async def _indirection_depth(
+    sess: persistent.AsyncSession, peer: persistent.ConversationPeer,
+) -> int:
+    """Nested substream hops this peer sits behind; 0 when read directly."""
+    depth = 0
+    cur: "persistent.ConversationPeer | None" = peer
+    while cur is not None and cur.name.startswith(_SUBSTREAM_NAME_PREFIX):
+        depth += 1
+        if depth > _MAX_INDIRECTION_DEPTH:
+            break
+        cur = await _substream_parent(sess, cur.name)
+    return depth
+
+
+async def _open_piece_count(
+    sess: persistent.AsyncSession, bacap_stream: uuid.UUID,
+) -> int:
+    """Un-coalesced pieces this stream is holding."""
+    return len((await sess.exec(
+        select(persistent.ReceivedPiece).where(
+            persistent.ReceivedPiece.read_cap == bacap_stream,
+        )
+    )).all())
 
 
 def _attachments_root() -> Path:
@@ -1943,6 +1996,7 @@ async def _try_assemble(
         return None  # a lone 'C', chain not yet terminated
 
     chain = [cur]
+    held = len(cur.chunk)
     counter = int.from_bytes(terminal_idx_8b, "little")
     while counter > 0:
         counter -= 1
@@ -1953,6 +2007,14 @@ async def _try_assemble(
             break  # either gap or substream start; let CBOR decode decide
         if prev.chunk_type in (b"F", b"I"):
             break  # boundary with a prior assembled message
+        held += len(prev.chunk)
+        if held > _ASSEMBLY_HARD_CAP:
+            logger.warning(
+                "chain at rcw=%s terminal=%s holds %d bytes, past the %d "
+                "byte ceiling; refusing it", rcw_id,
+                terminal_idx_8b.hex(), held, _ASSEMBLY_HARD_CAP,
+            )
+            return None
         chain.insert(0, prev)
 
     chunks = [(rp.chunk_type, rp.chunk) for rp in chain]
@@ -1996,6 +2058,19 @@ def _substream_miss_state(
     if now_s - started >= budget_s:
         return started, "A required box remained unavailable"
     return started, None
+
+
+async def _advance_past_tombstone(mw_id: uuid.UUID) -> None:
+    async with persistent.asession() as sess:
+        mw_row = await sess.get(persistent.MixWAL, mw_id)
+        if mw_row is None:
+            return
+        rcw = await sess.get(persistent.ReadCapWAL, mw_row.bacap_stream)
+        if rcw is not None and rcw.next_index == mw_row.current_message_index:
+            rcw.next_index = mw_row.next_message_index
+            sess.add(rcw)
+        await sess.delete(mw_row)
+        await sess.commit()
 
 
 async def _record_substream_miss(
@@ -2063,6 +2138,40 @@ async def _discard_substream_release(
 ) -> None:
     for piece in await _substream_release_pieces(sess, parent_cap_id, read_cap):
         await sess.delete(piece)
+
+
+READ_FANOUT_LIMIT = 64
+_read_fanout_slots: "dict[asyncio.AbstractEventLoop, asyncio.Semaphore]" = {}
+
+
+def read_fanout_slot() -> asyncio.Semaphore:
+  """The read-concurrency limiter for the running loop.
+
+  Per loop, because the async engine is driven from both the Qt loop and
+  the io thread's loop, and an asyncio primitive belongs to whichever
+  loop first awaits it (see persistent.warm_async_engine).
+  """
+  loop = asyncio.get_running_loop()
+  slot = _read_fanout_slots.get(loop)
+  if slot is None:
+    slot = asyncio.Semaphore(READ_FANOUT_LIMIT)
+    _read_fanout_slots[loop] = slot
+  return slot
+
+
+async def drain_mixwal_read_bounded(**kwargs: "Any") -> None:
+  """Run one stream's read, waiting for a slot first.
+
+  The drain starts one task per readable box with nothing between the
+  calls, so concurrency is the number of streams: a member's stream each,
+  plus one per transfer substream, over every conversation. Each read
+  opens its own session, and aiosqlite gives every connection an OS
+  thread, so an unbounded pass turns a large group into a thread and
+  connection spike before sqlite serialises anything. It is also a
+  traffic burst the network can see.
+  """
+  async with read_fanout_slot():
+    await drain_mixwal_read_single(**kwargs)
 
 
 async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes, mw: persistent.MixWAL, draining_right_now: "set[uuid.UUID]", read_watchdog_s: float = READ_WATCHDOG_SECONDS, reconnect_grace_s: float = _RECONNECT_GRACE_SECONDS) -> None:
@@ -2243,11 +2352,25 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     await asyncio.sleep(_pacer.delay_s(bacap_uuid))
     give_up()
     return
-  except (BoxIDNotFoundError, TombstoneError) as e:
+  except TombstoneError as e:
+    if is_substream:
+      logger.info("tombstoned substream box at %s: %s", bacap_uuid, e)
+      await _record_substream_miss(
+          bacap_uuid, terminal=True,
+          now_s=time.time(), budget_s=read_watchdog_s,
+      )
+    else:
+      logger.info("tombstone at %s; advancing past it: %s", bacap_uuid, e)
+      await _advance_past_tombstone(mw.id)
+    __resend_queue.discard(bacap_uuid)
+    _pacer.reset(bacap_uuid)
+    give_up()
+    return
+  except BoxIDNotFoundError as e:
     failed = False
     if is_substream:
       failed = await _record_substream_miss(
-          bacap_uuid, terminal=isinstance(e, TombstoneError),
+          bacap_uuid, terminal=False,
           now_s=time.time(), budget_s=read_watchdog_s,
       )
     if not failed:
@@ -2322,9 +2445,21 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       draining_right_now.discard(bacap_uuid)  # otherwise this stream is wedged forever with no exception needed
       readables_to_mixwal_event.set()  # signal readables_to_mixwal() so we can begin reading next
       return
+    if idx_new != idx_old + 1:
+      logger.warning(
+          "not advancing idx to %s from old %s: a reply that skips a box "
+          "would move this stream past one we never read", idx_new, idx_old,
+      )
+      try:
+        await sess.delete(mw)
+        await sess.commit()
+      except Exception as e:  # pragma: no cover - defensive
+        logger.critical("error deleting skipping MW: %s", e, exc_info=True)
+      draining_right_now.discard(bacap_uuid)
+      readables_to_mixwal_event.set()
+      return
     logger.info(f"advancing read to idx {idx_new}")
     _pacer.reset(bacap_uuid)
-    assert idx_new == idx_old + 1, f"idx mismatch {idx_new} != {idx_old} + 1"
     rcw.next_index = rcr.next_message_box_index
     rcw.substream_missing_since = None
     sess.add(rcw)
@@ -2351,6 +2486,29 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
       return
 
     cp = (await sess.exec(select(persistent.ConversationPeer).where(persistent.ConversationPeer.read_cap_id==rcw.id))).one()
+    held_pieces = await _open_piece_count(sess, mw.bacap_stream)
+    if held_pieces >= _MAX_OPEN_PIECES_PER_STREAM:
+      logger.warning(
+          "stream %s holds %d un-coalesced pieces; dropping this chunk",
+          mw.bacap_stream, held_pieces,
+      )
+      await sess.delete(mw)
+      await sess.commit()
+      draining_right_now.discard(bacap_uuid)
+      __mixwal_updated.set()
+      return
+    if await _indirection_depth(sess, cp) > _MAX_INDIRECTION_DEPTH:
+      logger.warning(
+          "peer %s is more than %d substream hops deep; retiring it",
+          cp.id, _MAX_INDIRECTION_DEPTH,
+      )
+      cp.active = False
+      sess.add(cp)
+      await sess.delete(mw)
+      await sess.commit()
+      draining_right_now.discard(bacap_uuid)
+      __mixwal_updated.set()
+      return
     sess.add(persistent.ReceivedPiece(
                 read_cap=mw.bacap_stream,
                 bacap_index=mw.current_message_index[:8],
@@ -2793,6 +2951,73 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
         )
 
 
+def _is_member(
+    peer: persistent.ConversationPeer, own_peer_id: int,
+) -> bool:
+    """Whether this conversation peer is one whose stream we poll."""
+    return (
+        peer.id != own_peer_id
+        and peer.active
+        and not peer.name.startswith(_SUBSTREAM_NAME_PREFIX)
+    )
+
+
+async def _member_streams(conversation_id: int) -> "list[uuid.UUID]":
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return []
+        peers = (await sess.exec(
+            select(persistent.ConversationPeer)
+            .join(persistent.ConversationPeerLink)
+            .where(
+                persistent.ConversationPeerLink.conversation_id
+                == conversation_id,
+            )
+        )).all()
+        return [
+            peer.read_cap_id for peer in peers
+            if _is_member(peer, conv.own_peer_id)
+        ]
+
+
+def conversation_reads_paused(
+    sess: "persistent.Session", conversation_id: int, own_peer_id: int,
+) -> bool:
+    """Whether every member of this conversation is paused. An empty
+    conversation is not paused: there is nothing to have stopped."""
+    rows = sess.exec(
+        select(persistent.ConversationPeer, persistent.ReadCapWAL)
+        .join(persistent.ConversationPeerLink)
+        .where(
+            persistent.ConversationPeerLink.conversation_id
+            == conversation_id,
+            persistent.ConversationPeer.read_cap_id
+            == persistent.ReadCapWAL.id,
+        )
+    ).all()
+    members = [rcw for peer, rcw in rows if _is_member(peer, own_peer_id)]
+    return bool(members) and all(rcw.paused for rcw in members)
+
+
+async def pause_conversation_reads(*, conversation_id: int) -> None:
+    """Stop polling every member of one conversation.
+
+    Reading is what costs a round trip per member, so a user in many
+    groups pauses the whole conversation rather than each member. This is
+    not muting: nothing about notifications changes, and the streams stay
+    joined so a resume picks up from each saved cursor.
+    """
+    for stream in await _member_streams(conversation_id):
+        await pause_peer_reads(bacap_stream=stream)
+
+
+async def resume_conversation_reads(*, conversation_id: int) -> None:
+    """Poll every member of one conversation again."""
+    for stream in await _member_streams(conversation_id):
+        await resume_peer_reads(bacap_stream=stream)
+
+
 async def pause_upload(*, rcw_id: uuid.UUID) -> None:
     """Pause an outbound substream.
 
@@ -3209,7 +3434,13 @@ async def drain_mixwal2(connection: ThinClient) -> None:
                             draining_right_now.discard(mw.bacap_stream)
                             __resend_queue.discard(mw.bacap_stream)
                             continue
-                        read_task = create_task(drain_mixwal_read_single(connection=connection, rcw_read_cap=rcw.read_cap, mw=mw, draining_right_now=draining_right_now))
+                        read_task = create_task(
+                            drain_mixwal_read_bounded(
+                                connection=connection,
+                                rcw_read_cap=rcw.read_cap, mw=mw,
+                                draining_right_now=draining_right_now,
+                            )
+                        )
                         requests.add(read_task)
                         read_task.add_done_callback(requests.discard)
                         _inflight_reads[mw.bacap_stream] = read_task
@@ -3719,6 +3950,7 @@ async def on_connection_status(status: "Mapping[str, object]") -> None:
             # instead of logging the same single event twice.
             logger.warning("daemon reports disconnected from mixnet; ARQ rides out and retries")
     _last_connected = connected
+    _notify_status(connected)
     if err:
         logger.error("ON_CONNECTION_STATUS err: %s", status)
         #ON_CONNECTION_STATUS err: {'is_connected': False, 'err': {'Op': 'read', 'Net': 'tcp', 'Source': {'IP': b'\x7f\x00\x00\x01', 'Port': 51718, 'Zone': ''}, 'Addr': {'IP': b'\x7f\x00\x00\x01', 'Port': 30004, 'Zone': ''}, 'Err': {}}}
@@ -3779,10 +4011,9 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
       2. ``$KATZENQT_THINCLIENT_CONFIG``,
       3. ``$XDG_CONFIG_HOME/katzenqt/thinclient.toml`` (default
          ``~/.config/katzenqt/thinclient.toml``),
-      4. the bundled copy shipped under ``katzenqt/data/thinclient.toml``
-         (resolved via ``importlib.resources``),
-      5. the development-tree fallback at
-         ``<repo>/config/thinclient.toml``.
+      4. the copy shipped as package data under
+         ``katzenqt/data/thinclient.toml`` (resolved via
+         ``importlib.resources``, independent of the repo location).
     """
     if explicit is not None:
         explicit_path = Path(explicit)
@@ -3798,14 +4029,9 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
         candidates.append(Path(env))
     xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     candidates.append(Path(xdg) / "katzenqt" / "thinclient.toml")
-    try:
-        bundled = importlib.resources.files("katzenqt") / "data" / "thinclient.toml"
-        candidates.append(Path(str(bundled)))
-    except (ModuleNotFoundError, FileNotFoundError):
-        pass
-    candidates.append(
-        Path(__file__).resolve().parent.parent.parent / "config" / "thinclient.toml"
-    )
+    package = importlib.resources.files("katzenqt")
+    bundled = package / "data" / "thinclient.toml"
+    candidates.append(Path(str(bundled)))
 
     for c in candidates:
         if c.is_file():
@@ -3814,6 +4040,19 @@ def resolve_thinclient_config(explicit: "str | Path | None" = None) -> Path:
         "Could not locate thinclient.toml in: "
         + ", ".join(str(c) for c in candidates)
     )
+
+
+def epoch_period_seconds(now: "datetime | None" = None) -> float:
+    override = os.environ.get("KQT_EPOCH_DURATION_S")
+    period = epochs.period_s(
+        derive_epoch_period_seconds(_last_epoch, now), override,
+    )
+    if period == 0.0 and override:
+        logger.warning(
+            "ignoring KQT_EPOCH_DURATION_S=%r: not a period between 0 and "
+            "a week", override,
+        )
+    return period
 
 
 # from katzenpost_thinclient import ThinClient, Config
@@ -3876,32 +4115,6 @@ def create_new_keypair(seed: bytes) -> "tuple[bytes, bytes]":
     assert len(read_cap)  == 32 + 104
     return write_cap, read_cap
 
-async def test_keypair(connection: ThinClient, write_cap: bytes,
-                       read_cap: bytes) -> None:
-    """Test that create_new_keypair() results in usable+matching write/read caps."""
-    wcr = await connection.encrypt_write(
-        plaintext=b'hello',
-        write_cap=write_cap,
-        message_box_index=write_cap[-104:])
-    await connection.start_resending_encrypted_message(
-        read_cap=None, write_cap=write_cap, message_box_index=None,
-        reply_index=None,
-        envelope_descriptor=wcr.envelope_descriptor,
-        message_ciphertext=wcr.message_ciphertext,
-        envelope_hash=wcr.envelope_hash)
-
-    await asyncio.sleep(20)
-
-    rcr = await connection.encrypt_read(
-        read_cap=read_cap,
-        message_box_index=read_cap[-104:])
-    await connection.start_resending_encrypted_message(
-        read_cap=read_cap, write_cap=None,
-        message_box_index=read_cap[-104:],
-        reply_index=None,
-        envelope_descriptor=rcr.envelope_descriptor,
-        message_ciphertext=rcr.message_ciphertext,
-        envelope_hash=rcr.envelope_hash)
 __all__ = [
     "Awaitable",
     "BACAPDecryptionFailedError",
@@ -4010,7 +4223,6 @@ __all__ = [
     "persist_first_unread",
     "persistent",
     "provision_read_caps",
-    "random",
     "readables_to_mixwal",
     "readables_to_mixwal_event",
     "readables_to_mixwal_supervised",
@@ -4036,7 +4248,6 @@ __all__ = [
     "substream_progress_queue",
     "summarize_pki_document",
     "tally_update_queue",
-    "test_keypair",
     "threading",
     "time",
     "timezone",

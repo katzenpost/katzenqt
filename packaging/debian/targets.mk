@@ -5,7 +5,7 @@ THINCLIENT_REV := 7c7de9128033554ecff355020dcccb22b4d5bb25
 PIP_VER := 24.2
 MATURIN_VER := 1.8.2
 RUSTIC_AUDIO_URL := https://github.com/katzenpost/Rustic_Audio_PyO3
-RUSTIC_AUDIO_REV := 2158e2a5cc5e58f430b4c0bf2f5603d8909becc6
+RUSTIC_AUDIO_REV := a7f5c4877f1aa84f312cc7a23fd85a445225393b
 
 DEB_DISTROS ?= debian-13 debian-forky ubuntu-26.04
 

@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from . import persistent
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("katzen.theme")
 
 # AppSetting key under which the chosen mode is stored.
 THEME_SETTING = "theme.mode"

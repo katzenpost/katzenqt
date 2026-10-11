@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from pydantic import Field, BaseModel, SecretBytes, SecretStr, field_serializer, model_validator
 import cbor2
 from enum import Enum
@@ -296,6 +297,28 @@ class SendOperation(BaseModel):
         return await asyncio.to_thread(
             self.serialize, chunk_size=chunk_size, conversation_id=conversation_id,
         )
+
+
+NAME_POLICY_SETTING = "attachments.namePolicy"
+NAME_POLICY_KEEP = "keep"
+NAME_POLICY_HASH = "hash"
+
+
+def outgoing_basename(
+    payload: bytes, basename: str, filetype: str, *, hash_all: bool,
+) -> str:
+    """The name an attachment travels under. Audio always hashes.
+
+    >>> outgoing_basename(b"jpg", "holiday.jpg", "image/jpeg", hash_all=False)
+    'holiday.jpg'
+    >>> outgoing_basename(b"ogg", "conversation-4-draft-179137435.opus",
+    ...                   "audio/opus", hash_all=False)
+    '90308fe99871113bf5490ec73a8813b667adc60fe01530102a6c7bfb73c66481.opus'
+    """
+    if not (hash_all or filetype.startswith("audio/")):
+        return basename
+    digest = hashlib.sha256(payload).hexdigest()
+    return f"{digest}{Path(basename).suffix.lower()}"
 
 
 class GroupChatFileUpload(BaseModel):

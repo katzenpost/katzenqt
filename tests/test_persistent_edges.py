@@ -40,6 +40,7 @@ async def test_wait_for_sent_returns_false_when_the_deadline_has_passed() -> (
         await persistent.wait_for_sent(
             uuid.uuid4(),
             deadline_s=-1.0,
+            epoch_s=0.0,
         )
         is False
     )
@@ -55,6 +56,7 @@ async def test_wait_for_sent_returns_true_once_the_row_is_there() -> None:
         await persistent.wait_for_sent(
             pwal_id,
             deadline_s=5.0,
+            epoch_s=0.0,
             poll_s=0.01,
         )
         is True
@@ -117,7 +119,7 @@ async def test_wait_for_sent_polls_until_the_row_appears(
 
     monkeypatch.setattr(asyncio, "sleep", insert_on_the_first_poll)
     assert await persistent.wait_for_sent(
-        pwal_id, deadline_s=5.0, poll_s=0.01,
+        pwal_id, deadline_s=5.0, epoch_s=0.0, poll_s=0.01,
     ) is True
     assert polls >= 1
 

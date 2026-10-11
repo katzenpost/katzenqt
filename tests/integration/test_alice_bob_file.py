@@ -17,7 +17,9 @@ import hashlib
 import os
 import subprocess
 import sys
+import struct
 import time
+import wave
 from pathlib import Path
 
 import pytest
@@ -128,3 +130,70 @@ def test_file_roundtrip(
     assert recv_path.is_file(), f"reported path {recv_path} does not exist"
     assert _sha256(recv_path) == expected_sha
     print(f"[file] received in {time.monotonic()-t0:.1f}s -> {recv_path}")
+
+
+def _make_wav(path: Path, n_samples: int = 1_000) -> None:
+    """A mono 8 kHz WAV of n_samples, deterministic so the hash is stable."""
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8_000)
+        handle.writeframes(
+            b"".join(
+                struct.pack("<h", ((i * 137) % 4_000) - 2_000)
+                for i in range(n_samples)
+            )
+        )
+
+
+@pytest.mark.integration
+def test_audio_file_roundtrip(
+    kpclientd_endpoint: "tuple[str, int]",
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The same path as test_file_roundtrip, carrying a WAV instead.
+
+    A voice note is the one attachment the GUI plays rather than opens,
+    so the bytes have to survive the substream unchanged: the RIFF
+    header is checked on both sides as well as the hash.
+    """
+    alice_state = tmp_path_factory.mktemp("alice_audio") / "state"
+    bob_state = tmp_path_factory.mktemp("bob_audio") / "state"
+    src_dir = tmp_path_factory.mktemp("alice_audio_outbox")
+    dst_dir = tmp_path_factory.mktemp("bob_audio_inbox")
+
+    src = src_dir / "clip.wav"
+    _make_wav(src)
+    assert src.read_bytes()[:4] == b"RIFF"
+    assert src.stat().st_size > 2_000
+    expected_sha = _sha256(src)
+
+    _bootstrap_voucher(alice_state, bob_state)
+
+    t0 = time.monotonic()
+    send = _run_role(
+        alice_state, "send-file", "demo", str(src),
+        "--timeout", deadline_arg(780.0),
+        timeout=budget_s(1080.0),
+    )
+    assert send.returncode == 0 and "SENT" in _output(send), (
+        f"send-file failed:\nstdout:\n{send.stdout}\nstderr:\n{send.stderr}"
+    )
+    print(f"[audio] sent in {time.monotonic()-t0:.1f}s")
+
+    t0 = time.monotonic()
+    read = _run_role(
+        bob_state, "read-file", "demo",
+        "--to-dir", str(dst_dir),
+        "--timeout", deadline_arg(780.0),
+        timeout=budget_s(880.0),
+    )
+    assert read.returncode == 0, (
+        f"read-file failed:\nstdout tail:\n{read.stdout[-2000:]}\n"
+        f"stderr tail:\n{read.stderr[-2000:]}"
+    )
+    recv_path = Path(_expect_token(read, "RECV_FILE="))
+    assert recv_path.is_file(), f"reported path {recv_path} does not exist"
+    assert recv_path.read_bytes()[:4] == b"RIFF"
+    assert _sha256(recv_path) == expected_sha
+    print(f"[audio] received in {time.monotonic()-t0:.1f}s -> {recv_path}")

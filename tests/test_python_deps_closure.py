@@ -100,3 +100,17 @@ def test_the_top_level_makefile_only_includes_the_packaging_targets() -> None:
     assert "-include packaging/*/targets.mk" in body
     assert "PYCRDT_URL" not in body
     assert re.search(r"^deb:", body, re.MULTILINE) is None
+
+
+def test_the_debian_audio_pin_matches_the_application_lock() -> None:
+    """The Debian build vendors the audio crate from its own pin, so a bump
+    in uv.lock that misses this file ships a different encoder."""
+    makefile = (ROOT / "packaging" / "debian" / "targets.mk").read_text(
+        encoding="ascii",
+    )
+    pinned = re.search(
+        r"^RUSTIC_AUDIO_REV := ([0-9a-f]{40})$", makefile, re.MULTILINE,
+    )
+    assert pinned is not None
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert pinned.group(1) in lock

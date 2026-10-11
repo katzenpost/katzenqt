@@ -237,27 +237,20 @@ async def _outbound_upload_from_entries(
 
 
 def _resolve_alembic_ini() -> Path:
-    """Locate the ``alembic.ini`` shipped with the package.
+    """Locate the ``alembic.ini`` shipped as package data.
 
-    Tries the package-data copy first (works for both editable and
-    copy installs), then falls back to the development-tree
-    ``<repo>/config/alembic.ini`` (so ``uv run alembic -c
-    config/alembic.ini ...`` from the source tree keeps working
-    without touching the package data file).
+    Resolved through ``importlib.resources`` so it works the same for
+    editable and copy installs, independent of the repository location.
     """
-    try:
-        bundled = importlib.resources.files("katzenqt") / "data" / "alembic.ini"
-        p = Path(str(bundled))
-        if p.is_file():
-            return p
-    except (ModuleNotFoundError, FileNotFoundError):
-        pass
-    return Path(__file__).parent.parent.parent / "config" / "alembic.ini"
+    package = importlib.resources.files("katzenqt")
+    return Path(str(package / "data" / "alembic.ini"))
 
 
 _alembic_cfg = alembic.config.Config(_resolve_alembic_ini())
 
-xdg_data_home = (Path().home()/".local"/"share")
+xdg_data_home = Path(
+    os.environ.get("XDG_DATA_HOME") or Path.home()/".local"/"share"
+)
 xdg_data_home.mkdir(parents=True,exist_ok=True)
 app_data = xdg_data_home / "katzenqt"
 app_data.mkdir(exist_ok=True, mode=0o700)
@@ -302,6 +295,10 @@ def _set_sqlite_pragmas(
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout=250")
     cursor.close()
+    # journal_mode=WAL lazily creates the -wal/-shm sidecars on first write,
+    # under the process umask rather than inheriting the main file's 0600,
+    # so restrict them too, now that they are guaranteed to exist.
+    _restrict_state_file_perms(state_file)
 
 
 sa.event.listens_for(_engine.sync_engine, "connect")(_set_sqlite_pragmas)
@@ -368,18 +365,29 @@ async def warm_async_engine() -> None:
         pass
 
 def _restrict_state_file_perms(path: Path) -> None:
-    """Tighten the on-disk state database to owner-only (0600).
+    """Tighten the on-disk state database, and its WAL/SHM sidecars if
+    present, to owner-only (0600).
 
-    The state directory is already 0700, but the database file itself is
-    created with the process umask, so on a permissive umask it can be group-
-    or world-readable. It holds BACAP caps, signing keys, and message
-    plaintext, so clamp it to 0600. Best-effort: a missing file or a
-    filesystem that does not honour chmod is not fatal to startup."""
-    try:
-        if path.is_file():
-            os.chmod(path, 0o600)
-    except OSError as exc:  # pragma: no cover - platform/filesystem dependent
-        logger.warning("could not restrict permissions on %s: %s", path, exc)
+    The state directory is already 0700, but each file is created with the
+    process umask, so on a permissive umask any of them can be group- or
+    world-readable. journal_mode=WAL means uncheckpointed writes -- BACAP
+    caps, signing keys, message plaintext -- can sit in the -wal/-shm
+    sidecars, not just the main file, so all three need clamping. Best-
+    effort: a missing file or a filesystem that does not honour chmod is not
+    fatal to startup."""
+    sidecars = (
+        path,
+        path.with_name(path.name + "-wal"),
+        path.with_name(path.name + "-shm"),
+    )
+    for candidate in sidecars:
+        try:
+            if candidate.is_file():
+                os.chmod(candidate, 0o600)
+        except OSError as exc:  # pragma: no cover - filesystem dependent
+            logger.warning(
+                "could not restrict permissions on %s: %s", candidate, exc,
+            )
 
 
 def init_and_migrate() -> None:
@@ -413,6 +421,34 @@ class AppSetting(SQLModel, table=True):
     id: str = Field(primary_key=True)  # name of the setting
     type: str = Field(nullable=False)  # "str" or "int", I guess
     value: str = Field(nullable=True)  # value or NULL
+
+MUTED_PREFIX = "mute:"
+
+
+def muted_key(conversation_id: int) -> str:
+    """The AppSetting id under which one conversation's mute is recorded.
+
+    >>> muted_key(7)
+    'mute:7'
+    """
+    return f"{MUTED_PREFIX}{conversation_id}"
+
+
+async def is_muted(conversation_id: int) -> bool:
+    async with asession() as sess:
+        row = await sess.get(AppSetting, muted_key(conversation_id))
+    return row is not None
+
+
+async def set_muted(conversation_id: int, *, muted: bool) -> None:
+    key = muted_key(conversation_id)
+    async with asession() as sess:
+        row = await sess.get(AppSetting, key)
+        if muted and row is None:
+            sess.add(AppSetting(id=key, type="str", value="1"))
+        elif not muted and row is not None:
+            await sess.delete(row)
+        await sess.commit()
 
 class MixWAL(SQLModel, table=True):
     """
@@ -737,9 +773,10 @@ async def own_read_cap(
 
 
 async def wait_for_sent(
-    pwal_id: uuid.UUID, *, deadline_s: float, poll_s: float = 0.25,
+    pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float,
+    poll_s: float = 0.25,
 ) -> bool:
-    """Poll SentLog for ``pwal_id`` until one epoch plus ``deadline_s``
+    """Poll SentLog for ``pwal_id`` until ``epoch_s`` plus ``deadline_s``
     elapses. Returns True if acked in time, False on timeout.
 
     Shared by every caller that needs to block until an outbound
@@ -749,9 +786,12 @@ async def wait_for_sent(
 
     ``deadline_s`` is slack on top of one epoch, not the whole wait: an ack
     may have to ride out a PKI rollover, and an epoch is two minutes on the
-    local mixnet and twenty on a live one. The period comes from the PKI
-    document, so nothing needs setting per network."""
-    deadline = asyncio.get_event_loop().time() + epochs.budget_s(deadline_s)
+    local mixnet and twenty on a live one. ``epoch_s`` is that period, which
+    the caller reads from the PKI document via
+    ``network.epoch_period_seconds``; pass 0.0 to wait only ``deadline_s``."""
+    deadline = (
+        asyncio.get_event_loop().time() + epochs.budget_s(epoch_s, deadline_s)
+    )
     while asyncio.get_event_loop().time() < deadline:
         async with asession() as sess:
             hit = (await sess.exec(

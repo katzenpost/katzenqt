@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from collections.abc import Collection
 from typing import NamedTuple, Optional, TYPE_CHECKING, assert_never, cast
 
 import cbor2
@@ -26,8 +27,9 @@ from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel
                             QModelIndex, QObject, QPoint, QSettings,
                             QSize, Property, Slot, QThread, QUrl,
                             Signal, QTimer)
-from PySide6.QtGui import (QAction, QDesktopServices, QIcon, QKeySequence,
-                           QPixmap, QShortcut, QStandardItem, QStandardItemModel)
+from PySide6.QtGui import (QAction, QActionGroup, QDesktopServices, QIcon,
+                           QKeySequence, QPixmap, QShortcut, QStandardItem,
+                           QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
 from PySide6.QtTest import QAbstractItemModelTester
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
@@ -50,11 +52,15 @@ from katzenpost_thinclient import ThinClientOfflineError
 from .voucher import (await_and_open, cancel_pending_voucher,
                      conversation_is_joined, derive_read_and_induct,
                      list_pending_vouchers, mint_and_publish,
-                     pending_joiner_join_conversation_ids, pending_voucher_for)
+                     pending_joiner_join_conversation_ids,
+                     pending_voucher_for, pending_voucher_token,
+                     voucher_code)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
-from .models import (GROUP_CHAT_VERSION, GroupChatFileUpload,
-                     GroupChatMessage, GroupChatPleaseAdd, SendOperation)
+from .models import (GROUP_CHAT_VERSION, NAME_POLICY_HASH, NAME_POLICY_KEEP,
+                     NAME_POLICY_SETTING, GroupChatFileUpload,
+                     GroupChatMessage, GroupChatPleaseAdd, SendOperation,
+                     outgoing_basename)
 #from ui_mixchat_chatview import Ui_ChatForm
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
@@ -84,7 +90,40 @@ if TYPE_CHECKING:
     _P = ParamSpec("_P")
 
 logger = logging.getLogger("katzen")
+DELIVERY_TICK = "\u2713"
 logger.setLevel("INFO")
+
+
+def contact_label(
+    name: str, read_cap_id: "uuid.UUID | None", taken: "Collection[str]",
+) -> str:
+    """The label a contact row shows, suffixed when the name is taken.
+
+    >>> contact_label("alice", None, [])
+    'alice'
+    >>> import uuid
+    >>> cap = uuid.UUID("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+    >>> contact_label("alice", cap, ["alice"])
+    'alice #3f2504'
+    >>> contact_label("alice", None, ["alice"])
+    'alice'
+    """
+    if name not in taken or read_cap_id is None:
+        return name
+    return f"{name} #{str(read_cap_id)[:6]}"
+
+
+def sibling_labels(parent: "QStandardItem") -> "list[str]":
+    """The labels already on a contact row's children.
+
+    >>> sibling_labels(ContactsItem("empty"))
+    []
+    """
+    return [
+        child.text()
+        for row in range(parent.rowCount())
+        if (child := parent.child(row)) is not None
+    ]
 
 
 def _peer_is_displayable(peer: persistent.ConversationPeer) -> bool:
@@ -119,6 +158,23 @@ class _ResolvedAttachment(NamedTuple):
 # that one queue item. The UI can briefly lag the io thread at startup, but a
 # stale or deleted conversation_id must not starve every later item forever.
 _CONVERSATION_STATE_WAIT_TIMEOUT_S = 30
+
+PAUSE_MARK = "\u23f8"
+
+
+def paused_label(name: str, paused: bool) -> str:
+    """A conversation row's text, marked when nothing is being read.
+
+    >>> paused_label("friends", False)
+    'friends'
+    >>> paused_label("friends", True) == "\u23f8 friends"
+    True
+    >>> paused_label(paused_label("friends", True), True) == "\u23f8 friends"
+    True
+    """
+    bare = name.removeprefix(f"{PAUSE_MARK} ")
+    return f"{PAUSE_MARK} {bare}" if paused else bare
+
 
 class ContactsItem(QStandardItem):
     conversation_id: int
@@ -341,6 +397,60 @@ async def _qml_source_ready(widget: "QQuickWidget") -> None:
         await fut
     finally:
         widget.statusChanged.disconnect(_on_status)
+
+
+class VoucherDialog(QDialog):
+    COPY_LABEL = "Copy voucher"
+    COPIED_LABEL = "Copied"
+    COPIED_SHOWN_MS = 1500
+
+    def __init__(
+        self,
+        parent: "QWidget",
+        code: str,
+        *,
+        display_name: "str | None" = None,
+    ) -> None:
+        super().__init__(parent)
+        self.code = code
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(f"Voucher: {APP_NAME}")
+        intro = (
+            f"Here is your voucher, {display_name}."
+            if display_name else "Here is your voucher."
+        )
+        self.label = QLabel(
+            f"{intro}\nHand it out of band to an existing member, who will "
+            f"induct you. Right-click the group chat to copy it again:"
+            f"\n\n{code}",
+            self,
+        )
+        self.label.setWordWrap(True)
+        self.label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+            | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard,
+        )
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close, self,
+        )
+        self.copy_button = buttons.addButton(
+            self.COPY_LABEL, QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        self.copy_button.clicked.connect(self.copy_code)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.label)
+        layout.addWidget(buttons)
+
+    def copy_code(self) -> None:
+        QApplication.clipboard().setText(self.code)
+        self.copy_button.setText(self.COPIED_LABEL)
+        QTimer.singleShot(
+            self.COPIED_SHOWN_MS, self.copy_button, self.restore_copy_label,
+        )
+
+    def restore_copy_label(self) -> None:
+        self.copy_button.setText(self.COPY_LABEL)
 
 
 async def _commit_new_conversation(
@@ -731,6 +841,16 @@ class PacketsDialog(QDialog):
     def hideEvent(self, event: "QHideEvent") -> None:
         self._timer.stop()
         super().hideEvent(event)
+# Fixed, not theme-driven: theme.py has no semantic "status" color yet, and
+# both read at a contrast that stays legible against either palette.
+_MIXNET_CONNECTED_COLOR = "#268bd2"
+_MIXNET_OFFLINE_COLOR = "#dc322f"
+
+
+def mixnet_status_text(connected: bool) -> "tuple[str, str]":
+    if connected:
+        return ("Mixnet: connected", _MIXNET_CONNECTED_COLOR)
+    return ("Mixnet: offline", _MIXNET_OFFLINE_COLOR)
 
 
 class MainWindow(QMainWindow):
@@ -752,6 +872,8 @@ class MainWindow(QMainWindow):
         key = ev.key()  # type: ignore[attr-defined]
         print("key released", key)
 
+    mixnet_status_changed = Signal(bool)
+
     def _push_to_talk_audio(self) -> PttAudioBridge | None:
         if getattr(self, "_ptt_audio_failed", False):
             return None
@@ -763,11 +885,7 @@ class MainWindow(QMainWindow):
             self._ptt_audio_failed = True
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.warning(
-                    self,
-                    APP_NAME,
-                    str(exc),
-                ),
+                partial(QMessageBox.warning, self, APP_NAME, str(exc)),
             )
             return None
         # The attachment controls are created before the audio engine is lazily
@@ -955,7 +1073,9 @@ class MainWindow(QMainWindow):
 
         if isinstance(decoded, dict) and "kind" in decoded:
             kind = decoded.get("kind")
-            basename = decoded.get("basename") or "unnamed"
+            basename = decoded.get("basename")
+            if not isinstance(basename, str) or not basename:
+                basename = "unnamed"
             filetype = decoded.get("filetype")
 
             if kind == "file_oversized":
@@ -1186,9 +1306,8 @@ class MainWindow(QMainWindow):
         except AudioEngineError as exc:
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.critical(
-                    self,
-                    f"ERROR: {APP_NAME}",
+                partial(
+                    QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                     f"Failed to start push-to-talk capture.\n\n{exc}",
                 ),
             )
@@ -1221,9 +1340,8 @@ class MainWindow(QMainWindow):
             except AudioEngineError as exc:
                 QTimer.singleShot(
                     0,
-                    lambda: QMessageBox.critical(
-                        self,
-                        f"ERROR: {APP_NAME}",
+                    partial(
+                        QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                         f"Failed to cancel push-to-talk capture.\n\n{exc}",
                     ),
                 )
@@ -1234,9 +1352,8 @@ class MainWindow(QMainWindow):
         except AudioEngineError as exc:
             QTimer.singleShot(
                 0,
-                lambda: QMessageBox.critical(
-                    self,
-                    f"ERROR: {APP_NAME}",
+                partial(
+                    QMessageBox.critical, self, f"ERROR: {APP_NAME}",
                     f"Failed to finalize push-to-talk capture.\n\n{exc}",
                 ),
             )
@@ -1324,30 +1441,6 @@ class MainWindow(QMainWindow):
         # Modal chooser; applies and persists on accept (see theme.py).
         theme.ThemeDialog(self.theme, self).exec()
 
-    @async_cb
-    async def testme(self) -> None:
-        logger.info("testing")
-        import secrets
-        x = secrets.token_bytes(32)
-        import base64
-        #print(base64.z85encode(x))
-        print(base64.b64encode(x))
-        write_cap , read_cap = network.create_new_keypair(x)
-        logger.critical(write_cap)
-        logger.critical(read_cap)
-        client = self.iothread.kp_client
-        assert client is not None
-        await self.iothread.run_in_io(network.test_keypair(client, write_cap, read_cap))
-        # we want to make a regular conversation,
-        # give it a name,
-        # pick a name for ourselves
-        # set up Conversation + ConversationLog in persistent
-        # make RCW + WCW
-        # upload the RCW to the deterministic stream via a models.GroupChatPleaseAdd
-        # or even better a GroupChatReplyWho(please_adds=...) for the conversation
-        
-        
-
     def push_to_talk_pressed(self) -> bool:
         """The shortcut has autoRepeat=True, so we will keep getting these at regular intervals.
         Instead of relying on receiving a keyReleased event, we do a "dead man's switch" thing
@@ -1387,6 +1480,7 @@ class MainWindow(QMainWindow):
         self.systray = None
         super(MainWindow, self).__init__()
         self.conversation_state_by_id : Dict[int, ConversationUIState] = dict()
+        self._ticked_conversations: "set[int]" = set()
         self.app = app
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
@@ -1479,13 +1573,26 @@ class MainWindow(QMainWindow):
 
         # item delegates define custom looks for view items
         self.ui.action_display_font.triggered.connect(self.font_settings_dialog)
+        self.name_policy_menu = self.ui.menuSettings.addMenu(
+            "Outgoing file names"
+        )
+        self.name_policy_group = QActionGroup(self)
+        self.name_policy_group.setExclusive(True)
+        for label, policy in (
+            ("Keep original names", NAME_POLICY_KEEP),
+            ("Hash all names", NAME_POLICY_HASH),
+        ):
+            action = self.name_policy_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(policy)
+            self.name_policy_group.addAction(action)
+        self.name_policy_group.triggered.connect(self.set_name_policy)
         # Theme: enable the (otherwise disabled) menu action, wire its dialog,
         # then restore the persisted light/dark/system choice.
         self.ui.action_theme.setEnabled(True)
         self.ui.action_theme.triggered.connect(self.theme_settings_dialog)
         self.theme = theme.ThemeManager(self.app, self)
         self.theme.restore()
-        self.ui.action_testme.triggered.connect(self.testme)
         self.ui.action_space.triggered.connect(self.new_conversation)
         self.ui.action_new_conversation.triggered.connect(self.new_conversation)
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
@@ -1754,6 +1861,26 @@ class MainWindow(QMainWindow):
                 logger.error(
                     "tally_listener: dropping an item after %s", e, exc_info=e,
                 )
+        self.mixnet_status_label: QLabel = QLabel()
+        self.ui.statusbar.addPermanentWidget(self.mixnet_status_label)
+        self.mixnet_status_changed.connect(self.render_mixnet_status)
+        status_listener = self.mixnet_status_changed.emit
+        network.add_status_listener(status_listener)
+        self.destroyed.connect(
+            lambda *_: network.remove_status_listener(status_listener)
+        )
+        self.render_mixnet_status(network.mixnet_connected())
+
+    @Slot(bool)
+    def render_mixnet_status(self, connected: bool) -> None:
+        text, color = mixnet_status_text(connected)
+        self.mixnet_status_label.setText(text)
+        self.mixnet_status_label.setStyleSheet(f"color: {color};")
+        menu = self.ui.menuMixnetStatus
+        menu.setEnabled(True)
+        menu.clear()
+        current = menu.addAction(text)
+        current.setEnabled(False)
 
     async def _enqueue_outgoing_gcm(
         self,
@@ -1959,6 +2086,39 @@ class MainWindow(QMainWindow):
                     e, exc_info=e,
                 )
 
+    def _note_first_delivery_mark(self, conversation_id: int) -> None:
+        """Say once per conversation what the first delivery mark means.
+
+        A mark is a courier or replica acknowledgement, which is the only
+        delivery this client can observe. It is not a peer having read
+        anything, and until a second acknowledgement exists we hold the
+        only copy anyone can fetch, so the message has to be kept.
+        """
+        if conversation_id in self._ticked_conversations:
+            return
+        with persistent.Session(persistent._engine_sync) as sess:
+            marked = sess.exec(
+                select(persistent.ConversationLog).where(
+                    persistent.ConversationLog.conversation_id
+                    == conversation_id,
+                    persistent.ConversationLog.network_status == 2,
+                )
+            ).first()
+        if marked is None:
+            return
+        self._ticked_conversations.add(conversation_id)
+        logger.info(
+            "conversation %s carries its first courier or replica "
+            "acknowledgement; the message is kept until a second one exists",
+            conversation_id,
+        )
+        self._show_status_message(
+            "",
+            f"{DELIVERY_TICK} means a courier or replica has the message, "
+            "not that anyone read it; it is kept until a second mark "
+            "appears",
+        )
+
     async def _process_conversation_update(
         self, conversation_id: int, redraw_only: bool,
     ) -> None:
@@ -1967,6 +2127,7 @@ class MainWindow(QMainWindow):
         convo_state = self.conversation_state_by_id[conversation_id]
         if redraw_only:
             convo_state.conversation_log_model.redraw_network_status()
+            self._note_first_delivery_mark(conversation_id)
             return
         reset = convo_state.conversation_log_model.refresh_row_count()
 
@@ -1996,6 +2157,11 @@ class MainWindow(QMainWindow):
             convo_state.chat_lines_scroll_idx += 1.0
             # TODO we should flash the contact entry somehow
             # TODO we should bump "unread message" counter
+
+        if await self.iothread.run_in_io(
+            persistent.is_muted(conversation_id),
+        ):
+            return
 
         # if the main window is not in focus, we should issue a notification:
         if not self.app.focusWidget():
@@ -2099,10 +2265,72 @@ class MainWindow(QMainWindow):
     async def _conversation_menu(
         self, item: "ContactsItem", global_pos: QPoint,
     ) -> None:
+        conversation_id = getattr(item, "conversation_id", None)
+        paused = False
+        if conversation_id is not None:
+            with persistent.Session(persistent._engine_sync) as sess:
+                convo = sess.get(persistent.Conversation, conversation_id)
+                paused = convo is not None and (
+                    network.conversation_reads_paused(
+                        sess, conversation_id, convo.own_peer_id,
+                    )
+                )
         api = QMenu(self.ui.contacts_treeWidget)
+        mute = api.addAction("Mute notifications")
+        mute.setCheckable(True)
+        mute.setEnabled(conversation_id is not None)
+        was_muted = conversation_id is not None and await (
+            self.iothread.run_in_io(persistent.is_muted(conversation_id))
+        )
+        mute.setChecked(was_muted)
+        stop = api.addAction("Do not read from this group chat any more")
+        start = api.addAction("Resume reading from this group chat")
+        stop.setEnabled(conversation_id is not None and not paused)
+        start.setEnabled(conversation_id is not None and paused)
+        api.addSeparator()
+        copy_voucher = api.addAction("Copy voucher")
+        show_voucher = api.addAction("Show voucher...")
+        token = await self._pending_voucher(item)
+        copy_voucher.setEnabled(token is not None)
+        show_voucher.setEnabled(token is not None)
+        api.addSeparator()
         remove = api.addAction("Remove group chat...")
-        if await _menu_chosen(api, global_pos) is remove:
+        chosen = await _menu_chosen(api, global_pos)
+        if chosen is remove:
             await self._remove_conversation(item)
+        elif chosen is stop and conversation_id is not None:
+            await self.iothread.run_in_io(
+                network.pause_conversation_reads(
+                    conversation_id=conversation_id,
+                ),
+            )
+            item.setText(paused_label(item.text(), True))
+        elif chosen is start and conversation_id is not None:
+            await self.iothread.run_in_io(
+                network.resume_conversation_reads(
+                    conversation_id=conversation_id,
+                ),
+            )
+            item.setText(paused_label(item.text(), False))
+        elif chosen is mute and conversation_id is not None:
+            await self.iothread.run_in_io(
+                persistent.set_muted(conversation_id, muted=not was_muted),
+            )
+        elif token is None:
+            return
+        elif chosen is copy_voucher:
+            QApplication.clipboard().setText(voucher_code(token))
+            self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
+        elif chosen is show_voucher:
+            await _dialog_finished(VoucherDialog(self, voucher_code(token)))
+
+    async def _pending_voucher(self, item: "ContactsItem") -> "bytes | None":
+        conversation_id = getattr(item, "conversation_id", None)
+        if conversation_id is None:
+            return None
+        return await self.iothread.run_in_io(
+            pending_voucher_token(conversation_id),
+        )
 
     async def _peer_menu(
         self, item: "ContactsItem", global_pos: QPoint,
@@ -2324,6 +2552,28 @@ class MainWindow(QMainWindow):
                 network.resume_peer_reads(bacap_stream=rcw_id),
             )
 
+    def set_name_policy(self, action: "QAction") -> None:
+        """Persist the outgoing-name policy the user picked."""
+        policy = str(action.data())
+        self.settings = {**self.settings, NAME_POLICY_SETTING: policy}
+        try:
+            with persistent.Session(persistent._engine_sync) as sess:
+                row = sess.get(persistent.AppSetting, NAME_POLICY_SETTING)
+                if row is None:
+                    row = persistent.AppSetting(id=NAME_POLICY_SETTING)
+                row.type = "str"
+                row.value = policy
+                sess.add(row)
+                sess.commit()
+        except Exception as e:
+            logger.warning("could not persist the name policy: %s", e)
+
+    def restore_name_policy(self) -> None:
+        """Check the menu entry matching the persisted policy."""
+        current = self.settings.get(NAME_POLICY_SETTING, NAME_POLICY_KEEP)
+        for action in self.name_policy_group.actions():
+            action.setChecked(action.data() == current)
+
     async def transfers_listener(self) -> None:
         """Drain network.substream_progress_queue into the Transfers model.
 
@@ -2458,6 +2708,11 @@ class MainWindow(QMainWindow):
                 continue
 
             upload = GroupChatFileUpload.from_path(f_path)
+            policy = self.settings.get(NAME_POLICY_SETTING)
+            upload.basename = outgoing_basename(
+                upload.payload, upload.basename, upload.filetype,
+                hash_all=policy == NAME_POLICY_HASH,
+            )
             gcm = GroupChatMessage(version=GROUP_CHAT_VERSION, file_upload=upload)
 
             # Pre-assign the ConversationLog id so a voice-note draft (which is
@@ -2843,17 +3098,12 @@ class MainWindow(QMainWindow):
                 return
             await self.iothread.run_in_io(cancel_pending_voucher(pending_id))
 
-        display_dialog = QInputDialog(self)
-        display_dialog.setWindowTitle("Generate voucher")
-        display_dialog.setLabelText(
-            "Choose (your) name shown to the contact who inducts you:",
-        )
-        if not await _dialog_finished(display_dialog):
-            return
-        display_name = display_dialog.textValue().strip()
+        display_name = convo.own_peer_name
         if not display_name:
+            self.ui.statusbar.showMessage(
+                "Set your own name in this conversation first", 5000,
+            )
             return
-
         try:
             client = self.iothread.kp_client
             assert client is not None
@@ -2868,18 +3118,16 @@ class MainWindow(QMainWindow):
             ))
             return
 
-        code = b64encode(voucher).decode()
-        QTimer.singleShot(0, lambda: QMessageBox.information(
-            self, f"Voucher: {APP_NAME}",
-            f"Here is your voucher, {display_name}.\nHand it out of band to an "
-            f"existing member, who will induct you:\n\n{code}",
-        ))
+        code = voucher_code(voucher)
         # Completion is asynchronous: poll for the inductor's reply, then move
         # this conversation onto the salt-mutated stream and add the members it
         # names. PendingVoucher persists the handshake, so a restart resumes it.
         self._supervised_listener(
             "_await_voucher_join",
             lambda: self._await_voucher_join(convo),
+        )
+        await _dialog_finished(
+            VoucherDialog(self, code, display_name=display_name),
         )
 
     async def _await_voucher_join(self, convo: ConversationUIState) -> None:
@@ -3296,7 +3544,11 @@ async def add_conversation(
 
     contacts = window.ui.contacts_treeWidget
     #qtwi = QTreeWidgetItem([convo.name])
-    qtwi = ContactsItem(convo.name)
+    with persistent.Session(persistent._engine_sync) as sess:
+        quiet = network.conversation_reads_paused(
+            sess, convo.id, convo.own_peer_id,
+        )
+    qtwi = ContactsItem(paused_label(convo.name, quiet))
     qtwi.conversation_id = convo.id
     clm = ConversationLogModel(convo.id)
     convo_state = ConversationUIState(
@@ -3316,7 +3568,9 @@ async def add_conversation(
         #ptwi = QTreeWidgetItem([peer.name])
         if not _peer_is_displayable(peer):
             continue
-        ptwi = ContactsItem(peer.name)
+        ptwi = ContactsItem(
+            contact_label(peer.name, peer.read_cap_id, sibling_labels(qtwi)),
+        )
         # The peer row is the per-peer pause/resume target:
         # tag it with its read cap (the bacap_stream the drain reads on) so
         # the contacts-tree context menu can resolve the right stream, and
@@ -3412,6 +3666,7 @@ async def main(window: MainWindow) -> None:
         for convo in a:
             await add_conversation(window, convo)
 
+    window.restore_name_policy()
     window.show()
     window._supervised_listener(
         "receive_msg_listener", window.receive_msg_listener, restart_on_finish=True,
@@ -3486,6 +3741,34 @@ def error_and_exit(app: QApplication, why: str, main_window: QMainWindow | None=
 def get_all_loggers() -> "set[str]":
     return set(logging.root.manager.loggerDict.keys())
 
+LOG_LEVELS = (
+    "notset", "debug", "info", "warning", "error", "critical", "off",
+)
+
+
+def resolve_log_level(level: str) -> "int | None":
+    """The level a name means, None for "off", refusing anything else.
+
+    >>> resolve_log_level("debug"), resolve_log_level("notset")
+    (10, 0)
+    >>> resolve_log_level("off") is None
+    True
+    >>> resolve_log_level("dbug")
+    Traceback (most recent call last):
+        ...
+    ValueError: unknown log level: 'dbug'; choose from notset, debug, info, warning, error, critical, off
+    """
+    wanted = level.lower()
+    if wanted not in LOG_LEVELS:
+        raise ValueError(
+            f"unknown log level: {level!r}; choose from "
+            + ", ".join(LOG_LEVELS)
+        )
+    if wanted == "off":
+        return None
+    return logging.getLevelNamesMapping()[wanted.upper()]
+
+
 def install_log_handlers() -> None:
     for ln in get_all_loggers():
         lnlog = logging.getLogger(ln)
@@ -3496,8 +3779,6 @@ def install_log_handlers() -> None:
             logging.Formatter("%(asctime)s %(name)s: %(levelname)s: %(message)s"),
         )
         lnlog.addHandler(ch)
-        print("log fmt set", ln)
-        lnlog.critical("test")
 
 
 def log_level_command() -> click.Command:
@@ -3548,6 +3829,7 @@ def cli() -> object:
     if (_res_root / "resources").is_dir():
         os.chdir(_res_root)
     app = QApplication(sys.argv)
+    app.setDesktopFileName("network.katzenpost.katzenqt")
     if (_res_root / "resources" / "echomix_256.png").is_file():
         app.setWindowIcon(QIcon("resources/echomix_256.png"))
     install_log_handlers()
@@ -3560,15 +3842,18 @@ def cli() -> object:
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
 
-    if levels:
-        for logger_name, level in levels:
-            log_level = getattr(logging, level.upper(), None)
-            if log_level:
-                logging.getLogger(logger_name).disabled = False
-                logging.getLogger(logger_name).setLevel(log_level)
-                logging.getLogger(logger_name).critical(f"set to {level.upper()}({log_level})")
-            else:
-                logging.getLogger(logger_name).disabled = True
+    for logger_name, level in levels:
+        try:
+            log_level = resolve_log_level(level)
+        except ValueError as e:
+            raise SystemExit(f"{e}") from None
+        target = logging.getLogger(logger_name)
+        if log_level is None:
+            target.disabled = True
+            continue
+        target.disabled = False
+        target.setLevel(log_level)
+        target.critical(f"set to {level.upper()}({log_level})")
 
     logger.critical("checking for instance")
     if is_there_already_an_instance_running():

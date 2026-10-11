@@ -15,7 +15,11 @@ from sqlmodel import select
 
 from katzenqt import conversation_handlers, models, persistent
 from katzenqt.tally import engine, events, schema, sync
-from katzenqt.tally.controller import TallyController, voter_id_from_read_cap
+from katzenqt.tally.controller import (
+    ApplyResult,
+    TallyController,
+    voter_id_from_read_cap,
+)
 from katzenqt.tally.schema import Mode, votes_map
 
 if TYPE_CHECKING:
@@ -505,3 +509,41 @@ async def test_buffered_vote_already_in_the_create_blob_is_not_double_applied() 
     result = engine.tally(stored_doc)
     assert result.n_voters == 1
     assert result.slots[0].yes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sync_response_merges_into_the_persisted_doc() -> None:
+    survey_id = uuid.uuid4().bytes
+    async with persistent.asession() as sess:
+        convo, _own, peers = await _make_convo(
+            sess, "g", OWN_CAP, {"alice": ALICE_CAP},
+        )
+        ctrl = TallyController()
+        await ctrl.create_local(
+            sess, convo, survey_id, "t", Mode.AVAILABILITY, ["a", "b"],
+        )
+        created = ctrl.get(convo.id, survey_id)
+        assert created is not None
+        before_the_vote = sync.full_state(created)
+        await ctrl.handle_event(
+            sess, peers["alice"], events.build_vote(survey_id, {"s0": "yes"}),
+        )
+        convo_id = convo.id
+        peer_id = peers["alice"].id
+        await sess.commit()
+
+    async with persistent.asession() as sess:
+        peer = await sess.get(persistent.ConversationPeer, peer_id)
+        assert peer is not None
+        restarted = TallyController()
+        assert await restarted.handle_event(
+            sess, peer,
+            events.build_sync_response(survey_id, before_the_vote),
+        ) == ApplyResult("applied")
+        await sess.commit()
+
+    reloaded = TallyController()
+    await reloaded.load_all()
+    doc = reloaded.get(convo_id, survey_id)
+    assert doc is not None
+    assert engine.tally(doc).slots[0].yes == 1

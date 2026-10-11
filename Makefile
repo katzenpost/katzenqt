@@ -9,6 +9,7 @@ MAKEFLAGS += --no-print-directory
 
 export PATH:=$(PATH):~/.local/bin/
 export UV_VENV_CLEAR:=1
+export GOCACHE:=$(CURDIR)/.go-cache
 # override uv with:
 #   make setup-uv UV=$$HOME/.local/bin/uv
 UV ?= uv
@@ -24,6 +25,7 @@ SYSTEM_STAMP := .system-setup.stamp
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
 KATZENPOST_REV := 97cef8b2eddc8b7e19b60bc982e95fd2b36fa58e
+KPCLIENTD_BIN := $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd
 
 GEN_RES := src/katzenqt/resources_rc.py
 GEN_UI_MIX := src/katzenqt/ui_mixchat.py
@@ -33,6 +35,7 @@ PYPROJECT := pyproject.toml
 UV_LOCK := $(wildcard uv.lock)
 
 # make alembic-revision-uv ALEMBIC_MSG='some changeset details'
+ALEMBIC_INI := src/katzenqt/data/alembic.ini
 ALEMBIC_MSG ?=
 ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 
@@ -44,14 +47,15 @@ ALEMBIC_MSG_Q := "$(ALEMBIC_MSG)"
 KQT_INTEGRATION_PARALLEL ?= 4
 
 .PHONY: default default_uv_setup default_pip_setup help \
-	system-setup install-debian-packages install-uv clean-system-stamp \
+	system-setup install-debian-packages apt-install install-uv \
+	clean-system-stamp \
 	setup setup-uv setup-pip setup-status \
 	run test mypy status code-generator regen-code \
 	run-uv run-pip test-uv test-pip mypy-uv mypy-pip \
 	alembic-check-uv alembic-check-pip \
 	alembic-revision-uv alembic-revision-pip \
 	katzenpost-update kpclientd kpclientd-podman install-kpclient kpclientd.service \
-	clean clean-venv deps deps-audio
+	clean clean-venv deps deps-audio mixnet-up mixnet-down run-docker
 
 deps: deps-audio default_uv_setup
 
@@ -71,12 +75,14 @@ help:
 		'Usage:' \
 		'  make deps                  Install system packages and venv' \
 		'  make system-setup          Install system packages (Debian/Ubuntu) and uv (via pipx)' \
+		'  make apt-install           Install APT_PACKAGES as root or sudo' \
 		'  make setup-uv              Create or update .venv using uv' \
 		'  make setup-pip             Create or update .venv using pip/venv' \
 		'' \
 		'Backend auto selection:' \
 		'  make setup                 Ensure setup is complete for the chosen backend and print status' \
 		'  make run                   Run katzenqt using the chosen backend' \
+		'  make run-launcher          Run katzenqt via the launcher' \
 		'  make test                  Run pytest using the chosen backend' \
 		'  make mypy                  Run mypy using the chosen backend' \
 		'  make status                Show backend, venv, and kpclientd status' \
@@ -101,6 +107,9 @@ help:
 		'' \
 		'Katzenpost / kpclientd:' \
 		'  make katzenpost-update     git pull --ff-only in ./katzenpost (clone if missing)' \
+		'  make mixnet-up             Start the katzenpost docker mixnet' \
+		'  make mixnet-down           Stop the katzenpost docker mixnet' \
+		'  make run-docker            Run one GUI against that mixnet' \
 		'  make kpclientd             Build kpclientd (golang native build; falls back to podman)' \
 		'  make kpclientd-podman      Build kpclientd using the container toolchain' \
 		'  make install-kpclient      Install kpclientd to ~/.local/bin/kpclientd' \
@@ -121,18 +130,30 @@ $(SYSTEM_STAMP):
 clean-system-stamp:
 	@rm -f $(SYSTEM_STAMP)
 
+APT_DEPS := libxcb-cursor0 libegl1 libpulse0 libfontconfig1 \
+	libxkbcommon0 build-essential pkg-config git podman pipx \
+	python3 python3-venv
+
 install-debian-packages:
-	@sudo apt install -y \
-		libxcb-cursor0 libegl1 libpulse0 libfontconfig1 libxkbcommon0 \
-		build-essential pkg-config \
-		git podman \
-		pipx python3 python3-venv >/dev/null
+	@$(MAKE) apt-install APT_PACKAGES="$(APT_DEPS)"
+
+apt-install:
+	@if [[ "$$(id -u)" == 0 ]]; then \
+		apt install -y $(APT_PACKAGES) >/dev/null; \
+	elif command -v sudo >/dev/null 2>&1 && sudo -v 2>/dev/null; then \
+		sudo apt install -y $(APT_PACKAGES) >/dev/null; \
+	else \
+		printf '%s\n' \
+			"error: this user cannot use sudo, so run as root:" \
+			"  su -c 'apt install -y $(APT_PACKAGES)'" >&2; \
+		exit 1; \
+	fi
 
 install-uv:
 	@pipx install -f uv >/dev/null
 
 deps-audio:
-	@sudo apt install -y libasound2-dev cargo >/dev/null
+	@$(MAKE) apt-install APT_PACKAGES="libasound2-dev cargo"
 
 setup:
 	@$(MAKE) setup-status
@@ -227,6 +248,12 @@ run-uv: $(STAMP_UV) code-generator
 
 run-pip: $(STAMP_PIP) code-generator
 	@$(VENV)/bin/katzenqt
+
+.PHONY: run-launcher
+
+run-launcher: setup code-generator
+	@KATZENQT_GUI=$(CURDIR)/$(VENV)/bin/katzenqt \
+		$(VENV)/bin/python -m katzenqt.launcher
 
 test: setup
 	@if [[ -e "$(BACKEND_UV)" ]]; then \
@@ -328,19 +355,37 @@ docker-integration: setup
 
 $(KATZENPOST_DIR):
 	@git clone $(KATZENPOST_URL) $(KATZENPOST_DIR) >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
 
 katzenpost-update: $(KATZENPOST_DIR)
-	@cd $(KATZENPOST_DIR) && git pull --ff-only >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) fetch origin $(KATZENPOST_REV) >/dev/null 2>&1
+	@git -C $(KATZENPOST_DIR) switch --detach $(KATZENPOST_REV) >/dev/null 2>&1
+	@rm -f $(KPCLIENTD_BIN)
+
+INSTANCE ?= alice
+
+mixnet-up: $(KATZENPOST_DIR)
+	@$(MAKE) -C $(KATZENPOST_DIR)/docker start
+
+mixnet-down: $(KATZENPOST_DIR)
+	@$(MAKE) -C $(KATZENPOST_DIR)/docker stop
+
+run-docker:
+	@KQT_STATE=docker-$(INSTANCE) \
+		KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml \
+		$(MAKE) run
 
 kpclientd: $(KATZENPOST_DIR)
 	@set +e; \
-	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v >/dev/null 2>&1 ) ; \
+	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v ) ; \
 	rc=$$?; \
 	set -e; \
 	if [[ $$rc -ne 0 ]]; then \
 		printf '%s\n' "warn: native kpclientd build failed; falling back to kpclientd-podman"; \
 		$(MAKE) kpclientd-podman; \
 	fi
+
+kpclientd: $(KPCLIENTD_BIN)
 
 kpclientd-podman:
 	@cd $(KATZENPOST_DIR)/docker && make warped=false distro=bookworm \
@@ -351,38 +396,52 @@ kpclientd-podman:
 # the namenlos mixnet and a thin client config that reaches the daemon over
 # the @katzenpost abstract socket. The integration tests do not read these,
 # dialing kpclientd directly via --address instead.
-install-kpclient: kpclientd
+install-kpclient: $(KPCLIENTD_BIN)
 	@install -d -m 0700 ~/.local/bin
 	@install -d -m 0700 ~/.local/katzenpost/
-	@install -m 0600 config/client.toml ~/.local/katzenpost/client.toml
-	@install -m 0600 config/thinclient.toml ~/.local/katzenpost/thinclient.toml
-	@install -m 0755 $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd ~/.local/bin/kpclientd
+	@sed "s|[$$]XDG_RUNTIME_DIR|$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}|g" \
+		src/katzenqt/data/client.toml > ~/.local/katzenpost/client.toml
+	@chmod 0600 ~/.local/katzenpost/client.toml
+	@install -m 0600 src/katzenqt/data/thinclient.toml \
+		~/.local/katzenpost/thinclient.toml
+	@install -m 0755 $(KPCLIENTD_BIN) ~/.local/bin/kpclientd
 
 kpclientd.service: install-kpclient
 	@install -d -m 0700 ~/.config/systemd/user
-	@install -m 0644 config/kpclientd.service ~/.config/systemd/user/kpclientd.service
+	@install -m 0644 src/katzenqt/data/kpclientd.service \
+		~/.config/systemd/user/kpclientd.service
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now kpclientd >/dev/null 2>&1
 
 alembic-check-uv:
-	@$(UV) run alembic -c config/alembic.ini check
+	@state=$$(mktemp -d); \
+	trap 'rm -rf "$$state"' EXIT; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c $(ALEMBIC_INI) \
+		upgrade head; \
+	XDG_DATA_HOME=$$state $(UV) run alembic -c $(ALEMBIC_INI) check
 
 alembic-check-pip:
-	@$(VENV)/bin/alembic -c config/alembic.ini check
+	@state=$$(mktemp -d); \
+	trap 'rm -rf "$$state"' EXIT; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c $(ALEMBIC_INI) \
+		upgrade head; \
+	XDG_DATA_HOME=$$state $(VENV)/bin/alembic -c $(ALEMBIC_INI) check
 
 alembic-revision-uv:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(UV) run alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(UV) run alembic -c $(ALEMBIC_INI) revision --autogenerate \
+		-m $(ALEMBIC_MSG_Q)
 
 alembic-revision-pip:
 	@if [[ -z "$(ALEMBIC_MSG)" ]]; then \
 		printf '%s\n' "error: set ALEMBIC_MSG, e.g. make $@ ALEMBIC_MSG='some change'"; \
 		exit 2; \
 	fi
-	@$(VENV)/bin/alembic -c config/alembic.ini revision --autogenerate -m $(ALEMBIC_MSG_Q)
+	@$(VENV)/bin/alembic -c $(ALEMBIC_INI) revision --autogenerate \
+		-m $(ALEMBIC_MSG_Q)
 
 clean-venv:
 	@rm -r $(VENV)

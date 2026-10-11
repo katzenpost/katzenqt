@@ -19,6 +19,15 @@ katzenpost/
 .demo-state/
 
 .ci-local/
+
+.flatpak-build/
+.flatpak-builder/
+.flatpak-export/
+.flatpak-repo/
+.flathub-dist/
+.go-cache/
+dist/
+.kpclientd-build-revision
 .pybuild/
 debian/.debhelper/
 debian/debhelper-build-stamp

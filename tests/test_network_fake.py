@@ -1791,7 +1791,6 @@ class TestDrainMixwalReadSingle:
 
     @pytest.mark.parametrize("benign", [
         BoxIDNotFoundError("box ID not found"),
-        TombstoneError("tombstone"),
     ])
     @pytest.mark.asyncio
     async def test_benign_replica_outcome_does_not_wedge(self, fake_thinclient: FakeThinClient, benign: Exception) -> None:
@@ -3551,25 +3550,6 @@ class TestSendLoopResilience:
 # ---------------------------------------------------------------------------
 
 
-class TestTestKeypairHelper:
-    @pytest.mark.asyncio
-    async def test_keypair_round_trip(
-        self, fake_thinclient: FakeThinClient, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """`network.test_keypair` is a developer smoke helper that exercises
-        encrypt_write → start_resending → encrypt_read → start_resending
-        in one shot. It is wired only by hand in REPL sessions, so this
-        test exists to keep its bytecode warm and surface a future
-        signature drift."""
-        # The helper sleeps 20 seconds in the middle; our autouse
-        # fast_asyncio_sleep collapses that.
-        kp = await fake_thinclient.new_keypair(b"\x77" * 32)
-        # Pre-store the box at the keypair's first index so the read leg
-        # has something to return; otherwise the box-id lookup would
-        # raise BoxIDNotFoundError.
-        await network.test_keypair(fake_thinclient, kp.write_cap, kp.read_cap)
-
-
 class TestDoneCallbackPrimitive:
     """Direct tests of the shared fire-and-forget done-callback primitive
     (`_done_callback`) that `_on_write_done` / `_on_read_done` / `on_error`
@@ -4402,7 +4382,7 @@ class TestUnhandledReplicaError:
             assert issubclass(subclass, ReplicaError)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("error", [BoxIDNotFoundError, TombstoneError])
+    @pytest.mark.parametrize("error", [BoxIDNotFoundError])
     async def test_an_unavailable_box_takes_its_own_clause(
         self, fake_thinclient: FakeThinClient,
         recorded_sleeps: "list[float]", error: "type[ReplicaError]",

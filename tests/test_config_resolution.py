@@ -6,9 +6,8 @@ The resolver consults sources in precedence order:
   2. env var ``KATZENQT_THINCLIENT_CONFIG``
   3. ``$XDG_CONFIG_HOME/katzenqt/thinclient.toml`` (falling back to
      ``~/.config/katzenqt/thinclient.toml``)
-  4. the bundled copy under ``katzenqt/data/thinclient.toml`` via
-     ``importlib.resources``
-  5. the development-tree fallback at ``<repo>/config/thinclient.toml``
+  4. the copy shipped as package data under
+     ``katzenqt/data/thinclient.toml`` via ``importlib.resources``
 
 Each step is exercised by a separate test. The whole suite must work
 without ``KATZENQT_THINCLIENT_CONFIG`` set, hence the autouse fixture

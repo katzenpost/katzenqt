@@ -22,8 +22,8 @@ mixnet. Place them in `~/.local/katzenpost/`:
 
 ```bash
 mkdir -p ~/.local/katzenpost/
-cp config/client.toml ~/.local/katzenpost/client.toml
-cp config/thinclient.toml ~/.local/katzenpost/thinclient.toml
+cp src/katzenqt/data/client.toml ~/.local/katzenpost/client.toml
+cp src/katzenqt/data/thinclient.toml ~/.local/katzenpost/thinclient.toml
 ```
 
 For a real network (for example [namenlos](https://github.com/katzenpost/namenlos)),
