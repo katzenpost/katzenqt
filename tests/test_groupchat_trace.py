@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ from katzenqt.groupchat.trace import Recorder, TracedGroup
 SCENARIOS = Path(__file__).parent / "data" / "groupchat"
 
 
-def lines(script: str) -> list[dict]:
+def lines(script: str) -> list[dict[str, Any]]:
     trace = io.StringIO()
     sim.run(script, trace)
     return [json.loads(line) for line in trace.getvalue().splitlines()]
