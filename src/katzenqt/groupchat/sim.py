@@ -34,7 +34,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import IO, Any
 
 from hpqc.bacap import MessageBoxIndex, ReadCap, WriteCap
 
@@ -65,6 +65,7 @@ from .events import (
 from .group import Group, Outgoing
 from .ledger import Induction
 from .sentbox import Retention
+from .trace import Recorder, TracedGroup
 from .wire import CborCodec, Key, Message, key_of
 
 CTX = b"pigeonhole context"
@@ -179,7 +180,8 @@ class Member:
 
 
 class World:
-    def __init__(self) -> None:
+    def __init__(self, trace: IO[str] | None = None) -> None:
+        self.recorder = Recorder(trace, self.name_of) if trace is not None else None
         self.replica = Replica()
         self.members: dict[str, Member] = {}
         self.codec = CborCodec()
@@ -245,7 +247,13 @@ class World:
             for name in list(options)
             if name in Retention.__dataclass_fields__
         }
+        if self.recorder is not None:
+            options["tracer"] = self.recorder
         return {"policy": Retention(**policy), **options}
+
+    @property
+    def kind(self) -> type[Group]:
+        return TracedGroup if self.recorder is not None else Group
 
     # The driver.
 
@@ -310,7 +318,7 @@ class World:
     def join(self, new: Member, reply: JoinReply) -> list[str]:
         if new.group is not None:
             return [f"{new.name} already joined"]
-        new.group = Group.joined(new.read_cap, reply, **self.settings())
+        new.group = self.kind.joined(new.read_cap, reply, **self.settings())
         new.group.handle(EpochChanged(self.replica.epoch))
         self.make_passive(new)
         return []
@@ -452,7 +460,7 @@ class World:
         founders = [self.new_member(name) for name in names]
         caps = [founder.read_cap for founder in founders]
         for founder in founders:
-            founder.group = Group.found(founder.read_cap, caps, **self.settings())
+            founder.group = self.kind.found(founder.read_cap, caps, **self.settings())
             self.make_passive(founder)
 
     def written(self, member: Member) -> list[str]:
@@ -602,10 +610,11 @@ class World:
         return [result.value]
 
 
-def run(script: str) -> str:
+def run(script: str, trace: IO[str] | None = None) -> str:
     """Run a scenario and return it with every checked command's output
-    replaced by what the commands printed now."""
-    world = World()
+    replaced by what the commands printed now, writing a trace of every
+    member to ``trace`` if given."""
+    world = World(trace)
     lines = script.splitlines()
     out: list[str] = []
     i = 0

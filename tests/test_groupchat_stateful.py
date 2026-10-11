@@ -5,6 +5,11 @@ beyond dropping acked plaintext."""
 
 from __future__ import annotations
 
+import os
+import uuid
+from pathlib import Path
+from typing import IO
+
 import pytest
 from hypothesis import settings
 from hypothesis import strategies as st
@@ -19,11 +24,14 @@ from hypothesis.stateful import (
 from katzenqt.groupchat import sim, state
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.ledger import Induction
+from katzenqt.groupchat.trace import TracedGroup
 from katzenqt.groupchat.wire import Key
 
 FOUNDERS = ("alice", "bob", "carol")
 NEWCOMERS = ("dave", "erin")
 NAMES = FOUNDERS + NEWCOMERS
+TRACE_DIR = os.environ.get("GROUPCHAT_TRACE_DIR")
+"""Where to write a trace of every run, for CryptWalker's replay."""
 
 
 class GroupChat(RuleBasedStateMachine):
@@ -31,9 +39,14 @@ class GroupChat(RuleBasedStateMachine):
     """Drive members as a client that reads and writes for itself would,
     with its writes landing late."""
 
+    trace: IO[str] | None = None
+
     @initialize()
     def found(self) -> None:
-        self.world = sim.World()
+        if TRACE_DIR:
+            name = f"{type(self).__name__}-{uuid.uuid4().hex[:12]}.jsonl"
+            self.trace = (Path(TRACE_DIR) / name).open("w")
+        self.world = sim.World(self.trace)
         if self.passive:
             self.world.run("option passive on")
             self.world.run("option delay-writes on")
@@ -196,6 +209,8 @@ class GroupChat(RuleBasedStateMachine):
             member = self.world.members[name]
             assert member.group is not None
             restored = state.load(state.dump(member.group))
+            if isinstance(member.group, TracedGroup):
+                restored = TracedGroup.of(restored, member.group.tracer)
             assert restored == member.group
             member.group = restored
 
@@ -293,6 +308,11 @@ class GroupChat(RuleBasedStateMachine):
                     assert self.world.do_peek(owner, str(at)) != [
                         "tombstone"
                     ], f"{owner} tombstoned a box {reader} has not read"
+
+
+    def teardown(self) -> None:
+        if self.trace is not None:
+            self.trace.close()
 
 
 TestGroupChat = GroupChat.TestCase
