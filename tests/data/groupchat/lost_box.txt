@@ -1,0 +1,44 @@
+# A reader keeps a box a scan stepped past only while it is within its
+# recheck window. Bob's is two boxes: he jumps over alice@0 to alice@2 to
+# reach alice@3 and keeps only alice@2, so alice@0 and alice@1 are lost to
+# him even once alice backfills them, and he never acknowledges past them.
+
+option recheck 2
+new-group alice bob carol
+send alice m0
+send alice m1
+send alice m2
+read carol alice
+epoch 2                  # alice's first boxes expire
+backfill carol           # alice has not backfilled yet
+send alice m3
+read carol alice
+send carol c0            # acks alice@3
+read bob carol
+read bob alice
+----
+alice@0 not found
+  stuck: carol acked alice@3
+
+scan bob alice
+----
+alice@3 "m3"
+alice@4 not found
+
+backfill alice
+scan bob alice           # alice@2 comes back; the others are not kept
+----
+alice@2 "m2"
+alice@4 not found
+
+send bob b0
+read alice bob
+acked alice
+----
+none
+
+inbox bob
+----
+carol@0 "c0"
+alice@3 "m3"
+alice@2 "m2"

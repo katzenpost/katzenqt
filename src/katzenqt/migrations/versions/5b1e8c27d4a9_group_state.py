@@ -125,7 +125,7 @@ def _position(data) -> int:
 def _reader(key: bytes, read_cap: bytes, next_index: bytes, last) -> dict:
     return {
         "stream": key, "read_cap": read_cap, "next": next_index, "last": last,
-        "passed": 0, "kept": [], "mode": "idle", "tried": [],
+        "passed": 0, "kept": [], "lost": None, "mode": "idle", "tried": [],
     }
 
 
@@ -133,8 +133,7 @@ def _state(own_cap: bytes, entries, readers, published, acked_by, records) -> by
     group = {
         "read_cap": own_cap,
         "policy": {"window": 3, "discard_acked": True, "keep_sent": None, "keep_received": None},
-        "recheck": 4,
-        "auto_scan": True,
+        "recheck": 256,
         "rosters": {
             "entries": [
                 [owner, [[i, {"key": k, "introduced": None}] for i, k in roster.items()]]

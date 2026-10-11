@@ -1,8 +1,9 @@
 # Fix for flaw (c). Carol introduces erin and alice numbers her. Bob is
-# away while carol's early boxes expire, then jumps past them on alice's
-# ack. Numbering is explicit, so bob knows alice gave index 3 to someone
-# he cannot name yet and index 4 to frank: nothing shifts, and alice's ack
-# of erin stays unresolved instead of landing on frank.
+# away while carol's early boxes expire, then asks for a scan and jumps
+# past them on alice's ack. Numbering is explicit, so bob knows alice gave
+# index 3 to someone he cannot name yet and index 4 to frank: nothing
+# shifts, and alice's ack of erin stays unresolved instead of landing on
+# frank.
 
 new-group alice bob carol
 send carol c0
@@ -20,10 +21,13 @@ read alice carol
 send alice a1            # acks carol@2
 introduce alice frank
 read bob alice
-read bob carol           # stuck behind the hole: scans and jumps
+read bob carol           # stuck behind the hole
 ----
 carol@0 not found
   stuck: alice acked carol@2
+
+scan bob carol           # jumps past it
+----
 carol@2 "c2"
 carol@3 not found
 

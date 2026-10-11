@@ -15,17 +15,6 @@ read bob alice
 alice@0 tombstone
 alice@1 not found
 
-scan bob alice           # bob rechecks the tombstone: still one
+scan bob alice           # a tombstone counts as read: nothing to recheck
 ----
-alice@0 recheck: tombstone
 alice@1 not found
-
-send alice m1
-send alice m2
-send alice m3
-send alice m4
-send alice m5
-read bob alice
-scan bob alice           # alice@0 has left bob's recheck window
-----
-alice@6 not found

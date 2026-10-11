@@ -32,7 +32,6 @@ from .events import (
     Introduce,
     Invite,
     JoinReply,
-    Missing,
     Read,
     Remove,
     Scan,
@@ -90,9 +89,8 @@ class Group:
     read_cap: bytes
     """Our own read cap: our key and our stream's first index."""
     policy: Retention = field(default_factory=Retention)
-    recheck: int = 4
-    """How many boxes a reader keeps for rechecking."""
-    auto_scan: bool = True
+    recheck: int = 256
+    """How many boxes behind it a reader keeps one a scan stepped past."""
     codec: Codec = field(default_factory=CborCodec, compare=False, repr=False)
     rosters: Rosters = field(default_factory=Rosters)
     readers: dict[Key, Reader] = field(default_factory=dict)
@@ -285,13 +283,6 @@ class Group:
         )
         if plaintext is not None:
             effects = self._ingest(event.stream, event.index, plaintext) + effects
-        if (
-            event.result is Missing.NOT_FOUND
-            and reader.mode is Mode.IDLE
-            and self.auto_scan
-            and reader.ahead(self._heard(event.stream))
-        ):
-            effects += self._scan(event.stream)
         return effects
 
     def _ingest(self, sender: Key, index: bytes, plaintext: bytes) -> list[Effect]:
@@ -419,7 +410,7 @@ class Group:
             reader = self.readers.get(member) if member else None
             if reader is None:
                 continue
-            owed = self.ledger.owed(reader.stream, reader.last)
+            owed = self.ledger.owed(reader.stream, reader.run)
             if owed is not None:
                 acks[index] = owed
                 pending.acks[reader.stream] = (self.ledger.published.get(reader.stream), owed)

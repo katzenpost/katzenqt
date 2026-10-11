@@ -254,8 +254,27 @@ class GroupChat(RuleBasedStateMachine):
                 if seq not in by_seq:
                     continue
                 reader = self.group(self.world.name_of(acker)).readers[self.key(owner)]
-                assert reader.last is not None
-                assert self.n(self.key(owner), by_seq[seq]) <= self.n(self.key(owner), reader.last)
+                assert reader.run is not None
+                assert self.n(self.key(owner), by_seq[seq]) <= self.n(self.key(owner), reader.run)
+
+    @invariant()
+    def acks_cover_only_boxes_read(self) -> None:
+        """A member acknowledges a box only once it has read it and every
+        box before it from where it started reading the stream."""
+        if not hasattr(self, "world"):
+            return
+        for viewer in self.joined():
+            member = self.world.members[viewer]
+            for stream, value in self.group(viewer).ledger.published.items():
+                tried = [self.n(stream, index) for index in member.tried.get(stream, ())]
+                had = {
+                    self.n(stream, index) for owner, index in member.had if owner == stream
+                }
+                missing = set(range(min(tried, default=0), self.n(stream, value) + 1)) - had
+                assert not missing, (
+                    f"{viewer} acked {self.world.name_of(stream)}'s box "
+                    f"{self.n(stream, value)} without reading {sorted(missing)}"
+                )
 
     @invariant()
     def nothing_owed_is_dropped(self) -> None:

@@ -39,11 +39,12 @@ class Ledger:
     def holding(self) -> bool:
         return self.induction is Induction.INDUCTING
 
-    def owed(self, stream: Key, last: bytes | None) -> bytes | None:
-        """The index to acknowledge of ``stream``, if anything new."""
-        if self.holding or last is None or self.published.get(stream) == last:
+    def owed(self, stream: Key, run: bytes | None) -> bytes | None:
+        """The index to acknowledge of ``stream``, the end of the unbroken
+        run read, if anything new."""
+        if self.holding or run is None or self.published.get(stream) == run:
             return None
-        return last
+        return run
 
     def publish(self, stream: Key, index: bytes) -> None:
         self.published[stream] = index

@@ -137,6 +137,10 @@ class Member:
     inbox: list[tuple[Key, bytes, str]] = field(default_factory=list)
     seen: dict[tuple[Key, bytes], Message] = field(default_factory=dict)
     """Every message this member has read, by stream and box, for ``acks``."""
+    had: set[tuple[Key, bytes]] = field(default_factory=set)
+    """Every box this member has read, data or tombstone, by stream and box."""
+    tried: dict[Key, set[bytes]] = field(default_factory=dict)
+    """Every box this member has tried to read, by stream."""
     reported: int = -1
     """The last of its own boxes, in the order written, a command printed."""
     passive: bool = False
@@ -371,6 +375,9 @@ class World:
         self, member: Member, stream: Key, index: bytes, result: bytes | Missing, recheck: bool
     ) -> list[str]:
         where = self.at(stream, index)
+        member.tried.setdefault(stream, set()).add(index)
+        if result is not Missing.NOT_FOUND:
+            member.had.add((stream, index))
         if recheck and not isinstance(result, bytes):
             return [f"{where} recheck: {result.value}"]
         if isinstance(result, bytes):
