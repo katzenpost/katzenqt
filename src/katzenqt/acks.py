@@ -31,10 +31,9 @@ import cbor2
 from sqlmodel import col, select
 
 from . import ack_codec, models, persistent
-from .ack_protocol import REPLICA_EPOCH_SECONDS
 from .groupchat import state as group_state
 from .groupchat import wire
-from .groupchat.events import EpochChanged, JoinReply
+from .groupchat.events import Effect, EpochChanged, JoinReply, WriteBox, WriteTombstone
 from .groupchat.group import Group, Outgoing
 
 if TYPE_CHECKING:
@@ -43,6 +42,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 1530
+
+REPLICA_EPOCH_SECONDS = 7 * 24 * 3600
+"""A replica epoch's length, as the replica's ``ReplicaEpochPeriod``."""
 
 _inducting: set[int] = set()
 """Conversations an induction is under way for in this process. A state
@@ -139,6 +141,9 @@ class _Stored(NamedTuple):
     landed: list[persistent.GroupWritten]
     """Where our messages landed, taken in: deleted when the state is saved,
     so a load that is not saved takes them in again next time."""
+    effects: list[Effect]
+    """What the state machine asked for on load, carried out when the state
+    is saved, so a load that is not saved asks again next time."""
 
 
 def _replica_epoch() -> int:
@@ -160,13 +165,12 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
     for written in taken:
         token = outgoing.pop(written.pwal_id, None)
         if token is not None:
-            group.written(token, written.box_index)
+            group.written(token, written.box_index, written.payload)
     if group.ledger.holding and conversation_id not in _inducting:
         group.cancel_induction()
     epoch = _replica_epoch()
-    if epoch > group.epoch:
-        group.handle(EpochChanged(epoch))
-    return _Stored(row, group, cbor2.loads(row.held), outgoing, taken)
+    effects = group.handle(EpochChanged(epoch)) if epoch > group.epoch else []
+    return _Stored(row, group, cbor2.loads(row.held), outgoing, taken, effects)
 
 
 async def _save(sess: "AsyncSession", stored: _Stored) -> None:
@@ -179,6 +183,23 @@ async def _save(sess: "AsyncSession", stored: _Stored) -> None:
     for written in stored.landed:
         await sess.delete(written)
     stored.landed.clear()
+    for effect in stored.effects:
+        match effect:
+            case WriteBox(index, plaintext):
+                await _rewrite(sess, stored.row.conversation_id, index, plaintext)
+            case WriteTombstone(index):
+                await _rewrite(sess, stored.row.conversation_id, index, None)
+    stored.effects.clear()
+
+
+async def _rewrite(
+    sess: "AsyncSession", conversation_id: int, index: bytes, payload: bytes | None
+) -> None:
+    row = await sess.get(persistent.GroupRewrite, (conversation_id, index))
+    if row is None:
+        row = persistent.GroupRewrite(conversation_id=conversation_id, box_index=index)
+    row.payload = payload
+    sess.add(row)
 
 
 async def _members(
@@ -231,7 +252,7 @@ async def _founded(
         return None
     group = Group.found(own_cap, [own_cap], codec=CODEC)
     row = persistent.GroupState(conversation_id=conv.id, state=group_state.dump(group))
-    return _Stored(row, group, [], {}, [])
+    return _Stored(row, group, [], {}, [], [])
 
 
 async def _queue(
@@ -471,6 +492,60 @@ async def settle(
 # Writing.
 
 
+async def tick() -> None:
+    """Load and save every conversation's group state, so a new replica
+    epoch reaches each state machine and the rewrites its backfill asks
+    for are queued (see ``rewrites``)."""
+    async with persistent.asession() as sess:
+        conversation_ids = list(await sess.exec(select(persistent.GroupState.conversation_id)))
+    for conversation_id in conversation_ids:
+        async with persistent.conversation_log_order_lock(conversation_id):
+            async with persistent.asession() as sess:
+                stored = await _load(sess, conversation_id)
+                if stored is not None:
+                    await _save(sess, stored)
+                    await sess.commit()
+
+
+class Rewrite(NamedTuple):
+    conversation_id: int
+    write_cap: bytes
+    box_index: bytes
+    payload: bytes
+    """Empty for a tombstone."""
+
+
+async def rewrites() -> list[Rewrite]:
+    """Every rewrite queued, with the write cap of its stream."""
+    async with persistent.asession() as sess:
+        rows = await sess.exec(
+            select(persistent.GroupRewrite, persistent.WriteCapWAL)
+            .join(
+                persistent.Conversation,
+                col(persistent.Conversation.id) == persistent.GroupRewrite.conversation_id,
+            )
+            .join(
+                persistent.WriteCapWAL,
+                col(persistent.WriteCapWAL.id) == persistent.Conversation.write_cap,
+            )
+        )
+        return [
+            Rewrite(row.conversation_id, wcw.write_cap, row.box_index, row.payload or b"")
+            for row, wcw in rows
+            if wcw.write_cap is not None
+        ]
+
+
+async def rewritten(rewrite: Rewrite) -> None:
+    """``rewrite`` was written, unless a newer one for its box has been
+    queued since."""
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.GroupRewrite, (rewrite.conversation_id, rewrite.box_index))
+        if row is not None and (row.payload or b"") == rewrite.payload:
+            await sess.delete(row)
+            await sess.commit()
+
+
 async def forget_outgoing(
     sess: "AsyncSession", conversation_id: int, pwal_id: uuid.UUID
 ) -> None:
@@ -645,7 +720,7 @@ async def adopt(
     row = await sess.get(persistent.GroupState, conv.id)
     if row is None:
         row = persistent.GroupState(conversation_id=conv.id, state=b"")
-    await _save(sess, _Stored(row, group, [], {}, []))
+    await _save(sess, _Stored(row, group, [], {}, [], []))
     await sess.flush()
     return True
 

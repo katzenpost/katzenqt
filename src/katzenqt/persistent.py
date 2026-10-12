@@ -887,7 +887,10 @@ def _record_sent_box(
         return
     if sess.get(GroupWritten, pwal.id) is not None:
         return
-    sess.add(GroupWritten(pwal_id=pwal.id, conversation_id=conv.id, box_index=box_index))
+    sess.add(GroupWritten(
+        pwal_id=pwal.id, conversation_id=conv.id, box_index=box_index,
+        payload=pwal.bacap_payload,
+    ))
 
 
 def _finalize_stale_ack(
@@ -1315,6 +1318,17 @@ class GroupWritten(SQLModel, table=True):
     pwal_id: uuid.UUID = Field(primary_key=True)
     conversation_id: int = Field(foreign_key="conversation.id", index=True)
     box_index: bytes = Field(min_length=104, max_length=104)
+    payload: bytes | None = None
+    """What the box holds, for the Sent box to rewrite it with."""
+
+
+class GroupRewrite(SQLModel, table=True):
+    """A box of a conversation's own stream to write again, as the group
+    state machine's backfill asks: with ``payload``, or as a tombstone when
+    there is none. See "Backfill" in the group chat spec."""
+    conversation_id: int = Field(foreign_key="conversation.id", primary_key=True)
+    box_index: bytes = Field(primary_key=True, min_length=104, max_length=104)
+    payload: bytes | None = None
 
 
 class TallyState(SQLModel, table=True):
@@ -1340,6 +1354,7 @@ __all__ = [
     "ConversationPeer",
     "ConversationPeerLink",
     "Field",
+    "GroupRewrite",
     "GroupState",
     "GroupWritten",
     "Lock",

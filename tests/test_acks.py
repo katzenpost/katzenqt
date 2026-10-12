@@ -27,6 +27,7 @@ from katzenqt.groupchat import state as group_state
 from katzenqt.groupchat import wire
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.numbering import Entry
+from katzenqt.groupchat.sentbox import Retention
 from katzenqt.headless import _actions
 from tests.fakes.thinclient import FakeThinClient
 from tests.test_network_fake import _set_up_read_flow, _set_up_write_flow
@@ -1033,3 +1034,81 @@ async def test_a_headless_message_waits_for_the_writer_lock() -> None:
         await asyncio.sleep(0.05)
         assert not queueing.done()
     await queueing
+
+
+# Backfill.
+
+
+def _epoch(monkeypatch: pytest.MonkeyPatch, epoch: int) -> None:
+    monkeypatch.setattr(acks, "_replica_epoch", lambda: epoch)
+
+
+@pytest.mark.asyncio
+async def test_a_new_epoch_rewrites_each_box_we_wrote_with_what_it_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _epoch(monkeypatch, 10)
+    chat, _ = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    payload = sent.bacap_payload
+    index = chat.land(sent.id)
+    await acks.tick()
+    assert await acks.rewrites() == []
+    _epoch(monkeypatch, 11)
+    await acks.tick()
+    assert await acks.rewrites() == [
+        acks.Rewrite(chat.conversation_id, chat.write_cap, index, payload)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_box_everyone_acknowledged_is_rewritten_as_a_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _epoch(monkeypatch, 10)
+    chat, bob = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    index = chat.land(sent.id)
+    me = (await chat.group()).rosters.index_of(bob, chat.own_key)
+    assert me is not None
+    await chat.receive("bob", models.GroupChatMessage(
+        version=2, text="seen", acks=ack_codec.encode({me: index}),
+    ), 1)
+    _epoch(monkeypatch, 11)
+    await acks.tick()
+    (rewrite,) = await acks.rewrites()
+    assert (rewrite.box_index, rewrite.payload) == (index, b"")
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_sent_is_not_queued_again_that_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _epoch(monkeypatch, 10)
+    chat, _ = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    chat.land(sent.id)
+    await acks.tick()
+    _epoch(monkeypatch, 11)
+    await acks.tick()
+    (rewrite,) = await acks.rewrites()
+    await acks.rewritten(rewrite)
+    await acks.tick()
+    assert await acks.rewrites() == []
+    _epoch(monkeypatch, 12)
+    await acks.tick()
+    assert [r.box_index for r in await acks.rewrites()] == [rewrite.box_index]
+
+
+@pytest.mark.asyncio
+async def test_a_box_is_no_longer_rewritten_once_its_record_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _epoch(monkeypatch, 10)
+    chat, _ = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    chat.land(sent.id)
+    await acks.tick()
+    _epoch(monkeypatch, 10 + Retention().window + 1)
+    await acks.tick()
+    assert await acks.rewrites() == []

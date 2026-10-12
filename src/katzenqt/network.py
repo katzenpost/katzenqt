@@ -1092,6 +1092,7 @@ async def start_background_threads(connection: ThinClient) -> None:
             create_task(_supervised(drain_mixwal, connection)),
             create_task(_supervised(send_resendable_plaintexts, connection)),
             create_task(readables_to_mixwal_supervised(connection)),
+            create_task(_supervised(backfill, connection)),
         ))
         done, _ = await asyncio.wait(
             [*workers, stopping], return_when=asyncio.FIRST_COMPLETED,
@@ -3756,6 +3757,63 @@ class _ResendDispatch(NamedTuple):
     id: uuid.UUID
     bacap_stream: uuid.UUID
     bacap_payload: bytes
+
+
+_BACKFILL_SWEEP_S = 3600.0
+"""How often every group's backfill is looked at: far shorter than a replica
+epoch, so each epoch's rewrites go out early in it."""
+
+
+async def backfill(connection: ThinClient) -> None:
+    """Rewrite what each group's Sent box asks to, once per replica epoch
+    (see ``acks.tick`` and "Backfill" in the group chat spec)."""
+    while not __should_quit.is_set():
+        if await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
+            await acks.tick()
+            for rewrite in await acks.rewrites():
+                await _send_rewrite(connection, rewrite)
+        try:
+            await asyncio.wait_for(__should_quit.wait(), timeout=_BACKFILL_SWEEP_S)
+        except TimeoutError:
+            pass
+
+
+_REWRITE_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
+    *_REMINT_TRANSIENT_ERRORS, TimeoutError, OSError,
+)
+
+
+async def _send_rewrite(connection: ThinClient, rewrite: acks.Rewrite) -> None:
+    """Write one box again, at its own index, without moving the stream on.
+    A failure leaves it queued for the next sweep."""
+    stream = ("rewrite", rewrite.conversation_id, rewrite.box_index)
+    try:
+        wcr: "EncryptWriteResult" = await _rpc_racing_connection_life(
+            bacap_uuid=stream,
+            what="encrypt_write",
+            rpc_factory=lambda: connection.encrypt_write(
+                write_cap=rewrite.write_cap,
+                message_box_index=rewrite.box_index,
+                plaintext=rewrite.payload,
+            ),
+            backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+        )
+        await _delivery_racing_connection_life(
+            bacap_uuid=stream,
+            what="start_resending_encrypted_message",
+            rpc_factory=lambda: connection.start_resending_encrypted_message(
+                write_cap=rewrite.write_cap,
+                envelope_descriptor=wcr.envelope_descriptor,
+                envelope_hash=wcr.envelope_hash,
+                message_ciphertext=wcr.message_ciphertext,
+                read_cap=None, message_box_index=None, reply_index=None,
+            ),
+        )
+    except _REWRITE_TRANSIENT_ERRORS as e:
+        logger.warning("rewrite for conversation %s failed; will retry: %s",
+                       rewrite.conversation_id, e)
+        return
+    await acks.rewritten(rewrite)
 
 
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
