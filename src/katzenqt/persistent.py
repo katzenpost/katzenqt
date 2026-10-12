@@ -8,6 +8,7 @@ from pathlib import Path
 import alembic.config
 import alembic.command
 import alembic.context
+import time
 import uuid
 from contextlib import asynccontextmanager
 from sqlmodel import Field, Relationship, Session, SQLModel, col, create_engine, UniqueConstraint, select
@@ -449,6 +450,48 @@ async def set_muted(conversation_id: int, *, muted: bool) -> None:
         elif not muted and row is not None:
             await sess.delete(row)
         await sess.commit()
+
+
+class Retention(NamedTuple):
+    """A conversation's disappearing messages policy: how many days the
+    content of received and of sent messages is kept, or None to keep it.
+    See "Disappearing messages" in the group chat spec."""
+
+    received_days: int | None = None
+    sent_days: int | None = None
+
+
+def _retention_keys(conversation_id: int) -> tuple[str, str]:
+    return f"keep_received:{conversation_id}", f"keep_sent:{conversation_id}"
+
+
+async def retention(sess: "AsyncSession", conversation_id: int) -> Retention:
+    days = []
+    for key in _retention_keys(conversation_id):
+        row = await sess.get(AppSetting, key)
+        days.append(int(row.value) if row is not None else None)
+    return Retention(*days)
+
+
+async def current_retention(conversation_id: int) -> Retention:
+    async with asession() as sess:
+        return await retention(sess, conversation_id)
+
+
+async def set_retention(conversation_id: int, policy: Retention) -> None:
+    async with asession() as sess:
+        for key, days in zip(_retention_keys(conversation_id), policy):
+            row = await sess.get(AppSetting, key)
+            if days is None:
+                if row is not None:
+                    await sess.delete(row)
+                continue
+            if row is None:
+                row = AppSetting(id=key, type="int")
+            row.value = str(days)
+            sess.add(row)
+        await sess.commit()
+
 
 class MixWAL(SQLModel, table=True):
     """
@@ -1243,6 +1286,8 @@ class ConversationLog(SQLModel, table=True):
 
     # TODO: envelope_hash: bytes - do we need this?
     payload: bytes  # This contains binary CBOR
+    logged_at: float | None = Field(default_factory=time.time)
+    """When the row was added, for the disappearing messages policy."""
 
     network_status: int = Field(default=0) # 0: received; 1:pending; 2: fully sent
     outgoing_pwal: uuid.UUID | None = Field(
@@ -1367,6 +1412,7 @@ __all__ = [
     "PlaintextWAL",
     "ReadCapWAL",
     "ReceivedPiece",
+    "Retention",
     "Relationship",
     "SQLModel",
     "SentLog",

@@ -302,6 +302,22 @@ def _read_file(
 
 
 @verbs.command(
+    "disappear",
+    help="delete messages received more than RECEIVED_DAYS ago and sent "
+         "more than SENT_DAYS ago; 0 keeps them",
+)
+@click.argument("conv_name")
+@click.argument("received_days", type=click.IntRange(min=0))
+@click.argument("sent_days", type=click.IntRange(min=0))
+def _disappear(
+    conv_name: str, received_days: int, sent_days: int,
+) -> "Plan[_args.Disappear]":
+    return plan("_action_disappear", _args.Disappear(
+        action=verb(), conv_name=conv_name, received_days=received_days, sent_days=sent_days,
+    ))
+
+
+@verbs.command(
     "info",
     help="emit one line of JSON describing the state file's schema, "
          "conversations, and outstanding WAL counts",

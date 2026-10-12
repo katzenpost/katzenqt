@@ -21,6 +21,7 @@ next load takes it in.
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -44,6 +45,7 @@ from .groupchat.events import (
     WriteTombstone,
 )
 from .groupchat.group import Group, Outgoing
+from .groupchat.sentbox import Retention
 
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
@@ -155,6 +157,21 @@ class _Stored(NamedTuple):
     is saved, so a load that is not saved asks again next time."""
 
 
+def _policy(sent_days: int | None) -> Retention:
+    """The Sent box's retention for a policy that keeps sent content
+    ``sent_days`` days: whole replica epochs, never fewer days than asked.
+
+    >>> _policy(None).keep_sent is None
+    True
+    >>> _policy(1).keep_sent, _policy(7).keep_sent, _policy(8).keep_sent
+    (2, 2, 3)
+    """
+    if sent_days is None:
+        return Retention()
+    epochs = math.ceil(sent_days * 24 * 3600 / REPLICA_EPOCH_SECONDS)
+    return Retention(keep_sent=epochs + 1)
+
+
 def _replica_epoch() -> int:
     return int(time.time() // REPLICA_EPOCH_SECONDS)
 
@@ -164,6 +181,7 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
     if row is None:
         return None
     group = group_state.load(row.state, CODEC)
+    group.policy = _policy((await persistent.retention(sess, conversation_id)).sent_days)
     outgoing = {uuid.UUID(bytes=pwal): token for pwal, token in cbor2.loads(row.outgoing)}
     landed = await sess.exec(
         select(persistent.GroupWritten).where(

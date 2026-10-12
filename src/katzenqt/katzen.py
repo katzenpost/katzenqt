@@ -35,7 +35,7 @@ from PySide6.QtTest import QAbstractItemModelTester
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
                                QFormLayout, QHBoxLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
+                               QMessageBox, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
                                QTextBrowser, QTableView, QToolButton, QTreeView,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 from sqlmodel import col, select
@@ -652,6 +652,40 @@ class GroupInfoDialog(QDialog):
             label = QLabel(f"Has read {ours}. {hint}.")
             label.setWordWrap(True)
             layout.addRow(name, label)
+
+
+class RetentionDialog(QDialog):
+    """A conversation's disappearing messages policy: days to keep received
+    and sent messages, where 0 keeps them."""
+
+    def __init__(self, parent: "QWidget | None", title: str, policy: "persistent.Retention") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{title}: disappearing messages")
+        layout = QFormLayout(self)
+        self.received = self._days(policy.received_days)
+        self.sent = self._days(policy.sent_days)
+        layout.addRow("Delete messages I receive after", self.received)
+        layout.addRow("Delete messages I send after", self.sent)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    @staticmethod
+    def _days(days: "int | None") -> QSpinBox:
+        box = QSpinBox()
+        box.setRange(0, 3650)
+        box.setSuffix(" days")
+        box.setSpecialValueText("Never")
+        box.setValue(days or 0)
+        return box
+
+    def policy(self) -> "persistent.Retention":
+        return persistent.Retention(
+            self.received.value() or None, self.sent.value() or None,
+        )
 
 
 class ConsensusDialog(QDialog):
@@ -2146,6 +2180,9 @@ class MainWindow(QMainWindow):
             return
         convo_state = self.conversation_state_by_id[conversation_id]
         if redraw_only:
+            # Rows can go too: disappearing messages deletes them.
+            if convo_state.conversation_log_model.lost_rows():
+                convo_state.conversation_log_model.refresh_row_count()
             convo_state.conversation_log_model.redraw_network_status()
             self._note_first_delivery_mark(conversation_id)
             return
@@ -2309,6 +2346,8 @@ class MainWindow(QMainWindow):
         start.setEnabled(conversation_id is not None and paused)
         members = api.addAction("Members and acknowledgements...")
         members.setEnabled(conversation_id is not None)
+        disappear = api.addAction("Disappearing messages...")
+        disappear.setEnabled(conversation_id is not None)
         api.addSeparator()
         copy_voucher = api.addAction("Copy voucher")
         show_voucher = api.addAction("Show voucher...")
@@ -2322,6 +2361,8 @@ class MainWindow(QMainWindow):
             await self._remove_conversation(item)
         elif chosen is members and conversation_id is not None:
             await self._show_members(conversation_id, item.text())
+        elif chosen is disappear and conversation_id is not None:
+            await self._edit_retention(conversation_id, item.text())
         elif chosen is stop and conversation_id is not None:
             await self.iothread.run_in_io(
                 network.pause_conversation_reads(
@@ -2347,6 +2388,15 @@ class MainWindow(QMainWindow):
             self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
         elif chosen is show_voucher:
             await _dialog_finished(VoucherDialog(self, voucher_code(token)))
+
+    async def _edit_retention(self, conversation_id: int, title: str) -> None:
+        policy = await self.iothread.run_in_io(persistent.current_retention(conversation_id))
+        dialog = RetentionDialog(self, title, policy)
+        if await _dialog_finished(dialog) != QDialog.DialogCode.Accepted.value:
+            return
+        await self.iothread.run_in_io(
+            persistent.set_retention(conversation_id, dialog.policy()),
+        )
 
     async def _show_members(self, conversation_id: int, title: str) -> None:
         info = await self.iothread.run_in_io(

@@ -1185,6 +1185,10 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self.endResetModel()
         return True
 
+    def lost_rows(self) -> bool:
+        """Whether a row the view shows is no longer in the log."""
+        return not set(self._orders) <= set(self._query_orders())
+
     def redraw_network_status(self) -> None:
         """Repaint the network-status column without changing the row set."""
         if self._view_count == 0:

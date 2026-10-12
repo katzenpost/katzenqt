@@ -794,6 +794,19 @@ async def _action_scan(args: _args.Scan) -> int:
     return 0
 
 
+async def _action_disappear(args: _args.Disappear) -> int:
+    """Set a conversation's disappearing messages policy. The running client
+    applies it within the hour."""
+    conversation_id = await _conv_id_by_name(args.conv_name)
+    if conversation_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    policy = persistent.Retention(args.received_days or None, args.sent_days or None)
+    await persistent.set_retention(conversation_id, policy)
+    logger.info("RETENTION=%s", json.dumps(policy._asdict()))
+    return 0
+
+
 async def _action_info(args: _args.Info) -> int:
     """Print one line of JSON describing this state file's schema,
     conversations, and outstanding WAL counts.

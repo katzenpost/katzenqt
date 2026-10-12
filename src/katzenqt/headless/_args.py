@@ -89,6 +89,13 @@ class ReadFile(Connected):
 
 
 @dataclass(frozen=True)
+class Disappear(Offline):
+    conv_name: str
+    received_days: int
+    sent_days: int
+
+
+@dataclass(frozen=True)
 class Info(Offline):
     pass
 

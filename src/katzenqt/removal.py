@@ -15,15 +15,13 @@ from __future__ import annotations
 import logging
 import shutil
 import uuid
-from pathlib import Path
 from typing import NamedTuple
 
-import cbor2
 import sqlalchemy as sa
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import acks, conversation_handlers, models, network, persistent
+from . import acks, attachments, conversation_handlers, models, network, persistent
 from .tally import controller as tally_controller
 
 logger = logging.getLogger("katzen.removal")
@@ -41,51 +39,6 @@ class _Doomed(NamedTuple):
     @property
     def streams(self) -> "list[uuid.UUID]":
         return self.read_streams + self.write_streams
-
-
-def _attachment_paths(payload: bytes) -> "set[str]":
-    if payload[:1] != b"F":
-        return set()
-    try:
-        decoded = cbor2.loads(payload[1:])
-    except Exception:
-        return set()
-    if not isinstance(decoded, dict):
-        return set()
-    keys = ("rel_path", "thumb_rel_path")
-    return {p for p in (decoded.get(k) for k in keys) if isinstance(p, str)}
-
-
-def _attachment_file(rel_path: str) -> "Path | None":
-    root = (persistent.state_file.parent / "attachments").resolve()
-    path = (persistent.state_file.parent / rel_path).resolve()
-    return path if path.is_relative_to(root) else None
-
-
-def _unlink_attachments(rel_paths: "set[str]") -> None:
-    for rel_path in rel_paths:
-        path = _attachment_file(rel_path)
-        if path is None:
-            logger.warning(
-                "not deleting attachment outside the state dir: %r", rel_path
-            )
-            continue
-        path.unlink(missing_ok=True)
-
-
-async def _remaining_attachment_paths(
-    sess: AsyncSession,
-    conversation_id: int,
-) -> "set[str]":
-    payloads = (
-        await sess.exec(
-            select(persistent.ConversationLog.payload).where(
-                col(persistent.ConversationLog.conversation_id)
-                == conversation_id,
-            )
-        )
-    ).all()
-    return set().union(*(_attachment_paths(p) for p in payloads))
 
 
 async def _silence_peers(conversation_id: int, peer_id: int) -> _Doomed:
@@ -176,7 +129,7 @@ async def _delete_peer_rows(
         )
     ).all()
     candidates = set().union(
-        *(_attachment_paths(row.payload) for row in logs)
+        *(attachments.paths_in(row.payload) for row in logs)
     )
     for row in logs:
         await sess.delete(row)
@@ -196,7 +149,7 @@ async def _delete_peer_rows(
         )
     )
     await _delete_unshared_read_caps(sess, doomed.read_streams)
-    return candidates - await _remaining_attachment_paths(
+    return candidates - await attachments.remaining(
         sess, conversation_id
     )
 
@@ -230,7 +183,7 @@ async def remove_peer(*, conversation_id: int, peer_id: int) -> None:
         async with persistent.asession() as sess:
             orphaned = await _delete_peer_rows(sess, conversation_id, doomed)
             await sess.commit()
-    _unlink_attachments(orphaned)
+    attachments.unlink(orphaned)
     _announce_removed(doomed.read_streams[1:])
     network.readables_to_mixwal_event.set()
 

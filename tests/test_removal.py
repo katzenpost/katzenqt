@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtCore import QModelIndex
 from sqlmodel import SQLModel, select
 
-from katzenqt import network, persistent, removal
+from katzenqt import attachments, network, persistent, removal
 from katzenqt.qt_models import ConversationLogModel
 from katzenqt.tally.presenter import first_unread_order
 from katzenqt.tally import controller as tally_controller
@@ -399,7 +399,7 @@ def test_sent_log_records_the_conversation_it_was_sent_in() -> None:
     ],
 )
 def test_attachment_paths_ignores_hostile_payloads(payload: bytes) -> None:
-    assert removal._attachment_paths(payload) == set()
+    assert attachments.paths_in(payload) == set()
 
 
 @pytest.mark.asyncio

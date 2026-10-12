@@ -59,3 +59,14 @@ async def test_scan_needs_the_member(caplog: pytest.LogCaptureFixture) -> None:
     await make_conversation("room", peers=("bob",))
     assert await run_action(["scan", "room", "me", *ADDRESS]) == 2
     assert "member 'me' not found" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_disappear_sets_the_policy(caplog: pytest.LogCaptureFixture) -> None:
+    from katzenqt import persistent
+
+    handle = await make_conversation("room")
+    assert await run_action(["disappear", "room", "7", "0"]) == 0
+    assert await persistent.current_retention(handle.conversation_id) == persistent.Retention(7, None)
+    assert 'RETENTION={"received_days": 7, "sent_days": null}' in caplog.text
+    assert await run_action(["disappear", "nowhere", "1", "1"]) == 2

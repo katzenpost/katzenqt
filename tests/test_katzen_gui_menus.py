@@ -1105,3 +1105,64 @@ async def test_a_group_without_rosters_says_so(
     conversation = window.convo_state().contacts_standard_item
     await window.peer_context_menu(peer_position(window, conversation))
     assert window.ui.statusbar.currentMessage() == "This group chat keeps no rosters"
+
+
+@pytest.mark.asyncio
+async def test_the_disappearing_messages_policy_is_set_from_the_group_menu(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _bob_menu(window)
+    conversation_id = window.convo_state().conversation_id
+    await persistent.set_retention(conversation_id, persistent.Retention(3, None))
+    seen: list[tuple[int, int]] = []
+
+    async def answer(dialog: katzen.RetentionDialog) -> int:
+        seen.append((dialog.received.value(), dialog.sent.value()))
+        dialog.received.setValue(0)
+        dialog.sent.setValue(5)
+        return QDialog.DialogCode.Accepted.value
+
+    monkeypatch.setattr(katzen, "_dialog_finished", answer)
+    chosen(by_text("Disappearing messages..."))
+    conversation = window.convo_state().contacts_standard_item
+    await window.peer_context_menu(peer_position(window, conversation))
+    assert seen == [(3, 0)]
+    assert await persistent.current_retention(conversation_id) == persistent.Retention(None, 5)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_disappearing_messages_dialog_changes_nothing(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _bob_menu(window)
+    conversation_id = window.convo_state().conversation_id
+
+    async def cancel(dialog: katzen.RetentionDialog) -> int:
+        dialog.sent.setValue(5)
+        return QDialog.DialogCode.Rejected.value
+
+    monkeypatch.setattr(katzen, "_dialog_finished", cancel)
+    chosen(by_text("Disappearing messages..."))
+    conversation = window.convo_state().contacts_standard_item
+    await window.peer_context_menu(peer_position(window, conversation))
+    assert await persistent.current_retention(conversation_id) == persistent.Retention()
+
+
+@pytest.mark.asyncio
+async def test_messages_that_disappeared_leave_the_view(window: katzen.MainWindow) -> None:
+    await _bob_menu(window)
+    state = window.convo_state()
+    with persistent.Session(persistent._engine_sync) as sess:
+        rows = sess.exec(select(persistent.ConversationLog).where(
+            persistent.ConversationLog.conversation_id == state.conversation_id,
+        )).all()
+        assert rows
+        for row in rows:
+            sess.delete(row)
+        sess.commit()
+    await window._process_conversation_update(state.conversation_id, True)
+    assert state.conversation_log_model.rowCount() == 0

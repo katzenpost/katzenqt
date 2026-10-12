@@ -81,7 +81,7 @@ from .katzen_util import create_task
 from ._thinclient import ThinClient
 from . import epochs
 from pydantic.dataclasses import dataclass
-from . import acks, attachment_images, conversation_handlers, models, persistent
+from . import acks, attachment_images, conversation_handlers, disappearing, models, persistent
 from .groupchat.events import BoxRead, Missing, ReadBox, Walk, Walked
 from sqlmodel import col, select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -1093,7 +1093,7 @@ async def start_background_threads(connection: ThinClient) -> None:
             create_task(_supervised(drain_mixwal, connection)),
             create_task(_supervised(send_resendable_plaintexts, connection)),
             create_task(readables_to_mixwal_supervised(connection)),
-            create_task(_supervised(backfill, connection)),
+            create_task(_supervised(upkeep, connection)),
         ))
         done, _ = await asyncio.wait(
             [*workers, stopping], return_when=asyncio.FIRST_COMPLETED,
@@ -4019,21 +4019,24 @@ class _ResendDispatch(NamedTuple):
     bacap_payload: bytes
 
 
-_BACKFILL_SWEEP_S = 3600.0
-"""How often every group's backfill is looked at: far shorter than a replica
-epoch, so each epoch's rewrites go out early in it."""
+_UPKEEP_SWEEP_S = 3600.0
+"""How often every group's backfill and retention are looked at: far
+shorter than a replica epoch, so each epoch's rewrites go out early in it."""
 
 
-async def backfill(connection: ThinClient) -> None:
+async def upkeep(connection: ThinClient) -> None:
     """Rewrite what each group's Sent box asks to, once per replica epoch
-    (see ``acks.tick`` and "Backfill" in the group chat spec)."""
+    (see ``acks.tick`` and "Backfill" in the group chat spec), and delete
+    what each conversation's disappearing messages policy no longer keeps."""
     while not __should_quit.is_set():
+        for conversation_id in await disappearing.expire(time.time()):
+            await conversation_update_queue.put((conversation_id, True))
         if await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
             await acks.tick()
             for rewrite in await acks.rewrites():
                 await _send_rewrite(connection, rewrite)
         try:
-            await asyncio.wait_for(__should_quit.wait(), timeout=_BACKFILL_SWEEP_S)
+            await asyncio.wait_for(__should_quit.wait(), timeout=_UPKEEP_SWEEP_S)
         except TimeoutError:
             pass
 

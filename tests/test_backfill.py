@@ -63,9 +63,9 @@ async def test_the_worker_sweeps_until_asked_to_quit(monkeypatch: pytest.MonkeyP
         await tick()
 
     monkeypatch.setattr(acks, "tick", counted)
-    monkeypatch.setattr(network, "_BACKFILL_SWEEP_S", 0.0)
+    monkeypatch.setattr(network, "_UPKEEP_SWEEP_S", 0.0)
     getattr(network, "__mixnet_connected").set()
-    worker = asyncio.create_task(network.backfill(cast(network.ThinClient, client)))
+    worker = asyncio.create_task(network.upkeep(cast(network.ThinClient, client)))
     while sweeps < 2:
         await asyncio.sleep(0.01)
     assert client.box_store[rewrite.write_cap[32:], rewrite.box_index] == rewrite.payload
