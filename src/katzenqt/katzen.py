@@ -634,6 +634,26 @@ class StatsDialog(QDialog):
         super().hideEvent(event)
 
 
+class GroupInfoDialog(QDialog):
+    """Read-only view of a group chat's roster, how far each member has
+    read our stream, and what is known about each member's stream."""
+
+    def __init__(self, parent: "QWidget | None", title: str, info: "network.GroupInfo") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{title}: members")
+        layout = QFormLayout(self)
+        roster = QLabel(", ".join(f"{i} {name}" for i, name in enumerate(info.roster)))
+        roster.setWordWrap(True)
+        layout.addRow("Roster", roster)
+        for name, read, hint in info.members:
+            ours = "nothing of ours yet" if read is None else (
+                f"our first {read} box{'es' * (read != 1)}"
+            )
+            label = QLabel(f"Has read {ours}. {hint}.")
+            label.setWordWrap(True)
+            layout.addRow(name, label)
+
+
 class ConsensusDialog(QDialog):
     """Modeless view of the daemon's current PKI consensus document.
 
@@ -2287,6 +2307,8 @@ class MainWindow(QMainWindow):
         start = api.addAction("Resume reading from this group chat")
         stop.setEnabled(conversation_id is not None and not paused)
         start.setEnabled(conversation_id is not None and paused)
+        members = api.addAction("Members and acknowledgements...")
+        members.setEnabled(conversation_id is not None)
         api.addSeparator()
         copy_voucher = api.addAction("Copy voucher")
         show_voucher = api.addAction("Show voucher...")
@@ -2298,6 +2320,8 @@ class MainWindow(QMainWindow):
         chosen = await _menu_chosen(api, global_pos)
         if chosen is remove:
             await self._remove_conversation(item)
+        elif chosen is members and conversation_id is not None:
+            await self._show_members(conversation_id, item.text())
         elif chosen is stop and conversation_id is not None:
             await self.iothread.run_in_io(
                 network.pause_conversation_reads(
@@ -2323,6 +2347,17 @@ class MainWindow(QMainWindow):
             self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
         elif chosen is show_voucher:
             await _dialog_finished(VoucherDialog(self, voucher_code(token)))
+
+    async def _show_members(self, conversation_id: int, title: str) -> None:
+        info = await self.iothread.run_in_io(
+            network.group_info(conversation_id=conversation_id),
+        )
+        if info is None:
+            self.ui.statusbar.showMessage(
+                "This group chat keeps no rosters", 5000,
+            )
+            return
+        await _dialog_finished(GroupInfoDialog(self, title, info))
 
     async def _pending_voucher(self, item: "ContactsItem") -> "bytes | None":
         conversation_id = getattr(item, "conversation_id", None)
@@ -2351,16 +2386,29 @@ class MainWindow(QMainWindow):
             )).first()
             rcw = sess.get(persistent.ReadCapWAL, read_cap_id)
             active = bool(solo and solo.active and rcw and not rcw.paused)
+        conversation_id = cast("ContactsItem", item.parent()).conversation_id
+        stream = await self.iothread.run_in_io(network.member_stream(
+            conversation_id=conversation_id, read_cap_id=read_cap_id,
+        ))
         # A throwaway menu so we never clobber the tray's contextMenu().
         api = QMenu(self.ui.contacts_treeWidget)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
         rgm = api.addAction(f"Resume reading from {item.text()}")
         api.addSeparator()
+        # A scan runs only when asked for: nothing can tell a quiet stream
+        # from one stuck behind a missing box.
+        scan = api.addAction(f"Scan {item.text()}'s messages")
+        scan.setEnabled(stream is not None and self.iothread.kp_client is not None)
+        if stream is not None:
+            api.addAction(network.stream_hint(stream)).setEnabled(False)
+        api.addSeparator()
         rm = api.addAction(f"Remove {item.text()} from this group chat...")
         pgm.setEnabled(active)
         rgm.setEnabled(not active)
         chosen = await _menu_chosen(api, global_pos)
-        if chosen is pgm and active:
+        if chosen is scan:
+            await self._scan_peer(conversation_id, read_cap_id)
+        elif chosen is pgm and active:
             await self.iothread.run_in_io(
                 network.pause_peer_reads(bacap_stream=read_cap_id),
             )
@@ -2370,6 +2418,26 @@ class MainWindow(QMainWindow):
             )
         elif chosen is rm:
             await self._remove_peer(item)
+
+    async def _scan_peer(self, conversation_id: int, read_cap_id: uuid.UUID) -> None:
+        client = self.iothread.kp_client
+        if client is None:
+            return
+        peer_id = await self.iothread.run_in_io(persistent.peer_id_by_read_cap(
+            conversation_id=conversation_id, read_cap_id=read_cap_id,
+        ))
+        if peer_id is None:
+            return
+        self.ui.statusbar.showMessage("Scanning...")
+        try:
+            result = await self.iothread.run_in_io(network.scan_member(
+                client, conversation_id=conversation_id, peer_id=peer_id,
+            ))
+        except Exception as e:
+            logger.exception("scan of %s failed", read_cap_id)
+            self.ui.statusbar.showMessage(f"Scan failed: {_error_detail(e)}", 5000)
+            return
+        self.ui.statusbar.showMessage(network.scan_summary(result), 5000)
 
     async def _confirm(self, text: str) -> bool:
         box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)

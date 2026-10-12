@@ -758,6 +758,42 @@ async def _action_read(args: _args.Read) -> int:
         await _shutdown(bg, connection)
 
 
+async def _action_scan(args: _args.Scan) -> int:
+    """Scan one member's stream, and log what the scan did as one line of
+    JSON. A scan runs only when asked for: see "Rewrite and scan" in
+    the group chat spec."""
+    async with persistent.asession() as sess:
+        conv = (await sess.exec(
+            select(persistent.Conversation).where(
+                persistent.Conversation.name == args.conv_name
+            )
+        )).first()
+        if conv is None:
+            logger.error("conversation %r not found", args.conv_name)
+            return 2
+        conversation_id = conv.id
+        peer = next((
+            p for p in conv.peers
+            if p.name == args.member and p.id != conv.own_peer_id
+        ), None)
+        if peer is None:
+            logger.error("member %r not found in %r", args.member, args.conv_name)
+            return 2
+        peer_id = peer.id
+    connection, bg = await _connect_and_start()
+    try:
+        result = await network.scan_member(
+            connection, conversation_id=conversation_id, peer_id=peer_id,
+        )
+    finally:
+        await _shutdown(bg, connection)
+    if result is None:
+        logger.error("nothing to scan on %r's stream", args.member)
+        return 1
+    logger.info("SCANNED=%s", json.dumps(result._asdict()))
+    return 0
+
+
 async def _action_info(args: _args.Info) -> int:
     """Print one line of JSON describing this state file's schema,
     conversations, and outstanding WAL counts.

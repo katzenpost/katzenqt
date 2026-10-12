@@ -82,6 +82,7 @@ from ._thinclient import ThinClient
 from . import epochs
 from pydantic.dataclasses import dataclass
 from . import acks, attachment_images, conversation_handlers, models, persistent
+from .groupchat.events import BoxRead, Missing, ReadBox, Walk, Walked
 from sqlmodel import col, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -2950,6 +2951,265 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
                 rcw_id=bacap_stream, direction="download", paused=False,
             ),
         )
+
+
+class ScanResult(NamedTuple):
+    rechecked: int
+    """Boxes a scan stepped past earlier that it has now read."""
+    walked: bool
+    """Whether it jumped forward to a box another member acknowledged."""
+    unread: int
+    """Boxes stepped past that are still unread."""
+
+
+async def scan_member(
+    connection: ThinClient, *, conversation_id: int, peer_id: int,
+) -> ScanResult | None:
+    """Scan one member's stream, because the user asked to: read again what
+    an earlier scan stepped past, and jump forward to the furthest box other
+    members have acknowledged. The reader then carries on from there. None
+    when there is nothing this conversation can scan on that stream right
+    now. See "Rewrite and scan" in the group chat spec."""
+    async with persistent.asession() as sess:
+        peer = await sess.get(persistent.ConversationPeer, peer_id)
+        rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id) if peer else None
+        if rcw is None or rcw.read_cap is None:
+            return None
+        rcw_id, read_cap, was_paused = rcw.id, rcw.read_cap, rcw.paused
+    stream = acks.member_key(read_cap)
+    await pause_peer_reads(bacap_stream=rcw_id)
+    try:
+        effects = await _scanning(conversation_id, lambda sess: acks.scan(
+            sess, conversation_id, stream,
+        ))
+        if effects is None:
+            return None
+        rechecked, walked = 0, False
+        while effects:
+            match effects.pop(0):
+                case ReadBox(_, _, index, recheck=True):
+                    result, after = await _read_once(connection, read_cap, index)
+                    if isinstance(result, bytes):
+                        delivered = await _deliver_rechecked(conversation_id, peer_id, result)
+                        if delivered is None:
+                            continue
+                        result = delivered
+                    rechecked += result is not Missing.NOT_FOUND
+                    effects += await _scanning(conversation_id, lambda sess: acks.scanned(
+                        sess, conversation_id, BoxRead(stream, index, result, after),
+                    )) or []
+                case Walk() as walk:
+                    found = await _walk(connection, walk)
+                    walked = walked or found.target is not None
+                    effects += await _scanning(conversation_id, lambda sess: acks.scanned(
+                        sess, conversation_id, found,
+                    )) or []
+        async with persistent.conversation_log_order_lock(conversation_id):
+            async with persistent.asession() as sess:
+                now = await acks.stream(sess, conversation_id, stream)
+                rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+                assert now is not None and rcw is not None
+                rcw.next_index = now.next
+                sess.add(rcw)
+                await sess.commit()
+        return ScanResult(rechecked, walked, now.unread)
+    finally:
+        if not was_paused:
+            await resume_peer_reads(bacap_stream=rcw_id)
+
+
+async def member_stream(
+    *, conversation_id: int, read_cap_id: uuid.UUID,
+) -> "acks.Stream | None":
+    """What the user may want to know before scanning a member's stream."""
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, read_cap_id)
+        if rcw is None or rcw.read_cap is None:
+            return None
+        return await acks.stream(sess, conversation_id, acks.member_key(rcw.read_cap))
+
+
+class GroupInfo(NamedTuple):
+    roster: "list[str]"
+    """Our roster, in order: a member's place in it is its roster index."""
+    members: "list[tuple[str, int | None, str]]"
+    """Each member we read: its name, how many of our messages it has
+    acknowledged, if any, and what is known about its stream."""
+
+
+async def group_info(*, conversation_id: int) -> "GroupInfo | None":
+    """Rosters and acknowledgements, for the user to look at. None for a
+    conversation that keeps no rosters."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return None
+        roster, acked = await acks.summary(sess, conv)
+        if roster is None:
+            return None
+        peers = (await sess.exec(
+            select(persistent.ConversationPeer, persistent.ReadCapWAL)
+            .join(persistent.ConversationPeerLink)
+            .join(
+                persistent.ReadCapWAL,
+                col(persistent.ReadCapWAL.id) == persistent.ConversationPeer.read_cap_id,
+            )
+            .where(persistent.ConversationPeerLink.conversation_id == conversation_id)
+        )).all()
+        members = []
+        for peer, rcw in peers:
+            if not _is_member(peer, conv.own_peer_id) or rcw.read_cap is None:
+                continue
+            stream = await acks.stream(sess, conversation_id, acks.member_key(rcw.read_cap))
+            hint = stream_hint(stream) if stream is not None else "Not read as a member"
+            seen = acked.get(peer.name)
+            members.append((peer.name, None if seen is None else seen + 1, hint))
+    return GroupInfo(roster, members)
+
+
+def stream_hint(stream: "acks.Stream") -> str:
+    """
+    >>> stream_hint(acks.Stream(b"", 2, True))
+    'Others have read further; 2 boxes skipped are still unread'
+    >>> stream_hint(acks.Stream(b"", 1, False))
+    '1 box skipped is still unread'
+    >>> stream_hint(acks.Stream(b"", 0, False))
+    'Nothing known to be missing'
+    """
+    parts = []
+    if stream.acked_ahead:
+        parts.append("Others have read further")
+    if stream.unread == 1:
+        parts.append("1 box skipped is still unread")
+    elif stream.unread:
+        parts.append(f"{stream.unread} boxes skipped are still unread")
+    if not parts:
+        return "Nothing known to be missing"
+    text = "; ".join(parts)
+    return text[0].upper() + text[1:]
+
+
+def scan_summary(result: "ScanResult | None") -> str:
+    """
+    >>> scan_summary(None)
+    'Nothing to scan'
+    >>> scan_summary(ScanResult(0, False, 0))
+    'Scan found nothing new'
+    >>> scan_summary(ScanResult(2, True, 1))
+    'Scan read 2 skipped boxes, jumped ahead; 1 box skipped is still unread'
+    """
+    if result is None:
+        return "Nothing to scan"
+    done = []
+    if result.rechecked:
+        done.append(f"read {result.rechecked} skipped box{'es' * (result.rechecked != 1)}")
+    if result.walked:
+        done.append("jumped ahead")
+    text = "Scan " + (", ".join(done) if done else "found nothing new")
+    if result.unread:
+        text += "; " + stream_hint(acks.Stream(b"", result.unread, False)).lower()
+    return text
+
+
+_T = TypeVar("_T")
+
+
+async def _scanning(
+    conversation_id: int, step: "Callable[[persistent.AsyncSession], Awaitable[_T]]",
+) -> _T:
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            result = await step(sess)
+            await sess.commit()
+            return result
+
+
+async def _read_once(
+    connection: ThinClient, read_cap: bytes, index: bytes,
+) -> "tuple[bytes | Missing, bytes]":
+    """Read one box without waiting for it to be written, and the index
+    after it."""
+    key = ("scan", index)
+    rcr = await _rpc_racing_connection_life(
+        bacap_uuid=key,
+        what="encrypt_read",
+        rpc_factory=lambda: connection.encrypt_read(
+            read_cap=read_cap, message_box_index=index,
+        ),
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+    )
+    try:
+        reply = await _delivery_racing_connection_life(
+            bacap_uuid=key,
+            what="start_resending_encrypted_message",
+            rpc_factory=lambda: connection.start_resending_encrypted_message(
+                read_cap=read_cap, write_cap=None, message_box_index=index,
+                reply_index=None, envelope_descriptor=rcr.envelope_descriptor,
+                message_ciphertext=rcr.message_ciphertext,
+                envelope_hash=rcr.envelope_hash,
+                no_retry_on_box_id_not_found=True,
+            ),
+        )
+    except BoxIDNotFoundError:
+        return Missing.NOT_FOUND, rcr.next_message_box_index
+    except TombstoneError:
+        return Missing.TOMBSTONE, rcr.next_message_box_index
+    return reply.plaintext, rcr.next_message_box_index
+
+
+async def _deliver_rechecked(
+    conversation_id: int, peer_id: int, payload: bytes,
+) -> bytes | None:
+    """Show a message found in a box an earlier scan stepped past, and
+    return what the state machine reads of it. None for a box announcing a
+    file, which a scan leaves for the reader to fetch later."""
+    if payload[:1] != b"F":
+        return None
+    try:
+        gcm = models.GroupChatMessage.from_cbor(payload[1:])
+    except Exception:
+        return b""
+    if gcm.file_upload is not None:
+        return None
+    if gcm.text is not None:
+        gcm.text = models.clamp_message_text(gcm.text)
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            peer = await sess.get(persistent.ConversationPeer, peer_id)
+            assert peer is not None
+            added, _, peer_added, tally_added = await conversation_handlers.dispatch(
+                sess, peer, gcm, b"F" + gcm.to_cbor(),
+            )
+            await sess.commit()
+    if added:
+        await conversation_update_queue.put((conversation_id, False))
+    if tally_added:
+        tally_update_queue.put_nowait(conversation_id)
+    if peer_added:
+        peer_added_queue.put_nowait(peer_added)
+    return gcm.to_cbor()
+
+
+async def _walk(connection: ThinClient, walk: Walk) -> Walked:
+    """Step forward from ``walk.start`` to the furthest of its targets met
+    within ``acks.WALK_LIMIT`` boxes, keeping the last ``walk.keep``
+    indexes stepped past on the way."""
+    passed: list[bytes] = []
+    found: "tuple[bytes, list[bytes]] | None" = None
+    met: set[bytes] = set()
+    index = walk.start
+    for _ in range(acks.WALK_LIMIT):
+        if index in walk.targets:
+            found = (index, list(passed))
+            met.add(index)
+            if len(met) == len(set(walk.targets)):
+                break
+        passed.append(index)
+        index = await connection.next_message_box_index(index)
+    if found is None:
+        return Walked(walk.stream, None, ())
+    target, before = found
+    return Walked(walk.stream, target, tuple(before[-walk.keep:]), len(before))
 
 
 def _is_member(

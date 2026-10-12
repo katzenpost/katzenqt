@@ -33,7 +33,16 @@ from sqlmodel import col, select
 from . import ack_codec, models, persistent
 from .groupchat import state as group_state
 from .groupchat import wire
-from .groupchat.events import Effect, EpochChanged, JoinReply, WriteBox, WriteTombstone
+from .groupchat.events import (
+    BoxRead,
+    Effect,
+    EpochChanged,
+    JoinReply,
+    Scan,
+    Walked,
+    WriteBox,
+    WriteTombstone,
+)
 from .groupchat.group import Group, Outgoing
 
 if TYPE_CHECKING:
@@ -725,6 +734,67 @@ async def adopt(
     return True
 
 
+# Scanning, only ever when the user asks: a reader cannot tell a quiet
+# stream from one stuck behind a missing box. See "Rewrite and scan" in the
+# group chat spec.
+
+WALK_LIMIT = 256
+"""How far a scan steps a stream forward looking for a box acknowledged."""
+
+
+async def scan(
+    sess: "AsyncSession", conversation_id: int, stream: bytes
+) -> list[Effect] | None:
+    """Begin a scan of ``stream``: what to read and walk. None when this
+    conversation keeps no group state, does not follow ``stream``, or holds
+    a box of it back behind a message still arriving. Called under the
+    conversation's writer lock."""
+    stored = await _load(sess, conversation_id)
+    if (
+        stored is None
+        or stream not in stored.group.readers
+        or any(box["stream"] == stream for box in stored.held)
+    ):
+        return None
+    effects = stored.group.handle(Scan(stream))
+    await _save(sess, stored)
+    return effects
+
+
+async def scanned(
+    sess: "AsyncSession", conversation_id: int, event: BoxRead | Walked
+) -> list[Effect]:
+    """A box a scan read, or where its walk ended: what to do next. Called
+    under the conversation's writer lock."""
+    stored = await _load(sess, conversation_id)
+    if stored is None:
+        return []
+    effects = stored.group.handle(event)
+    await _save(sess, stored)
+    return effects
+
+
+class Stream(NamedTuple):
+    """What the user may want to know before asking for a scan."""
+
+    next: bytes
+    """The box the reader expects next."""
+    unread: int
+    """Boxes a scan stepped past that are still unread."""
+    acked_ahead: bool
+    """Whether other members have acknowledged boxes the reader has not
+    reached and a scan has not looked for."""
+
+
+async def stream(sess: "AsyncSession", conversation_id: int, key: bytes) -> Stream | None:
+    stored = await _load(sess, conversation_id)
+    if stored is None or key not in stored.group.readers:
+        return None
+    reader = stored.group.readers[key]
+    heard = list(stored.group.ledger.heard.get(key, {}).values())
+    return Stream(reader.next, len(reader.kept), bool(reader.ahead(heard)))
+
+
 # Membership.
 
 
@@ -769,6 +839,10 @@ async def summary(
 __all__ = [
     "CODEC",
     "GcmCodec",
+    "REPLICA_EPOCH_SECONDS",
+    "Rewrite",
+    "Stream",
+    "WALK_LIMIT",
     "adopt",
     "append_outbound_text",
     "box_read",
@@ -778,9 +852,15 @@ __all__ = [
     "held_back",
     "member_key",
     "on_message",
+    "rewrites",
+    "rewritten",
+    "scan",
+    "scanned",
     "serialize_introduction",
     "serialize_with_acks",
     "settle",
+    "stream",
     "summary",
+    "tick",
     "wait_for_outgoing",
 ]

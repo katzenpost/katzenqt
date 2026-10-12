@@ -60,6 +60,12 @@ class Read(Connected):
 
 
 @dataclass(frozen=True)
+class Scan(Connected):
+    conv_name: str
+    member: str
+
+
+@dataclass(frozen=True)
 class ChatSession(Connected):
     conv_name: str
     steps: "list[str]"

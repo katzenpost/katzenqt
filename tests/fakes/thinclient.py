@@ -352,6 +352,11 @@ class FakeThinClient(_ThinClientBase):
         )
         self.pending_acks.discard(envelope_hash)
 
+    async def next_message_box_index(self, message_box_index: bytes) -> bytes:
+        self._record("next_message_box_index", message_box_index=message_box_index)
+        self._maybe_raise("next_message_box_index")
+        return self._bump_index(message_box_index)
+
     async def get_message_box_index_counter(
         self, message_box_index: bytes,
     ) -> int:

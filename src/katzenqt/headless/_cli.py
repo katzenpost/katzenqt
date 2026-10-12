@@ -218,6 +218,25 @@ def _read(
 
 
 @verbs.command(
+    "scan",
+    help="scan MEMBER's stream: read again the boxes an earlier scan "
+         "stepped past, and jump to the furthest box other members have "
+         "acknowledged",
+)
+@connection
+@click.argument("conv_name")
+@click.argument("member")
+def _scan(
+    config: "str | None", address: "str | None", network: str,
+    conv_name: str, member: str,
+) -> "Plan[_args.Scan]":
+    require_one(config, address)
+    return plan("_action_scan", _args.Scan(
+        action=verb(), config=config, address=address, network=network, conv_name=conv_name, member=member,
+    ))
+
+
+@verbs.command(
     "chat-session",
     help="run steps like SEND:text, READ:text, SLEEP:seconds in one session",
 )

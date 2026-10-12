@@ -83,6 +83,14 @@ CASES: list[tuple[list[str], dict[str, object]]] = [
         },
     ),
     (
+        ["scan", "room", "bob", *CONFIG],
+        {
+            "action": "scan", "config": "/tmp/kqt-contract.toml",
+            "address": None, "network": "tcp",
+            "conv_name": "room", "member": "bob",
+        },
+    ),
+    (
         ["read", "room", "12.5", *CONFIG],
         {
             "action": "read", "config": "/tmp/kqt-contract.toml",
@@ -217,7 +225,7 @@ CASES: list[tuple[list[str], dict[str, object]]] = [
 
 VERBS = [
     "create-conv", "voucher-mint", "voucher-induct", "voucher-await",
-    "send", "multi-send", "read", "chat-session", "send-file", "read-file",
+    "send", "multi-send", "read", "scan", "chat-session", "send-file", "read-file",
     "info", "tally-create", "tally-vote", "tally-result", "tally-close",
     "tally-list", "remove-conv", "remove-peer",
 ]
@@ -234,6 +242,7 @@ DISPATCH = {
     "send": "_action_send",
     "multi-send": "_action_multi_send",
     "read": "_action_read",
+    "scan": "_action_scan",
     "chat-session": "_action_chat_session",
     "send-file": "_action_send_file",
     "read-file": "_action_read_file",
@@ -312,6 +321,13 @@ TOKENS_AND_CODES: dict[
         (0, 1, 2),
     ),
     "_action_info": ((), (0,)),
+    "_action_scan": (
+        (("error", "conversation %r not found"),
+         ("error", "member %r not found in %r"),
+         ("error", "nothing to scan on %r's stream"),
+         ("info", "SCANNED=%s")),
+        (0, 1, 2),
+    ),
     "_action_tally_create": (
         (("error", "conversation %r not found"),
          ("error", "unknown mode %r"),
