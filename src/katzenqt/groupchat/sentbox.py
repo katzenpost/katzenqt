@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .events import Effect, WriteBox, WriteTombstone
+from .wire import counter
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,14 @@ class SentBox:
         falls, or None if we never wrote it."""
         record = self.records.get(index)
         return None if record is None else record.seq
+
+    def check_at(self, idx64: int) -> int | None:
+        """The Sent-box check for an acknowledgement, which names the box by
+        its ``Idx64``."""
+        for index, record in self.records.items():
+            if counter(index) == idx64:
+                return record.seq
+        return None
 
     def retain(
         self, epoch: int, policy: Retention, everyone_acked: Callable[[int], bool]

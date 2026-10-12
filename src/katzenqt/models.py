@@ -384,9 +384,9 @@ class GroupChatMessage(BaseModel):
     reply_who: str | None = Field(default=None)
     tally: GroupChatTally | None = Field(default=None)
 
-    # Who this sender acknowledges, by roster index, and one BACAP
-    # MessageBoxIndex for each; see ``katzenqt.ack_codec``. Absent when there
-    # is nothing to acknowledge.
+    # Who this sender acknowledges, by roster index, and the BACAP Idx64 of
+    # the box acknowledged for each; see ``katzenqt.ack_codec``. Absent when
+    # there is nothing to acknowledge.
     acks: bytes | None = Field(default=None)
     # Roster indexes this message assigns, and where the sender was
     # introduced; see ``katzenqt.groupchat.wire``. Only in control messages

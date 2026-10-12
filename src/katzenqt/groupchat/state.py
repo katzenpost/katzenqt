@@ -14,9 +14,11 @@ from typing import Any
 import cbor2
 
 from .group import Group
-from .wire import CborCodec, Codec
+from .wire import CborCodec, Codec, counter
 
-VERSION = 1
+VERSION = 2
+"""Version 2 keeps acknowledgements heard, and boxes a scan looked for, by
+``Idx64``; version 1 kept their whole ``MessageBoxIndex``."""
 
 
 class StateError(ValueError):
@@ -37,11 +39,35 @@ def load(data: bytes, codec: Codec | None = None) -> Group:
         version, body = cbor2.loads(data)
     except (cbor2.CBORDecodeError, TypeError, ValueError) as error:
         raise StateError(str(error)) from error
-    if version != VERSION:
+    if version == 1:
+        body = _from_v1(body)
+    elif version != VERSION:
         raise StateError(f"group state version {version}")
     group: Group = _decode(Group, body)
     group.codec = codec or CborCodec()
     return group
+
+
+def _from_v1(body: Any) -> Any:
+    """A version 1 body as version 2 writes it.
+
+    >>> group = Group.found(bytes(136), [bytes(136), bytes([1]) * 136])
+    >>> group.ledger.heard[b"s"] = {b"m": 7}
+    >>> (reader,) = group.readers.values()
+    >>> reader.tried = [9]
+    >>> v1 = lambda idx64: idx64.to_bytes(8, "little") + bytes(96)
+    >>> body = _encode(group)
+    >>> body["ledger"]["heard"] = [[b"s", [[b"m", v1(7)]]]]
+    >>> body["readers"][0][1]["tried"] = [v1(9)]
+    >>> load(cbor2.dumps([1, body])) == group
+    True
+    """
+    for _, by in body["ledger"]["heard"]:
+        for pair in by:
+            pair[1] = counter(pair[1])
+    for _, reader in body["readers"]:
+        reader["tried"] = [counter(index) for index in reader["tried"]]
+    return body
 
 
 def _encode(value: Any) -> Any:

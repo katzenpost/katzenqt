@@ -53,6 +53,7 @@ from .wire import (
     Key,
     Message,
     Numbers,
+    counter,
     key_of,
     prefix_of,
 )
@@ -276,7 +277,7 @@ class Group:
         stream = key_of(read_cap)
         self.readers[stream] = Reader(stream, read_cap, start)
 
-    def _heard(self, stream: Key) -> list[bytes]:
+    def _heard(self, stream: Key) -> list[int]:
         return list(self.ledger.heard.get(stream, {}).values())
 
     def _scan(self, stream: Key) -> list[Effect]:
@@ -312,7 +313,7 @@ class Group:
         for at, value in message.acks.items():
             acked = self.rosters.resolve(sender, at)
             if acked == self.me:
-                seq = self.sent.check(value)
+                seq = self.sent.check_at(value)
                 if seq is not None:
                     self.ledger.acked(sender, seq)
             elif acked is not None:
@@ -414,14 +415,14 @@ class Group:
         return message, Pending(numbers=assigned, introduced=new, control=True)
 
     def _with_acks(self, message: Message, pending: Pending) -> Message:
-        acks: dict[int, bytes] = {}
+        acks: dict[int, int] = {}
         for index, member in self.rosters.known(self.me).items():
             reader = self.readers.get(member) if member else None
             if reader is None:
                 continue
             owed = self.ledger.owed(reader.stream, reader.run)
             if owed is not None:
-                acks[index] = owed
+                acks[index] = counter(owed)
                 pending.acks[reader.stream] = (self.ledger.published.get(reader.stream), owed)
                 self.ledger.publish(reader.stream, owed)
         return Message(

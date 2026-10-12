@@ -58,7 +58,6 @@ from .events import (
     Send,
     SendJoinReply,
     Walk,
-    Walked,
     WriteBox,
     WriteTombstone,
 )
@@ -66,7 +65,8 @@ from .group import Group, Outgoing
 from .ledger import Induction
 from .sentbox import Retention
 from .trace import Recorder, TracedGroup
-from .wire import CborCodec, Key, Message, key_of
+from .walk import walk
+from .wire import CborCodec, Key, Message, counter, key_of
 
 CTX = b"pigeonhole context"
 
@@ -171,8 +171,12 @@ class Member:
             self.chain.append(step(self.chain[-1]))
         return self.chain[n]
 
-    def ordinal(self, index: bytes) -> int | None:
-        """Which box of our stream ``index`` names, by stepping forward."""
+    def ordinal(self, index: bytes | int) -> int | None:
+        """Which box of our stream ``index`` names, by stepping forward, or
+        by its ``Idx64`` alone, as an acknowledgement names it."""
+        if isinstance(index, int):
+            n = index - counter(self.nth(0))
+            return n if 0 <= n < WALK_LIMIT else None
         for n in range(WALK_LIMIT):
             if self.nth(n) == index:
                 return n
@@ -221,16 +225,16 @@ class World:
         member = self.by_key(key) if key is not None else None
         return member.name if member else "?"
 
-    def ordinal(self, key: Key, index: bytes) -> int | None:
+    def ordinal(self, key: Key, index: bytes | int) -> int | None:
         member = self.by_key(key)
         return member.ordinal(index) if member else None
 
-    def at(self, key: Key, index: bytes) -> str:
+    def at(self, key: Key, index: bytes | int) -> str:
         member = self.by_key(key)
         assert member is not None
         return f"{member.name}@{member.ordinal(index)}"
 
-    def where(self, index: bytes) -> str:
+    def where(self, index: bytes | int) -> str:
         """Which stream's box ``index`` names, by stepping each forward."""
         for member in self.members.values():
             n = member.ordinal(index)
@@ -285,8 +289,8 @@ class World:
                     while len(indexes) < count:
                         indexes.append(step(indexes[-1]))
                     follow = IndexesDerived(stream, tuple(indexes))
-                case Walk(stream, start, targets, keep):
-                    follow = self.walk(stream, start, targets, keep)
+                case Walk() as request:
+                    follow = walk(request, WALK_LIMIT)
                 case Deliver(sender, index, content):
                     member.inbox.append((sender, index, content.decode()))
                 case Expire(sender, index):
@@ -298,22 +302,6 @@ class World:
             if follow is not None:
                 pending[:0] = group.handle(follow)
         return out
-
-    @staticmethod
-    def walk(stream: Key, start: bytes, targets: tuple[bytes, ...], keep: int) -> Walked:
-        """Step forward from ``start`` to the furthest of ``targets`` met,
-        keeping the last ``keep`` indexes stepped past on the way."""
-        passed: list[bytes] = []
-        found: tuple[bytes, list[bytes]] | None = None
-        index = start
-        for _ in range(WALK_LIMIT):
-            if index in targets:
-                found = (index, list(passed))
-            passed.append(index)
-            index = step(index)
-        if found is None:
-            return Walked(stream, None, ())
-        return Walked(stream, found[0], tuple(found[1][-keep:]), len(found[1]))
 
     def join(self, new: Member, reply: JoinReply) -> list[str]:
         if new.group is not None:

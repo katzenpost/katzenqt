@@ -82,7 +82,8 @@ from ._thinclient import ThinClient
 from . import epochs
 from pydantic.dataclasses import dataclass
 from . import acks, attachment_images, conversation_handlers, disappearing, models, persistent
-from .groupchat.events import BoxRead, Missing, ReadBox, Walk, Walked
+from .groupchat import walk as groupchat_walk
+from .groupchat.events import BoxRead, Missing, ReadBox, Walk
 from sqlmodel import col, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -3004,7 +3005,7 @@ async def scan_member(
                         sess, conversation_id, BoxRead(stream, index, result, after),
                     )) or []
                 case Walk() as walk:
-                    found = await _walk(connection, walk)
+                    found = groupchat_walk.walk(walk, acks.WALK_LIMIT)
                     walked = walked or found.target is not None
                     effects += await _scanning(conversation_id, lambda sess: acks.scanned(
                         sess, conversation_id, found,
@@ -3195,28 +3196,6 @@ async def _deliver_rechecked(
     if peer_added:
         peer_added_queue.put_nowait(peer_added)
     return gcm.to_cbor()
-
-
-async def _walk(connection: ThinClient, walk: Walk) -> Walked:
-    """Step forward from ``walk.start`` to the furthest of its targets met
-    within ``acks.WALK_LIMIT`` boxes, keeping the last ``walk.keep``
-    indexes stepped past on the way."""
-    passed: list[bytes] = []
-    found: "tuple[bytes, list[bytes]] | None" = None
-    met: set[bytes] = set()
-    index = walk.start
-    for _ in range(acks.WALK_LIMIT):
-        if index in walk.targets:
-            found = (index, list(passed))
-            met.add(index)
-            if len(met) == len(set(walk.targets)):
-                break
-        passed.append(index)
-        index = await connection.next_message_box_index(index)
-    if found is None:
-        return Walked(walk.stream, None, ())
-    target, before = found
-    return Walked(walk.stream, target, tuple(before[-walk.keep:]), len(before))
 
 
 def _is_member(

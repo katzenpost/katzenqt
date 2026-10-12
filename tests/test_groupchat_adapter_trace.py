@@ -19,6 +19,7 @@ from sqlmodel import Session
 from katzenqt import ack_codec, acks, conversation_handlers, models, network, persistent
 from katzenqt.groupchat.sim import seeded, step
 from katzenqt.groupchat.trace import Recorder, TracedGroup
+from katzenqt.groupchat.wire import counter
 from tests.fakes.thinclient import FakeThinClient
 from tests.test_acks import _Chat, _text
 
@@ -97,8 +98,8 @@ async def run(directory: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict[str
     (sent,) = await chat.queue(_text("hi"))
     _land(chat, sent.id, 0)
     acks_of_carol = {
-        await _place(chat, carol, bob): _box(BOB, 2),
-        await _place(chat, carol, chat.own_key): _box(ALICE, 0),
+        await _place(chat, carol, bob): counter(_box(BOB, 2)),
+        await _place(chat, carol, chat.own_key): counter(_box(ALICE, 0)),
     }
     await _receive(chat, "carol", CAROL, 0, models.GroupChatMessage(
         version=models.GROUP_CHAT_VERSION, text="carol 0", acks=ack_codec.encode(acks_of_carol),

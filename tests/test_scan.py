@@ -4,11 +4,11 @@ stepped past, and reads those again on a later scan."""
 
 from __future__ import annotations
 
-import struct
 import uuid
 from typing import cast
 
 import pytest
+from hpqc.bacap import MessageBoxIndex
 from sqlmodel import col, select
 
 from katzenqt import ack_codec, acks, conversation_handlers, models, network, persistent
@@ -18,7 +18,8 @@ from tests.test_acks import _Chat, _text
 
 
 def _box(n: int) -> bytes:
-    return struct.pack("<Q", n) + bytes(96)
+    """The box at ``Idx64`` ``n`` of a stream that starts at 0, by BACAP."""
+    return MessageBoxIndex.from_bytes(bytes(104)).advance_index_to(n).to_bytes()
 
 
 BOB_CAP = bytes([2]) * 32 + _box(0)
@@ -48,9 +49,10 @@ async def _stuck() -> tuple[_Chat, FakeThinClient]:
     at = (await chat.group()).rosters.index_of(bytes([3]) * 32, bob)
     assert at is not None
     await _receive(chat, "carol", models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION, text="read", acks=ack_codec.encode({at: _box(2)}),
+        version=models.GROUP_CHAT_VERSION, text="read", acks=ack_codec.encode({at: 2}),
     ), 0)
     client = FakeThinClient()
+    client.bacap = True
     client.box_store[BOB_CAP, _box(2)] = b"F" + _text("three").to_cbor()
     return chat, client
 

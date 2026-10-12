@@ -204,8 +204,8 @@ def test_state_that_cannot_be_read() -> None:
 
 def test_forgetting_a_member_drops_what_it_acknowledged() -> None:
     ledger = Ledger()
-    ledger.hear(b"alice", b"i1", by=b"bob")
-    ledger.hear(b"bob", b"i2", by=b"carol")
+    ledger.hear(b"alice", 1, by=b"bob")
+    ledger.hear(b"bob", 2, by=b"carol")
     ledger.acked(b"bob", 3)
     ledger.forget(b"bob")
     assert ledger.heard == {b"alice": {}} and ledger.acked_by == {}
