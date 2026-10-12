@@ -280,9 +280,10 @@ TOKENS_AND_CODES: dict[
     ),
     "_action_voucher_induct": (
         (("error", "conversation %r not found"),
+         ("error", "introduction of %s not written"),
          ("error", "invalid voucher encoding"),
          ("info", "INDUCTED=%s")),
-        (0, 2),
+        (0, 2, 3),
     ),
     "_action_voucher_await": (
         (("error", "conversation %r not found"), ("info", "JOINED")),

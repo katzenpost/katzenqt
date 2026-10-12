@@ -109,7 +109,12 @@ from ..tally import schema as tally_schema
 from ..tally import send as tally_send
 from ..tally import sync as tally_sync
 from ..tally.controller import INSTANCE as tally_instance
-from ..voucher import await_and_open, derive_read_and_induct, mint_and_publish
+from ..voucher import (
+    await_and_open,
+    derive_read_and_induct,
+    introductions_written,
+    mint_and_publish,
+)
 
 logger = logging.getLogger("katzen.headless")
 
@@ -295,6 +300,11 @@ async def _action_voucher_induct(args: _args.VoucherInduct) -> int:
             connection, conv_id, args.peer_name, voucher,
         )
         logger.info("INDUCTED=%s", joiner_name)
+        # The other members learn of the new one from its Introduction,
+        # which only this process can write until it next runs.
+        if not await introductions_written():
+            logger.error("introduction of %s not written", joiner_name)
+            return 3
         return 0
     finally:
         await _shutdown(bg, connection)

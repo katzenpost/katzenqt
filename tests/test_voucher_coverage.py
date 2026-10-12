@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -337,6 +338,28 @@ async def test_an_unacked_introduction_is_reported_not_raised(
     monkeypatch.setattr(persistent, "wait_for_sent", never_sent)
 
     with caplog.at_level(logging.ERROR):
-        await voucher._wait_intro_acked(uuid.uuid4(), "bob", 7)
+        assert not await voucher._wait_intro_acked(uuid.uuid4(), "bob", 7)
 
     assert "not acked within 180s" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_introductions_written_waits_for_each_queued_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[uuid.UUID] = []
+
+    async def acked(pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float) -> bool:
+        await asyncio.sleep(0)
+        sent.append(pwal_id)
+        return True
+
+    monkeypatch.setattr(persistent, "wait_for_sent", acked)
+    ids = [uuid.uuid4(), uuid.uuid4()]
+    for pwal_id in ids:
+        voucher._introductions.add(asyncio.create_task(
+            voucher._wait_intro_acked(pwal_id, "bob", 7),
+        ))
+    assert await voucher.introductions_written()
+    assert sorted(sent) == sorted(ids)
+    assert await voucher.introductions_written(), "nothing left to wait for"

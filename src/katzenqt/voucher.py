@@ -762,12 +762,19 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     # fire-and-forget, so a caller (e.g. derive_read_and_induct, right after
     # durably committing the induction) must not be made to wait up to 180s
     # -- or see an exception from -- confirming delivery of the announcement.
-    create_task(_wait_intro_acked(final_pwal_id, display_name, conversation_id))
+    _introductions.add(
+        create_task(_wait_intro_acked(final_pwal_id, display_name, conversation_id))
+    )
+
+
+_introductions: "set[asyncio.Task[bool]]" = set()
+"""Waits for the Introductions this process has queued, until
+``introductions_written`` collects them."""
 
 
 async def _wait_intro_acked(
     final_pwal_id: uuid.UUID, display_name: str, conversation_id: int,
-) -> None:
+) -> bool:
     """Wait until the INTRODUCTION announcement is acked into SentLog.
 
     Fire-and-forget: a timeout is logged, never raised, so the induction
@@ -780,6 +787,19 @@ async def _wait_intro_acked(
             "introduction for %r not acked within 180s (conversation %d)",
             display_name, conversation_id,
         )
+        return False
+    return True
+
+
+async def introductions_written() -> bool:
+    """Wait until every Introduction this process queued is written, or its
+    wait gives up. A process that exits sooner, as the headless CLI does
+    after an induction, leaves the Introduction queued until it next runs,
+    and until then no other member learns of the new one. False if any was
+    not written."""
+    waits = list(_introductions)
+    _introductions.difference_update(waits)
+    return all(await asyncio.gather(*waits))
 
 
 _induction_locks: "dict[int, asyncio.Lock]" = {}
