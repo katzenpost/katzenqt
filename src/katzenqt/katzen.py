@@ -91,6 +91,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("katzen")
 DELIVERY_TICK = "\u2713"
+MEMBER_ACK_TICKS = "\u2713\u2713"
 logger.setLevel("INFO")
 
 
@@ -2143,10 +2144,9 @@ class MainWindow(QMainWindow):
     def _note_first_delivery_mark(self, conversation_id: int) -> None:
         """Say once per conversation what the first delivery mark means.
 
-        A mark is a courier or replica acknowledgement, which is the only
-        delivery this client can observe. It is not a peer having read
-        anything, and until a second acknowledgement exists we hold the
-        only copy anyone can fetch, so the message has to be kept.
+        The first mark is a courier or replica acknowledgement, not a peer
+        having read anything. The second is a member's acknowledgement,
+        carried on a message of theirs.
         """
         if conversation_id in self._ticked_conversations:
             return
@@ -2155,7 +2155,7 @@ class MainWindow(QMainWindow):
                 select(persistent.ConversationLog).where(
                     persistent.ConversationLog.conversation_id
                     == conversation_id,
-                    persistent.ConversationLog.network_status == 2,
+                    col(persistent.ConversationLog.network_status) >= 2,
                 )
             ).first()
         if marked is None:
@@ -2163,14 +2163,14 @@ class MainWindow(QMainWindow):
         self._ticked_conversations.add(conversation_id)
         logger.info(
             "conversation %s carries its first courier or replica "
-            "acknowledgement; the message is kept until a second one exists",
+            "acknowledgement",
             conversation_id,
         )
         self._show_status_message(
             "",
             f"{DELIVERY_TICK} means a courier or replica has the message, "
-            "not that anyone read it; it is kept until a second mark "
-            "appears",
+            f"not that anyone read it; {MEMBER_ACK_TICKS} means a member has "
+            "acknowledged reading it",
         )
 
     async def _process_conversation_update(

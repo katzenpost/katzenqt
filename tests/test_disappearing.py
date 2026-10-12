@@ -61,6 +61,7 @@ async def test_old_content_disappears_and_the_rest_stays() -> None:
     await _log(chat, bob, _f(_text("new")), 2 * DAY)
     await _log(chat, bob, INTRO, 0)
     await _log(chat, chat.own_peer_id, _f(_text("mine, sent")), 0, status=2)
+    await _log(chat, chat.own_peer_id, _f(_text("mine, acknowledged")), 0, status=3)
     await _log(chat, chat.own_peer_id, _f(_text("mine, unsent")), 0, status=1)
     await persistent.set_retention(chat.conversation_id, persistent.Retention(1, 1))
     assert await disappearing.expire(2 * DAY + 1) == [chat.conversation_id]

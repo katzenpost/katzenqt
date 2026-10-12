@@ -22,6 +22,7 @@ from katzenqt.qt_models import (  # noqa: E402
     ROLE_CHAT_ATTACHMENT_KIND,
     ROLE_CHAT_IS_AUDIO_MESSAGE,
     ROLE_CHAT_MESSAGE_ID,
+    ROLE_CHAT_NETWORK_STATUS,
     ROLE_CHAT_PICTURE_PATH,
     ConversationLogModel,
 )
@@ -187,6 +188,26 @@ def _append_row_with_id(convo_id: int, order: int) -> uuid.UUID:
         ))
         sess.commit()
     return mid
+
+
+def _set_status(mid: uuid.UUID, status: int) -> None:
+    with persistent.Session(persistent._engine_sync) as sess:
+        row = sess.get(persistent.ConversationLog, mid)
+        assert row is not None
+        row.network_status = status
+        sess.add(row)
+        sess.commit()
+
+
+def test_a_sent_mark_is_reread_until_a_member_acknowledges_it() -> None:
+    mid = _append_row_with_id(1300, 0)
+    _set_status(mid, 2)
+    model = ConversationLogModel(convo_id=1300)
+    model.refresh_row_count()
+    index = model.index(0, 0)
+    assert model.data(index, ROLE_CHAT_NETWORK_STATUS) == 2
+    _set_status(mid, 3)
+    assert model.data(index, ROLE_CHAT_NETWORK_STATUS) == 3
 
 
 def test_rows_after_a_middle_deletion_stay_addressable() -> None:

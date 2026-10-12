@@ -2551,6 +2551,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     signal_send = False
     peer_added = None
     tally_added = False
+    member_acked: "set[int]" = set()
     notify_conv_id = cp.conversation.id
     parent_peer = None
 
@@ -2737,6 +2738,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
         await sess.commit()
+        member_acked = acks.acked_in(sess)
     except OperationalError as e:
       if not _is_transient_sqlite_busy(e):
           raise
@@ -2808,6 +2810,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
+
+  for acked_conv_id in member_acked:
+    create_task(conversation_update_queue.put((acked_conv_id, True)))
 
   if tally_added:
     # A tally event was consumed and its transaction committed. The GUI lists
@@ -3121,7 +3126,9 @@ async def _scanning(
         async with persistent.asession() as sess:
             result = await step(sess)
             await sess.commit()
-            return result
+    for acked_conv_id in acks.acked_in(sess):
+        await conversation_update_queue.put((acked_conv_id, True))
+    return result
 
 
 async def _read_once(

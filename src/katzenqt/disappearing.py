@@ -60,7 +60,7 @@ async def expire(now: float) -> list[int]:
                         days is None
                         or row.logged_at is None
                         or now - row.logged_at < days * DAY_SECONDS
-                        or (own and row.network_status != 2)
+                        or (own and row.network_status < 2)
                         or not _is_content(row.payload)
                     ):
                         continue

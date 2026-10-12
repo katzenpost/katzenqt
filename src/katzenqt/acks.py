@@ -245,8 +245,11 @@ async def _save(sess: "AsyncSession", stored: _Stored) -> None:
     )
     sess.add(stored.row)
     for written in stored.landed:
+        await _note_sent_seq(sess, stored.group, written)
         await sess.delete(written)
     stored.landed.clear()
+    if await _mark_member_acked(sess, stored):
+        sess.info.setdefault(_ACKED, set()).add(stored.row.conversation_id)
     for effect in stored.effects:
         match effect:
             case WriteBox(index, plaintext):
@@ -254,6 +257,48 @@ async def _save(sess: "AsyncSession", stored: _Stored) -> None:
             case WriteTombstone(index):
                 await _rewrite(sess, stored.row.conversation_id, index, None)
     stored.effects.clear()
+
+
+async def _note_sent_seq(
+    sess: "AsyncSession", group: Group, written: persistent.GroupWritten
+) -> None:
+    convlog = (await sess.exec(
+        select(persistent.ConversationLog).where(
+            persistent.ConversationLog.outgoing_pwal == written.pwal_id
+        )
+    )).first()
+    if convlog is not None:
+        convlog.sent_seq = group.sent.check(written.box_index)
+        sess.add(convlog)
+
+
+async def _mark_member_acked(sess: "AsyncSession", stored: _Stored) -> bool:
+    """Mark our sent messages that any member has acknowledged; whether any
+    were newly marked."""
+    reach = max(stored.group.ledger.acked_by.values(), default=-1)
+    if reach < 0:
+        return False
+    rows = (await sess.exec(
+        select(persistent.ConversationLog).where(
+            persistent.ConversationLog.conversation_id == stored.row.conversation_id,
+            persistent.ConversationLog.network_status == 2,
+            col(persistent.ConversationLog.sent_seq) <= reach,
+        )
+    )).all()
+    for convlog in rows:
+        convlog.network_status = 3
+        sess.add(convlog)
+    return bool(rows)
+
+
+_ACKED = "katzenqt.acks.acked"
+
+
+def acked_in(sess: "AsyncSession") -> set[int]:
+    """The conversations whose messages a member newly acknowledged in
+    ``sess``, to redraw once it commits."""
+    acked: set[int] = sess.info.pop(_ACKED, set())
+    return acked
 
 
 async def _rewrite(

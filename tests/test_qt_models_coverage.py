@@ -665,11 +665,11 @@ def test_author_and_network_status_roles() -> None:
 
 def test_a_settled_network_status_is_answered_from_the_stable_cache() -> None:
     convo_id, peer_id = _make_conversation()
-    _seed_log(convo_id, peer_id, 0, _text_payload("acked"), network_status=2)
+    _seed_log(convo_id, peer_id, 0, _text_payload("acked"), network_status=3)
     model = ConversationLogModel(convo_id)
     model.set_row_count()
     index = model.index(0, 0, QModelIndex())
-    assert model.data(index, ROLE_CHAT_NETWORK_STATUS) == 2
+    assert model.data(index, ROLE_CHAT_NETWORK_STATUS) == 3
 
     with persistent.Session(persistent._engine_sync) as sess:
         row = sess.exec(
@@ -681,7 +681,7 @@ def test_a_settled_network_status_is_answered_from_the_stable_cache() -> None:
         sess.add(row)
         sess.commit()
 
-    assert model.data(index, ROLE_CHAT_NETWORK_STATUS) == 2
+    assert model.data(index, ROLE_CHAT_NETWORK_STATUS) == 3
     model.set_row_count()
     assert model.data(index, ROLE_CHAT_NETWORK_STATUS) == 0
 

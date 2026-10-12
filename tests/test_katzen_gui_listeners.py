@@ -129,6 +129,15 @@ def test_the_chat_view_draws_the_same_mark_the_status_bar_names() -> None:
     assert f"\\u{ord(katzen.DELIVERY_TICK):04x}" in line
 
 
+def test_the_chat_view_draws_two_marks_for_a_member_acknowledgement() -> None:
+    line = next(
+        one for one in CHATVIEW.read_text(encoding="utf-8").splitlines()
+        if "network_status == 3" in one
+    )
+    marks = "".join(f"\\u{ord(c):04x}" for c in katzen.MEMBER_ACK_TICKS)
+    assert f'network_status == 3 ? "{marks} "' in line
+
+
 @pytest.mark.asyncio
 async def test_the_first_delivery_mark_is_explained_once(
     loaded_window: katzen.MainWindow,
@@ -159,6 +168,7 @@ async def test_the_first_delivery_mark_is_explained_once(
     said = loaded_window.statusBar().currentMessage()
     assert katzen.DELIVERY_TICK in said
     assert "not that anyone read it" in said
+    assert katzen.MEMBER_ACK_TICKS in said
 
     loaded_window.statusBar().clearMessage()
     caplog.clear()

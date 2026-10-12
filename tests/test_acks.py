@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import cbor2
 import pytest
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from katzenqt import (
     ack_codec,
@@ -133,9 +133,10 @@ class _Chat:
             await sess.commit()
             return stored.group
 
-    async def receive(self, sender: str, gcm: models.GroupChatMessage, n: int) -> None:
+    async def receive(self, sender: str, gcm: models.GroupChatMessage, n: int) -> set[int]:
         """Deliver ``gcm`` as the network does: dispatched, then its box
-        read, with the stream's next index moved past it."""
+        read, with the stream's next index moved past it. Returns the
+        conversations to redraw for a member's acknowledgement."""
         peer_id, rcw_id, _ = self.peers[sender]
         async with persistent.asession() as sess:
             peer = await sess.get(persistent.ConversationPeer, peer_id)
@@ -147,6 +148,7 @@ class _Chat:
             )
             await acks.box_read(sess, peer, rcw, _index(n))
             await sess.commit()
+        return acks.acked_in(sess)
 
     async def queue(self, gcm: models.GroupChatMessage) -> list[persistent.PlaintextWAL]:
         async with persistent.conversation_log_order_lock(self.conversation_id):
@@ -422,6 +424,89 @@ async def test_an_acknowledgement_of_a_box_we_never_wrote_is_ignored() -> None:
         version=2, text="seen", acks=ack_codec.encode({me: _index(0)}),
     ), 1)
     assert (await chat.group()).ledger.acked_by == {}
+
+
+# Marks on our own messages.
+
+
+async def _post(chat: _Chat, text: str) -> uuid.UUID:
+    """Send ``text`` as the GUI does; returns the PlaintextWAL to land."""
+    await acks.append_outbound_text(
+        conversation_id=chat.conversation_id,
+        conversation_peer_id=chat.own_peer_id,
+        gcm=_text(text),
+    )
+    async with persistent.asession() as sess:
+        row = (await sess.exec(
+            select(persistent.ConversationLog)
+            .where(persistent.ConversationLog.conversation_id == chat.conversation_id)
+            .order_by(col(persistent.ConversationLog.conversation_order).desc())
+        )).first()
+    assert row is not None and row.outgoing_pwal is not None
+    return row.outgoing_pwal
+
+
+async def _statuses(chat: _Chat) -> list[int]:
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(
+            select(persistent.ConversationLog)
+            .where(persistent.ConversationLog.conversation_id == chat.conversation_id)
+            .order_by(col(persistent.ConversationLog.conversation_order))
+        )).all()
+    return [row.network_status for row in rows]
+
+
+def _seen(chat_group: Group, member: bytes, me: bytes, index: bytes) -> models.GroupChatMessage:
+    at = chat_group.rosters.index_of(member, me)
+    assert at is not None
+    return models.GroupChatMessage(version=2, text="seen", acks=ack_codec.encode({at: index}))
+
+
+@pytest.mark.asyncio
+async def test_a_message_a_member_acknowledged_gets_its_second_mark() -> None:
+    chat, bob = await _with_bob()
+    index = chat.land(await _post(chat, "hello"))
+    assert await _statuses(chat) == [2]
+    redraw = await chat.receive("bob", _seen(await chat.group(), bob, chat.own_key, index), 1)
+    assert redraw == {chat.conversation_id}
+    assert await _statuses(chat) == [3, 0]
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_a_later_message_marks_the_earlier_ones() -> None:
+    chat, bob = await _with_bob()
+    chat.land(await _post(chat, "one"))
+    index = chat.land(await _post(chat, "two"))
+    await chat.receive("bob", _seen(await chat.group(), bob, chat.own_key, index), 1)
+    assert await _statuses(chat) == [3, 3, 0]
+
+
+@pytest.mark.asyncio
+async def test_one_member_acknowledging_is_enough() -> None:
+    chat = await _Chat().create()
+    bob = await chat.add_peer("bob")
+    await chat.add_peer("carol")
+    await chat.found("bob", "carol")
+    index = chat.land(await _post(chat, "hello"))
+    await chat.receive("bob", _seen(await chat.group(), bob, chat.own_key, index), 1)
+    assert await _statuses(chat) == [3, 0]
+
+
+@pytest.mark.asyncio
+async def test_a_message_not_yet_sent_keeps_its_pending_mark() -> None:
+    chat, bob = await _with_bob()
+    index = chat.land(await _post(chat, "one"))
+    await _post(chat, "two")
+    await chat.receive("bob", _seen(await chat.group(), bob, chat.own_key, index), 1)
+    assert await _statuses(chat) == [3, 1, 0]
+
+
+@pytest.mark.asyncio
+async def test_a_message_read_without_an_acknowledgement_of_ours_redraws_nothing() -> None:
+    chat, _ = await _with_bob()
+    chat.land(await _post(chat, "hello"))
+    assert await chat.receive("bob", _text("unrelated"), 1) == set()
+    assert await _statuses(chat) == [2, 0]
 
 
 # Numbering.
@@ -866,6 +951,46 @@ async def test_a_box_read_through_the_network_is_told_in_order(
         assert stored is not None
     assert stored.group.readers[stream].last == setup["first_message_index"]
     assert stored.held == []
+
+
+def _redraws() -> list[tuple[int, bool]]:
+    seen = []
+    while not network.conversation_update_queue.empty():
+        seen.append(network.conversation_update_queue.get_nowait())
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_box_read_carrying_an_acknowledgement_redraws_its_conversation(
+    fake_thinclient: FakeThinClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _set_up_read_flow(fake_thinclient)
+    async with persistent.asession() as sess:
+        mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        assert mw is not None
+    monkeypatch.setattr(acks, "acked_in", lambda sess: {41})
+    _redraws()
+    await network.drain_mixwal_read_single(
+        connection=fake_thinclient, rcw_read_cap=setup["read_cap"], mw=mw,
+        draining_right_now={setup["bacap_stream"]},
+    )
+    await asyncio.sleep(0)
+    assert (41, True) in _redraws()
+
+
+@pytest.mark.asyncio
+async def test_a_scan_step_carrying_an_acknowledgement_redraws_its_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat, _ = await _with_bob()
+    monkeypatch.setattr(acks, "acked_in", lambda sess: {chat.conversation_id})
+    _redraws()
+
+    async def step(sess: Any) -> str:
+        return "done"
+
+    assert await network._scanning(chat.conversation_id, step) == "done"
+    assert _redraws() == [(chat.conversation_id, True)]
 
 
 @pytest.mark.asyncio
