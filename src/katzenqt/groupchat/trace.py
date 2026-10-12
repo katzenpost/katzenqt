@@ -61,6 +61,15 @@ def decoded(codec: Codec, plaintext: bytes | None) -> Any:
     return message(codec.decode(plaintext)) if plaintext else None
 
 
+def payload(codec: Codec, plaintext: bytes | None) -> Any:
+    """What a box of our own stream holds: the message, decoded, or bytes a
+    client handed over that are not one, which the member never looks into."""
+    if plaintext is None:
+        return None
+    decoded = codec.decode(plaintext)
+    return message(decoded) if decoded is not None else {"bytes": plaintext}
+
+
 def plain(value: Any, codec: Codec) -> Any:
     """``value`` as JSON: dataclasses as objects named by ``type``, bytes as
     hex, messages decoded."""
@@ -77,7 +86,7 @@ def plain(value: Any, codec: Codec) -> Any:
         if "result" in fields and isinstance(fields["result"], bytes):
             fields["result"] = {"data": decoded(codec, fields["result"])}
         if "plaintext" in fields and isinstance(fields["plaintext"], bytes):
-            fields["message"] = decoded(codec, fields.pop("plaintext"))
+            fields["payload"] = payload(codec, fields.pop("plaintext"))
         return {"type": type(value).__name__, **{k: plain(v, codec) for k, v in fields.items()}}
     if isinstance(value, dict):
         return {str(k): plain(v, codec) for k, v in value.items()}
@@ -89,7 +98,7 @@ def plain(value: Any, codec: Codec) -> Any:
 def snapshot(group: Group) -> Any:
     body = state._encode(group)
     for pair in body["sent"]["records"]:
-        pair[1]["plaintext"] = decoded(group.codec, pair[1]["plaintext"])
+        pair[1]["plaintext"] = payload(group.codec, pair[1]["plaintext"])
     return plain(body, group.codec)
 
 
@@ -157,7 +166,7 @@ class TracedGroup(Group):
         self.traced(
             "written",
             lambda: super(TracedGroup, self).written(token, index, plaintext),
-            token=token, index=index, message=decoded(self.codec, plaintext),
+            token=token, index=index, payload=payload(self.codec, plaintext),
         )
 
     def abandoned(self, token: int) -> None:

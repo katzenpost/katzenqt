@@ -20,12 +20,15 @@ next load takes it in.
 
 from __future__ import annotations
 
+import io
 import logging
 import math
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import cbor2
@@ -46,6 +49,7 @@ from .groupchat.events import (
 )
 from .groupchat.group import Group, Outgoing
 from .groupchat.sentbox import Retention
+from .groupchat.trace import Recorder, TracedGroup
 
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
@@ -157,6 +161,36 @@ class _Stored(NamedTuple):
     is saved, so a load that is not saved asks again next time."""
 
 
+TRACE_DIR = "GROUPCHAT_ADAPTER_TRACE_DIR"
+"""The environment variable naming a directory to record, for each
+conversation, every call made on its state machine, for CryptWalker's
+replay (``lake exe CryptWalker.GroupChat.replay``). Unset in use."""
+
+
+def _kind() -> type[Group]:
+    return TracedGroup if os.environ.get(TRACE_DIR) else Group
+
+
+def _traced(**kwargs: Any) -> dict[str, Any]:
+    if os.environ.get(TRACE_DIR):
+        kwargs["tracer"] = Recorder(io.StringIO())
+    return kwargs
+
+
+def _flush_trace(group: Group) -> None:
+    """Record the calls made on ``group`` since it was loaded, now that
+    what they did is saved."""
+    directory = os.environ.get(TRACE_DIR)
+    if not directory or not isinstance(group, TracedGroup) or group.tracer is None:
+        return
+    out = group.tracer.out
+    assert isinstance(out, io.StringIO)
+    with (Path(directory) / f"adapter-{group.me.hex()[:16]}.jsonl").open("a") as trace:
+        trace.write(out.getvalue())
+    out.seek(0)
+    out.truncate()
+
+
 def _policy(sent_days: int | None) -> Retention:
     """The Sent box's retention for a policy that keeps sent content
     ``sent_days`` days: whole replica epochs, never fewer days than asked.
@@ -181,6 +215,8 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
     if row is None:
         return None
     group = group_state.load(row.state, CODEC)
+    if os.environ.get(TRACE_DIR):
+        group = TracedGroup.of(group, Recorder(io.StringIO()))
     group.policy = _policy((await persistent.retention(sess, conversation_id)).sent_days)
     outgoing = {uuid.UUID(bytes=pwal): token for pwal, token in cbor2.loads(row.outgoing)}
     landed = await sess.exec(
@@ -202,6 +238,7 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
 
 async def _save(sess: "AsyncSession", stored: _Stored) -> None:
     stored.row.state = group_state.dump(stored.group)
+    _flush_trace(stored.group)
     stored.row.held = cbor2.dumps(stored.held)
     stored.row.outgoing = cbor2.dumps(
         [[pwal.bytes, token] for pwal, token in stored.outgoing.items()]
@@ -277,7 +314,7 @@ async def _founded(
     )
     if joining.first() is not None:
         return None
-    group = Group.found(own_cap, [own_cap], codec=CODEC)
+    group = _kind().found(own_cap, [own_cap], **_traced(codec=CODEC))
     row = persistent.GroupState(conversation_id=conv.id, state=group_state.dump(group))
     return _Stored(row, group, [], {}, [], [])
 
@@ -743,7 +780,7 @@ async def adopt(
         member_key(m[0]) for m in handed.members if m
     }:
         return False
-    group = Group.joined(own_read_cap, handed, codec=CODEC)
+    group = _kind().joined(own_read_cap, handed, **_traced(codec=CODEC))
     row = await sess.get(persistent.GroupState, conv.id)
     if row is None:
         row = persistent.GroupState(conversation_id=conv.id, state=b"")

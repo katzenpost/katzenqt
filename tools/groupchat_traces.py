@@ -1,6 +1,8 @@
 """Record traces of the group chat simulator for CryptWalker's replay
 (``lake exe CryptWalker.GroupChat.replay``): every scenario under
-``tests/data/groupchat``, and a fixed set of the stateful test's random runs.
+``tests/data/groupchat``, a fixed set of the stateful test's random runs, and
+a group chat driven through the app's own adapter (``acks``), as
+``adapter-scenario.jsonl``.
 
     python tools/groupchat_traces.py OUT_DIR [EXAMPLES]
 
@@ -11,6 +13,7 @@ default; 0 records the scenarios alone, as CryptWalker keeps them.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,6 +46,11 @@ def main() -> None:
                 database=None, derandomize=True,
             ),
         )
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-n0", "--no-cov", "-p", "no:cacheprovider",
+         "tests/test_groupchat_adapter_trace.py::test_every_call_the_app_makes_is_recorded"],
+        cwd=ROOT, env={**os.environ, "GROUPCHAT_ADAPTER_TRACE_OUT": str(out)}, check=True,
+    )
     print(f"{len(list(out.glob('*.jsonl')))} traces in {out}")
 
 

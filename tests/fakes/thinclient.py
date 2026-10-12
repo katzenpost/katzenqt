@@ -43,6 +43,8 @@ from katzenpost_thinclient.pigeonhole import (
     StartResendingResult,
 )
 
+from hpqc.bacap import MessageBoxIndex
+
 from katzenqt.network import create_new_keypair
 
 
@@ -120,6 +122,8 @@ class FakeThinClient(_ThinClientBase):
         self.started: bool = False
         self.started_loop: Optional[asyncio.AbstractEventLoop] = None
         self.stopped: bool = False
+        # step indexes by BACAP's own derivation instead of the counter
+        self.bacap: bool = False
 
     # ----- test-side controls -----
 
@@ -198,7 +202,10 @@ class FakeThinClient(_ThinClientBase):
     def _bump_index(self, message_box_index: bytes) -> bytes:
         """Advance the BACAP Idx64 counter in the opaque 104-byte blob by
         one, matching the convention `create_new_keypair` enforces (high
-        bit cleared, little-endian u64 in the first 8 bytes)."""
+        bit cleared, little-endian u64 in the first 8 bytes); or, with
+        ``bacap`` set, derive the next index as BACAP does."""
+        if self.bacap:
+            return MessageBoxIndex.from_bytes(message_box_index).next_index().to_bytes()
         cur = struct.unpack("<Q", message_box_index[:8])[0]
         nxt = (cur + 1) & 0x7FFFFFFFFFFFFFFF
         return struct.pack("<Q", nxt) + message_box_index[8:]

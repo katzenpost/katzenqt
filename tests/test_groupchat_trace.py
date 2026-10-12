@@ -36,7 +36,7 @@ def test_every_call_on_a_member_is_one_line() -> None:
 
 def test_introduced_at_is_written_as_a_pair() -> None:
     calls = lines((SCENARIOS / "double_introduction.txt").read_text())
-    written = [e["message"] for c in calls for e in c["result"] or [] if e["type"] == "WriteBox"]
+    written = [e["payload"] for c in calls for e in c["result"] or [] if e["type"] == "WriteBox"]
     assert any(m["introduced_at"] for m in written)
     at = next(m["introduced_at"] for m in written if m["introduced_at"])
     assert isinstance(at[0], int) and len(bytes.fromhex(at[1])) == 104
@@ -45,9 +45,9 @@ def test_introduced_at_is_written_as_a_pair() -> None:
 def test_messages_are_written_decoded() -> None:
     calls = lines("new-group alice bob\nsend alice hi\nread bob alice\n")
     writes = [e for c in calls for e in c["result"] or [] if e["type"] == "WriteBox"]
-    assert writes[0]["message"]["content"] == b"hi".hex()
+    assert writes[0]["payload"]["content"] == b"hi".hex()
     reads = [c["args"]["event"] for c in calls if c["call"] == "handle"]
-    assert {"data": writes[0]["message"]} in [e.get("result") for e in reads]
+    assert {"data": writes[0]["payload"]} in [e.get("result") for e in reads]
 
 
 def test_a_member_restored_from_its_bytes_is_still_traced() -> None:
@@ -62,6 +62,17 @@ def test_a_member_restored_from_its_bytes_is_still_traced() -> None:
     calls = [json.loads(line) for line in out.getvalue().splitlines()]
     assert [c["call"] for c in calls[-3:]] == ["cancel_induction", "remove", "observe"]
     assert calls[-1]["args"]["message"] is None, "an undecodable box is written as null"
+
+
+def test_a_box_a_client_wrote_is_kept_as_its_bytes() -> None:
+    out = io.StringIO()
+    me = bytes(136)
+    group = TracedGroup.found(me, [me], tracer=Recorder(out))
+    (outgoing,) = group.compose(b"hi")
+    group.written(outgoing.token, bytes(104), b"F\x00")
+    call = json.loads(out.getvalue().splitlines()[-1])
+    assert call["args"]["payload"] == {"bytes": "4600"}
+    assert call["state"]["sent"]["records"][0][1]["plaintext"] == {"bytes": "4600"}
 
 
 @pytest.mark.nightly
