@@ -24,6 +24,8 @@ dependencies = [
     # .github/workflows/test-integration-docker.yml.
     "katzenpost-thinclient==0.0.24",
     "rustic-audio-tool",
+    # BACAP index arithmetic for acknowledgements (Idx64 to MessageBoxIndex).
+    "hpqc",
 ]
 
 [dependency-groups]
@@ -37,7 +39,6 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
-    "hpqc",
 ]
 release = [
 ]
