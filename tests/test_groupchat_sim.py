@@ -118,6 +118,16 @@ def test_retiring_renames_every_mention() -> None:
     assert b"gone" in rosters.entries and b"gone" in rosters.keys
 
 
+def test_retiring_leaves_a_place_another_member_may_hold() -> None:
+    rosters = Rosters()
+    rosters.found([b"a", b"bx", b"by"])
+    rosters.number(b"a", 3, Entry(prefix=b"b"))
+    rosters.number(b"a", 4, Entry(prefix=b"bx"))
+    rosters.retire(b"bx", b"gone")
+    assert rosters.entries[b"a"][3] == Entry(prefix=b"b")
+    assert rosters.resolve(b"a", 4) == b"gone"
+
+
 def test_the_replica_refuses_a_bad_signature() -> None:
     world = sim.World()
     world.run("new-group alice")

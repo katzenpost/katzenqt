@@ -112,14 +112,16 @@ class Rosters:
         self.entries.setdefault(owner, {}).setdefault(index, entry)
 
     def retire(self, member: Key, token: Key) -> None:
-        """Forget ``member``'s key, keeping every place it holds."""
+        """Forget ``member``'s key, keeping every place it holds. A place
+        named by a prefix is ``member``'s only if the prefix names no other
+        member known."""
 
         def renamed(key: Key) -> Key:
             return token if key == member else key
 
         for roster in self.entries.values():
             for entry in roster.values():
-                if entry.key == member or (entry.prefix and member.startswith(entry.prefix)):
+                if entry.key == member or (entry.prefix and self.named(entry.prefix) == member):
                     entry.key, entry.prefix = token, None
         if member in self.entries:
             self.entries[token] = self.entries.pop(member)
