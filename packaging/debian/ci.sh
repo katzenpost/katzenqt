@@ -58,8 +58,11 @@ if ! cargo --version 2>/dev/null \
 fi
 
 packaging/container/pydeps-build.sh "$debs"
-packaging/container/dep-deb.sh "$debs" "$KATZENPOST_URL" "$KATZENPOST_REV"
-packaging/container/dep-deb.sh "$debs" "$THINCLIENT_URL" "$THINCLIENT_REV"
+go_net="GO111MODULE=on GOPROXY=https://proxy.golang.org,direct"
+env $go_net packaging/container/dep-deb.sh \
+    "$debs" "$KATZENPOST_URL" "$KATZENPOST_REV"
+env $go_net packaging/container/dep-deb.sh \
+    "$debs" "$THINCLIENT_URL" "$THINCLIENT_REV"
 packaging/debian/build.sh
 cp dist/katzenqt_*.deb "$debs"/
 
