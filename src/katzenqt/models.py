@@ -11,7 +11,7 @@ import io
 from . import persistent
 import hashlib
 from base64 import b64encode, b64decode
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, List, Tuple, Union
 from pathlib import Path
 
@@ -98,6 +98,28 @@ class UnsupportedVersion(ValueError):
             f"{GROUP_CHAT_VERSION}, the newest this client reads"
         )
         self.version = version
+
+BOX_PLAINTEXT_FALLBACK = 1530
+"""The plaintext a box is taken to hold before the daemon has said."""
+
+_box_plaintext_length: "int | None" = None
+
+
+def note_pigeonhole_geometry(geometry: object) -> None:
+    """Take the plaintext a box holds from the daemon's pigeonhole geometry,
+    as its connection status event carries it."""
+    global _box_plaintext_length
+    if isinstance(geometry, Mapping):
+        length = geometry.get("MaxPlaintextPayloadLength")
+        if isinstance(length, int) and length > 1:
+            _box_plaintext_length = length
+
+
+def box_plaintext_length() -> int:
+    """The most plaintext a box holds, as the daemon last said, or
+    :data:`BOX_PLAINTEXT_FALLBACK` before it has."""
+    return _box_plaintext_length or BOX_PLAINTEXT_FALLBACK
+
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
@@ -260,7 +282,8 @@ class SendOperation(BaseModel):
     def serialize(self, chunk_size: int, conversation_id: int) -> "Tuple[List[uuid.UUID], List[SerializedRow]]":
         """Produce data to go into PlaintextWAL.
 
-        TODO chunk_size = BoxPayloadLength = 1556
+        ``chunk_size`` is the most plaintext a box holds,
+        :func:`box_plaintext_length`.
 
         This produces the BACAP payloads to insert.
         The first element of the returned tuple is a list of new UUIDs of BACAP WriteCap(s) that needs to be generated.

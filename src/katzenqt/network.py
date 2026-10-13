@@ -4238,6 +4238,7 @@ async def on_daemon_disconnected(event: "Mapping[str, object]") -> None:
 async def on_connection_status(status: "Mapping[str, object]") -> None:
     global _last_connected, _reconnect_event
     connected = bool(status["is_connected"])
+    models.note_pigeonhole_geometry(status.get("pigeonhole_geometry"))
     transitioned = _last_connected is not None and _last_connected != connected
     err = status.get("err") or status.get("Err")
     if connected:

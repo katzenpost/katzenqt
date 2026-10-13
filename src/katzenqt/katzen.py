@@ -44,6 +44,7 @@ from sqlmodel import col, select
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
 from . import attachment_images
 from . import conversation_handlers
+from . import models
 from . import network  # this is network.py
 from . import persistent
 from . import removal
@@ -2001,7 +2002,7 @@ class MainWindow(QMainWindow):
         )
         logger.debug("serializing %d outgoing message(s)", len(send_op.messages))
         new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            chunk_size=models.box_plaintext_length(),
             conversation_id=convo_state.conversation_id,
         )
 

@@ -58,7 +58,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CHUNK_SIZE = 1530
 
 REPLICA_EPOCH_SECONDS = 7 * 24 * 3600
 """A replica epoch's length, as the replica's ``ReplicaEpochPeriod``."""
@@ -459,7 +458,7 @@ async def _queue(
             gcm.membership_hash = await local_membership_hash(sess, conv)
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
         new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=_CHUNK_SIZE, conversation_id=conv.id
+            chunk_size=models.box_plaintext_length(), conversation_id=conv.id
         )
         last = db_entries[-1]
         if entries:
@@ -498,7 +497,7 @@ async def serialize_with_acks(
     stored = await _founded(sess, conv)
     if stored is None:
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
-        return await send_op.serialize_async(chunk_size=_CHUNK_SIZE, conversation_id=conv.id)
+        return await send_op.serialize_async(chunk_size=models.box_plaintext_length(), conversation_id=conv.id)
     outgoing = stored.group.compose(gcm.to_cbor())
     queued = await _queue(sess, conv, stored, outgoing)
     await _save(sess, stored)
@@ -520,7 +519,7 @@ async def serialize_introduction(
     stored = await _load(sess, conv.id)
     if stored is None or intro is None:
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
-        return await send_op.serialize_async(chunk_size=_CHUNK_SIZE, conversation_id=conv.id)
+        return await send_op.serialize_async(chunk_size=models.box_plaintext_length(), conversation_id=conv.id)
     outgoing = stored.group.introduce_now(intro.display_name, intro.read_cap)
     queued = await _queue(sess, conv, stored, [outgoing])
     await _save(sess, stored)
