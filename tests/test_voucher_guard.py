@@ -206,7 +206,6 @@ async def test_intro_announcement_emits_increment(
         return None
 
     monkeypatch.setattr(voucher, "check_for_new", _noop)
-    monkeypatch.setattr(voucher, "_wait_intro_acked", lambda *a, **k: _noop())
 
     while not network.conversation_update_queue.empty():
         network.conversation_update_queue.get_nowait()

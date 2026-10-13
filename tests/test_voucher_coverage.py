@@ -347,19 +347,40 @@ async def test_an_unacked_introduction_is_reported_not_raised(
 async def test_introductions_written_waits_for_each_queued_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    sent: list[uuid.UUID] = []
+    conversation_id = await _make_conversation()
+    ids = [
+        await voucher._write_introduction_log(conversation_id, name, _JOINER_READ_CAP)
+        for name in ("bob", "carol", "dave")
+    ]
+    async with persistent.asession() as sess:
+        row = (await sess.exec(select(persistent.ConversationLog).where(
+            persistent.ConversationLog.outgoing_pwal == ids[2]
+        ))).one()
+        row.network_status = 2
+        sess.add(row)
+        sess.add(persistent.ConversationLog(
+            conversation_id=conversation_id, conversation_order=9,
+            conversation_peer_id=row.conversation_peer_id,
+            payload=b"Your name in this conversation is me", network_status=1,
+            outgoing_pwal=uuid.uuid4(),
+        ))
+        sess.add(persistent.ConversationLog(
+            conversation_id=conversation_id, conversation_order=10,
+            conversation_peer_id=row.conversation_peer_id,
+            payload=b"F" + models.GroupChatMessage(
+                version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32),
+                text="hi",
+            ).to_cbor(),
+            network_status=1, outgoing_pwal=uuid.uuid4(),
+        ))
+        await sess.commit()
+    waited: list[uuid.UUID] = []
 
     async def acked(pwal_id: uuid.UUID, *, deadline_s: float, epoch_s: float) -> bool:
         await asyncio.sleep(0)
-        sent.append(pwal_id)
-        return True
+        waited.append(pwal_id)
+        return pwal_id != ids[1]
 
     monkeypatch.setattr(persistent, "wait_for_sent", acked)
-    ids = [uuid.uuid4(), uuid.uuid4()]
-    for pwal_id in ids:
-        voucher._introductions.add(asyncio.create_task(
-            voucher._wait_intro_acked(pwal_id, "bob", 7),
-        ))
-    assert await voucher.introductions_written()
-    assert sorted(sent) == sorted(ids)
-    assert await voucher.introductions_written(), "nothing left to wait for"
+    assert not await voucher.introductions_written()
+    assert sorted(waited) == sorted(ids[:2]), "a sent Introduction is not waited for"
