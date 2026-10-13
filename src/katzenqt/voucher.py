@@ -122,16 +122,22 @@ async def conversation_is_joined(conversation_id: int) -> bool:
         )
 
 
+async def _pending_voucher_in(
+    sess: persistent.AsyncSession, conversation_id: int, role: str = "joiner",
+) -> "uuid.UUID | None":
+    row = (await sess.exec(
+        select(persistent.PendingVoucher).where(
+            persistent.PendingVoucher.conversation_id == conversation_id,
+            persistent.PendingVoucher.role == role,
+        )
+    )).first()
+    return row.id if row is not None else None
+
+
 async def pending_voucher_for(conversation_id: int, role: str = "joiner") -> "uuid.UUID | None":
     """The id of an unfinished voucher for this conversation and role, if any."""
     async with persistent.asession() as sess:
-        row = (await sess.exec(
-            select(persistent.PendingVoucher).where(
-                persistent.PendingVoucher.conversation_id == conversation_id,
-                persistent.PendingVoucher.role == role,
-            )
-        )).first()
-        return row.id if row is not None else None
+        return await _pending_voucher_in(sess, conversation_id, role)
 
 
 async def list_pending_vouchers() -> "list[tuple[uuid.UUID, str, str, str]]":
@@ -522,6 +528,11 @@ async def mint_and_publish(
         display_name=display_name,
     )
     async with persistent.asession() as sess:
+        if await _pending_voucher_in(sess, conversation_id) is not None:
+            raise PendingVoucherExistsError(
+                f"conversation {conversation_id} gained a pending voucher "
+                "while this one was being minted"
+            )
         sess.add(pv)
         await sess.commit()
         await sess.refresh(pv)
