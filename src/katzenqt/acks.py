@@ -248,7 +248,7 @@ async def _save(sess: "AsyncSession", stored: _Stored) -> None:
     )
     sess.add(stored.row)
     for written in stored.landed:
-        await _note_sent_seq(sess, stored.group, written)
+        await _note_sent_idx64(sess, stored.group, written)
         await sess.delete(written)
     stored.landed.clear()
     if await _mark_member_acked(sess, stored):
@@ -262,7 +262,7 @@ async def _save(sess: "AsyncSession", stored: _Stored) -> None:
     stored.effects.clear()
 
 
-async def _note_sent_seq(
+async def _note_sent_idx64(
     sess: "AsyncSession", group: Group, written: persistent.GroupWritten
 ) -> None:
     convlog = (await sess.exec(
@@ -271,7 +271,8 @@ async def _note_sent_seq(
         )
     )).first()
     if convlog is not None:
-        convlog.sent_seq = group.sent.check(written.box_index)
+        idx64 = group.sent.check(written.box_index)
+        convlog.sent_idx64 = None if idx64 is None else idx64.to_bytes(8, "big")
         sess.add(convlog)
 
 
@@ -285,7 +286,7 @@ async def _mark_member_acked(sess: "AsyncSession", stored: _Stored) -> bool:
         select(persistent.ConversationLog).where(
             persistent.ConversationLog.conversation_id == stored.row.conversation_id,
             persistent.ConversationLog.network_status == 2,
-            col(persistent.ConversationLog.sent_seq) <= reach,
+            col(persistent.ConversationLog.sent_idx64) <= reach.to_bytes(8, "big"),
         )
     )).all()
     for convlog in rows:
@@ -929,8 +930,9 @@ async def summary(
     sess: "AsyncSession", conv: persistent.Conversation
 ) -> "tuple[list[str] | None, dict[str, int]]":
     """For inspection: our roster as display names in order, with "?" where
-    a member is not known by name, and how far each member has acknowledged
-    our stream. The roster is None for a conversation that keeps none."""
+    a member is not known by name, and the ``Idx64`` of the last box of ours
+    each member has acknowledged. The roster is None for a conversation that
+    keeps none."""
     stored = await _load(sess, conv.id)
     if stored is None:
         return None, {}

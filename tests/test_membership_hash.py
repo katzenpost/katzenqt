@@ -79,14 +79,6 @@ async def _make_conversation(name: str = "demo") -> int:
         sess.add(persistent.ConversationPeer(
             name="alice", read_cap_id=peer_rcw.id, active=True, conversation=convo,
         ))
-        for name, active in (("paused", False), (models.SUBSTREAM_NAME_PREFIX + "x", True)):
-            rcw = persistent.ReadCapWAL(
-                id=uuid.uuid4(), read_cap=bytes([len(name)]) * 136, next_index=bytes(104),
-            )
-            sess.add(rcw)
-            sess.add(persistent.ConversationPeer(
-                name=name, read_cap_id=rcw.id, active=active, conversation=convo,
-            ))
         await sess.commit()
         await sess.refresh(convo)
         return convo.id
@@ -98,6 +90,16 @@ async def test_local_membership_hash_uses_write_cap_and_peers() -> None:
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
         assert convo is not None
+        for name, active in (("paused", False), (models.SUBSTREAM_NAME_PREFIX + "x", True)):
+            rcw = persistent.ReadCapWAL(
+                id=uuid.uuid4(), read_cap=bytes([len(name)]) * 136, next_index=bytes(104),
+            )
+            sess.add(rcw)
+            sess.add(persistent.ConversationPeer(
+                name=name, read_cap_id=rcw.id, active=active, conversation=convo,
+            ))
+        await sess.commit()
+        await sess.refresh(convo)
         got = await conversation_handlers.local_membership_hash(sess, convo)
     want = models.canonical_membership_hash([b"\x02" * 136, b"\x01" * 136])
     assert got == want

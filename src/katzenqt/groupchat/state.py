@@ -16,9 +16,12 @@ import cbor2
 from .group import Group
 from .wire import CborCodec, Codec, counter
 
-VERSION = 2
-"""Version 2 keeps acknowledgements heard, and boxes a scan looked for, by
-``Idx64``; version 1 kept their whole ``MessageBoxIndex``."""
+VERSION = 3
+"""Version 3 keeps Sent-box records, and how far each member acknowledged
+our stream, by ``Idx64``; version 2 kept them by where each box fell in the
+order we wrote our stream. Version 2 keeps acknowledgements heard, and boxes
+a scan looked for, by ``Idx64``; version 1 kept their whole
+``MessageBoxIndex``."""
 
 
 class StateError(ValueError):
@@ -41,6 +44,8 @@ def load(data: bytes, codec: Codec | None = None) -> Group:
         raise StateError(str(error)) from error
     if version == 1:
         body = _from_v1(body)
+    if version in (1, 2):
+        body = _from_v2(body)
     elif version != VERSION:
         raise StateError(f"group state version {version}")
     group: Group = _decode(Group, body)
@@ -67,6 +72,37 @@ def _from_v1(body: Any) -> Any:
             pair[1] = counter(pair[1])
     for _, reader in body["readers"]:
         reader["tried"] = [counter(index) for index in reader["tried"]]
+    return body
+
+
+def _from_v2(body: Any) -> Any:
+    """A version 2 body as version 3 writes it. A member's acknowledgement of
+    a box no longer recorded is forgotten.
+
+    >>> group = Group.found(bytes(136), [bytes(136), bytes([1]) * 136])
+    >>> box = (5).to_bytes(8, "little") + bytes(96)
+    >>> group.sent.record(box, b"hi", False, 0)
+    >>> group.ledger.acked_by = {bytes([1]) * 136: 5}
+    >>> body = _encode(group)
+    >>> body["sent"] = {"records": [[box, {"seq": 0, "plaintext": b"hi",
+    ...     "control": False, "written": 0}]], "count": 1, "backfilled": -1}
+    >>> body["ledger"]["acked_by"] = [[bytes([1]) * 136, 0], [bytes(136), 7]]
+    >>> load(cbor2.dumps([2, body])) == group
+    True
+    """
+    sent = body["sent"]
+    by_seq = {record["seq"]: counter(index) for index, record in sent["records"]}
+    sent["records"] = [
+        [counter(index), {
+            "index": index, "plaintext": record["plaintext"],
+            "control": record["control"], "written": record["written"],
+        }]
+        for index, record in sent["records"]
+    ]
+    sent.pop("count", None)
+    body["ledger"]["acked_by"] = [
+        [key, by_seq[seq]] for key, seq in body["ledger"]["acked_by"] if seq in by_seq
+    ]
     return body
 
 

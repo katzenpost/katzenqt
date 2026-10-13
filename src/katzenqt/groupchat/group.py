@@ -313,9 +313,8 @@ class Group:
         for at, value in message.acks.items():
             acked = self.rosters.resolve(sender, at)
             if acked == self.me:
-                seq = self.sent.check_at(value)
-                if seq is not None:
-                    self.ledger.acked(sender, seq)
+                if self.sent.check_at(value):
+                    self.ledger.acked(sender, value)
             elif acked is not None:
                 self.ledger.hear(acked, value, sender)
         if message.content is None:
@@ -568,5 +567,5 @@ class Group:
                     effects.append(Expire(sender, index))
         return effects + self.sent.backfill(epoch)
 
-    def _everyone_acked(self, seq: int) -> bool:
-        return all(self.ledger.acked_by.get(key, -1) >= seq for key in self.readers)
+    def _everyone_acked(self, idx64: int) -> bool:
+        return all(self.ledger.acked_by.get(key, -1) >= idx64 for key in self.readers)

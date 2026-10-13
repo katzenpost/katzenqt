@@ -1291,9 +1291,10 @@ class ConversationLog(SQLModel, table=True):
     """When the row was added, for the disappearing messages policy."""
 
     network_status: int = Field(default=0) # 0: received; 1:pending; 2: fully sent; 3: acknowledged by a member
-    sent_seq: int | None = Field(default=None)
-    """Where our message falls in the order we wrote our stream, matched
-    against members' acknowledgements (``Ledger.acked_by``)."""
+    sent_idx64: bytes | None = Field(default=None)
+    """The ``Idx64`` of the box our message ends in, big-endian so that it
+    orders as a number, matched against members' acknowledgements
+    (``Ledger.acked_by``)."""
     outgoing_pwal: uuid.UUID | None = Field(
         default=None,
         foreign_key="plaintextwal.id",

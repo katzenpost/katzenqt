@@ -827,7 +827,8 @@ async def _action_info(args: _args.Info) -> int:
 
     For a conversation that keeps rosters, ``roster`` is our own roster as
     display names in order; it is null otherwise. ``acked`` maps each member
-    that has acknowledged our stream to the position it has reached.
+    that has acknowledged our stream to the ``Idx64`` of the last box of ours
+    it acknowledged.
     """
     with persistent._engine_sync.connect() as conn:
         ctx = MigrationContext.configure(conn)

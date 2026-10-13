@@ -23,8 +23,8 @@ class Ledger:
     published: dict[Key, bytes] = field(default_factory=dict)
     """The last index acknowledged of each stream."""
     acked_by: dict[Key, int] = field(default_factory=dict)
-    """How far each member has acknowledged our stream, in the order we
-    wrote it, after the Sent-box check."""
+    """The ``Idx64`` of the last box of our stream each member has
+    acknowledged, after the Sent-box check."""
     heard: dict[Key, dict[Key, int]] = field(default_factory=dict)
     """For each stream, the ``Idx64`` of the last box each other member
     acknowledged of it."""
@@ -53,8 +53,8 @@ class Ledger:
     def hear(self, stream: Key, idx64: int, by: Key) -> None:
         self.heard.setdefault(stream, {})[by] = idx64
 
-    def acked(self, member: Key, seq: int) -> None:
-        self.acked_by[member] = max(self.acked_by.get(member, -1), seq)
+    def acked(self, member: Key, idx64: int) -> None:
+        self.acked_by[member] = max(self.acked_by.get(member, -1), idx64)
 
     def forget(self, member: Key) -> None:
         self.acked_by.pop(member, None)

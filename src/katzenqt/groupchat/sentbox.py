@@ -26,8 +26,8 @@ class Retention:
 
 @dataclass
 class Record:
-    seq: int
-    """Where the box falls in the order we wrote our boxes."""
+    index: bytes
+    """The box's whole ``MessageBoxIndex``."""
     plaintext: bytes | None
     """None once the plaintext is gone, or if it was never handed over."""
     control: bool
@@ -36,40 +36,36 @@ class Record:
 
 @dataclass
 class SentBox:
-    records: dict[bytes, Record] = field(default_factory=dict)
-    """By ``MessageBoxIndex``."""
-    count: int = 0
+    records: dict[int, Record] = field(default_factory=dict)
+    """By the box's ``Idx64``, which orders the boxes of our stream as we
+    wrote them."""
     backfilled: int = -1
 
     def record(self, index: bytes, plaintext: bytes | None, control: bool, epoch: int) -> None:
-        self.records[index] = Record(self.count, plaintext, control, epoch)
-        self.count += 1
+        self.records[counter(index)] = Record(index, plaintext, control, epoch)
 
     def check(self, index: bytes) -> int | None:
-        """The Sent-box check: where in our order the box ``index`` names
-        falls, or None if we never wrote it."""
-        record = self.records.get(index)
-        return None if record is None else record.seq
+        """The Sent-box check: the ``Idx64`` of the box ``index`` names, or
+        None if we never wrote it."""
+        record = self.records.get(counter(index))
+        return counter(index) if record is not None and record.index == index else None
 
-    def check_at(self, idx64: int) -> int | None:
+    def check_at(self, idx64: int) -> bool:
         """The Sent-box check for an acknowledgement, which names the box by
         its ``Idx64``."""
-        for index, record in self.records.items():
-            if counter(index) == idx64:
-                return record.seq
-        return None
+        return idx64 in self.records
 
     def retain(
         self, epoch: int, policy: Retention, everyone_acked: Callable[[int], bool]
     ) -> None:
-        for index in [i for i, r in self.records.items() if epoch - r.written > policy.window]:
-            del self.records[index]
-        for record in self.records.values():
+        for idx64 in [i for i, r in self.records.items() if epoch - r.written > policy.window]:
+            del self.records[idx64]
+        for idx64, record in self.records.items():
             if (
                 not record.control
                 and policy.keep_sent is not None
                 and epoch - record.written >= policy.keep_sent
-            ) or (policy.discard_acked and everyone_acked(record.seq)):
+            ) or (policy.discard_acked and everyone_acked(idx64)):
                 record.plaintext = None
 
     def backfill(self, epoch: int) -> list[Effect]:
@@ -78,6 +74,6 @@ class SentBox:
             return []
         self.backfilled = epoch
         return [
-            WriteBox(index, r.plaintext) if r.plaintext is not None else WriteTombstone(index)
-            for index, r in sorted(self.records.items(), key=lambda item: item[1].seq)
+            WriteBox(r.index, r.plaintext) if r.plaintext is not None else WriteTombstone(r.index)
+            for _, r in sorted(self.records.items())
         ]

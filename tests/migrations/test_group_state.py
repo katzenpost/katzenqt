@@ -135,9 +135,9 @@ def test_old_rosters_become_explicit() -> None:
         assert group.readers[BOB].last == _index(208)
         assert group.readers[CAROL].last is None
         assert group.ledger.published == {BOB: _index(207)}
-        assert group.ledger.acked_by == {BOB: 1}
-        assert group.sent.check(_index(105)) == 1
-        assert group.sent.check(_index(104)) == 0
+        assert group.ledger.acked_by == {BOB: 105}
+        assert group.sent.check(_index(105)) == 105
+        assert group.sent.check(_index(104)) == 104
         assert "frontier_index" not in {
             c["name"] for c in sa.inspect(conn).get_columns("readcapwal")
         }

@@ -406,13 +406,13 @@ async def test_an_acknowledgement_of_a_box_we_wrote_is_accepted() -> None:
         version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
     ), 1)
     group = await chat.group()
-    assert group.ledger.acked_by == {bob: 0}
+    assert group.ledger.acked_by == {bob: wire.counter(index)}
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, chat.conversation_id)
         assert conv is not None
         names, acked = await acks.summary(sess, conv)
     assert sorted(names or ()) == ["bob", "me"]
-    assert acked == {"bob": 0}
+    assert acked == {"bob": wire.counter(index)}
 
 
 @pytest.mark.asyncio

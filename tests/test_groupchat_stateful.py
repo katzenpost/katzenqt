@@ -264,13 +264,13 @@ class GroupChat(RuleBasedStateMachine):
             return
         for owner in self.joined():
             group = self.group(owner)
-            by_seq = {r.seq: index for index, r in group.sent.records.items()}
-            for acker, seq in group.ledger.acked_by.items():
-                if seq not in by_seq:
+            records = group.sent.records
+            for acker, idx64 in group.ledger.acked_by.items():
+                if idx64 not in records:
                     continue
                 reader = self.group(self.world.name_of(acker)).readers[self.key(owner)]
                 assert reader.run is not None
-                assert self.n(self.key(owner), by_seq[seq]) <= self.n(self.key(owner), reader.run)
+                assert self.n(self.key(owner), records[idx64].index) <= self.n(self.key(owner), reader.run)
 
     @invariant()
     def acks_cover_only_boxes_read(self) -> None:

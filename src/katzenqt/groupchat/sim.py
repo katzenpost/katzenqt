@@ -430,8 +430,8 @@ class World:
         """Who the ``Introduction`` in the box ``index`` introduced: the
         truth, from its introducer's records."""
         for member in self.members.values():
-            record = member.group.sent.records.get(index) if member.group else None
-            if record is not None and record.plaintext is not None:
+            record = member.group.sent.records.get(counter(index)) if member.group else None
+            if record is not None and record.index == index and record.plaintext is not None:
                 message = self.codec.decode(record.plaintext)
                 if message is not None and message.introduction is not None:
                     return message.introduction.name
@@ -460,13 +460,12 @@ class World:
         """What ``member`` has written since a command last printed it."""
         lines = []
         assert member.group is not None
-        records = sorted(member.group.sent.records.items(), key=lambda item: item[1].seq)
-        for index, record in records:
-            if record.seq > member.reported and record.plaintext is not None:
+        for idx64, record in sorted(member.group.sent.records.items()):
+            if idx64 > member.reported and record.plaintext is not None:
                 message = self.codec.decode(record.plaintext)
                 assert message is not None
-                lines.append(f"{self.at(member.key, index)} {self.show(message)}")
-                member.reported = record.seq
+                lines.append(f"{self.at(member.key, record.index)} {self.show(message)}")
+                member.reported = idx64
         return lines
 
     def do_send(self, who: str, *text: str) -> list[str]:
@@ -575,12 +574,12 @@ class World:
     def do_acked(self, who: str) -> list[str]:
         member = self.members[who]
         group = self.group(who)
-        by_seq = {record.seq: index for index, record in group.sent.records.items()}
+        records = group.sent.records
         return [
             " ".join(
-                f"{self.name_of(acker)}:{self.at(member.key, by_seq[seq])}"
-                for acker, seq in sorted(group.ledger.acked_by.items())
-                if seq in by_seq
+                f"{self.name_of(acker)}:{self.at(member.key, records[idx64].index)}"
+                for acker, idx64 in sorted(group.ledger.acked_by.items())
+                if idx64 in records
             )
             or "none"
         ]
