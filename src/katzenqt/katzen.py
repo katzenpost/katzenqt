@@ -2037,7 +2037,16 @@ class MainWindow(QMainWindow):
             self._restore_unsent_text(convo_state, msg)
             return
 
-        group_chat_message = GroupChatMessage(version=GROUP_CHAT_VERSION, text=msg)
+        # Stamp the real membership hash before serialize.
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(
+                convo_state.conversation_id
+            )
+        )
+        group_chat_message = GroupChatMessage(
+            version=GROUP_CHAT_VERSION, membership_hash=membership_hash, text=msg
+        )
 
         # conversation_order is a count subquery evaluated at commit. The
         # receive/voucher paths append on the io loop; the send path funnels
@@ -2792,6 +2801,10 @@ class MainWindow(QMainWindow):
 
         voice_note_drafts = []
         audio = getattr(self, "_ptt_audio", None)
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(convo.conversation_id)
+        )
         # One SendOperation per file; unserialize() only decodes one GCM.
         for fn in sorted(convo.attached_files):
             f_path = Path(fn)
@@ -2831,7 +2844,11 @@ class MainWindow(QMainWindow):
                 upload.payload, upload.basename, upload.filetype,
                 hash_all=policy == NAME_POLICY_HASH,
             )
-            gcm = GroupChatMessage(version=GROUP_CHAT_VERSION, file_upload=upload)
+            gcm = GroupChatMessage(
+                version=GROUP_CHAT_VERSION,
+                membership_hash=membership_hash,
+                file_upload=upload,
+            )
 
             # Pre-assign the ConversationLog id so a voice-note draft (which is
             # discarded right after sending) can be cached for playback under

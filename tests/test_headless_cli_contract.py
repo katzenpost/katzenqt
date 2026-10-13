@@ -223,6 +223,10 @@ CASES: list[tuple[list[str], dict[str, object]]] = [
         },
     ),
     (["tally-list", "room"], {"action": "tally-list", "conv_name": "room"}),
+    (
+        ["membership-hash", "room"],
+        {"action": "membership-hash", "conv_name": "room"},
+    ),
     (["remove-conv", "room"], {"action": "remove-conv", "conv_name": "room"}),
     (
         ["remove-peer", "room", "bob"],
@@ -234,11 +238,11 @@ VERBS = [
     "create-conv", "voucher-mint", "voucher-induct", "voucher-await",
     "send", "multi-send", "read", "scan", "chat-session", "send-file", "read-file",
     "info", "disappear", "tally-create", "tally-vote", "tally-result", "tally-close",
-    "tally-list", "remove-conv", "remove-peer",
+    "tally-list", "membership-hash", "remove-conv", "remove-peer",
 ]
 
 OFFLINE_VERBS = [
-    "info", "disappear", "tally-list", "remove-conv", "remove-peer",
+    "info", "disappear", "tally-list", "membership-hash", "remove-conv", "remove-peer",
 ]
 
 DISPATCH = {
@@ -260,6 +264,7 @@ DISPATCH = {
     "tally-result": "_action_tally_result",
     "tally-close": "_action_tally_close",
     "tally-list": "_action_tally_list",
+    "membership-hash": "_action_membership_hash",
     "remove-conv": "_action_remove_conv",
     "remove-peer": "_action_remove_peer",
 }
@@ -376,6 +381,11 @@ TOKENS_AND_CODES: dict[
         (("error", "conversation %r not found"),
          ("info", "(no surveys)"),
          ("info", "SURVEY=%s status=%s voters=%d mode=%s topic=%s")),
+        (0, 2),
+    ),
+    "_action_membership_hash": (
+        (("error", "conversation %r not found"),
+         ("info", "MEMBERSHIP_HASH=%s")),
         (0, 2),
     ),
     "_action_remove_conv": (

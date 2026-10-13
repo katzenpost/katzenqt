@@ -112,13 +112,13 @@ def test_the_shorter_form_is_always_the_one_written(
 def test_the_field_survives_a_group_chat_message(
     acks: dict[int, int], text: str
 ) -> None:
-    sent = GroupChatMessage(version=0, text=text, acks=ack_codec.encode(acks))
+    sent = GroupChatMessage(version=0, membership_hash=bytes(32), text=text, acks=ack_codec.encode(acks))
     received = GroupChatMessage.from_cbor(sent.to_cbor())
     assert received.acks is not None
     assert ack_codec.decode(received.acks) == dict(sorted(acks.items()))
 
 
 def test_a_message_with_nothing_to_acknowledge_carries_no_field() -> None:
-    sent = GroupChatMessage(version=0, text="hi")
+    sent = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
     assert "acks" not in cbor2.loads(sent.to_cbor())
     assert GroupChatMessage.from_cbor(sent.to_cbor()).acks is None

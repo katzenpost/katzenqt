@@ -102,7 +102,7 @@ async def run(directory: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict[str
         await _place(chat, carol, chat.own_key): counter(_box(ALICE, 0)),
     }
     await _receive(chat, "carol", CAROL, 0, models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION, text="carol 0", acks=ack_codec.encode(acks_of_carol),
+        version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32), text="carol 0", acks=ack_codec.encode(acks_of_carol),
     ))
     client = FakeThinClient()
     client.bacap = True

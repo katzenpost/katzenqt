@@ -48,7 +48,7 @@ def _f(gcm: models.GroupChatMessage) -> bytes:
 
 
 INTRO = _f(models.GroupChatMessage(
-    version=models.GROUP_CHAT_VERSION,
+    version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32),
     introduction=models.GroupChatPleaseAdd(display_name="carol", read_cap=bytes(136)),
 ))
 

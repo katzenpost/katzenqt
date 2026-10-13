@@ -70,7 +70,7 @@ def _fatal_db_error() -> OperationalError:
 
 def _f_payload(text: str = "hello") -> bytes:
     gcm = models.GroupChatMessage(
-        version=0,
+        version=0, membership_hash=bytes(32),
         text=text,
     )
     return b"F" + bytes(gcm.to_cbor())

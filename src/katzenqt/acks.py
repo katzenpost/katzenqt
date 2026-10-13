@@ -83,7 +83,7 @@ class GcmCodec:
     def decode(self, plaintext: bytes) -> wire.Message | None:
         """
         >>> codec = GcmCodec()
-        >>> text = models.GroupChatMessage(version=2, text="hi")
+        >>> text = models.GroupChatMessage(version=2, membership_hash=bytes(32), text="hi")
         >>> codec.decode(text.to_cbor()).content is not None
         True
         >>> codec.decode(b"\\xff") is None
@@ -120,6 +120,7 @@ class GcmCodec:
         elif message.introduction is not None:
             gcm = models.GroupChatMessage(
                 version=models.GROUP_CHAT_VERSION,
+                membership_hash=models.MEMBERSHIP_SENTINELS[1],
                 msg_type=models.GroupChatTypeEnum.INTRODUCTION,
                 introduction=models.GroupChatPleaseAdd(
                     display_name=message.introduction.name,
@@ -128,7 +129,9 @@ class GcmCodec:
             )
         else:
             gcm = models.GroupChatMessage(
-                version=models.GROUP_CHAT_VERSION, msg_type=models.GroupChatTypeEnum.CONTROL,
+                version=models.GROUP_CHAT_VERSION,
+                membership_hash=models.MEMBERSHIP_SENTINELS[1],
+                msg_type=models.GroupChatTypeEnum.CONTROL,
             )
         gcm.acks = ack_codec.encode(message.acks) or None
         gcm.numbers = wire.encode_numbers(message.numbers) or None
@@ -371,13 +374,18 @@ async def _queue(
     outgoing: list[Outgoing],
 ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
     """Serialize what the state machine asks to send, one message to a box
-    or substream, each written after the one before."""
+    or substream, each written after the one before. A message the state
+    machine makes itself carries our membership hash; one it was handed
+    carries its own."""
+    from .conversation_handlers import local_membership_hash
+
     write_caps: list[uuid.UUID] = []
     entries: list[models.SerializedRow] = []
     for item in outgoing:
-        send_op = models.SendOperation(
-            bacap_stream=conv.write_cap, messages=[CODEC.gcm(item.message)]
-        )
+        gcm = CODEC.gcm(item.message)
+        if item.message.content is None:
+            gcm.membership_hash = await local_membership_hash(sess, conv)
+        send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
         new_write_caps, db_entries = await send_op.serialize_async(
             chunk_size=_CHUNK_SIZE, conversation_id=conv.id
         )
@@ -411,7 +419,10 @@ async def serialize_with_acks(
     it carries, after any control message the state machine owes. The caller
     adds the rows to ``sess`` and commits, holding
     ``persistent.conversation_log_order_lock`` from before this call; the
-    last row ends ``gcm``."""
+    last row ends ``gcm``, which is stamped with our membership hash."""
+    from .conversation_handlers import local_membership_hash
+
+    gcm.membership_hash = await local_membership_hash(sess, conv)
     stored = await _founded(sess, conv)
     if stored is None:
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
@@ -429,7 +440,10 @@ async def serialize_introduction(
 ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
     """Serialize ``gcm``, the ``Introduction`` that commits the induction
     under way, numbering the member it introduces. Called under the
-    conversation's writer lock."""
+    conversation's writer lock. It carries our membership hash."""
+    from .conversation_handlers import local_membership_hash
+
+    gcm.membership_hash = await local_membership_hash(sess, conv)
     intro = gcm.as_introduction
     stored = await _load(sess, conv.id)
     if stored is None or intro is None:

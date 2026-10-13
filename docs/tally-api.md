@@ -198,7 +198,8 @@ receive path.
 
 Each builder returns a `katzenqt.models.GroupChatMessage` with the explicit
 `msg_type` set and a `GroupChatTally` payload. They are pure: no network, no
-database.
+database. Tally messages are not membership events, so they carry a fixed
+32-byte zero `membership_hash`.
 
 ```python
 def build_create(survey_id: bytes, full_state: bytes) -> GroupChatMessage

@@ -49,7 +49,7 @@ async def _stuck() -> tuple[_Chat, FakeThinClient]:
     at = (await chat.group()).rosters.index_of(bytes([3]) * 32, bob)
     assert at is not None
     await _receive(chat, "carol", models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION, text="read", acks=ack_codec.encode({at: 2}),
+        version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32), text="read", acks=ack_codec.encode({at: 2}),
     ), 0)
     client = FakeThinClient()
     client.bacap = True
@@ -207,7 +207,7 @@ async def test_a_small_file_stepped_past_is_left_for_later() -> None:
     chat, client = await _stuck()
     await _scan(chat, client)
     upload = models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION,
+        version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32),
         msg_type=models.GroupChatTypeEnum.FILE_UPLOAD,
         file_upload=models.GroupChatFileUpload(payload=b"x", filetype="arbitrary", basename="x"),
     )

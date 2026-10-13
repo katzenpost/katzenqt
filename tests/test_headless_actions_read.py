@@ -46,7 +46,7 @@ def stub_session(monkeypatch: pytest.MonkeyPatch) -> StubConnection:
 
 def _text_payload(text: str) -> bytes:
     gcm = models.GroupChatMessage(
-        version=0,
+        version=0, membership_hash=bytes(32),
         text=text,
     )
     body: bytes = gcm.to_cbor()
@@ -55,7 +55,7 @@ def _text_payload(text: str) -> bytes:
 
 def _introduction_payload(display_name: str) -> bytes:
     gcm = models.GroupChatMessage(
-        version=0,
+        version=0, membership_hash=bytes(32),
         introduction=models.GroupChatPleaseAdd(
             display_name=display_name,
             read_cap=bytes([0x44]) * 136,

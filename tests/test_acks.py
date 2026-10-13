@@ -43,12 +43,12 @@ def _index(n: int) -> bytes:
 
 
 def _text(text: str = "hi") -> models.GroupChatMessage:
-    return models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, text=text)
+    return models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32), text=text)
 
 
 def _introduction(name: str, read_cap: bytes) -> models.GroupChatMessage:
     return models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION,
+        version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32),
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(display_name=name, read_cap=read_cap),
     )
@@ -403,7 +403,7 @@ async def test_an_acknowledgement_of_a_box_we_wrote_is_accepted() -> None:
     me = (await chat.group()).rosters.index_of(bob, chat.own_key)
     assert me is not None
     await chat.receive("bob", models.GroupChatMessage(
-        version=2, text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
     ), 1)
     group = await chat.group()
     assert group.ledger.acked_by == {bob: 0}
@@ -421,7 +421,7 @@ async def test_an_acknowledgement_of_a_box_we_never_wrote_is_ignored() -> None:
     me = (await chat.group()).rosters.index_of(bob, chat.own_key)
     assert me is not None
     await chat.receive("bob", models.GroupChatMessage(
-        version=2, text="seen", acks=ack_codec.encode({me: wire.counter(_index(0))}),
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(_index(0))}),
     ), 1)
     assert (await chat.group()).ledger.acked_by == {}
 
@@ -459,7 +459,7 @@ async def _statuses(chat: _Chat) -> list[int]:
 def _seen(chat_group: Group, member: bytes, me: bytes, index: bytes) -> models.GroupChatMessage:
     at = chat_group.rosters.index_of(member, me)
     assert at is not None
-    return models.GroupChatMessage(version=2, text="seen", acks=ack_codec.encode({at: wire.counter(index)}))
+    return models.GroupChatMessage(version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({at: wire.counter(index)}))
 
 
 @pytest.mark.asyncio
@@ -533,7 +533,7 @@ async def test_a_member_introduced_is_numbered_in_a_control_message_first() -> N
 @pytest.mark.asyncio
 async def test_a_control_message_is_not_shown() -> None:
     chat, bob = await _with_bob()
-    control = models.GroupChatMessage(version=2, msg_type=models.GroupChatTypeEnum.CONTROL)
+    control = models.GroupChatMessage(version=2, membership_hash=bytes(32), msg_type=models.GroupChatTypeEnum.CONTROL)
     peer_id, _, _ = chat.peers["bob"]
     async with persistent.asession() as sess:
         peer = await sess.get(persistent.ConversationPeer, peer_id)
@@ -876,7 +876,7 @@ def test_the_codec_reads_what_it_writes() -> None:
     text = _text().to_cbor()
     decoded = acks.CODEC.decode(acks.CODEC.encode(wire.Message(content=text)))
     assert decoded is not None and decoded.content is not None
-    broken = models.GroupChatMessage(version=2, text="x", acks=b"\x01\x02")
+    broken = models.GroupChatMessage(version=2, membership_hash=bytes(32), text="x", acks=b"\x01\x02")
     decoded = acks.CODEC.decode(broken.to_cbor())
     assert decoded is not None and decoded.acks == {}
 
@@ -1197,7 +1197,7 @@ async def test_a_box_everyone_acknowledged_is_rewritten_as_a_tombstone(
     me = (await chat.group()).rosters.index_of(bob, chat.own_key)
     assert me is not None
     await chat.receive("bob", models.GroupChatMessage(
-        version=2, text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
     ), 1)
     _epoch(monkeypatch, 11)
     await acks.tick()

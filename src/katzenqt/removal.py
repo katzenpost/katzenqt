@@ -8,6 +8,14 @@ One thing outlasts a removed member: its place in the rosters. Every member
 numbers the others, nobody is told of a removal, and so every roster still
 counts from the place the removed member held. The place is kept and the key
 is forgotten (see ``acks.forget_member``).
+
+Removing a member changes the membership hash: ``local_membership_hash`` covers
+every active non-substream peer, so once a member is deleted this client hashes
+one peer fewer than the members who kept them. Every message this client sends
+afterwards carries a hash the others do not compute, and theirs mismatch our
+view, for the life of the conversation. This is accepted on purpose: keeping
+removed members in the hash would leave a trace of them. Receivers currently
+only log the mismatch in ``_verify_membership_advisory``.
 """
 
 from __future__ import annotations
@@ -44,8 +52,8 @@ class _Doomed(NamedTuple):
 async def _silence_peers(conversation_id: int, peer_id: int) -> _Doomed:
     """Pause the peer's and its download substreams' read caps, and commit, so
     the arming sweep stops re-arming them while they are torn down. ``active``
-    is left alone: it decides who a voucher reply names, and a crash before
-    the delete must not leave a half-removed member dropped from it."""
+    is left alone: it feeds the membership hash, and a crash before the delete
+    must not leave a half-removed member with a shifted hash."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         if conv is None:
