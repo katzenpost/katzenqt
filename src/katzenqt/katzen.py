@@ -44,7 +44,6 @@ from sqlmodel import col, select
 # https://doc.qt.io/qtforpython-6/PySide6/QtAsyncio/index.html
 from . import attachment_images
 from . import conversation_handlers
-from . import models
 from . import network  # this is network.py
 from . import persistent
 from . import removal
@@ -62,7 +61,7 @@ from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (GROUP_CHAT_VERSION, NAME_POLICY_HASH, NAME_POLICY_KEEP,
                      NAME_POLICY_SETTING, GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation,
-                     outgoing_basename)
+                     box_plaintext_length, outgoing_basename)
 #from ui_mixchat_chatview import Ui_ChatForm
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
@@ -2002,7 +2001,7 @@ class MainWindow(QMainWindow):
         )
         logger.debug("serializing %d outgoing message(s)", len(send_op.messages))
         new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=models.box_plaintext_length(),
+            chunk_size=box_plaintext_length(),
             conversation_id=convo_state.conversation_id,
         )
 
