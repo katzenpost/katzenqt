@@ -1256,7 +1256,7 @@ async def test_an_epoch_is_taken_up_when_it_falls_due(
     group = await chat.group()
     assert group.epoch == future - 1
     due = acks._due(group, future)
-    monkeypatch.setattr(acks.time, "time", lambda: due)
+    monkeypatch.setattr(time, "time", lambda: due)
     assert (await chat.group()).epoch == future
 
 

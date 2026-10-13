@@ -194,7 +194,8 @@ class GroupChat(RuleBasedStateMachine):
             if self.n(stream.stream, stream.next) == end:
                 self.caught_up[reader, owner] = self.epoch
             elif since is not None:
-                assert self.epoch - since > group.policy.window, (
+                window = group.policy.window
+                assert window is not None and self.epoch - since > window, (
                     f"{reader} is stuck on {owner}'s stream although it"
                     f" could read to the end in epoch {since}, now {self.epoch}"
                 )
