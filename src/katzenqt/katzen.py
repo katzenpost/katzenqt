@@ -400,6 +400,20 @@ async def _qml_source_ready(widget: "QQuickWidget") -> None:
         widget.statusChanged.disconnect(_on_status)
 
 
+SECRET_CLIPBOARD_MS = 60_000
+
+
+def clear_secret(text: str) -> None:
+    clipboard = QApplication.clipboard()
+    if clipboard.text() == text:
+        clipboard.clear()
+
+
+def copy_secret(text: str, owner: QObject) -> None:
+    QApplication.clipboard().setText(text)
+    QTimer.singleShot(SECRET_CLIPBOARD_MS, owner, partial(clear_secret, text))
+
+
 class VoucherDialog(QDialog):
     COPY_LABEL = "Copy voucher"
     COPIED_LABEL = "Copied"
@@ -444,7 +458,7 @@ class VoucherDialog(QDialog):
         layout.addWidget(buttons)
 
     def copy_code(self) -> None:
-        QApplication.clipboard().setText(self.code)
+        copy_secret(self.code, self.copy_button)
         self.copy_button.setText(self.COPIED_LABEL)
         QTimer.singleShot(
             self.COPIED_SHOWN_MS, self.copy_button, self.restore_copy_label,
@@ -2375,8 +2389,10 @@ class MainWindow(QMainWindow):
         elif token is None:
             return
         elif chosen is copy_voucher:
-            QApplication.clipboard().setText(voucher_code(token))
-            self.ui.statusbar.showMessage("Voucher copied to clipboard", 3000)
+            copy_secret(voucher_code(token), self)
+            self.ui.statusbar.showMessage(
+                "Voucher copied to clipboard; it clears in a minute", 3000,
+            )
         elif chosen is show_voucher:
             await _dialog_finished(VoucherDialog(self, voucher_code(token)))
 
