@@ -139,6 +139,38 @@ async def test_mint_refuses_when_voucher_pending() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_voucher_that_appears_while_minting_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conv_id = await _make_conversation()
+
+    async def mint_and_race(**_kwargs: object) -> SimpleNamespace:
+        await _add_pending(conv_id)
+        return SimpleNamespace(
+            voucher=b"v" * 32,
+            voucher_write_cap=b"\x01" * 168,
+            voucher_read_cap=bytes(136),
+            voucher_secret_key=bytes(32),
+            voucher_payload=b"payload",
+        )
+
+    async def published(*_a: object, **_k: object) -> bytes:
+        return bytes(104)
+
+    monkeypatch.setattr(
+        voucher, "_rpc_racing_connection_life", mint_and_race,
+    )
+    monkeypatch.setattr(voucher, "_publish_box", published)
+    with pytest.raises(voucher.PendingVoucherExistsError):
+        await voucher.mint_and_publish(
+            cast("ThinClient", None), conv_id, "me",
+        )
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.PendingVoucher))).all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_pending_lookup_list_and_cancel() -> None:
     conv_id = await _make_conversation()
     assert await voucher.pending_voucher_for(conv_id) is None
