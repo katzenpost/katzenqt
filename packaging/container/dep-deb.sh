@@ -9,10 +9,19 @@ root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 
 mkdir -p "$out"
 work=$(mktemp -d)
+cloned=
 for _ in 1 2 3; do
-    git clone --quiet "$url" "$work/src" && break
+    rm -rf "$work/src"
+    if git clone --quiet "$url" "$work/src"; then
+        cloned=yes
+        break
+    fi
     sleep 5
 done
+if [ -z "$cloned" ]; then
+    printf '%s\n' "could not clone $url" >&2
+    exit 1
+fi
 if ! git -C "$work/src" cat-file -e "$rev^{commit}" 2>/dev/null; then
     printf '%s\n' "$url has no $rev" \
         "a force-push may have discarded it; repoint the pin" >&2
