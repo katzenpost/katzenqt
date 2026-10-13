@@ -275,9 +275,8 @@ def _due(write_cap: bytes, epoch: int) -> float:
     >>> _due(bytes(168), 5) != _due(bytes([1]) * 168, 5)
     True
     """
-    digest = hashlib.blake2b(
-        epoch.to_bytes(8, "big"), key=hashlib.blake2b(write_cap).digest(), digest_size=8
-    ).digest()
+    key = hashlib.blake2b(write_cap, person=b"KP:rewrite-time").digest()
+    digest = hashlib.blake2b(epoch.to_bytes(8, "big"), key=key, digest_size=8).digest()
     offset = int.from_bytes(digest, "big") % (REPLICA_EPOCH_SECONDS // 2)
     return KATZENPOST_EPOCH_ORIGIN + epoch * REPLICA_EPOCH_SECONDS + offset
 
