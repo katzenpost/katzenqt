@@ -647,6 +647,27 @@ async def test_owed_numbering_goes_out_before_an_induction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_introduction_carries_the_hash_before_its_member() -> None:
+    chat, _ = await _with_bob()
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        before = await conversation_handlers.local_membership_hash(sess, conv)
+    dave_cap = secrets.token_bytes(136)
+    await chat.add_peer("dave", dave_cap)
+    async with acks.held_back(chat.conversation_id):
+        await _reply(chat)
+        final = await voucher._write_introduction_log(chat.conversation_id, "dave", dave_cap)
+    async with persistent.asession() as sess:
+        intro = await sess.get(persistent.PlaintextWAL, final)
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert intro is not None and conv is not None
+        after = await conversation_handlers.local_membership_hash(sess, conv)
+    assert _sent(intro).as_introduction is not None
+    assert _sent(intro).membership_hash == before != after
+
+
+@pytest.mark.asyncio
 async def test_a_new_member_carries_on_from_what_it_was_handed() -> None:
     chat, bob = await _with_bob()
     await chat.receive("bob", _text(), 3)
@@ -850,14 +871,14 @@ async def test_removing_a_conversation_removes_its_group_state() -> None:
 async def test_records_older_than_the_window_are_let_go(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     await persistent.set_retention(chat.conversation_id, persistent.Retention(sent_days=1))
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     assert (await chat.group()).sent.records
     assert (await chat.group()).sent.records
-    _epoch(monkeypatch, 10 + 10)
+    await _epoch(10 + 10)
     assert not (await chat.group()).sent.records
 
 
@@ -865,12 +886,12 @@ async def test_records_older_than_the_window_are_let_go(
 async def test_records_are_kept_as_long_as_sent_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     assert (await chat.group()).sent.records
-    _epoch(monkeypatch, 10 + 100)
+    await _epoch(10 + 100)
     assert (await chat.group()).sent.records
 
 
@@ -1179,22 +1200,25 @@ async def test_a_headless_message_waits_for_the_writer_lock() -> None:
 # Backfill.
 
 
-def _epoch(monkeypatch: pytest.MonkeyPatch, epoch: int) -> None:
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: epoch)
+async def _epoch(epoch: int) -> None:
+    """The PKI says the replicas are in ``epoch``."""
+    await acks.note_pki_document(
+        {"StorageReplicas": [{"EnvelopeKeys": {epoch: b"k", epoch + 1: b"k"}}]}
+    )
 
 
 @pytest.mark.asyncio
 async def test_a_new_epoch_rewrites_each_box_we_wrote_with_what_it_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     payload = sent.bacap_payload
     index = chat.land(sent.id)
     await acks.tick()
     assert await acks.rewrites() == []
-    _epoch(monkeypatch, 11)
+    await _epoch(11)
     await acks.tick()
     assert await acks.rewrites() == [
         acks.Rewrite(chat.conversation_id, chat.write_cap, index, payload)
@@ -1205,7 +1229,7 @@ async def test_a_new_epoch_rewrites_each_box_we_wrote_with_what_it_holds(
 async def test_a_box_everyone_acknowledged_is_rewritten_as_a_tombstone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, bob = await _with_bob()
     (sent,) = await chat.queue(_text())
     index = chat.land(sent.id)
@@ -1214,7 +1238,7 @@ async def test_a_box_everyone_acknowledged_is_rewritten_as_a_tombstone(
     await chat.receive("bob", models.GroupChatMessage(
         version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
     ), 1)
-    _epoch(monkeypatch, 11)
+    await _epoch(11)
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     assert (rewrite.box_index, rewrite.payload) == (index, b"")
@@ -1224,7 +1248,7 @@ async def test_a_box_everyone_acknowledged_is_rewritten_as_a_tombstone(
 async def test_nothing_is_written_once_nobody_is_behind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, bob = await _with_bob()
     (sent,) = await chat.queue(_text())
     index = chat.land(sent.id)
@@ -1233,11 +1257,11 @@ async def test_nothing_is_written_once_nobody_is_behind(
     await chat.receive("bob", models.GroupChatMessage(
         version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
     ), 1)
-    _epoch(monkeypatch, 11)
+    await _epoch(11)
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     await acks.rewritten(rewrite)
-    _epoch(monkeypatch, 12)
+    await _epoch(12)
     await acks.tick()
     assert await acks.rewrites() == []
 
@@ -1247,43 +1271,46 @@ async def test_an_epoch_is_taken_up_when_it_falls_due(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     future = int((time.time() - acks.KATZENPOST_EPOCH_ORIGIN) // acks.REPLICA_EPOCH_SECONDS) + 1000
-    _epoch(monkeypatch, future - 1)
+    await _epoch(future - 1)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     assert (await chat.group()).epoch == future - 1
-    _epoch(monkeypatch, future)
+    await _epoch(future)
     group = await chat.group()
     assert group.epoch == future - 1
-    due = acks._due(group, future)
+    due = acks._due(chat.write_cap, future)
     monkeypatch.setattr(time, "time", lambda: due)
     assert (await chat.group()).epoch == future
 
 
-def test_the_replica_epoch_comes_from_the_pki(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(acks, "_pki_replica_epoch", None)
-    acks.note_pki_document({})
-    assert acks._replica_epoch() is None
-    acks.note_pki_document({"StorageReplicas": [{"EnvelopeKeys": {6: b"k", 7: b"k"}}]})
-    assert acks._replica_epoch() == 6
+@pytest.mark.asyncio
+async def test_the_replica_epoch_comes_from_the_pki() -> None:
+    async with persistent.asession() as sess:
+        assert await acks._replica_epoch(sess) is None
+    await acks.note_pki_document({})
+    await acks.note_pki_document({"StorageReplicas": [{"EnvelopeKeys": {6: b"k", 7: b"k"}}]})
+    await acks.note_pki_document({"StorageReplicas": [{"EnvelopeKeys": {6: b"k", 7: b"k"}}]})
+    async with persistent.asession() as sess:
+        assert await acks._replica_epoch(sess) == 6
 
 
 @pytest.mark.asyncio
 async def test_a_rewrite_sent_is_not_queued_again_that_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     await acks.tick()
-    _epoch(monkeypatch, 11)
+    await _epoch(11)
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     await acks.rewritten(rewrite)
     await acks.tick()
     assert await acks.rewrites() == []
-    _epoch(monkeypatch, 12)
+    await _epoch(12)
     await acks.tick()
     assert [r.box_index for r in await acks.rewrites()] == [rewrite.box_index]
 
@@ -1292,12 +1319,12 @@ async def test_a_rewrite_sent_is_not_queued_again_that_epoch(
 async def test_a_box_is_no_longer_rewritten_once_its_record_is_gone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     await persistent.set_retention(chat.conversation_id, persistent.Retention(sent_days=1))
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     await acks.tick()
-    _epoch(monkeypatch, 10 + (acks._policy(1).window or 0) + 1)
+    await _epoch(10 + (acks._policy(1).window or 0) + 1)
     await acks.tick()
     assert await acks.rewrites() == []

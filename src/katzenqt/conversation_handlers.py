@@ -76,12 +76,18 @@ async def _conversation_peers(
 
 
 async def local_membership_hash(
-    sess: AsyncSession, conv: persistent.Conversation
+    sess: AsyncSession, conv: persistent.Conversation,
+    exclude_read_cap: "bytes | None" = None,
 ) -> bytes:
     """Our own view of the conversation membership as the canonical hash
     (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
     plus ourself as ``write_cap[32:]`` rather than the possibly stale own-peer
-    read cap."""
+    read cap.
+
+    ``exclude_read_cap`` drops one member from the set, by its public key,
+    which an ``Introduction`` needs because it describes the group as it
+    stood before the addition it announces: a reader compares the hash
+    before it applies the ``Introduction``."""
     peers = await _conversation_peers(sess, conv.id)
     caps: "set[bytes]" = set()
     for p in peers:
@@ -91,7 +97,8 @@ async def local_membership_hash(
             continue
         rcw = await sess.get(persistent.ReadCapWAL, p.read_cap_id)
         if rcw is not None and rcw.read_cap is not None:
-            caps.add(rcw.read_cap)
+            if exclude_read_cap is None or rcw.read_cap[:32] != exclude_read_cap[:32]:
+                caps.add(rcw.read_cap)
     wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
     if wcw is not None and wcw.write_cap is not None:
         caps.add(wcw.write_cap[32:])
@@ -113,9 +120,11 @@ async def _verify_membership_advisory(
     peer: persistent.ConversationPeer,
     gcm: models.GroupChatMessage,
 ) -> None:
-    """Advisory membership check: a sender that computed a real hash and
-    disagrees with our view is logged, never dropped. Every shipping client
-    still sends a sentinel, so this does no work until a real hash appears."""
+    """Advisory membership check: a sender whose hash disagrees with our
+    view is logged, never dropped. A sentinel, which an older client sends,
+    is not compared. It runs before the message is applied, so an
+    ``Introduction`` is compared with the group as it stood before the
+    member it introduces."""
     got = gcm.membership_hash
     if models.is_membership_sentinel(got):
         return

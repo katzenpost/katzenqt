@@ -10,16 +10,16 @@ import pytest
 
 from katzenqt import acks, network
 from tests.fakes.thinclient import FakeThinClient
-from tests.test_acks import _text, _with_bob
+from tests.test_acks import _epoch, _text, _with_bob
 
 
 async def _queued(monkeypatch: pytest.MonkeyPatch) -> acks.Rewrite:
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     await acks.tick()
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: 11)
+    await _epoch(11)
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     return rewrite

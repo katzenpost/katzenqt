@@ -771,7 +771,7 @@ async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     except Exception as e:
         logger.debug("on_new_pki_document: could not parse event payload: %s", e)
         return
-    acks.note_pki_document(doc)
+    await acks.note_pki_document(doc)
     lambda_p = doc.get("LambdaP")
     if (isinstance(lambda_p, (int, float)) and math.isfinite(lambda_p)
             and lambda_p > 0.0 and _pacer.follow_lambda_p(float(lambda_p))):

@@ -65,8 +65,9 @@ REPLICA_EPOCH_SECONDS = 7 * 24 * 3600
 KATZENPOST_EPOCH_ORIGIN = 1496275200
 """When replica epoch 0 began: 2017-06-01 UTC, katzenpost's ``epochtime.Epoch``."""
 
-_pki_replica_epoch: int | None = None
-"""The replica epoch the latest PKI document's storage replicas are in."""
+REPLICA_EPOCH_SETTING = "replica_epoch"
+"""The ``AppSetting`` holding the replica epoch the latest PKI document's
+storage replicas are in."""
 
 _inducting: set[int] = set()
 """Conversations an induction is under way for in this process. A state
@@ -242,43 +243,60 @@ def replica_epoch_of(doc: Mapping[str, Any]) -> int | None:
     return votes.most_common(1)[0][0] if votes else None
 
 
-def note_pki_document(doc: Mapping[str, Any]) -> None:
-    """Take the replica epoch from a new PKI document."""
-    global _pki_replica_epoch
+async def note_pki_document(doc: Mapping[str, Any]) -> None:
+    """Keep the replica epoch a new PKI document's storage replicas are in,
+    beside the group states it is applied to."""
     epoch = replica_epoch_of(doc)
-    if epoch is not None:
-        _pki_replica_epoch = epoch
+    if epoch is None:
+        return
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.AppSetting, REPLICA_EPOCH_SETTING)
+        if row is not None and row.value == str(epoch):
+            return
+        row = row or persistent.AppSetting(id=REPLICA_EPOCH_SETTING, type="int")
+        row.value = str(epoch)
+        sess.add(row)
+        await sess.commit()
 
 
-def _replica_epoch() -> int | None:
-    return _pki_replica_epoch
+async def _replica_epoch(sess: "AsyncSession") -> int | None:
+    row = await sess.get(persistent.AppSetting, REPLICA_EPOCH_SETTING)
+    return int(row.value) if row is not None and row.value is not None else None
 
 
-def _due(group: Group, epoch: int) -> float:
-    """When ``group`` takes up ``epoch``: at a point in its first half that
-    only this client can work out, so that members do not all rewrite at
-    once.
+def _due(write_cap: bytes, epoch: int) -> float:
+    """When the group we write with ``write_cap`` takes up ``epoch``: at a
+    point in its first half that only we can work out, so that members do
+    not all rewrite at once, nor can one tell when another will.
 
-    >>> group = Group.found(bytes(136), [bytes(136)])
     >>> start = KATZENPOST_EPOCH_ORIGIN + 5 * REPLICA_EPOCH_SECONDS
-    >>> start <= _due(group, 5) < start + REPLICA_EPOCH_SECONDS / 2
+    >>> start <= _due(bytes(168), 5) < start + REPLICA_EPOCH_SECONDS / 2
     True
-    >>> _due(group, 5) - start != _due(group, 6) - start - REPLICA_EPOCH_SECONDS
+    >>> _due(bytes(168), 5) != _due(bytes([1]) * 168, 5)
     True
     """
     digest = hashlib.blake2b(
-        epoch.to_bytes(8, "big"), key=group.read_cap[:64], digest_size=8
+        epoch.to_bytes(8, "big"), key=hashlib.blake2b(write_cap).digest(), digest_size=8
     ).digest()
     offset = int.from_bytes(digest, "big") % (REPLICA_EPOCH_SECONDS // 2)
     return KATZENPOST_EPOCH_ORIGIN + epoch * REPLICA_EPOCH_SECONDS + offset
 
 
-def _takes_up(group: Group, epoch: int) -> bool:
-    """Whether ``group`` takes up ``epoch`` now: once it is due, or at once
-    when the group has missed a whole epoch."""
+def _takes_up(group: Group, write_cap: bytes | None, epoch: int) -> bool:
+    """Whether ``group`` takes up ``epoch`` now: once it is due, at once
+    when the group has missed a whole epoch, and at once without a write
+    cap, since then there is nothing to rewrite."""
     if epoch <= group.epoch:
         return False
-    return epoch > group.epoch + 1 or time.time() >= _due(group, epoch)
+    if epoch > group.epoch + 1 or write_cap is None:
+        return True
+    return time.time() >= _due(write_cap, epoch)
+
+
+async def _write_cap(sess: "AsyncSession", conversation_id: int) -> bytes | None:
+    conv = await sess.get(persistent.Conversation, conversation_id)
+    wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap) if conv is not None else None
+    return wcw.write_cap if wcw is not None else None
 
 
 async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
@@ -302,10 +320,10 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
             group.written(token, written.box_index, written.payload)
     if group.ledger.holding and conversation_id not in _inducting:
         group.cancel_induction()
-    epoch = _replica_epoch()
-    effects = (
-        group.handle(EpochChanged(epoch)) if epoch is not None and _takes_up(group, epoch) else []
-    )
+    epoch = await _replica_epoch(sess)
+    effects = []
+    if epoch is not None and _takes_up(group, await _write_cap(sess, conversation_id), epoch):
+        effects = group.handle(EpochChanged(epoch))
     return _Stored(row, group, cbor2.loads(row.held), outgoing, taken, effects)
 
 
@@ -446,8 +464,9 @@ async def _queue(
 ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
     """Serialize what the state machine asks to send, one message to a box
     or substream, each written after the one before. A message the state
-    machine makes itself carries our membership hash; one it was handed
-    carries its own."""
+    machine makes itself carries our membership hash, an ``Introduction``
+    the hash before the member it introduces; one it was handed carries its
+    own."""
     from .conversation_handlers import local_membership_hash
 
     write_caps: list[uuid.UUID] = []
@@ -455,7 +474,10 @@ async def _queue(
     for item in outgoing:
         gcm = CODEC.gcm(item.message)
         if item.message.content is None:
-            gcm.membership_hash = await local_membership_hash(sess, conv)
+            intro = item.message.introduction
+            gcm.membership_hash = await local_membership_hash(
+                sess, conv, exclude_read_cap=intro.read_cap if intro else None,
+            )
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
         new_write_caps, db_entries = await send_op.serialize_async(
             chunk_size=models.box_plaintext_length(), conversation_id=conv.id
@@ -511,11 +533,14 @@ async def serialize_introduction(
 ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
     """Serialize ``gcm``, the ``Introduction`` that commits the induction
     under way, numbering the member it introduces. Called under the
-    conversation's writer lock. It carries our membership hash."""
+    conversation's writer lock. It carries our membership hash as it stood
+    before the member it introduces."""
     from .conversation_handlers import local_membership_hash
 
-    gcm.membership_hash = await local_membership_hash(sess, conv)
     intro = gcm.as_introduction
+    gcm.membership_hash = await local_membership_hash(
+        sess, conv, exclude_read_cap=intro.read_cap if intro else None,
+    )
     stored = await _load(sess, conv.id)
     if stored is None or intro is None:
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
@@ -1027,6 +1052,7 @@ __all__ = [
     "GcmCodec",
     "KATZENPOST_EPOCH_ORIGIN",
     "REPLICA_EPOCH_SECONDS",
+    "REPLICA_EPOCH_SETTING",
     "Rewrite",
     "Stream",
     "WALK_LIMIT",
