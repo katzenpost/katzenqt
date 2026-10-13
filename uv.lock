@@ -497,9 +497,9 @@ wheels = [
 
 [[package]]
 name = "highctidh"
-version = "1.0.2025051200"
+version = "1.0.2026101300"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/78/df/4b6b014d26cb938f8ffb021fcbec8ec6cd01b2507ed5a2b6c8e5c7e0abef/highctidh-1.0.2025051200.tar.gz", hash = "sha256:c06b926b3d000f16c789fec15fa08fd8e28ceb4b1f03c34ae6c44dd8da94875a", size = 1803890, upload-time = "2025-05-12T14:43:20.614Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/7c/423f487276722088f97161b1fa886cdb2b7d9bfbcae981f90a962058db52/highctidh-1.0.2026101300.tar.gz", hash = "sha256:33e6d523894d312506dd5aa981dc0de24fb6ddad7b369e9423fc47ec136f0df2", size = 1808437, upload-time = "2026-10-13T22:07:40.222Z" }
 
 [[package]]
 name = "hpqc"

@@ -301,7 +301,7 @@
             "name": "python3-highctidh",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"highctidh==1.0.2025051200\" --no-build-isolation"
+                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"highctidh==1.0.2026101300\" --no-build-isolation"
             ],
             "build-options": {
                 "env": {
@@ -311,8 +311,8 @@
             "sources": [
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/78/df/4b6b014d26cb938f8ffb021fcbec8ec6cd01b2507ed5a2b6c8e5c7e0abef/highctidh-1.0.2025051200.tar.gz",
-                    "sha256": "c06b926b3d000f16c789fec15fa08fd8e28ceb4b1f03c34ae6c44dd8da94875a"
+                    "url": "https://files.pythonhosted.org/packages/ab/7c/423f487276722088f97161b1fa886cdb2b7d9bfbcae981f90a962058db52/highctidh-1.0.2026101300.tar.gz",
+                    "sha256": "33e6d523894d312506dd5aa981dc0de24fb6ddad7b369e9423fc47ec136f0df2"
                 }
             ]
         },
