@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 from sqlmodel import SQLModel
 
-from katzenqt import network, persistent
+from katzenqt import network, persistent, voucher
 from katzenqt.tally import controller as tally_controller
 
 from tests.fakes.thinclient import FakeThinClient
@@ -123,6 +123,14 @@ def _reset_network_module_state() -> Iterator[None]:
     restore()
     yield
     restore()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_introduction_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test its own set of Introduction waits. A wait a test
+    queued and left runs on that test's loop, which has closed by the time
+    a later test waits on every Introduction queued."""
+    monkeypatch.setattr(voucher, "_introductions", set())
 
 
 @pytest.fixture(autouse=True)
