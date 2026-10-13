@@ -141,3 +141,37 @@ async def test_headless_prints_the_membership_hash(caplog: pytest.LogCaptureFixt
             _args.MembershipHash(action="membership-hash", conv_name="missing")
         ) == 2
     assert f"MEMBERSHIP_HASH={expected.hex()}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_introduction_is_checked_against_the_group_before_its_member(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    conv_id = await _make_conversation()
+    me, alice = b"\x02" * 136, b"\x01" * 136
+
+    def introducing(read_cap: bytes, members: list[bytes]) -> GroupChatMessage:
+        return GroupChatMessage(
+            version=models.GROUP_CHAT_VERSION,
+            membership_hash=models.canonical_membership_hash(members),
+            msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+            introduction=models.GroupChatPleaseAdd(display_name="x", read_cap=read_cap),
+        )
+
+    async with persistent.asession() as sess:
+        peer = (await conversation_handlers._conversation_peers(sess, conv_id))[0]
+        with caplog.at_level(logging.INFO):
+            await conversation_handlers._verify_membership_advisory(
+                sess, peer, introducing(me, [alice]),
+            )
+            await conversation_handlers._verify_membership_advisory(
+                sess, peer, introducing(b"\x05" * 136, [me, alice]),
+            )
+            assert "mismatch" not in caplog.text
+            await conversation_handlers._verify_membership_advisory(
+                sess, peer, GroupChatMessage(
+                    version=models.GROUP_CHAT_VERSION,
+                    membership_hash=models.canonical_membership_hash([alice]), text="hi",
+                ),
+            )
+    assert "mismatch" in caplog.text

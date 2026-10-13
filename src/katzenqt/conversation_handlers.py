@@ -86,8 +86,8 @@ async def local_membership_hash(
 
     ``exclude_read_cap`` drops one member from the set, by its public key,
     which an ``Introduction`` needs because it describes the group as it
-    stood before the addition it announces: a reader compares the hash
-    before it applies the ``Introduction``."""
+    stood before the addition it announces. The member dropped may be us,
+    when we read our own ``Introduction``."""
     peers = await _conversation_peers(sess, conv.id)
     caps: "set[bytes]" = set()
     for p in peers:
@@ -101,7 +101,9 @@ async def local_membership_hash(
                 caps.add(rcw.read_cap)
     wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
     if wcw is not None and wcw.write_cap is not None:
-        caps.add(wcw.write_cap[32:])
+        own = wcw.write_cap[32:]
+        if exclude_read_cap is None or own[:32] != exclude_read_cap[:32]:
+            caps.add(own)
     return models.canonical_membership_hash(caps)
 
 
@@ -122,13 +124,16 @@ async def _verify_membership_advisory(
 ) -> None:
     """Advisory membership check: a sender whose hash disagrees with our
     view is logged, never dropped. A sentinel, which an older client sends,
-    is not compared. It runs before the message is applied, so an
-    ``Introduction`` is compared with the group as it stood before the
-    member it introduces."""
+    is not compared. An ``Introduction`` is compared with our view less the
+    member it introduces, whether or not we hold that member yet: we may be
+    it."""
     got = gcm.membership_hash
     if models.is_membership_sentinel(got):
         return
-    local = await local_membership_hash(sess, peer.conversation)
+    intro = gcm.as_introduction
+    local = await local_membership_hash(
+        sess, peer.conversation, exclude_read_cap=intro.read_cap if intro else None,
+    )
     if got != local:
         logger.info(
             "membership_hash mismatch on conversation %s (advisory): peer "
