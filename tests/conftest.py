@@ -119,18 +119,14 @@ def _reset_network_module_state() -> Iterator[None]:
         # transition-only logging and dedupe epoch bumps across tests.
         setattr(network, "_last_connected", None)
         setattr(network, "_last_epoch", None)
+        # An Introduction wait a test queued and left runs on that test's
+        # loop, which has closed by the time a later test waits on every
+        # Introduction queued.
+        voucher._introductions.clear()
 
     restore()
     yield
     restore()
-
-
-@pytest.fixture(autouse=True)
-def _fresh_introduction_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give each test its own set of Introduction waits. A wait a test
-    queued and left runs on that test's loop, which has closed by the time
-    a later test waits on every Introduction queued."""
-    monkeypatch.setattr(voucher, "_introductions", set())
 
 
 @pytest.fixture(autouse=True)
