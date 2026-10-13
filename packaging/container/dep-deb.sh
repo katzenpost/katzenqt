@@ -22,6 +22,7 @@ git -C "$work/src" -c advice.detachedHead=false switch --detach "$rev"
 SOURCE_DATE_EPOCH=$(dpkg-parsechangelog \
     -l "$root/debian/changelog" -STimestamp)
 export SOURCE_DATE_EPOCH
+git config --global --add safe.directory "$work/src"
 $(command -v make) -C "$work/src" "$target"
 cp "$work/src"/dist/*.deb "$out"/
 rm -rf "$work"

@@ -25,7 +25,8 @@ mk-build-deps -ir -t "apt-get -y --no-install-recommends" debian/control
 
 apt install -y --no-install-recommends \
     build-essential cargo clang cmake curl dh-golang fakeroot git \
-    golang-any libasound2-dev pkg-config python3-build python3-dev \
+    golang-any libasound2-dev pkg-config python3-all-dev \
+    python3-build python3-dev \
     python3-pip python3-setuptools python3-stdeb python3-venv \
     python3-wheel rustc systemd unzip
 
