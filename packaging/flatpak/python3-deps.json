@@ -260,6 +260,56 @@
             ]
         },
         {
+            "name": "python3-cryptography",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"cryptography>=45\" --no-build-isolation"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/1a/f1/b474e930c4d910328780e3940da76f5aa5cbc48ce1fc14e44d239d9ea9db/cryptography-50.0.2-cp311-abi3-manylinux_2_28_x86_64.whl",
+                    "sha256": "4061c0079120205fb760c58acab6443e217307dcf05e3702cf970e0689972856",
+                    "only-arches": [
+                        "x86_64"
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "python3-highctidh",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"highctidh==1.0.2025051200\" --no-build-isolation"
+            ],
+            "build-options": {
+                "env": {
+                    "HIGHCTIDH_PORTABLE": "1"
+                }
+            },
+            "sources": [
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/78/df/4b6b014d26cb938f8ffb021fcbec8ec6cd01b2507ed5a2b6c8e5c7e0abef/highctidh-1.0.2025051200.tar.gz",
+                    "sha256": "c06b926b3d000f16c789fec15fa08fd8e28ceb4b1f03c34ae6c44dd8da94875a"
+                }
+            ]
+        },
+        {
+            "name": "python3-hpqc",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --no-deps --prefix=${FLATPAK_DEST} ./py"
+            ],
+            "sources": [
+                {
+                    "type": "git",
+                    "url": "https://github.com/katzenpost/hpqc.git",
+                    "commit": "dfe21b874248d450ac94cf802d61740cba90caed"
+                }
+            ]
+        },
+        {
             "name": "python3-cbor2",
             "buildsystem": "simple",
             "build-commands": [
