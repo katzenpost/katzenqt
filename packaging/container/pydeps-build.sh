@@ -14,6 +14,10 @@ SOURCE_DATE_EPOCH=$(dpkg-parsechangelog \
 export SOURCE_DATE_EPOCH
 RUSTIC_AUDIO_URL=$(sed -n 's/^RUSTIC_AUDIO_URL := //p' "$mk")
 RUSTIC_AUDIO_REV=$(sed -n 's/^RUSTIC_AUDIO_REV := //p' "$mk")
+HPQC_URL=$(sed -n 's/^HPQC_URL := //p' "$mk")
+HPQC_REV=$(sed -n 's/^HPQC_REV := //p' "$mk")
+HIGHCTIDH_URL=$(sed -n 's/^HIGHCTIDH_URL := //p' "$mk")
+HIGHCTIDH_REV=$(sed -n 's/^HIGHCTIDH_REV := //p' "$mk")
 
 CARGO_NET_RETRY=10
 CARGO_HTTP_TIMEOUT=120
@@ -80,3 +84,7 @@ mkdir -p "$work/wh-audio"
 retry "$PIP" wheel --no-deps -w "$work/wh-audio" "$work/audio"
 build_deb python3-rustic-audio-tool amd64 "$work/wh-audio" \
 	"python3, libasound2t64 | libasound2"
+
+dep="$(dirname "$0")/dep-deb.sh"
+"$dep" "$out" "$HPQC_URL" "$HPQC_REV"
+"$dep" "$out" "$HIGHCTIDH_URL" "$HIGHCTIDH_REV" deb

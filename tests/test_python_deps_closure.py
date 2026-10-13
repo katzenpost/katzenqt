@@ -32,6 +32,16 @@ def test_pins_are_explicit() -> None:
     assert re.search(
         r"^RUSTIC_AUDIO_REV := [0-9a-f]{40}$", makefile, re.MULTILINE
     )
+    assert re.search(
+        r"^HPQC_URL := https://github.com/", makefile, re.MULTILINE
+    )
+    assert re.search(r"^HPQC_REV := [0-9a-f]{40}$", makefile, re.MULTILINE)
+    assert re.search(
+        r"^HIGHCTIDH_URL := https://codeberg.org/", makefile, re.MULTILINE
+    )
+    assert re.search(
+        r"^HIGHCTIDH_REV := [0-9a-f]{40}$", makefile, re.MULTILINE
+    )
 
 
 def test_closure_builds_from_source_not_prebuilt_binaries() -> None:
@@ -45,6 +55,34 @@ def test_closure_builds_from_source_not_prebuilt_binaries() -> None:
     assert "katzenpost_thinclient" not in body
     assert "SOURCE_DATE_EPOCH" in body
     assert "$RUSTIC_AUDIO_URL" in body and "$RUSTIC_AUDIO_REV" in body
+
+
+def test_one_script_builds_every_dependency() -> None:
+    """A clone and one target has to yield the whole closure, and hpqc
+    and highctidh are built by their own targets, not repacked here."""
+    body = SCRIPT.read_text()
+    for name in ("pycrdt", "rustic-audio-tool", "HPQC_URL",
+                 "HIGHCTIDH_URL"):
+        assert name in body
+    assert '"$dep" "$out" "$HPQC_URL" "$HPQC_REV"' in body
+    assert '"$HIGHCTIDH_REV" deb' in body
+    dep = (ROOT / "packaging" / "container" / "dep-deb.sh").read_text()
+    assert "target=${4:-deb-build}" in dep
+    assert '"$target"' in dep
+    collect = (
+        ROOT / "packaging" / "container" / "build-python-debs.sh"
+    ).read_text()
+    for name in ("python3-hpqc_", "python3-highctidh_"):
+        assert name in collect
+    ci = CI.read_text()
+    assert "packaging/container/pydeps-build.sh" in ci
+    assert "dep-deb.sh \"$debs\" \"$HPQC_URL\"" not in ci
+
+
+def test_the_installed_package_imports_what_the_closure_builds() -> None:
+    body = (ROOT / "packaging" / "debian" / "test.sh").read_text()
+    assert "import hpqc.bacap" in body
+    assert "from hpqc.nike.ctidh1024 import CTIDH1024" in body
 
 
 def test_vendored_debs_declare_their_debian_runtime_deps() -> None:
@@ -66,8 +104,9 @@ def test_closure_container_has_rust_toolchain() -> None:
     dockerfile = (
         ROOT / "packaging" / "container" / "Containerfile.python-debs"
     ).read_text()
-    assert "cargo" in dockerfile
-    assert "python3-dev" in dockerfile
+    for tool in ("cargo", "python3-dev", "dh-golang", "golang-any",
+                 "python3-stdeb", "flit"):
+        assert tool in dockerfile
 
 
 def test_make_target_and_all_wire_the_closure() -> None:
@@ -84,6 +123,8 @@ def test_ci_builds_and_installs_the_closure() -> None:
     assert "make deb-ci" in wf
     assert "packaging/container/pydeps-build.sh" in ci
     assert '"$debs"/python3-katzenpost-thinclient_*.deb' in ci
+    assert '"$debs"/python3-highctidh_*.deb' in ci
+    assert '"$debs"/python3-hpqc_*.deb' in ci
     assert "apt install" in ci
     assert "pip install" not in ci
 

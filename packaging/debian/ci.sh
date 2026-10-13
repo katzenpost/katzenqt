@@ -24,8 +24,10 @@ apt install -y --no-install-recommends devscripts equivs
 mk-build-deps -ir -t "apt-get -y --no-install-recommends" debian/control
 
 apt install -y --no-install-recommends \
-    build-essential cargo cmake curl git libasound2-dev pkg-config \
-    python3-dev python3-pip python3-venv rustc systemd unzip
+    build-essential cargo clang cmake curl dh-golang fakeroot git \
+    golang-any libasound2-dev pkg-config python3-build python3-dev \
+    python3-pip python3-setuptools python3-stdeb python3-venv \
+    python3-wheel rustc systemd unzip
 
 if ! go version 2>/dev/null | grep -q "go$GO_VERSION"; then
     arch=$(dpkg --print-architecture)
@@ -64,6 +66,8 @@ apt update
 apt install -y \
     "$debs"/python3-pycrdt_*.deb \
     "$debs"/python3-rustic-audio-tool_*.deb \
+    "$debs"/python3-highctidh_*.deb \
+    "$debs"/python3-hpqc_*.deb \
     "$debs"/python3-katzenpost-thinclient_*.deb \
     "$debs"/katzenpost_*.deb \
     "$debs"/katzenqt_0.0.1_all.deb

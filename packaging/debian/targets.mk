@@ -6,6 +6,10 @@ PIP_VER := 24.2
 MATURIN_VER := 1.8.2
 RUSTIC_AUDIO_URL := https://github.com/katzenpost/Rustic_Audio_PyO3
 RUSTIC_AUDIO_REV := a7f5c4877f1aa84f312cc7a23fd85a445225393b
+HPQC_URL := https://github.com/katzenpost/hpqc.git
+HPQC_REV := dfe21b874248d450ac94cf802d61740cba90caed
+HIGHCTIDH_URL := https://codeberg.org/vula/highctidh.git
+HIGHCTIDH_REV := 0a9622b45ca5e34c23be4a9bce9b22d245833375
 
 DEB_DISTROS ?= debian-13 debian-forky ubuntu-26.04
 
