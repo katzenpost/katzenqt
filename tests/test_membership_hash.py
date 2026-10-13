@@ -79,6 +79,14 @@ async def _make_conversation(name: str = "demo") -> int:
         sess.add(persistent.ConversationPeer(
             name="alice", read_cap_id=peer_rcw.id, active=True, conversation=convo,
         ))
+        for name, active in (("paused", False), (models.SUBSTREAM_NAME_PREFIX + "x", True)):
+            rcw = persistent.ReadCapWAL(
+                id=uuid.uuid4(), read_cap=bytes([len(name)]) * 136, next_index=bytes(104),
+            )
+            sess.add(rcw)
+            sess.add(persistent.ConversationPeer(
+                name=name, read_cap_id=rcw.id, active=active, conversation=convo,
+            ))
         await sess.commit()
         await sess.refresh(convo)
         return convo.id
