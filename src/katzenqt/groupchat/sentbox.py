@@ -33,6 +33,9 @@ class Record:
     """None once the plaintext is gone, or if it was never handed over."""
     control: bool
     written: int
+    settled: bool = False
+    """Written as a tombstone once every member had acknowledged it: there
+    is nothing more to write."""
 
 
 @dataclass
@@ -72,12 +75,22 @@ class SentBox:
             ) or (policy.discard_acked and everyone_acked(idx64)):
                 record.plaintext = None
 
-    def backfill(self, epoch: int) -> list[Effect]:
-        """Rewrite every record, at most once per epoch."""
+    def backfill(self, epoch: int, everyone_acked: Callable[[int], bool]) -> list[Effect]:
+        """Rewrite every record a member has yet to acknowledge, at most
+        once per epoch, and write a record every member has acknowledged as
+        a tombstone once its plaintext is gone. Nothing when nobody is
+        behind."""
         if epoch == self.backfilled:
             return []
         self.backfilled = epoch
-        return [
-            WriteBox(r.index, r.plaintext) if r.plaintext is not None else WriteTombstone(r.index)
-            for _, r in sorted(self.records.items())
-        ]
+        effects: list[Effect] = []
+        for idx64, r in sorted(self.records.items()):
+            if not everyone_acked(idx64):
+                effects.append(
+                    WriteBox(r.index, r.plaintext) if r.plaintext is not None
+                    else WriteTombstone(r.index)
+                )
+            elif r.plaintext is None and not r.settled:
+                r.settled = True
+                effects.append(WriteTombstone(r.index))
+        return effects

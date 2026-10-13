@@ -565,7 +565,7 @@ class Group:
                 if epoch - received >= keep:
                     del self.received[sender, index]
                     effects.append(Expire(sender, index))
-        return effects + self.sent.backfill(epoch)
+        return effects + self.sent.backfill(epoch, self._everyone_acked)
 
     def _everyone_acked(self, idx64: int) -> bool:
         return all(self.ledger.acked_by.get(key, -1) >= idx64 for key in self.readers)

@@ -20,13 +20,15 @@ next load takes it in.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import math
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections import Counter
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -60,6 +62,12 @@ _CHUNK_SIZE = 1530
 
 REPLICA_EPOCH_SECONDS = 7 * 24 * 3600
 """A replica epoch's length, as the replica's ``ReplicaEpochPeriod``."""
+
+KATZENPOST_EPOCH_ORIGIN = 1496275200
+"""When replica epoch 0 began: 2017-06-01 UTC, katzenpost's ``epochtime.Epoch``."""
+
+_pki_replica_epoch: int | None = None
+"""The replica epoch the latest PKI document's storage replicas are in."""
 
 _inducting: set[int] = set()
 """Conversations an induction is under way for in this process. A state
@@ -213,8 +221,65 @@ def _policy(sent_days: int | None) -> Retention:
     return Retention(window=max(Retention().window or 0, epochs), keep_sent=epochs)
 
 
-def _replica_epoch() -> int:
-    return int(time.time() // REPLICA_EPOCH_SECONDS)
+def replica_epoch_of(doc: Mapping[str, Any]) -> int | None:
+    """The replica epoch a PKI document's storage replicas are in, as most of
+    them say: each publishes envelope keys up to the epoch after its own.
+
+    >>> replica = lambda *epochs: {"EnvelopeKeys": {e: b"k" for e in epochs}}
+    >>> replica_epoch_of({"StorageReplicas": [
+    ...     replica(4, 5, 6), cbor2.dumps(replica(5, 6)), replica(7, 8), b"junk", {},
+    ... ]})
+    5
+    >>> replica_epoch_of({}) is None
+    True
+    """
+    votes: Counter[int] = Counter()
+    for entry in doc.get("StorageReplicas") or []:
+        try:
+            desc = entry if isinstance(entry, dict) else cbor2.loads(entry)
+            votes[max(desc["EnvelopeKeys"]) - 1] += 1
+        except (cbor2.CBORDecodeError, KeyError, TypeError, ValueError):
+            continue
+    return votes.most_common(1)[0][0] if votes else None
+
+
+def note_pki_document(doc: Mapping[str, Any]) -> None:
+    """Take the replica epoch from a new PKI document."""
+    global _pki_replica_epoch
+    epoch = replica_epoch_of(doc)
+    if epoch is not None:
+        _pki_replica_epoch = epoch
+
+
+def _replica_epoch() -> int | None:
+    return _pki_replica_epoch
+
+
+def _due(group: Group, epoch: int) -> float:
+    """When ``group`` takes up ``epoch``: at a point in its first half that
+    only this client can work out, so that members do not all rewrite at
+    once.
+
+    >>> group = Group.found(bytes(136), [bytes(136)])
+    >>> start = KATZENPOST_EPOCH_ORIGIN + 5 * REPLICA_EPOCH_SECONDS
+    >>> start <= _due(group, 5) < start + REPLICA_EPOCH_SECONDS / 2
+    True
+    >>> _due(group, 5) - start != _due(group, 6) - start - REPLICA_EPOCH_SECONDS
+    True
+    """
+    digest = hashlib.blake2b(
+        epoch.to_bytes(8, "big"), key=group.read_cap[:64], digest_size=8
+    ).digest()
+    offset = int.from_bytes(digest, "big") % (REPLICA_EPOCH_SECONDS // 2)
+    return KATZENPOST_EPOCH_ORIGIN + epoch * REPLICA_EPOCH_SECONDS + offset
+
+
+def _takes_up(group: Group, epoch: int) -> bool:
+    """Whether ``group`` takes up ``epoch`` now: once it is due, or at once
+    when the group has missed a whole epoch."""
+    if epoch <= group.epoch:
+        return False
+    return epoch > group.epoch + 1 or time.time() >= _due(group, epoch)
 
 
 async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
@@ -239,7 +304,9 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
     if group.ledger.holding and conversation_id not in _inducting:
         group.cancel_induction()
     epoch = _replica_epoch()
-    effects = group.handle(EpochChanged(epoch)) if epoch > group.epoch else []
+    effects = (
+        group.handle(EpochChanged(epoch)) if epoch is not None and _takes_up(group, epoch) else []
+    )
     return _Stored(row, group, cbor2.loads(row.held), outgoing, taken, effects)
 
 
@@ -959,6 +1026,7 @@ async def summary(
 __all__ = [
     "CODEC",
     "GcmCodec",
+    "KATZENPOST_EPOCH_ORIGIN",
     "REPLICA_EPOCH_SECONDS",
     "Rewrite",
     "Stream",
@@ -971,7 +1039,9 @@ __all__ = [
     "hand_over",
     "held_back",
     "member_key",
+    "note_pki_document",
     "on_message",
+    "replica_epoch_of",
     "rewrites",
     "rewritten",
     "scan",

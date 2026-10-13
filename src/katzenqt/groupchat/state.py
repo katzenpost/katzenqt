@@ -75,27 +75,43 @@ def _from_v1(body: Any) -> Any:
     return body
 
 
+UNIX_WEEKS_AT_KATZENPOST_EPOCH = 2474
+"""Version 2 counted replica epochs in weeks since 1970; version 3 counts
+them as the replicas do, in weeks since 2017-06-01."""
+
+
 def _from_v2(body: Any) -> Any:
     """A version 2 body as version 3 writes it. A member's acknowledgement of
-    a box no longer recorded is forgotten.
+    a box no longer recorded is forgotten, and epochs are counted from
+    2017-06-01.
 
     >>> group = Group.found(bytes(136), [bytes(136), bytes([1]) * 136])
     >>> box = (5).to_bytes(8, "little") + bytes(96)
-    >>> group.sent.record(box, b"hi", False, 0)
+    >>> group.epoch = 7
+    >>> group.sent.record(box, b"hi", False, 7)
     >>> group.ledger.acked_by = {bytes([1]) * 136: 5}
     >>> body = _encode(group)
+    >>> body["epoch"] = 2481
     >>> body["sent"] = {"records": [[box, {"seq": 0, "plaintext": b"hi",
-    ...     "control": False, "written": 0}]], "count": 1, "backfilled": -1}
+    ...     "control": False, "written": 2481}]], "count": 1, "backfilled": -1}
     >>> body["ledger"]["acked_by"] = [[bytes([1]) * 136, 0], [bytes(136), 7]]
     >>> load(cbor2.dumps([2, body])) == group
     True
     """
+    def shifted(epoch: int) -> int:
+        return max(epoch - UNIX_WEEKS_AT_KATZENPOST_EPOCH, 0) if epoch > 0 else epoch
+
+    body["epoch"] = shifted(body["epoch"])
+    body["received"] = [[at, shifted(epoch)] for at, epoch in body["received"]]
     sent = body["sent"]
+    sent["backfilled"] = shifted(sent["backfilled"])
+    for _, record in sent["records"]:
+        record["written"] = shifted(record["written"])
     by_seq = {record["seq"]: counter(index) for index, record in sent["records"]}
     sent["records"] = [
         [counter(index), {
             "index": index, "plaintext": record["plaintext"],
-            "control": record["control"], "written": record["written"],
+            "control": record["control"], "written": record["written"], "settled": False,
         }]
         for index, record in sent["records"]
     ]

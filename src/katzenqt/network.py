@@ -756,7 +756,8 @@ _epoch_event = asyncio.Event()
 
 
 async def on_new_pki_document(event: "dict[str, bytes]") -> None:
-    """Bump _epoch_event on every epoch advance.
+    """Bump _epoch_event on every epoch advance, and note the replica epoch
+    the document's storage replicas are in.
 
     Parses the epoch out of the raw event ourselves (rather than going
     through connection.pki_document(), which needs a ThinClient instance
@@ -770,6 +771,7 @@ async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     except Exception as e:
         logger.debug("on_new_pki_document: could not parse event payload: %s", e)
         return
+    acks.note_pki_document(doc)
     lambda_p = doc.get("LambdaP")
     if (isinstance(lambda_p, (int, float)) and math.isfinite(lambda_p)
             and lambda_p > 0.0 and _pacer.follow_lambda_p(float(lambda_p))):

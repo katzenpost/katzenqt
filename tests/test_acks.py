@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, cast
 
@@ -849,13 +850,14 @@ async def test_removing_a_conversation_removes_its_group_state() -> None:
 async def test_records_older_than_the_window_are_let_go(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _epoch(monkeypatch, 10)
     chat, _ = await _with_bob()
     await persistent.set_retention(chat.conversation_id, persistent.Retention(sent_days=1))
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     assert (await chat.group()).sent.records
-    now = acks._replica_epoch()
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: now + 10)
+    assert (await chat.group()).sent.records
+    _epoch(monkeypatch, 10 + 10)
     assert not (await chat.group()).sent.records
 
 
@@ -863,11 +865,12 @@ async def test_records_older_than_the_window_are_let_go(
 async def test_records_are_kept_as_long_as_sent_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _epoch(monkeypatch, 10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
-    now = acks._replica_epoch()
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: now + 100)
+    assert (await chat.group()).sent.records
+    _epoch(monkeypatch, 10 + 100)
     assert (await chat.group()).sent.records
 
 
@@ -1215,6 +1218,54 @@ async def test_a_box_everyone_acknowledged_is_rewritten_as_a_tombstone(
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     assert (rewrite.box_index, rewrite.payload) == (index, b"")
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_written_once_nobody_is_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _epoch(monkeypatch, 10)
+    chat, bob = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    index = chat.land(sent.id)
+    me = (await chat.group()).rosters.index_of(bob, chat.own_key)
+    assert me is not None
+    await chat.receive("bob", models.GroupChatMessage(
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
+    ), 1)
+    _epoch(monkeypatch, 11)
+    await acks.tick()
+    (rewrite,) = await acks.rewrites()
+    await acks.rewritten(rewrite)
+    _epoch(monkeypatch, 12)
+    await acks.tick()
+    assert await acks.rewrites() == []
+
+
+@pytest.mark.asyncio
+async def test_an_epoch_is_taken_up_when_it_falls_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    future = int((time.time() - acks.KATZENPOST_EPOCH_ORIGIN) // acks.REPLICA_EPOCH_SECONDS) + 1000
+    _epoch(monkeypatch, future - 1)
+    chat, _ = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    chat.land(sent.id)
+    assert (await chat.group()).epoch == future - 1
+    _epoch(monkeypatch, future)
+    group = await chat.group()
+    assert group.epoch == future - 1
+    due = acks._due(group, future)
+    monkeypatch.setattr(acks.time, "time", lambda: due)
+    assert (await chat.group()).epoch == future
+
+
+def test_the_replica_epoch_comes_from_the_pki(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(acks, "_pki_replica_epoch", None)
+    acks.note_pki_document({})
+    assert acks._replica_epoch() is None
+    acks.note_pki_document({"StorageReplicas": [{"EnvelopeKeys": {6: b"k", 7: b"k"}}]})
+    assert acks._replica_epoch() == 6
 
 
 @pytest.mark.asyncio
