@@ -9,7 +9,7 @@ RUSTIC_AUDIO_REV := a7f5c4877f1aa84f312cc7a23fd85a445225393b
 HPQC_URL := https://github.com/katzenpost/hpqc.git
 HPQC_REV := fafc1de88fb40cf9e75bb8046f2bce7ff4fac6c8
 HIGHCTIDH_URL := https://codeberg.org/vula/highctidh.git
-HIGHCTIDH_REV := 0a9622b45ca5e34c23be4a9bce9b22d245833375
+HIGHCTIDH_REV := 15e284352a9db95838744cbfe9fe7c570b262d17
 
 DEB_DISTROS ?= debian-13 debian-forky ubuntu-26.04
 
