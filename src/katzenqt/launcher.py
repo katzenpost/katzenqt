@@ -121,6 +121,12 @@ def install_service() -> bool:
     blocks it. The unit is rewritten only when its bytes differ."""
     if service_blocker():
         return False
+    print(
+        "katzenqt is installing, enabling and starting the kpclientd "
+        "systemd user unit. Set KATZENQT_NO_AUTO_INSTALL=1 to stop it "
+        "doing this by itself.",
+        file=sys.stderr,
+    )
     units = Path.home() / ".config/systemd/user"
     units.mkdir(mode=0o700, parents=True, exist_ok=True)
     unit = units / "kpclientd.service"
