@@ -19,7 +19,7 @@ SerializedRow = Union[persistent.PlaintextWAL, persistent.ReadCapWAL]
 if TYPE_CHECKING:
     from pydantic import FieldSerializationInfo
 
-# --- membership hash (GROUP_CHAT_PROTOCOL.md section 6b) ------------------
+# --- membership hash -------------------------------------------------------
 # The recipe is fixed so that independent implementations compute the same
 # 32-byte digest over the same member set.
 

@@ -79,10 +79,9 @@ async def local_membership_hash(
     sess: AsyncSession, conv: persistent.Conversation,
     exclude_read_cap: "bytes | None" = None,
 ) -> bytes:
-    """Our own view of the conversation membership as the canonical hash
-    (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
-    plus ourself as ``write_cap[32:]`` rather than the possibly stale own-peer
-    read cap.
+    """Our own view of the conversation membership as the canonical hash:
+    every active, non-substream peer's read cap, plus ourself as
+    ``write_cap[32:]`` rather than the possibly stale own-peer read cap.
 
     ``exclude_read_cap`` drops one member from the set, by its public key,
     which an ``Introduction`` needs because it describes the group as it
