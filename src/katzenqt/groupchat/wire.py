@@ -144,11 +144,16 @@ class Codec(Protocol):
     def decode(self, plaintext: bytes) -> Message | None: ...
 
 
+VERSION = 3
+"""The message version :class:`CborCodec` writes, katzenqt's
+``GROUP_CHAT_VERSION``."""
+
+
 class CborCodec:
     """A plain encoding of :class:`Message`; a client supplies its own."""
 
     def encode(self, message: Message) -> bytes:
-        gcm: dict[str, object] = {"Version": 1}
+        gcm: dict[str, object] = {"Version": VERSION}
         if message.content is not None:
             gcm["Content"] = message.content
         if message.introduction is not None:

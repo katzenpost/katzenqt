@@ -6,6 +6,7 @@ from __future__ import annotations
 import cbor2
 import pytest
 
+from katzenqt import models
 from katzenqt.groupchat import events, sim, state, wire
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.ledger import Ledger
@@ -219,3 +220,8 @@ def test_forgetting_a_member_drops_what_it_acknowledged() -> None:
     ledger.acked(b"bob", 3)
     ledger.forget(b"bob")
     assert ledger.heard == {b"alice": {}} and ledger.acked_by == {}
+
+
+def test_the_plain_codec_writes_the_current_version() -> None:
+    assert wire.VERSION == models.GROUP_CHAT_VERSION
+    assert cbor2.loads(wire.CborCodec().encode(wire.Message()))["Version"] == wire.VERSION
