@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from pathlib import Path
@@ -6,6 +7,8 @@ ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "packaging" / "container" / "pydeps-build.sh"
 PINS = ROOT / "packaging" / "debian" / "targets.mk"
 CI = ROOT / "packaging" / "debian" / "ci.sh"
+FLATPAK = ROOT / "packaging" / "flatpak" / "python3-deps.json"
+PROJECT = ROOT / "pyproject.toml"
 
 
 def _group(pattern: str, text: str) -> str:
@@ -42,6 +45,39 @@ def test_pins_are_explicit() -> None:
     assert re.search(
         r"^HIGHCTIDH_REV := [0-9a-f]{40}$", makefile, re.MULTILINE
     )
+
+
+def test_every_place_that_pins_hpqc_pins_the_same_commit() -> None:
+    rev = _group(r"^HPQC_REV := ([0-9a-f]{40})$", PINS.read_text())
+    assert _group(
+        r'hpqc = \{ git = "[^"]+", rev = "([0-9a-f]{40})"',
+        PROJECT.read_text(),
+    ) == rev
+    flatpak = json.loads(FLATPAK.read_text())
+    module = next(
+        m for m in flatpak["modules"] if m.get("name") == "python3-hpqc"
+    )
+    commits = [
+        src["commit"] for src in module["sources"] if "commit" in src
+    ]
+    assert commits == [rev]
+
+
+def test_every_arch_gets_the_same_set_of_wheels() -> None:
+    flatpak = json.loads(FLATPAK.read_text())
+    for module in flatpak["modules"]:
+        per_arch: "dict[str, set[str]]" = {}
+        for src in module.get("sources", []):
+            name = src.get("url", "").rsplit("/", 1)[-1]
+            if not name.endswith(".whl"):
+                continue
+            for arch in src.get("only-arches", []):
+                per_arch.setdefault(arch, set()).add(name.split("-")[0])
+        if len(per_arch) < 2:
+            continue
+        assert len(set(map(frozenset, per_arch.values()))) == 1, (
+            module["name"], {a: sorted(n) for a, n in per_arch.items()},
+        )
 
 
 def test_closure_builds_from_source_not_prebuilt_binaries() -> None:
