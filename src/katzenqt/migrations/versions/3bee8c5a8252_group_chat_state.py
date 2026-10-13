@@ -8,11 +8,11 @@ A conversation's group state, kept as one ``katzenqt.groupchat`` state blob:
 where each of our messages landed, with what the box holds, until the blob
 takes it in, and the rewrites the state machine asks for until they are sent.
 Each message in a conversation's log notes when it was added, for the
-disappearing messages policy, and messages already there count from now. Each
+disappearing messages policy; messages already there have no such time, and
+the policy keeps them. Each
 message of ours notes the ``Idx64`` of the box it ends in, big-endian so that
 SQLite orders it as a number, to match against members' acknowledgements.
 """
-import time
 from typing import Sequence, Union
 
 from alembic import op
@@ -56,7 +56,6 @@ def upgrade() -> None:
     with op.batch_alter_table('conversationlog', schema=None) as batch_op:
         batch_op.add_column(sa.Column('logged_at', sa.Float(), nullable=True))
         batch_op.add_column(sa.Column('sent_idx64', sa.LargeBinary(), nullable=True))
-    op.execute(sa.text("UPDATE conversationlog SET logged_at = :now").bindparams(now=time.time()))
 
 
 def downgrade() -> None:

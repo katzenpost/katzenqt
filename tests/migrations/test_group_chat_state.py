@@ -1,7 +1,7 @@
-"""The migration to group chat state adds its tables and columns, and the
-messages already logged count from when it runs."""
+"""The migration to group chat state adds its tables and columns, and leaves
+the messages already logged without a time, so the disappearing messages
+policy keeps them."""
 
-import time
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -29,14 +29,13 @@ def test_upgrade_and_downgrade() -> None:
         )
         conn.exec_driver_sql("INSERT INTO conversation VALUES (1)")
         conn.exec_driver_sql("INSERT INTO conversationlog VALUES (1, 1)")
-        before = time.time()
         with Operations.context(MigrationContext.configure(conn)):
             migration.upgrade()
         assert TABLES <= set(sa.inspect(conn).get_table_names())
         ((logged_at, sent_idx64),) = conn.exec_driver_sql(
             "SELECT logged_at, sent_idx64 FROM conversationlog"
         ).all()
-        assert logged_at >= before and sent_idx64 is None
+        assert logged_at is None and sent_idx64 is None
         with Operations.context(MigrationContext.configure(conn)):
             migration.downgrade()
         assert not TABLES & set(sa.inspect(conn).get_table_names())
