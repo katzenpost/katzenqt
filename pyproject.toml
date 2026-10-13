@@ -71,7 +71,7 @@ build-backend = "flit_core.buildapi"
 name = "katzenqt"
 
 [tool.uv.sources]
-hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "aa6b39340c7ef8aa15b43d7573522b76efda045f", subdirectory = "py" }
+hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "4dc937e38c18c1a5cac96da63a4da7ba3cd15ebd", subdirectory = "py" }
 rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "a7f5c4877f1aa84f312cc7a23fd85a445225393b" }
 
 [tool.mypy]
