@@ -504,7 +504,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/78/df/4b6b014d26cb938f8
 [[package]]
 name = "hpqc"
 version = "0.0.2"
-source = { git = "https://github.com/katzenpost/hpqc?subdirectory=py&rev=dfe21b874248d450ac94cf802d61740cba90caed#dfe21b874248d450ac94cf802d61740cba90caed" }
+source = { git = "https://github.com/katzenpost/hpqc?subdirectory=py&rev=fafc1de88fb40cf9e75bb8046f2bce7ff4fac6c8#fafc1de88fb40cf9e75bb8046f2bce7ff4fac6c8" }
 dependencies = [
     { name = "cbor2" },
     { name = "cryptography" },
@@ -607,7 +607,7 @@ requires-dist = [
     { name = "alembic", specifier = "~=1.16.5" },
     { name = "cbor2", specifier = "~=5.6.5" },
     { name = "click", specifier = "~=8.1" },
-    { name = "hpqc", git = "https://github.com/katzenpost/hpqc?subdirectory=py&rev=dfe21b874248d450ac94cf802d61740cba90caed" },
+    { name = "hpqc", git = "https://github.com/katzenpost/hpqc?subdirectory=py&rev=fafc1de88fb40cf9e75bb8046f2bce7ff4fac6c8" },
     { name = "katzenpost-thinclient", specifier = "==0.0.24" },
     { name = "pycrdt", specifier = "~=0.13.1" },
     { name = "pydantic", specifier = "~=2.11.7" },
