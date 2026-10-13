@@ -14,8 +14,9 @@ from .wire import counter
 
 @dataclass(frozen=True)
 class Retention:
-    window: int = 3
-    """Epochs a Sent-box record is kept and backfilled."""
+    window: int | None = 3
+    """Epochs a Sent-box record is kept and backfilled; None keeps it for
+    good."""
     discard_acked: bool = True
     """Drop plaintext every member still read has acknowledged."""
     keep_sent: int | None = None
@@ -58,7 +59,10 @@ class SentBox:
     def retain(
         self, epoch: int, policy: Retention, everyone_acked: Callable[[int], bool]
     ) -> None:
-        for idx64 in [i for i, r in self.records.items() if epoch - r.written > policy.window]:
+        window = policy.window
+        for idx64 in [
+            i for i, r in self.records.items() if window is not None and epoch - r.written > window
+        ]:
             del self.records[idx64]
         for idx64, record in self.records.items():
             if (

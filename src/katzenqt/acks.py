@@ -196,17 +196,21 @@ def _flush_trace(group: Group) -> None:
 
 def _policy(sent_days: int | None) -> Retention:
     """The Sent box's retention for a policy that keeps sent content
-    ``sent_days`` days: whole replica epochs, never fewer days than asked.
+    ``sent_days`` days: whole replica epochs, never fewer days than asked. A
+    record is kept, so that a late acknowledgement still finds it, for as
+    long as the content, and never fewer epochs than the default.
 
-    >>> _policy(None).keep_sent is None
-    True
+    >>> _policy(None).keep_sent is None, _policy(None).window is None
+    (True, True)
     >>> _policy(1).keep_sent, _policy(7).keep_sent, _policy(8).keep_sent
     (2, 2, 3)
+    >>> _policy(1).window, _policy(365).window
+    (3, 54)
     """
     if sent_days is None:
-        return Retention()
-    epochs = math.ceil(sent_days * 24 * 3600 / REPLICA_EPOCH_SECONDS)
-    return Retention(keep_sent=epochs + 1)
+        return Retention(window=None)
+    epochs = math.ceil(sent_days * 24 * 3600 / REPLICA_EPOCH_SECONDS) + 1
+    return Retention(window=max(Retention().window or 0, epochs), keep_sent=epochs)
 
 
 def _replica_epoch() -> int:

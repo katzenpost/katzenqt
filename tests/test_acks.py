@@ -27,7 +27,6 @@ from katzenqt.groupchat import state as group_state
 from katzenqt.groupchat import wire
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.numbering import Entry
-from katzenqt.groupchat.sentbox import Retention
 from katzenqt.headless import _actions
 from tests.fakes.thinclient import FakeThinClient
 from tests.test_network_fake import _set_up_read_flow, _set_up_write_flow
@@ -851,12 +850,25 @@ async def test_records_older_than_the_window_are_let_go(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     chat, _ = await _with_bob()
+    await persistent.set_retention(chat.conversation_id, persistent.Retention(sent_days=1))
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     assert (await chat.group()).sent.records
     now = acks._replica_epoch()
     monkeypatch.setattr(acks, "_replica_epoch", lambda: now + 10)
     assert not (await chat.group()).sent.records
+
+
+@pytest.mark.asyncio
+async def test_records_are_kept_as_long_as_sent_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat, _ = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    chat.land(sent.id)
+    now = acks._replica_epoch()
+    monkeypatch.setattr(acks, "_replica_epoch", lambda: now + 100)
+    assert (await chat.group()).sent.records
 
 
 # The codec.
@@ -1231,9 +1243,10 @@ async def test_a_box_is_no_longer_rewritten_once_its_record_is_gone(
 ) -> None:
     _epoch(monkeypatch, 10)
     chat, _ = await _with_bob()
+    await persistent.set_retention(chat.conversation_id, persistent.Retention(sent_days=1))
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     await acks.tick()
-    _epoch(monkeypatch, 10 + Retention().window + 1)
+    _epoch(monkeypatch, 10 + (acks._policy(1).window or 0) + 1)
     await acks.tick()
     assert await acks.rewrites() == []
