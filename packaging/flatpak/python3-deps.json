@@ -326,7 +326,7 @@
                 {
                     "type": "git",
                     "url": "https://github.com/katzenpost/hpqc.git",
-                    "commit": "fafc1de88fb40cf9e75bb8046f2bce7ff4fac6c8"
+                    "commit": "aa6b39340c7ef8aa15b43d7573522b76efda045f"
                 }
             ]
         },
