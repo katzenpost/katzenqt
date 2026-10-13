@@ -31,3 +31,25 @@ def test_the_copy_button_returns_to_its_label(
     assert dialog.copy_button.text() == "Copied"
     dialog.restore_copy_label()
     assert dialog.copy_button.text() == "Copy voucher"
+
+
+def test_the_voucher_leaves_the_clipboard_again(
+    qt_app: QApplication,
+) -> None:
+    parent = QWidget()
+    dialog = katzen.VoucherDialog(parent, "voucher-abc123")
+    dialog.copy_code()
+    assert QApplication.clipboard().text() == "voucher-abc123"
+    katzen.clear_secret("voucher-abc123")
+    assert QApplication.clipboard().text() == ""
+
+
+def test_something_copied_since_is_left_alone(
+    qt_app: QApplication,
+) -> None:
+    parent = QWidget()
+    dialog = katzen.VoucherDialog(parent, "voucher-abc123")
+    dialog.copy_code()
+    QApplication.clipboard().setText("a shopping list")
+    katzen.clear_secret("voucher-abc123")
+    assert QApplication.clipboard().text() == "a shopping list"
