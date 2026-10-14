@@ -23,7 +23,7 @@ def _is_content(payload: bytes) -> bool:
     False
     >>> _is_content(b"Your name in this conversation is me")
     False
-    >>> _is_content(b"F" + bytes([255]))
+    >>> _is_content(b"F" + bytes([130]))
     False
     """
     if payload[:1] != b"F":
