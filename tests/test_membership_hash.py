@@ -107,6 +107,39 @@ async def test_local_membership_hash_uses_write_cap_and_peers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_conversation_awaiting_its_write_cap_still_counts_itself(
+) -> None:
+    own_rcw = persistent.ReadCapWAL(
+        id=uuid.uuid4(), read_cap=b"\x07" * 136, next_index=b"\x00" * 104,
+    )
+    convo = persistent.Conversation(
+        name="unprovisioned", write_cap=None, first_unread=0,
+    )
+    own_peer = persistent.ConversationPeer(
+        name="me", read_cap_id=own_rcw.id, active=True, conversation=convo,
+    )
+    convo.own_peer = own_peer
+    peer_rcw = persistent.ReadCapWAL(
+        id=uuid.uuid4(), read_cap=b"\x08" * 136, next_index=b"\x00" * 104,
+    )
+    async with persistent.asession() as sess:
+        sess.add(own_rcw)
+        sess.add(convo)
+        sess.add(own_peer)
+        sess.add(peer_rcw)
+        sess.add(persistent.ConversationPeer(
+            name="bob", read_cap_id=peer_rcw.id, active=True,
+            conversation=convo,
+        ))
+        await sess.commit()
+        await sess.refresh(convo)
+        got = await conversation_handlers.local_membership_hash(sess, convo)
+    assert got == models.canonical_membership_hash(
+        [b"\x07" * 136, b"\x08" * 136],
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_stamps_the_real_membership_hash() -> None:
     conv_id = await _make_conversation()
     gcm = GroupChatMessage(version=0, membership_hash=b"TODO" * 8, text="hello")

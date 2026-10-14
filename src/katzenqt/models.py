@@ -53,7 +53,9 @@ def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
     the index/mutation suffix variants of the same member's read cap — a
     joiner's pre-mutation cap, the salt-mutated cap the group holds, and
     future-only read caps starting at a later index all collapse to one
-    member. The caller represents itself as ``write_cap[32:]``.
+    member. A caller counts itself with its own read cap, as
+    ``persistent.own_read_cap`` derives it, which is that same
+    prefix whether or not its write cap has been provisioned yet.
 
     >>> key_a = bytes(range(32))
     >>> key_b = bytes(range(32, 64))

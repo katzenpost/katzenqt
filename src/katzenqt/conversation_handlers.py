@@ -79,9 +79,9 @@ async def local_membership_hash(
     sess: AsyncSession, conv: persistent.Conversation,
     exclude_read_cap: "bytes | None" = None,
 ) -> bytes:
-    """Our own view of the conversation membership as the canonical hash:
-    every active, non-substream peer's read cap, plus ourself as
-    ``write_cap[32:]`` rather than the possibly stale own-peer read cap.
+    """Our own view of the conversation membership as the canonical hash
+    (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
+    plus ourself as ``persistent.own_read_cap`` derives it.
 
     ``exclude_read_cap`` drops one member from the set, by its public key,
     which an ``Introduction`` needs because it describes the group as it
@@ -98,9 +98,8 @@ async def local_membership_hash(
         if rcw is not None and rcw.read_cap is not None:
             if exclude_read_cap is None or rcw.read_cap[:32] != exclude_read_cap[:32]:
                 caps.add(rcw.read_cap)
-    wcw = await sess.get(persistent.WriteCapWAL, conv.write_cap)
-    if wcw is not None and wcw.write_cap is not None:
-        own = wcw.write_cap[32:]
+    own = await persistent.own_read_cap(sess, conv)
+    if own is not None:
         if exclude_read_cap is None or own[:32] != exclude_read_cap[:32]:
             caps.add(own)
     return models.canonical_membership_hash(caps)
