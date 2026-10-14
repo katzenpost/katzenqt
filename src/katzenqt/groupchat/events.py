@@ -131,12 +131,12 @@ class DeriveIndexes:
 
 @dataclass(frozen=True)
 class Walk:
-    """Step ``stream`` forward from ``start`` until meeting each of
-    ``targets`` it can, by BACAP's derivation and index equality."""
+    """Step ``stream`` forward from ``start`` to the furthest box whose
+    ``Idx64`` is one of ``targets``, by BACAP's derivation."""
 
     stream: Key
     start: bytes
-    targets: tuple[bytes, ...]
+    targets: tuple[int, ...]
     keep: int
 
 

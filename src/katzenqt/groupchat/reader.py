@@ -11,7 +11,7 @@ import enum
 from dataclasses import dataclass, field
 
 from .events import Effect, Missing, ReadBox, Walk
-from .wire import Key
+from .wire import Key, counter
 
 
 class Mode(enum.Enum):
@@ -38,8 +38,9 @@ class Reader:
     """The first box passed unread and no longer kept, as a kept box is: it
     will never be read, so acknowledgements stop before it for good."""
     mode: Mode = Mode.IDLE
-    tried: list[bytes] = field(default_factory=list)
-    """Acknowledged boxes a scan has already looked for."""
+    tried: list[int] = field(default_factory=list)
+    """The ``Idx64`` of each acknowledged box a scan has already looked
+    for."""
 
     def read(self) -> list[Effect]:
         if self.mode is not Mode.IDLE:
@@ -47,11 +48,12 @@ class Reader:
         self.mode = Mode.READING
         return [ReadBox(self.stream, self.read_cap, self.next)]
 
-    def ahead(self, heard: list[bytes]) -> list[bytes]:
+    def ahead(self, heard: list[int]) -> list[int]:
         """Acknowledged boxes a scan has not looked for yet."""
-        return [h for h in heard if h != self.next and h not in self.tried]
+        here = counter(self.next)
+        return [h for h in heard if h != here and h not in self.tried]
 
-    def scan(self, heard: list[bytes], window: int) -> list[Effect]:
+    def scan(self, heard: list[int], window: int) -> list[Effect]:
         """Recheck what was kept, then look for acknowledged boxes ahead,
         or probe forward from here."""
         self.mode = Mode.SCANNING

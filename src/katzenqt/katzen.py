@@ -1,5 +1,6 @@
 APP_ORGANIZATION = "Mixnetwork"
 APP_NAME = "KatzenQt"
+GROUP_TINT_SETTING = "chat.groupTint"
 
 import asyncio
 import fcntl
@@ -60,7 +61,7 @@ from .katzen_util import create_task, is_risky_attachment_extension
 from .models import (GROUP_CHAT_VERSION, NAME_POLICY_HASH, NAME_POLICY_KEEP,
                      NAME_POLICY_SETTING, GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation,
-                     outgoing_basename)
+                     box_plaintext_length, outgoing_basename)
 #from ui_mixchat_chatview import Ui_ChatForm
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
@@ -1444,6 +1445,33 @@ class MainWindow(QMainWindow):
         if duration_time_ns() - convo.last_push_to_talk_ns > 100_000_000:
             self.push_to_talk_finish(cancel=False)
 
+    def set_group_tint(self, enabled: bool) -> None:
+        """Turn the membership tint on or off, and remember the choice."""
+        logger.info("membership tint %s", "on" if enabled else "off")
+        self.settings = {
+            **self.settings, GROUP_TINT_SETTING: int(bool(enabled)),
+        }
+        try:
+            with persistent.Session(persistent._engine_sync) as sess:
+                row = sess.get(persistent.AppSetting, GROUP_TINT_SETTING)
+                if not row:
+                    row = persistent.AppSetting(id=GROUP_TINT_SETTING)
+                row.type = "int"
+                row.value = str(int(bool(enabled)))
+                sess.add(row)
+                sess.commit()
+        except Exception as e:
+            logger.warning("could not persist the membership tint: %s", e)
+        for state in self.conversation_state_by_id.values():
+            state.conversation_log_model.set_group_tint(bool(enabled))
+
+    def restore_group_tint(self) -> None:
+        """Apply the persisted tint choice, which is off where unset."""
+        enabled = bool(self.settings.get(GROUP_TINT_SETTING, 0))
+        self.group_tint_action.setChecked(enabled)
+        for state in self.conversation_state_by_id.values():
+            state.conversation_log_model.set_group_tint(enabled)
+
     def font_settings_dialog(self) -> None:
         def font_example(qtoolbtn: QToolButton) -> None:
             ok, font = QFontDialog.getFont() # returns a QFont
@@ -1653,6 +1681,12 @@ class MainWindow(QMainWindow):
         self.ui.action_accept_invitation.triggered.connect(self.induct_via_voucher)
         self.ui.action_invite_contact.triggered.connect(self.generate_voucher)
         self.ui.action_pending_vouchers.triggered.connect(self.show_pending_vouchers)
+        self.group_tint_action = self.ui.menuSettings.addAction(
+            "Tint rows by membership",
+        )
+        self.group_tint_action.setCheckable(True)
+        self.group_tint_action.setChecked(False)
+        self.group_tint_action.toggled.connect(self.set_group_tint)
         # Mixnet status: enable the (otherwise disabled) menu and add the
         # Stats window action.
         self.ui.menuMixnetStatus.setEnabled(True)
@@ -1967,7 +2001,7 @@ class MainWindow(QMainWindow):
         )
         logger.debug("serializing %d outgoing message(s)", len(send_op.messages))
         new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            chunk_size=box_plaintext_length(),
             conversation_id=convo_state.conversation_id,
         )
 
@@ -2037,7 +2071,16 @@ class MainWindow(QMainWindow):
             self._restore_unsent_text(convo_state, msg)
             return
 
-        group_chat_message = GroupChatMessage(version=GROUP_CHAT_VERSION, text=msg)
+        # Stamp the real membership hash before serialize.
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(
+                convo_state.conversation_id
+            )
+        )
+        group_chat_message = GroupChatMessage(
+            version=GROUP_CHAT_VERSION, membership_hash=membership_hash, text=msg
+        )
 
         # conversation_order is a count subquery evaluated at commit. The
         # receive/voucher paths append on the io loop; the send path funnels
@@ -2792,6 +2835,10 @@ class MainWindow(QMainWindow):
 
         voice_note_drafts = []
         audio = getattr(self, "_ptt_audio", None)
+        # Computed on the io loop; never open asession on the Qt loop.
+        membership_hash = await self.iothread.run_in_io(
+            conversation_handlers.membership_hash_for(convo.conversation_id)
+        )
         # One SendOperation per file; unserialize() only decodes one GCM.
         for fn in sorted(convo.attached_files):
             f_path = Path(fn)
@@ -2831,7 +2878,11 @@ class MainWindow(QMainWindow):
                 upload.payload, upload.basename, upload.filetype,
                 hash_all=policy == NAME_POLICY_HASH,
             )
-            gcm = GroupChatMessage(version=GROUP_CHAT_VERSION, file_upload=upload)
+            gcm = GroupChatMessage(
+                version=GROUP_CHAT_VERSION,
+                membership_hash=membership_hash,
+                file_upload=upload,
+            )
 
             # Pre-assign the ConversationLog id so a voice-note draft (which is
             # discarded right after sending) can be cached for playback under
@@ -3784,6 +3835,7 @@ async def main(window: MainWindow) -> None:
         for convo in a:
             await add_conversation(window, convo)
 
+    window.restore_group_tint()
     window.restore_name_policy()
     window.show()
     window._supervised_listener(

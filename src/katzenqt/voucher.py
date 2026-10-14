@@ -30,7 +30,6 @@ from sqlalchemy import func
 from sqlmodel import col, select
 
 from . import acks, models, persistent
-from .katzen_util import create_task
 from .network import (
     _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _box_position,
     _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
@@ -615,8 +614,9 @@ async def await_and_open(
         # keypair (provision_read_caps); replace it with the salt-mutated read
         # cap, which is the 32-byte key plus the 104-byte index -- exactly the
         # cap the inductor recorded for us and the rest of the group holds.
-        # Leaving the un-mutated cap here made our own voter identity
-        # disagree with everyone else's view of us.
+        # Leaving the un-mutated cap here made our own voter identity (and
+        # membership hash, which self-represents via write_cap[32:]) disagree
+        # with everyone else's view of us.
         own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)
         if own_peer is not None:
             own_rcw = await sess.get(persistent.ReadCapWAL, own_peer.read_cap_id)
@@ -697,7 +697,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
     """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
     final PlaintextWAL id, for the caller to wait on the ack."""
     gcm = models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION,
+        version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(
             display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,
@@ -734,9 +734,10 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     stream (their salt-mutated read cap), so every peer that reads this
     stream can add the member and start reading their messages without any
     further coordination. It is sent after the induction has committed and is
-    genuinely fire-and-forget: a failure (writing the announcement, or its
-    eventual delivery) is logged, never raised, so the induction result
-    (already durable by the time this is called) always stands.
+    genuinely fire-and-forget: a failure writing the announcement is logged,
+    never raised, so the induction result (already durable by the time this
+    is called) always stands. ``introductions_written`` waits for it to be
+    sent.
 
     A pending ConversationLog row is also written for the sender's own peer,
     so the local UI shows the announcement (e.g. 'bob added carol') at the
@@ -744,7 +745,7 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     stream.
     """
     try:
-        final_pwal_id = await _write_introduction_log(conversation_id, display_name, read_cap)
+        await _write_introduction_log(conversation_id, display_name, read_cap)
     except Exception as e:
         logger.error(
             "send_introduction_message: failed to write INTRODUCTION for "
@@ -758,18 +759,6 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     await conversation_update_queue.put((conversation_id, False))
 
     await check_for_new()
-    # Background, not awaited: this function's own contract is
-    # fire-and-forget, so a caller (e.g. derive_read_and_induct, right after
-    # durably committing the induction) must not be made to wait up to 180s
-    # -- or see an exception from -- confirming delivery of the announcement.
-    _introductions.add(
-        create_task(_wait_intro_acked(final_pwal_id, display_name, conversation_id))
-    )
-
-
-_introductions: "set[asyncio.Task[bool]]" = set()
-"""Waits for the Introductions this process has queued, until
-``introductions_written`` collects them."""
 
 
 async def _wait_intro_acked(
@@ -777,8 +766,8 @@ async def _wait_intro_acked(
 ) -> bool:
     """Wait until the INTRODUCTION announcement is acked into SentLog.
 
-    Fire-and-forget: a timeout is logged, never raised, so the induction
-    result stands even if the announcement never gets delivered.
+    A timeout is logged, never raised, so the induction result stands even
+    if the announcement never gets delivered.
     """
     if not await persistent.wait_for_sent(
         final_pwal_id, deadline_s=180.0, epoch_s=epoch_period_seconds(),
@@ -791,15 +780,33 @@ async def _wait_intro_acked(
     return True
 
 
+async def _queued_introductions() -> "list[tuple[uuid.UUID, str, int]]":
+    """The Introductions we wrote that are not yet sent: each one's final
+    PlaintextWAL id, who it introduces, and its conversation."""
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.ConversationLog).where(
+            persistent.ConversationLog.network_status == 1,
+            col(persistent.ConversationLog.outgoing_pwal).is_not(None),
+        ))).all()
+    queued = []
+    for row in rows:
+        if row.payload[:1] != b"F" or row.outgoing_pwal is None:
+            continue
+        gcm = models.GroupChatMessage.from_cbor(row.payload[1:])
+        if gcm.introduction is not None:
+            queued.append((row.outgoing_pwal, gcm.introduction.display_name, row.conversation_id))
+    return queued
+
+
 async def introductions_written() -> bool:
-    """Wait until every Introduction this process queued is written, or its
-    wait gives up. A process that exits sooner, as the headless CLI does
-    after an induction, leaves the Introduction queued until it next runs,
-    and until then no other member learns of the new one. False if any was
-    not written."""
-    waits = list(_introductions)
-    _introductions.difference_update(waits)
-    return all(await asyncio.gather(*waits))
+    """Wait until every Introduction we wrote and have not yet sent is
+    written, or its wait gives up. A process that exits sooner, as the
+    headless CLI does after an induction, leaves the Introduction queued
+    until it next runs, and until then no other member learns of the new
+    one. False if any was not written."""
+    return all(await asyncio.gather(*(
+        _wait_intro_acked(*queued) for queued in await _queued_introductions()
+    )))
 
 
 _induction_locks: "dict[int, asyncio.Lock]" = {}

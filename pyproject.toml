@@ -17,13 +17,15 @@ dependencies = [
     "alembic~=1.16.5",
     "aiosqlite~=0.21.0",
     "pydantic~=2.11.7",
-    "cbor2>=6.0,<7",
+    "cbor2~=5.6.5",
     "pycrdt~=0.13.1",
     "click~=8.1",
     # Keep in lockstep with the katzenpost daemon ref in
     # .github/workflows/test-integration-docker.yml.
     "katzenpost-thinclient==0.0.24",
     "rustic-audio-tool",
+    # BACAP index arithmetic for acknowledgements (Idx64 to MessageBoxIndex).
+    "hpqc",
 ]
 
 [dependency-groups]
@@ -37,7 +39,6 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
-    "hpqc",
 ]
 release = [
 ]
@@ -70,7 +71,7 @@ build-backend = "flit_core.buildapi"
 name = "katzenqt"
 
 [tool.uv.sources]
-hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "21c7fad8c9eaf12ce5530aba717fb7545bc8ca7c", subdirectory = "py" }
+hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "4dc937e38c18c1a5cac96da63a4da7ba3cd15ebd", subdirectory = "py" }
 rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "a7f5c4877f1aa84f312cc7a23fd85a445225393b" }
 
 [tool.mypy]

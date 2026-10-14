@@ -19,8 +19,9 @@ from sqlmodel import Session
 from katzenqt import ack_codec, acks, conversation_handlers, models, network, persistent
 from katzenqt.groupchat.sim import seeded, step
 from katzenqt.groupchat.trace import Recorder, TracedGroup
+from katzenqt.groupchat.wire import counter
 from tests.fakes.thinclient import FakeThinClient
-from tests.test_acks import _Chat, _text
+from tests.test_acks import _Chat, _epoch, _text
 
 ALICE, BOB, CAROL = (WriteCap.generate(seeded(name)) for name in ("alice", "bob", "carol"))
 
@@ -90,18 +91,18 @@ async def run(directory: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict[str
     scans past a gap there, reads the gap once rewritten, backfills, and
     changes her disappearing messages policy."""
     monkeypatch.setenv(acks.TRACE_DIR, str(directory))
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: 10)
+    await _epoch(10)
     chat = await _group()
     bob, carol = _read_cap(BOB)[:32], _read_cap(CAROL)[:32]
     await _receive(chat, "bob", BOB, 0, _text("bob 0"))
     (sent,) = await chat.queue(_text("hi"))
     _land(chat, sent.id, 0)
     acks_of_carol = {
-        await _place(chat, carol, bob): _box(BOB, 2),
-        await _place(chat, carol, chat.own_key): _box(ALICE, 0),
+        await _place(chat, carol, bob): counter(_box(BOB, 2)),
+        await _place(chat, carol, chat.own_key): counter(_box(ALICE, 0)),
     }
     await _receive(chat, "carol", CAROL, 0, models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION, text="carol 0", acks=ack_codec.encode(acks_of_carol),
+        version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32), text="carol 0", acks=ack_codec.encode(acks_of_carol),
     ))
     client = FakeThinClient()
     client.bacap = True
@@ -110,10 +111,10 @@ async def run(directory: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict[str
     assert await network.scan_member(thin, **scan) == network.ScanResult(0, True, 1)
     client.box_store[_read_cap(BOB), _box(BOB, 1)] = b"F" + _text("bob 1").to_cbor()
     assert await network.scan_member(thin, **scan) == network.ScanResult(1, False, 0)
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: 11)
+    await _epoch(11)
     await acks.tick()
     await persistent.set_retention(chat.conversation_id, persistent.Retention(None, 1))
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: 13)
+    await _epoch(13)
     await acks.tick()
     (trace,) = directory.glob("adapter-*.jsonl")
     if keep := os.environ.get("GROUPCHAT_ADAPTER_TRACE_OUT"):

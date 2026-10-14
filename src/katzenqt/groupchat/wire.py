@@ -2,8 +2,10 @@
 encodings of its control fields. See "Opportunistic acknowledgements and
 backfill" in the group chat spec.
 
-A box is named by its ``MessageBoxIndex``: an opaque BACAP value, compared
-only for equality and moved forward only by BACAP.
+A box is named by its ``MessageBoxIndex``: a BACAP value, compared for
+equality and moved forward only by BACAP. An acknowledgement names a box by
+its ``Idx64`` alone (:func:`counter`), which the stream's read cap turns
+back into the whole index.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 import cbor2
+from hpqc.bacap import MessageBoxIndex
 
 from .. import ack_codec
 
@@ -33,6 +36,12 @@ def key_of(read_cap: bytes) -> Key:
 
 def prefix_of(key: Key) -> bytes:
     return key[:PREFIX_SIZE]
+
+
+def counter(index: bytes) -> int:
+    """The BACAP ``Idx64`` of the box ``index`` names: what an
+    acknowledgement carries."""
+    return MessageBoxIndex.from_bytes(index).idx_64
 
 
 @dataclass(frozen=True)
@@ -65,7 +74,8 @@ class Message:
     introduction: Introduction | None = None
     numbers: Numbers = ()
     introduced_at: IntroRef | None = None
-    acks: Mapping[int, bytes] = field(default_factory=dict)
+    acks: Mapping[int, int] = field(default_factory=dict)
+    """Roster index to the ``Idx64`` of the box acknowledged."""
 
     @property
     def control(self) -> bool:
@@ -134,11 +144,16 @@ class Codec(Protocol):
     def decode(self, plaintext: bytes) -> Message | None: ...
 
 
+VERSION = 3
+"""The message version :class:`CborCodec` writes, katzenqt's
+``GROUP_CHAT_VERSION``."""
+
+
 class CborCodec:
     """A plain encoding of :class:`Message`; a client supplies its own."""
 
     def encode(self, message: Message) -> bytes:
-        gcm: dict[str, object] = {"Version": 1}
+        gcm: dict[str, object] = {"Version": VERSION}
         if message.content is not None:
             gcm["Content"] = message.content
         if message.introduction is not None:

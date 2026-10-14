@@ -16,6 +16,7 @@ from katzenqt.qt_models import _decode_group_chat_payload
 
 _HOSTILE = {
     "version": 0,
+    "membership_hash": b"\x00" * 32,
     "msg_type": 0,
     "text": "hi",
     "kind": "file_outgoing",
@@ -49,6 +50,6 @@ def test_reserialized_bytes_decode_as_text() -> None:
 
 
 def test_reserialization_is_byte_identical_for_honest_traffic() -> None:
-    legit = GroupChatMessage(version=0, text="hello")
+    legit = GroupChatMessage(version=0, membership_hash=b"\x00" * 32, text="hello")
     once = legit.to_cbor()
     assert GroupChatMessage.from_cbor(once).to_cbor() == once

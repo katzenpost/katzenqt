@@ -1,12 +1,7 @@
-"""The Acks field codec: the spec's examples, every malformed field, a
-round trip over random rosters, and the vectors shared with the Go and Rust
-codecs."""
+"""The Acks field codec: the spec's naming examples, every malformed
+field, and a round trip over random rosters."""
 
 from __future__ import annotations
-
-import json
-import pathlib
-from typing import TypedDict
 
 import cbor2
 import pytest
@@ -16,29 +11,16 @@ from hypothesis import strategies as st
 from katzenqt import ack_codec
 from katzenqt.models import GroupChatMessage
 
-
-class _Case(TypedDict):
-    name: str
-    value_size: int
-    roster_size: int
-    acks: list[tuple[int, str]]
-    cbor: str
-
-
-_VECTORS: list[_Case] = json.loads(
-    (pathlib.Path(__file__).parent / "data" / "acks_vectors.json").read_text()
-)["cases"]
-
-_VALUE = bytes([0xAA]) * ack_codec.VALUE_SIZE
+_VALUE = 0xAA
 
 
 @pytest.mark.parametrize(
     "indexes, naming, form, field_length",
     [
-        ([9], "09", "list", 105),
-        ([3, 12], "030c", "list", 210),
-        ([3, 12, 13], "100c", "bitmap", 314),
-        (list(range(1, 16)), "7fff", "bitmap", 1562),
+        ([9], "09", "list", 10),
+        ([3, 12], "030c", "list", 19),
+        ([3, 12, 13], "100c", "bitmap", 27),
+        (list(range(1, 16)), "7fff", "bitmap", 123),
     ],
 )
 def test_the_examples_the_spec_gives(
@@ -46,30 +28,16 @@ def test_the_examples_the_spec_gives(
 ) -> None:
     field = ack_codec.encode({index: _VALUE for index in indexes})
     assert len(field) == field_length
-    width = len(field) - len(indexes) * ack_codec.VALUE_SIZE
-    assert field[:width].hex() == naming
+    assert field[0] == len(indexes) - 1
+    width = len(field) - 1 - len(indexes) * ack_codec.VALUE_SIZE
+    assert field[1 : 1 + width].hex() == naming
     assert (form == "list") == (width == len(indexes))
     assert list(ack_codec.decode(field)) == indexes
 
 
-@pytest.mark.parametrize("case", _VECTORS, ids=lambda case: case["name"])
-def test_vectors_shared_with_the_go_and_rust_codecs(case: _Case) -> None:
-    acks = {index: bytes.fromhex(value) for index, value in case["acks"]}
-    field = ack_codec.encode(acks, case["value_size"])
-    assert cbor2.dumps(field).hex() == case["cbor"]
-    assert ack_codec.decode(field, case["value_size"]) == dict(
-        sorted(acks.items())
-    )
-
-
-def test_the_vectors_cover_both_forms_and_the_last_roster_index() -> None:
-    forms = set()
-    for case in _VECTORS:
-        field = cbor2.loads(bytes.fromhex(case["cbor"]))
-        count, width = divmod(len(field), case["value_size"])
-        forms.add("list" if width == count else "bitmap")
-    assert forms == {"list", "bitmap"}
-    assert any(index == 255 for case in _VECTORS for index, _ in case["acks"])
+def test_a_value_is_an_idx64_little_endian() -> None:
+    field = ack_codec.encode({0: 0x0102030405060708})
+    assert field.hex() == "00" + "00" + "0807060504030201"
 
 
 @pytest.mark.parametrize(
@@ -88,16 +56,14 @@ def test_the_vectors_cover_both_forms_and_the_last_roster_index() -> None:
 def test_a_malformed_field_is_refused(
     naming: bytes, values: int, reason: str
 ) -> None:
+    field = bytes([values - 1]) + naming + bytes(8) * values
     with pytest.raises(ack_codec.AcksError, match=reason):
-        ack_codec.decode(naming + _VALUE * values)
+        ack_codec.decode(field)
 
 
-def test_a_value_no_longer_than_the_longest_bitmap_is_refused() -> None:
-    short = ack_codec.MIN_VALUE_SIZE - 1
-    with pytest.raises(ack_codec.AcksError, match="value too short"):
-        ack_codec.decode(b"\x09" + bytes(short), short)
-    with pytest.raises(ack_codec.AcksError, match="value too short"):
-        ack_codec.encode({9: bytes(short)}, short)
+def test_a_field_shorter_than_its_count_is_refused() -> None:
+    with pytest.raises(ack_codec.AcksError, match="shorter than its count"):
+        ack_codec.decode(bytes([1, 9]) + bytes(8))
 
 
 @pytest.mark.parametrize(
@@ -105,11 +71,12 @@ def test_a_value_no_longer_than_the_longest_bitmap_is_refused() -> None:
     [
         ({256: _VALUE}, "roster index out of range"),
         ({-1: _VALUE}, "roster index out of range"),
-        ({3: _VALUE[:-1]}, "value of the wrong size"),
+        ({3: -1}, "value out of range"),
+        ({3: 1 << 64}, "value out of range"),
     ],
 )
 def test_what_cannot_be_written_is_refused(
-    acks: dict[int, bytes], reason: str
+    acks: dict[int, int], reason: str
 ) -> None:
     with pytest.raises(ack_codec.AcksError, match=reason):
         ack_codec.encode(acks)
@@ -117,42 +84,41 @@ def test_what_cannot_be_written_is_refused(
 
 _ACKS = st.dictionaries(
     st.integers(min_value=0, max_value=ack_codec.ROSTER_MAX - 1),
-    st.binary(min_size=ack_codec.VALUE_SIZE, max_size=ack_codec.VALUE_SIZE),
+    st.integers(min_value=0, max_value=ack_codec.IDX64_MAX),
     max_size=ack_codec.ROSTER_MAX,
 )
 
 
 @settings(max_examples=300, deadline=None)
 @given(acks=_ACKS)
-def test_round_trip_over_any_roster(acks: dict[int, bytes]) -> None:
+def test_round_trip_over_any_roster(acks: dict[int, int]) -> None:
     field = ack_codec.encode(acks)
     assert ack_codec.decode(field) == dict(sorted(acks.items()))
 
 
 @settings(max_examples=300, deadline=None)
-@given(acks=_ACKS)
+@given(acks=_ACKS.filter(bool))
 def test_the_shorter_form_is_always_the_one_written(
-    acks: dict[int, bytes],
+    acks: dict[int, int],
 ) -> None:
     field = ack_codec.encode(acks)
-    width = len(field) - len(acks) * ack_codec.VALUE_SIZE
-    bitmap_width = max(acks) // 8 + 1 if acks else 0
-    assert width == min(len(acks), bitmap_width)
+    width = len(field) - 1 - len(acks) * ack_codec.VALUE_SIZE
+    assert width == min(len(acks), max(acks) // 8 + 1)
     assert width <= ack_codec.MAX_NAMING
 
 
 @settings(max_examples=200, deadline=None)
 @given(acks=_ACKS.filter(bool), text=st.text(max_size=20))
 def test_the_field_survives_a_group_chat_message(
-    acks: dict[int, bytes], text: str
+    acks: dict[int, int], text: str
 ) -> None:
-    sent = GroupChatMessage(version=0, text=text, acks=ack_codec.encode(acks))
+    sent = GroupChatMessage(version=0, membership_hash=bytes(32), text=text, acks=ack_codec.encode(acks))
     received = GroupChatMessage.from_cbor(sent.to_cbor())
     assert received.acks is not None
     assert ack_codec.decode(received.acks) == dict(sorted(acks.items()))
 
 
 def test_a_message_with_nothing_to_acknowledge_carries_no_field() -> None:
-    sent = GroupChatMessage(version=0, text="hi")
+    sent = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
     assert "acks" not in cbor2.loads(sent.to_cbor())
     assert GroupChatMessage.from_cbor(sent.to_cbor()).acks is None

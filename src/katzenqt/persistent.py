@@ -740,6 +740,7 @@ async def peer_has_read_cap(
     (the daemon mints a fresh random salt on every ``voucher_induct``). The
     index suffix is therefore not an identity, so this dedup keys on the
     32-byte public-key prefix alone -- matching
+    ``models.canonical_membership_hash`` and
     ``tally.controller.voter_id_from_read_cap``. Otherwise a re-induction
     adds a second peer for the same member, whose cap addresses a
     salt-determined box sequence nobody writes, and it polls a nonexistent
@@ -1290,9 +1291,10 @@ class ConversationLog(SQLModel, table=True):
     """When the row was added, for the disappearing messages policy."""
 
     network_status: int = Field(default=0) # 0: received; 1:pending; 2: fully sent; 3: acknowledged by a member
-    sent_seq: int | None = Field(default=None)
-    """Where our message falls in the order we wrote our stream, matched
-    against members' acknowledgements (``Ledger.acked_by``)."""
+    sent_idx64: bytes | None = Field(default=None)
+    """The ``Idx64`` of the box our message ends in, big-endian so that it
+    orders as a number, matched against members' acknowledgements
+    (``Ledger.acked_by``)."""
     outgoing_pwal: uuid.UUID | None = Field(
         default=None,
         foreign_key="plaintextwal.id",

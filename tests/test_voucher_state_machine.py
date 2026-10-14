@@ -299,11 +299,7 @@ async def _write_queued(*_: object, **__: object) -> None:
 
 @pytest.fixture
 def daemon(monkeypatch: pytest.MonkeyPatch) -> VoucherDaemon:
-    async def _noop(*_: object, **__: object) -> None:
-        return None
-
     monkeypatch.setattr(voucher, "check_for_new", _write_queued)
-    monkeypatch.setattr(voucher, "_wait_intro_acked", _noop)
     return VoucherDaemon()
 
 

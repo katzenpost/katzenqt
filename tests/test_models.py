@@ -55,7 +55,7 @@ def test_send_operation_empty() -> None:
 @given(st.integers(min_value=2), st.text())
 def test_send_operation_preserves_1(chunk_size: int, text: str) -> None:
     """Test that SendOperation chunking preserves the CBOR encoding of the input."""
-    m = models.GroupChatMessage(version=0, text=text)
+    m = models.GroupChatMessage(version=0,membership_hash=b'a'*32, text=text)
     bacap_stream = uuid.uuid4()
     s = models.SendOperation(messages=[m],bacap_stream=bacap_stream)
     new_bacap, ser = s.serialize(chunk_size=chunk_size, conversation_id=123)
@@ -100,7 +100,7 @@ def test_serialize_assigns_non_null_id_to_every_pwal() -> None:
     the wait can never terminate."""
     text = "X" * 4000  # forces multi-box split
     m = models.GroupChatMessage(
-        version=0, text=text,
+        version=0, membership_hash=b"a" * 32, text=text,
     )
     bacap_stream = uuid.uuid4()
     s = models.SendOperation(messages=[m], bacap_stream=bacap_stream)
@@ -126,7 +126,7 @@ def test_serialize_sets_substream_total_chunks_on_multi_chunk() -> None:
     can render progress as n/total over the substream's ReceivedPiece rows."""
     text = "X" * 4000  # forces multi-box split: several C + one F
     m = models.GroupChatMessage(
-        version=0, text=text,
+        version=0, membership_hash=b"a" * 32, text=text,
     )
     s = models.SendOperation(messages=[m], bacap_stream=uuid.uuid4())
     _, ser = s.serialize(chunk_size=1530, conversation_id=123)
@@ -165,7 +165,7 @@ def test_clamp_message_text_is_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_serialize_async_matches_serialize() -> None:
     """The off-loop wrapper produces the same chunking as the sync method."""
-    m = models.GroupChatMessage(version=0, text="hello world")
+    m = models.GroupChatMessage(version=0, membership_hash=b"a" * 32, text="hello world")
     s = models.SendOperation(messages=[m], bacap_stream=uuid.uuid4())
 
     sync_caps, sync_rows = s.serialize(chunk_size=1530, conversation_id=7)
@@ -187,3 +187,13 @@ async def test_serialize_async_matches_serialize() -> None:
 async def test_serialize_async_empty_message_list() -> None:
     s = models.SendOperation(messages=[], bacap_stream=uuid.uuid4())
     assert await s.serialize_async(chunk_size=1530, conversation_id=1) == ([], [])
+
+
+def test_boxes_hold_what_the_daemon_says(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(models, "_box_plaintext_length", None)
+    assert models.box_plaintext_length() == models.BOX_PLAINTEXT_FALLBACK
+    models.note_pigeonhole_geometry({"MaxPlaintextPayloadLength": 1677})
+    assert models.box_plaintext_length() == 1677
+    models.note_pigeonhole_geometry(None)
+    models.note_pigeonhole_geometry({"MaxPlaintextPayloadLength": 1})
+    assert models.box_plaintext_length() == 1677

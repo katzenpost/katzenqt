@@ -82,7 +82,8 @@ from ._thinclient import ThinClient
 from . import epochs
 from pydantic.dataclasses import dataclass
 from . import acks, attachment_images, conversation_handlers, disappearing, models, persistent
-from .groupchat.events import BoxRead, Missing, ReadBox, Walk, Walked
+from .groupchat import walk as groupchat_walk
+from .groupchat.events import BoxRead, Missing, ReadBox, Walk
 from sqlmodel import col, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -755,7 +756,8 @@ _epoch_event = asyncio.Event()
 
 
 async def on_new_pki_document(event: "dict[str, bytes]") -> None:
-    """Bump _epoch_event on every epoch advance.
+    """Bump _epoch_event on every epoch advance, and note the replica epoch
+    the document's storage replicas are in.
 
     Parses the epoch out of the raw event ourselves (rather than going
     through connection.pki_document(), which needs a ThinClient instance
@@ -769,6 +771,7 @@ async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     except Exception as e:
         logger.debug("on_new_pki_document: could not parse event payload: %s", e)
         return
+    await acks.note_pki_document(doc)
     lambda_p = doc.get("LambdaP")
     if (isinstance(lambda_p, (int, float)) and math.isfinite(lambda_p)
             and lambda_p > 0.0 and _pacer.follow_lambda_p(float(lambda_p))):
@@ -1878,6 +1881,7 @@ def _safe_basename(name: str) -> str:
 
 def _spill_attachment(
     file_upload: "models.GroupChatFileUpload",
+    membership_hash: bytes,
     conversation_id: int,
 ) -> bytes:
     """Write the attachment bytes to disk and return the CBOR marker
@@ -1907,6 +1911,7 @@ def _spill_attachment(
             "size": len(blob),
             "basename": safe,
             "filetype": file_upload.filetype,
+            "membership_hash": membership_hash,
         })
 
     sha = hashlib.sha256(blob).digest()
@@ -1937,6 +1942,7 @@ def _spill_attachment(
         "size": len(blob),
         "rel_path": rel_path,
         "sha256": sha,
+        "membership_hash": membership_hash,
     }
     if attachment_images.is_image_attachment(file_upload.filetype, safe):
         thumb_rel_path = attachment_images.spill_image_thumbnail(
@@ -2586,7 +2592,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             )
             spilled_payload = await asyncio.to_thread(
                 _spill_attachment,
-                spill_gcm.file_upload, spill_conv_id,
+                spill_gcm.file_upload, spill_gcm.membership_hash, spill_conv_id,
             )
 
     try:
@@ -3004,7 +3010,7 @@ async def scan_member(
                         sess, conversation_id, BoxRead(stream, index, result, after),
                     )) or []
                 case Walk() as walk:
-                    found = await _walk(connection, walk)
+                    found = groupchat_walk.walk(walk, acks.WALK_LIMIT)
                     walked = walked or found.target is not None
                     effects += await _scanning(conversation_id, lambda sess: acks.scanned(
                         sess, conversation_id, found,
@@ -3195,28 +3201,6 @@ async def _deliver_rechecked(
     if peer_added:
         peer_added_queue.put_nowait(peer_added)
     return gcm.to_cbor()
-
-
-async def _walk(connection: ThinClient, walk: Walk) -> Walked:
-    """Step forward from ``walk.start`` to the furthest of its targets met
-    within ``acks.WALK_LIMIT`` boxes, keeping the last ``walk.keep``
-    indexes stepped past on the way."""
-    passed: list[bytes] = []
-    found: "tuple[bytes, list[bytes]] | None" = None
-    met: set[bytes] = set()
-    index = walk.start
-    for _ in range(acks.WALK_LIMIT):
-        if index in walk.targets:
-            found = (index, list(passed))
-            met.add(index)
-            if len(met) == len(set(walk.targets)):
-                break
-        passed.append(index)
-        index = await connection.next_message_box_index(index)
-    if found is None:
-        return Walked(walk.stream, None, ())
-    target, before = found
-    return Walked(walk.stream, target, tuple(before[-walk.keep:]), len(before))
 
 
 def _is_member(
@@ -4254,6 +4238,7 @@ async def on_daemon_disconnected(event: "Mapping[str, object]") -> None:
 async def on_connection_status(status: "Mapping[str, object]") -> None:
     global _last_connected, _reconnect_event
     connected = bool(status["is_connected"])
+    models.note_pigeonhole_geometry(status.get("pigeonhole_geometry"))
     transitioned = _last_connected is not None and _last_connected != connected
     err = status.get("err") or status.get("Err")
     if connected:

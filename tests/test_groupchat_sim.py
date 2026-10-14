@@ -6,6 +6,7 @@ from __future__ import annotations
 import cbor2
 import pytest
 
+from katzenqt import models
 from katzenqt.groupchat import events, sim, state, wire
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.ledger import Ledger
@@ -118,6 +119,16 @@ def test_retiring_renames_every_mention() -> None:
     assert b"gone" in rosters.entries and b"gone" in rosters.keys
 
 
+def test_retiring_leaves_a_place_another_member_may_hold() -> None:
+    rosters = Rosters()
+    rosters.found([b"a", b"bx", b"by"])
+    rosters.number(b"a", 3, Entry(prefix=b"b"))
+    rosters.number(b"a", 4, Entry(prefix=b"bx"))
+    rosters.retire(b"bx", b"gone")
+    assert rosters.entries[b"a"][3] == Entry(prefix=b"b")
+    assert rosters.resolve(b"a", 4) == b"gone"
+
+
 def test_the_replica_refuses_a_bad_signature() -> None:
     world = sim.World()
     world.run("new-group alice")
@@ -204,8 +215,13 @@ def test_state_that_cannot_be_read() -> None:
 
 def test_forgetting_a_member_drops_what_it_acknowledged() -> None:
     ledger = Ledger()
-    ledger.hear(b"alice", b"i1", by=b"bob")
-    ledger.hear(b"bob", b"i2", by=b"carol")
+    ledger.hear(b"alice", 1, by=b"bob")
+    ledger.hear(b"bob", 2, by=b"carol")
     ledger.acked(b"bob", 3)
     ledger.forget(b"bob")
     assert ledger.heard == {b"alice": {}} and ledger.acked_by == {}
+
+
+def test_the_plain_codec_writes_the_current_version() -> None:
+    assert wire.VERSION == models.GROUP_CHAT_VERSION
+    assert cbor2.loads(wire.CborCodec().encode(wire.Message()))["Version"] == wire.VERSION

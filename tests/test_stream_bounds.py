@@ -19,7 +19,7 @@ def _idx(counter: int) -> bytes:
 
 async def _lay_a_real_chain(stream: uuid.UUID, text_chars: int) -> int:
     blob = models.GroupChatMessage(
-        version=0, text="x" * text_chars,
+        version=0, membership_hash=bytes(32), text="x" * text_chars,
     ).to_cbor()
     bodies = [blob[off:off + BODY] for off in range(0, len(blob), BODY)]
     async with persistent.asession() as sess:

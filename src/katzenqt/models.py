@@ -1,14 +1,16 @@
+import annotated_types
 import asyncio
-import hashlib
-from pydantic import Field, BaseModel, SecretBytes, SecretStr, field_serializer, model_validator
+from typing_extensions import Annotated
+from pydantic import Field, BaseModel, SecretBytes, SecretStr, Strict, field_serializer, model_validator
 import cbor2
 from enum import Enum
 import uuid
 import secrets
 import io
 from . import persistent
+import hashlib
 from base64 import b64encode, b64decode
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, List, Tuple, Union
 from pathlib import Path
 
@@ -17,11 +19,73 @@ SerializedRow = Union[persistent.PlaintextWAL, persistent.ReadCapWAL]
 if TYPE_CHECKING:
     from pydantic import FieldSerializationInfo
 
+# --- membership hash -------------------------------------------------------
+# The recipe is fixed so that independent implementations compute the same
+# 32-byte digest over the same member set.
+
 SUBSTREAM_NAME_PREFIX = ":substream:"
+
+MEMBERSHIP_DOMAIN = b"KP:membership:v1"
+
+MEMBERSHIP_SENTINELS = (b"TODO" * 8, bytes(32))
+
+
+def is_membership_sentinel(digest: bytes) -> bool:
+    """Whether ``digest`` is a 'no membership hash' sentinel accepted
+    without comparison during the migration window.
+
+    >>> is_membership_sentinel(b"TODO" * 8)
+    True
+    >>> is_membership_sentinel(bytes(32))
+    True
+    >>> is_membership_sentinel(canonical_membership_hash([bytes(136)]))
+    False
+    """
+    return digest in MEMBERSHIP_SENTINELS
+
+
+def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
+    """Order-independent membership hash of a set of member read caps:
+    take each cap's 32-byte public-key prefix, dedupe and sort those
+    byte-wise, concatenate, and SHA-256 under :data:`MEMBERSHIP_DOMAIN`.
+
+    Hashing the prefix (not the whole cap) keeps the digest stable across
+    the index/mutation suffix variants of the same member's read cap — a
+    joiner's pre-mutation cap, the salt-mutated cap the group holds, and
+    future-only read caps starting at a later index all collapse to one
+    member. The caller represents itself as ``write_cap[32:]``.
+
+    >>> key_a = bytes(range(32))
+    >>> key_b = bytes(range(32, 64))
+    >>> cap_a = key_a + bytes(104)
+    >>> cap_b = key_b + bytes(104)
+    >>> len(cap_a)
+    136
+    >>> canonical_membership_hash([cap_a, cap_b]) == canonical_membership_hash(
+    ...     [cap_b, cap_a])
+    True
+    >>> canonical_membership_hash(
+    ...     [cap_a, key_a + bytes(103) + bytes([1])],
+    ... ) == canonical_membership_hash([cap_a])
+    True
+    >>> canonical_membership_hash([cap_a]) == canonical_membership_hash(
+    ...     [cap_a, cap_b])
+    False
+    >>> len(canonical_membership_hash([cap_a]))
+    32
+    """
+    digest = hashlib.sha256()
+    digest.update(MEMBERSHIP_DOMAIN)
+    for key in sorted({cap[:32] for cap in read_caps}):
+        digest.update(key)
+    return digest.digest()
+
 
 # Version 1 carries acknowledgements and drops the membership hash.
 # Version 2 numbers members explicitly, in control messages.
-GROUP_CHAT_VERSION = 2
+# Version 3 names acknowledged boxes by Idx64, and carries the membership
+# hash again.
+GROUP_CHAT_VERSION = 3
 
 
 class UnsupportedVersion(ValueError):
@@ -33,6 +97,28 @@ class UnsupportedVersion(ValueError):
             f"{GROUP_CHAT_VERSION}, the newest this client reads"
         )
         self.version = version
+
+BOX_PLAINTEXT_FALLBACK = 1530
+"""The plaintext a box is taken to hold before the daemon has said."""
+
+_box_plaintext_length: "int | None" = None
+
+
+def note_pigeonhole_geometry(geometry: object) -> None:
+    """Take the plaintext a box holds from the daemon's pigeonhole geometry,
+    as its connection status event carries it."""
+    global _box_plaintext_length
+    if isinstance(geometry, Mapping):
+        length = geometry.get("MaxPlaintextPayloadLength")
+        if isinstance(length, int) and length > 1:
+            _box_plaintext_length = length
+
+
+def box_plaintext_length() -> int:
+    """The most plaintext a box holds, as the daemon last said, or
+    :data:`BOX_PLAINTEXT_FALLBACK` before it has."""
+    return _box_plaintext_length or BOX_PLAINTEXT_FALLBACK
+
 
 # Note: ``ConversationUIState`` used to live here but its Qt-typed fields
 # (ConversationLogModel, QStandardItem, QQmlPropertyMap) forced every
@@ -163,7 +249,7 @@ class GroupChatReplyWho(BaseModel):
         True
         """
         return cls(**cbor2.loads(data))
-    
+
 
 class GroupChatTypeEnum(Enum):
     TEXT = 0
@@ -195,7 +281,8 @@ class SendOperation(BaseModel):
     def serialize(self, chunk_size: int, conversation_id: int) -> "Tuple[List[uuid.UUID], List[SerializedRow]]":
         """Produce data to go into PlaintextWAL.
 
-        TODO chunk_size = BoxPayloadLength = 1556
+        ``chunk_size`` is the most plaintext a box holds,
+        :func:`box_plaintext_length`.
 
         This produces the BACAP payloads to insert.
         The first element of the returned tuple is a list of new UUIDs of BACAP WriteCap(s) that needs to be generated.
@@ -369,6 +456,7 @@ class GroupChatMessage(BaseModel):
     """
     model_config = {'validate_assignment': True}
     version: int = Field(ge=0,)
+    membership_hash : "Annotated[bytes, Strict(), annotated_types.Len(32, 32),]"
 
     # The message's type, made explicit so a conversation handler can route by
     # it rather than guessing from which optional field is set. Serialised as
@@ -384,9 +472,9 @@ class GroupChatMessage(BaseModel):
     reply_who: str | None = Field(default=None)
     tally: GroupChatTally | None = Field(default=None)
 
-    # Who this sender acknowledges, by roster index, and one BACAP
-    # MessageBoxIndex for each; see ``katzenqt.ack_codec``. Absent when there
-    # is nothing to acknowledge.
+    # Who this sender acknowledges, by roster index, and the BACAP Idx64 of
+    # the box acknowledged for each; see ``katzenqt.ack_codec``. Absent when
+    # there is nothing to acknowledge.
     acks: bytes | None = Field(default=None)
     # Roster indexes this message assigns, and where the sender was
     # introduced; see ``katzenqt.groupchat.wire``. Only in control messages
@@ -432,10 +520,14 @@ class GroupChatMessage(BaseModel):
         read-matching code paths.
 
         >>> intro = GroupChatPleaseAdd(display_name="alice", read_cap=bytes(136))
-        >>> announce = GroupChatMessage(version=0, introduction=intro)
+        >>> announce = GroupChatMessage(
+        ...     version=0, membership_hash=bytes(32), introduction=intro,
+        ... )
         >>> announce.as_introduction.display_name
         'alice'
-        >>> GroupChatMessage(version=0, text="hi").as_introduction is None
+        >>> GroupChatMessage(
+        ...     version=0, membership_hash=bytes(32), text="hi",
+        ... ).as_introduction is None
         True
         """
         if self.msg_type == GroupChatTypeEnum.INTRODUCTION and self.introduction is not None:
@@ -451,7 +543,7 @@ class GroupChatMessage(BaseModel):
 
         - The exception is that when we need to send more than one message at the same time,
 
-        >>> msg = GroupChatMessage(version=0, text="hi")
+        >>> msg = GroupChatMessage(version=0, membership_hash=bytes(32), text="hi")
         >>> cbor2.loads(msg.to_cbor())["msg_type"]
         0
         >>> "introduction" in cbor2.loads(msg.to_cbor())
@@ -459,7 +551,7 @@ class GroupChatMessage(BaseModel):
         >>> "acks" in cbor2.loads(msg.to_cbor())
         False
         >>> acked = GroupChatMessage(
-        ...     version=0, text="hi", acks=bytes([9]) + bytes(104))
+        ...     version=0, membership_hash=bytes(32), text="hi", acks=bytes([9]) + bytes(104))
         >>> len(cbor2.loads(acked.to_cbor())["acks"])
         105
         """
@@ -476,14 +568,14 @@ class GroupChatMessage(BaseModel):
         ... )
         >>> GroupChatMessage.from_cbor(legacy).msg_type
         <GroupChatTypeEnum.WHO: 3>
-        >>> msg = GroupChatMessage(version=GROUP_CHAT_VERSION, text="hi")
+        >>> msg = GroupChatMessage(version=GROUP_CHAT_VERSION, membership_hash=bytes(32), text="hi")
         >>> GroupChatMessage.from_cbor(msg.to_cbor()) == msg
         True
         >>> newer = cbor2.dumps({"version": GROUP_CHAT_VERSION + 1})
         >>> GroupChatMessage.from_cbor(newer)
         Traceback (most recent call last):
             ...
-        katzenqt.models.UnsupportedVersion: message version 3 is newer than version 2, the newest this client reads
+        katzenqt.models.UnsupportedVersion: message version 4 is newer than version 3, the newest this client reads
         """
         fields = cbor2.loads(cbor_bytes)
         if isinstance(fields, dict):
@@ -518,7 +610,9 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
     original ``bacap_stream`` or from an indirection substream; the
     caller has already classified them by the time they reach here.
 
-    >>> blob = GroupChatMessage(version=0, text="hi there").to_cbor()
+    >>> blob = GroupChatMessage(
+    ...     version=0, membership_hash=bytes(32), text="hi there",
+    ... ).to_cbor()
     >>> unserialize([(b"C", blob[:5]), (b"F", blob[5:])]).text
     'hi there'
     >>> unserialize([(b"C", blob)]) is None

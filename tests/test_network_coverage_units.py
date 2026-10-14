@@ -387,7 +387,7 @@ class TestTryAssemble:
     async def test_the_walk_back_stops_at_the_previous_message(self) -> None:
         stream = uuid.uuid4()
         gcm = models.GroupChatMessage(
-            version=0,
+            version=0, membership_hash=bytes(32),
             text="split",
         )
         blob = gcm.to_cbor()

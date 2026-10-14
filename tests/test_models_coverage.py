@@ -30,7 +30,7 @@ def test_serialize_refuses_a_chunk_size_that_cannot_hold_a_prefix(
         bacap_stream=uuid.uuid4(),
         messages=[
             models.GroupChatMessage(
-                version=0,
+                version=0, membership_hash=bytes(32),
                 text="hi",
             )
         ],
@@ -42,7 +42,7 @@ def test_serialize_refuses_a_chunk_size_that_cannot_hold_a_prefix(
 def test_as_introduction_returns_the_payload_for_an_introduction() -> None:
     intro = _please_add("carol", CAP_A)
     gcm = models.GroupChatMessage(
-        version=0,
+        version=0, membership_hash=bytes(32),
         introduction=intro,
     )
     assert gcm.msg_type == models.GroupChatTypeEnum.INTRODUCTION
@@ -51,7 +51,7 @@ def test_as_introduction_returns_the_payload_for_an_introduction() -> None:
 
 def test_as_introduction_is_none_for_a_plain_text_message() -> None:
     gcm = models.GroupChatMessage(
-        version=0,
+        version=0, membership_hash=bytes(32),
         text="hello",
     )
     assert gcm.as_introduction is None

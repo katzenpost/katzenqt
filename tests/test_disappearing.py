@@ -13,7 +13,7 @@ from sqlmodel import select
 from katzenqt import acks, disappearing, models, network, persistent
 from katzenqt.groupchat.sentbox import Retention
 from tests.fakes.thinclient import FakeThinClient
-from tests.test_acks import _Chat, _text, _with_bob
+from tests.test_acks import _Chat, _epoch, _text, _with_bob
 
 DAY = disappearing.DAY_SECONDS
 
@@ -48,7 +48,7 @@ def _f(gcm: models.GroupChatMessage) -> bytes:
 
 
 INTRO = _f(models.GroupChatMessage(
-    version=models.GROUP_CHAT_VERSION,
+    version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32),
     introduction=models.GroupChatPleaseAdd(display_name="carol", read_cap=bytes(136)),
 ))
 
@@ -107,14 +107,14 @@ async def test_an_attachment_goes_with_the_last_message_naming_it() -> None:
 async def test_the_sent_box_keeps_our_content_no_longer_than_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     await persistent.set_retention(chat.conversation_id, persistent.Retention(None, 7))
     assert (await chat.group()).policy == Retention(keep_sent=2)
     (sent,) = await chat.queue(_text())
     index = chat.land(sent.id)
     await acks.tick()
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: 12)
+    await _epoch(12)
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     assert (rewrite.box_index, rewrite.payload) == (index, b"")

@@ -206,7 +206,6 @@ async def test_intro_announcement_emits_increment(
         return None
 
     monkeypatch.setattr(voucher, "check_for_new", _noop)
-    monkeypatch.setattr(voucher, "_wait_intro_acked", lambda *a, **k: _noop())
 
     while not network.conversation_update_queue.empty():
         network.conversation_update_queue.get_nowait()
@@ -551,7 +550,8 @@ class TestAlreadyInductedGuard:
             )).all()
             # The own peer's read cap must be the salt-mutated one (the write
             # cap's 32-byte-key + index), not the un-mutated cap provisioned
-            # before the handshake. Own voter identity depends on it.
+            # before the handshake. Own voter identity and membership hash
+            # both depend on it.
             conv = await sess.get(persistent.Conversation, conversation_id)
             assert conv is not None
             own_peer = await sess.get(persistent.ConversationPeer, conv.own_peer_id)

@@ -59,6 +59,7 @@ def test_file_marker_resolves_to_spilled_file(tmp_path: Path) -> None:
         "size": len(blob),
         "rel_path": rel_path,
         "sha256": hashlib.sha256(blob).digest(),
+        "membership_hash": b"TODO" * 8,
     })
     message_id = _insert_payload(payload)
 
@@ -83,6 +84,7 @@ def test_file_marker_checksum_mismatch_raises() -> None:
         "size": 10,
         "rel_path": rel_path,
         "sha256": hashlib.sha256(b"different bytes").digest(),
+        "membership_hash": b"TODO" * 8,
     })
     message_id = _insert_payload(payload)
 
@@ -99,6 +101,7 @@ def test_file_marker_missing_file_raises() -> None:
         "size": 10,
         "rel_path": "attachments/9/does-not-exist.bin",
         "sha256": hashlib.sha256(b"x").digest(),
+        "membership_hash": b"TODO" * 8,
     })
     message_id = _insert_payload(payload)
 
@@ -113,6 +116,7 @@ def test_file_oversized_raises() -> None:
         "basename": "huge.bin",
         "filetype": "arbitrary",
         "size": 250 * 1024 * 1024,
+        "membership_hash": b"TODO" * 8,
     })
     message_id = _insert_payload(payload)
 
@@ -201,6 +205,7 @@ def test_file_marker_rejects_path_traversal() -> None:
         "size": 1,
         "rel_path": "../../etc/passwd",
         "sha256": b"\x00" * 32,
+        "membership_hash": b"TODO" * 8,
     })
     message_id = _insert_payload(payload)
     with pytest.raises(_AttachmentError):
@@ -237,6 +242,7 @@ def test_received_file_marker_without_sha256_is_refused() -> None:
         "filetype": "image/jpeg",
         "size": 10,
         "rel_path": rel_path,
+        "membership_hash": b"TODO" * 8,
     })
     message_id = _insert_payload(payload, network_status=0)
 

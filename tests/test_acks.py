@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, cast
 
@@ -27,7 +28,6 @@ from katzenqt.groupchat import state as group_state
 from katzenqt.groupchat import wire
 from katzenqt.groupchat.group import Group
 from katzenqt.groupchat.numbering import Entry
-from katzenqt.groupchat.sentbox import Retention
 from katzenqt.headless import _actions
 from tests.fakes.thinclient import FakeThinClient
 from tests.test_network_fake import _set_up_read_flow, _set_up_write_flow
@@ -43,12 +43,12 @@ def _index(n: int) -> bytes:
 
 
 def _text(text: str = "hi") -> models.GroupChatMessage:
-    return models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, text=text)
+    return models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32), text=text)
 
 
 def _introduction(name: str, read_cap: bytes) -> models.GroupChatMessage:
     return models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION,
+        version=models.GROUP_CHAT_VERSION, membership_hash=bytes(32),
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(display_name=name, read_cap=read_cap),
     )
@@ -260,7 +260,7 @@ async def test_a_message_carries_what_was_read_since_the_last_one() -> None:
     acked = ack_codec.decode(_sent(first).acks or b"")
     bob_place = (await chat.group()).rosters.index_of(chat.own_key, bob)
     assert bob_place is not None and list(acked) == [bob_place]
-    assert acked[bob_place] == _index(3)
+    assert acked[bob_place] == wire.counter(_index(3))
     (second,) = await chat.queue(_text())
     assert _sent(second).acks is None
 
@@ -279,7 +279,7 @@ async def test_a_box_that_cannot_be_read_still_counts_as_read() -> None:
         await sess.commit()
     (sent,) = await chat.queue(_text())
     acked = ack_codec.decode(_sent(sent).acks or b"")
-    assert list(acked.values()) == [_index(4)]
+    assert list(acked.values()) == [wire.counter(_index(4))]
 
 
 @pytest.mark.asyncio
@@ -317,7 +317,7 @@ async def test_a_stream_is_not_acknowledged_past_a_message_still_arriving() -> N
         await sess.commit()
     (released,) = await chat.queue(_text())
     acked = ack_codec.decode(_sent(released).acks or b"")
-    assert list(acked.values()) == [_index(6)]
+    assert list(acked.values()) == [wire.counter(_index(6))]
 
 
 @pytest.mark.asyncio
@@ -348,7 +348,7 @@ async def test_a_message_given_up_on_releases_what_waited_on_it() -> None:
         await acks.settle(sess, peer, rcw)
         await sess.commit()
     (released,) = await chat.queue(_text())
-    assert list(ack_codec.decode(_sent(released).acks or b"").values()) == [_index(5)]
+    assert list(ack_codec.decode(_sent(released).acks or b"").values()) == [wire.counter(_index(5))]
 
 
 @pytest.mark.asyncio
@@ -371,7 +371,7 @@ async def test_a_failed_transfer_does_not_hold_acknowledgements_back() -> None:
         await acks.box_read(sess, peer, rcw, _index(5), substream=substream_cap)
         await sess.commit()
     (sent,) = await chat.queue(_text())
-    assert list(ack_codec.decode(_sent(sent).acks or b"").values()) == [_index(5)]
+    assert list(ack_codec.decode(_sent(sent).acks or b"").values()) == [wire.counter(_index(5))]
 
 
 @pytest.mark.asyncio
@@ -403,16 +403,16 @@ async def test_an_acknowledgement_of_a_box_we_wrote_is_accepted() -> None:
     me = (await chat.group()).rosters.index_of(bob, chat.own_key)
     assert me is not None
     await chat.receive("bob", models.GroupChatMessage(
-        version=2, text="seen", acks=ack_codec.encode({me: index}),
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
     ), 1)
     group = await chat.group()
-    assert group.ledger.acked_by == {bob: 0}
+    assert group.ledger.acked_by == {bob: wire.counter(index)}
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, chat.conversation_id)
         assert conv is not None
         names, acked = await acks.summary(sess, conv)
     assert sorted(names or ()) == ["bob", "me"]
-    assert acked == {"bob": 0}
+    assert acked == {"bob": wire.counter(index)}
 
 
 @pytest.mark.asyncio
@@ -421,7 +421,7 @@ async def test_an_acknowledgement_of_a_box_we_never_wrote_is_ignored() -> None:
     me = (await chat.group()).rosters.index_of(bob, chat.own_key)
     assert me is not None
     await chat.receive("bob", models.GroupChatMessage(
-        version=2, text="seen", acks=ack_codec.encode({me: _index(0)}),
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(_index(0))}),
     ), 1)
     assert (await chat.group()).ledger.acked_by == {}
 
@@ -459,7 +459,7 @@ async def _statuses(chat: _Chat) -> list[int]:
 def _seen(chat_group: Group, member: bytes, me: bytes, index: bytes) -> models.GroupChatMessage:
     at = chat_group.rosters.index_of(member, me)
     assert at is not None
-    return models.GroupChatMessage(version=2, text="seen", acks=ack_codec.encode({at: index}))
+    return models.GroupChatMessage(version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({at: wire.counter(index)}))
 
 
 @pytest.mark.asyncio
@@ -533,7 +533,7 @@ async def test_a_member_introduced_is_numbered_in_a_control_message_first() -> N
 @pytest.mark.asyncio
 async def test_a_control_message_is_not_shown() -> None:
     chat, bob = await _with_bob()
-    control = models.GroupChatMessage(version=2, msg_type=models.GroupChatTypeEnum.CONTROL)
+    control = models.GroupChatMessage(version=2, membership_hash=bytes(32), msg_type=models.GroupChatTypeEnum.CONTROL)
     peer_id, _, _ = chat.peers["bob"]
     async with persistent.asession() as sess:
         peer = await sess.get(persistent.ConversationPeer, peer_id)
@@ -644,6 +644,27 @@ async def test_owed_numbering_goes_out_before_an_induction() -> None:
         async with persistent.asession() as sess:
             (queued,) = (await sess.exec(select(persistent.PlaintextWAL))).all()
         assert _sent(queued).numbers is not None
+
+
+@pytest.mark.asyncio
+async def test_an_introduction_carries_the_hash_before_its_member() -> None:
+    chat, _ = await _with_bob()
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        before = await conversation_handlers.local_membership_hash(sess, conv)
+    dave_cap = secrets.token_bytes(136)
+    await chat.add_peer("dave", dave_cap)
+    async with acks.held_back(chat.conversation_id):
+        await _reply(chat)
+        final = await voucher._write_introduction_log(chat.conversation_id, "dave", dave_cap)
+    async with persistent.asession() as sess:
+        intro = await sess.get(persistent.PlaintextWAL, final)
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert intro is not None and conv is not None
+        after = await conversation_handlers.local_membership_hash(sess, conv)
+    assert _sent(intro).as_introduction is not None
+    assert _sent(intro).membership_hash == before != after
 
 
 @pytest.mark.asyncio
@@ -850,13 +871,28 @@ async def test_removing_a_conversation_removes_its_group_state() -> None:
 async def test_records_older_than_the_window_are_let_go(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    await _epoch(10)
+    chat, _ = await _with_bob()
+    await persistent.set_retention(chat.conversation_id, persistent.Retention(sent_days=1))
+    (sent,) = await chat.queue(_text())
+    chat.land(sent.id)
+    assert (await chat.group()).sent.records
+    assert (await chat.group()).sent.records
+    await _epoch(10 + 10)
+    assert not (await chat.group()).sent.records
+
+
+@pytest.mark.asyncio
+async def test_records_are_kept_as_long_as_sent_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _epoch(10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     assert (await chat.group()).sent.records
-    now = acks._replica_epoch()
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: now + 10)
-    assert not (await chat.group()).sent.records
+    await _epoch(10 + 100)
+    assert (await chat.group()).sent.records
 
 
 # The codec.
@@ -865,7 +901,7 @@ async def test_records_older_than_the_window_are_let_go(
 def test_the_codec_reads_what_it_writes() -> None:
     control = wire.Message(
         numbers=((2, b"\x07" * 8),), introduced_at=wire.IntroRef(1, _index(5)),
-        acks={1: _index(3)},
+        acks={1: wire.counter(_index(3))},
     )
     assert acks.CODEC.decode(acks.CODEC.encode(control)) == control
     intro = wire.Message(
@@ -876,7 +912,7 @@ def test_the_codec_reads_what_it_writes() -> None:
     text = _text().to_cbor()
     decoded = acks.CODEC.decode(acks.CODEC.encode(wire.Message(content=text)))
     assert decoded is not None and decoded.content is not None
-    broken = models.GroupChatMessage(version=2, text="x", acks=b"\x01\x02")
+    broken = models.GroupChatMessage(version=2, membership_hash=bytes(32), text="x", acks=b"\x01\x02")
     decoded = acks.CODEC.decode(broken.to_cbor())
     assert decoded is not None and decoded.acks == {}
 
@@ -1164,22 +1200,25 @@ async def test_a_headless_message_waits_for_the_writer_lock() -> None:
 # Backfill.
 
 
-def _epoch(monkeypatch: pytest.MonkeyPatch, epoch: int) -> None:
-    monkeypatch.setattr(acks, "_replica_epoch", lambda: epoch)
+async def _epoch(epoch: int) -> None:
+    """The PKI says the replicas are in ``epoch``."""
+    await acks.note_pki_document(
+        {"StorageReplicas": [{"EnvelopeKeys": {epoch: b"k", epoch + 1: b"k"}}]}
+    )
 
 
 @pytest.mark.asyncio
 async def test_a_new_epoch_rewrites_each_box_we_wrote_with_what_it_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     payload = sent.bacap_payload
     index = chat.land(sent.id)
     await acks.tick()
     assert await acks.rewrites() == []
-    _epoch(monkeypatch, 11)
+    await _epoch(11)
     await acks.tick()
     assert await acks.rewrites() == [
         acks.Rewrite(chat.conversation_id, chat.write_cap, index, payload)
@@ -1190,37 +1229,88 @@ async def test_a_new_epoch_rewrites_each_box_we_wrote_with_what_it_holds(
 async def test_a_box_everyone_acknowledged_is_rewritten_as_a_tombstone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, bob = await _with_bob()
     (sent,) = await chat.queue(_text())
     index = chat.land(sent.id)
     me = (await chat.group()).rosters.index_of(bob, chat.own_key)
     assert me is not None
     await chat.receive("bob", models.GroupChatMessage(
-        version=2, text="seen", acks=ack_codec.encode({me: index}),
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
     ), 1)
-    _epoch(monkeypatch, 11)
+    await _epoch(11)
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     assert (rewrite.box_index, rewrite.payload) == (index, b"")
 
 
 @pytest.mark.asyncio
+async def test_nothing_is_written_once_nobody_is_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _epoch(10)
+    chat, bob = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    index = chat.land(sent.id)
+    me = (await chat.group()).rosters.index_of(bob, chat.own_key)
+    assert me is not None
+    await chat.receive("bob", models.GroupChatMessage(
+        version=2, membership_hash=bytes(32), text="seen", acks=ack_codec.encode({me: wire.counter(index)}),
+    ), 1)
+    await _epoch(11)
+    await acks.tick()
+    (rewrite,) = await acks.rewrites()
+    await acks.rewritten(rewrite)
+    await _epoch(12)
+    await acks.tick()
+    assert await acks.rewrites() == []
+
+
+@pytest.mark.asyncio
+async def test_an_epoch_is_taken_up_when_it_falls_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    future = int((time.time() - acks.KATZENPOST_EPOCH_ORIGIN) // acks.REPLICA_EPOCH_SECONDS) + 1000
+    await _epoch(future - 1)
+    chat, _ = await _with_bob()
+    (sent,) = await chat.queue(_text())
+    chat.land(sent.id)
+    assert (await chat.group()).epoch == future - 1
+    await _epoch(future)
+    group = await chat.group()
+    assert group.epoch == future - 1
+    due = acks._due(chat.write_cap, future)
+    monkeypatch.setattr(time, "time", lambda: due)
+    assert (await chat.group()).epoch == future
+
+
+@pytest.mark.asyncio
+async def test_the_replica_epoch_comes_from_the_pki() -> None:
+    async with persistent.asession() as sess:
+        assert await acks._replica_epoch(sess) is None
+    await acks.note_pki_document({})
+    await acks.note_pki_document({"StorageReplicas": [{"EnvelopeKeys": {6: b"k", 7: b"k"}}]})
+    await acks.note_pki_document({"StorageReplicas": [{"EnvelopeKeys": {6: b"k", 7: b"k"}}]})
+    async with persistent.asession() as sess:
+        assert await acks._replica_epoch(sess) == 6
+
+
+@pytest.mark.asyncio
 async def test_a_rewrite_sent_is_not_queued_again_that_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     await acks.tick()
-    _epoch(monkeypatch, 11)
+    await _epoch(11)
     await acks.tick()
     (rewrite,) = await acks.rewrites()
     await acks.rewritten(rewrite)
     await acks.tick()
     assert await acks.rewrites() == []
-    _epoch(monkeypatch, 12)
+    await _epoch(12)
     await acks.tick()
     assert [r.box_index for r in await acks.rewrites()] == [rewrite.box_index]
 
@@ -1229,11 +1319,12 @@ async def test_a_rewrite_sent_is_not_queued_again_that_epoch(
 async def test_a_box_is_no_longer_rewritten_once_its_record_is_gone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _epoch(monkeypatch, 10)
+    await _epoch(10)
     chat, _ = await _with_bob()
+    await persistent.set_retention(chat.conversation_id, persistent.Retention(sent_days=1))
     (sent,) = await chat.queue(_text())
     chat.land(sent.id)
     await acks.tick()
-    _epoch(monkeypatch, 10 + Retention().window + 1)
+    await _epoch(10 + (acks._policy(1).window or 0) + 1)
     await acks.tick()
     assert await acks.rewrites() == []
