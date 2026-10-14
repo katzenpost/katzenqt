@@ -538,38 +538,21 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
         ...
     ValueError: unknown chunk type: b'X'
     """
-    parts = []
-    chunk_list = list(chunks)
-    for i, (kind, data) in enumerate(chunk_list):
-        if kind == b"C":
-            if i == len(chunk_list) - 1:
-                return None  # chain still open, no terminating 'F'
-            parts.append(data)
-        elif kind == b"F":
-            if i != len(chunk_list) - 1:
-                raise ValueError(
-                    f"'F' chunk at index {i} but {len(chunk_list) - 1 - i} "
-                    "chunk(s) follow"
-                )
-            parts.append(data)
-            return GroupChatMessage.from_cbor(b"".join(parts))
-        elif kind == b"I":
-            raise ValueError(
-                "indirection ('I') framing must be resolved by the network "
-                "coalescer before reaching models.unserialize"
-            )
-        else:
-            raise ValueError(f"unknown chunk type: {kind!r}")
-    return None
+    blob = unserialize_opaque(kind + data for kind, data in chunks)
+    return None if blob is None else GroupChatMessage.from_cbor(blob)
 
 
 
 def frame_opaque(blob: bytes, chunk_size: int) -> "list[bytes]":
     """Frame an opaque blob as box payloads, all of them or none.
 
-    Uses the same framing as :meth:`SendOperation.serialize`: one byte
-    of marker per box, ``b'C'`` for every box but the last and ``b'F'``
-    for the last. A blob that fits is a single ``b'F'`` box.
+    One marker byte per box, ``b'C'`` for every box but the last and
+    ``b'F'`` for the last. The markers are the ones
+    :meth:`SendOperation.serialize` writes, but not its layout: a
+    message too large for one box goes onto a substream behind an
+    ``b'I'`` chunk, while this stays on the run of boxes it is given,
+    which is what a sealed reply on a voucher stream has. A blob that
+    fits is a single ``b'F'`` box.
 
     The all-or-nothing property is on the reading side:
     :func:`unserialize_opaque` yields the blob only once every box is
@@ -652,6 +635,11 @@ def unserialize_opaque(
                 )
             parts.append(data)
             return b"".join(parts)
+        elif kind == b"I":
+            raise ValueError(
+                "indirection ('I') framing must be resolved by the network "
+                "coalescer before reaching models.unserialize"
+            )
         else:
             raise ValueError(f"unknown chunk type: {kind!r}")
     return None
