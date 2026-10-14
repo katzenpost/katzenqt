@@ -543,49 +543,6 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
 
 
 
-def frame_opaque(blob: bytes, chunk_size: int) -> "list[bytes]":
-    """Frame an opaque blob as box payloads, all of them or none.
-
-    One marker byte per box, ``b'C'`` for every box but the last and
-    ``b'F'`` for the last. The markers are the ones
-    :meth:`SendOperation.serialize` writes, but not its layout: a
-    message too large for one box goes onto a substream behind an
-    ``b'I'`` chunk, while this stays on the run of boxes it is given,
-    which is what a sealed reply on a voucher stream has. A blob that
-    fits is a single ``b'F'`` box.
-
-    The all-or-nothing property is on the reading side:
-    :func:`unserialize_opaque` yields the blob only once every box is
-    present, so a run that was interrupted part way through is absent
-    to a reader rather than truncated.
-
-    >>> frame_opaque(b"hello", 8)
-    [b'Fhello']
-    >>> frame_opaque(b"hello", 4)
-    [b'Chel', b'Flo']
-    >>> frame_opaque(b"hello", 2)
-    [b'Ch', b'Ce', b'Cl', b'Cl', b'Fo']
-    >>> frame_opaque(b"", 8)
-    [b'F']
-    >>> frame_opaque(b"hello", 1)
-    Traceback (most recent call last):
-        ...
-    ValueError: chunk_size must leave room for the marker and a byte
-    """
-    if chunk_size <= 1:
-        raise ValueError(
-            "chunk_size must leave room for the marker and a byte"
-        )
-    body = chunk_size - 1
-    if len(blob) <= body:
-        return [b"F" + blob]
-    boxes = [
-        b"C" + blob[off:off + body]
-        for off in range(0, len(blob) - body, body)
-    ]
-    return boxes + [b"F" + blob[len(boxes) * body:]]
-
-
 def unserialize_opaque(
     chunks: "Iterable[bytes]",
 ) -> "bytes | None":
@@ -595,7 +552,7 @@ def unserialize_opaque(
     reader that holds a prefix of the run has nothing to act on, so a
     write that stopped half way cannot be mistaken for a shorter blob.
 
-    >>> boxes = frame_opaque(b"a sealed reply", 6)
+    >>> boxes = [b"Ca sea", b"Cled r", b"Feply"]
     >>> unserialize_opaque(boxes)
     b'a sealed reply'
     >>> unserialize_opaque(boxes[:-1]) is None
