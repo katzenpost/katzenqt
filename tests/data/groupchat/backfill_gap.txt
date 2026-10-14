@@ -1,0 +1,28 @@
+# A box lives through the epoch it was written in and the next, and a
+# rewrite in that time changes nothing. From the start of the epoch after,
+# it is gone until its owner's backfill writes it again.
+
+new-group alice bob carol
+send alice hello
+epoch
+backfill alice
+backfill alice           # at most once per epoch
+epoch
+peek alice 0
+----
+not found
+
+read bob alice
+----
+alice@0 not found
+
+backfill alice
+read bob alice
+----
+alice@0 "hello"
+alice@1 not found
+
+introduce alice dave
+roster carol dave        # carol has not read the Introduction yet
+----
+unknown

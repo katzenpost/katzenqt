@@ -83,6 +83,21 @@ CASES: list[tuple[list[str], dict[str, object]]] = [
         },
     ),
     (
+        ["disappear", "room", "7", "0"],
+        {
+            "action": "disappear", "conv_name": "room",
+            "received_days": 7, "sent_days": 0,
+        },
+    ),
+    (
+        ["scan", "room", "bob", *CONFIG],
+        {
+            "action": "scan", "config": "/tmp/kqt-contract.toml",
+            "address": None, "network": "tcp",
+            "conv_name": "room", "member": "bob",
+        },
+    ),
+    (
         ["read", "room", "12.5", *CONFIG],
         {
             "action": "read", "config": "/tmp/kqt-contract.toml",
@@ -221,13 +236,13 @@ CASES: list[tuple[list[str], dict[str, object]]] = [
 
 VERBS = [
     "create-conv", "voucher-mint", "voucher-induct", "voucher-await",
-    "send", "multi-send", "read", "chat-session", "send-file", "read-file",
-    "info", "tally-create", "tally-vote", "tally-result", "tally-close",
+    "send", "multi-send", "read", "scan", "chat-session", "send-file", "read-file",
+    "info", "disappear", "tally-create", "tally-vote", "tally-result", "tally-close",
     "tally-list", "membership-hash", "remove-conv", "remove-peer",
 ]
 
 OFFLINE_VERBS = [
-    "info", "tally-list", "membership-hash", "remove-conv", "remove-peer",
+    "info", "disappear", "tally-list", "membership-hash", "remove-conv", "remove-peer",
 ]
 
 DISPATCH = {
@@ -238,10 +253,12 @@ DISPATCH = {
     "send": "_action_send",
     "multi-send": "_action_multi_send",
     "read": "_action_read",
+    "scan": "_action_scan",
     "chat-session": "_action_chat_session",
     "send-file": "_action_send_file",
     "read-file": "_action_read_file",
     "info": "_action_info",
+    "disappear": "_action_disappear",
     "tally-create": "_action_tally_create",
     "tally-vote": "_action_tally_vote",
     "tally-result": "_action_tally_result",
@@ -268,9 +285,10 @@ TOKENS_AND_CODES: dict[
     ),
     "_action_voucher_induct": (
         (("error", "conversation %r not found"),
+         ("error", "introduction of %s not written"),
          ("error", "invalid voucher encoding"),
          ("info", "INDUCTED=%s")),
-        (0, 2),
+        (0, 2, 3),
     ),
     "_action_voucher_await": (
         (("error", "conversation %r not found"), ("info", "JOINED")),
@@ -317,6 +335,18 @@ TOKENS_AND_CODES: dict[
         (0, 1, 2),
     ),
     "_action_info": ((), (0,)),
+    "_action_disappear": (
+        (("error", "conversation %r not found"),
+         ("info", "RETENTION=%s")),
+        (0, 2),
+    ),
+    "_action_scan": (
+        (("error", "conversation %r not found"),
+         ("error", "member %r not found in %r"),
+         ("error", "nothing to scan on %r's stream"),
+         ("info", "SCANNED=%s")),
+        (0, 1, 2),
+    ),
     "_action_tally_create": (
         (("error", "conversation %r not found"),
          ("error", "unknown mode %r"),
@@ -454,7 +484,10 @@ def test_every_verb_is_covered() -> None:
 def test_offline_verbs_take_no_connection(
     run: Callable[..., tuple[int, dict[str, object]]], verb: str,
 ) -> None:
-    argv = {"info": [verb], "remove-peer": [verb, "room", "bob"]}.get(verb, [verb, "room"])
+    argv = {
+        "info": [verb], "remove-peer": [verb, "room", "bob"],
+        "disappear": [verb, "room", "1", "2"],
+    }.get(verb, [verb, "room"])
     _, namespace = run(argv)
     assert "config" not in namespace
     assert "address" not in namespace

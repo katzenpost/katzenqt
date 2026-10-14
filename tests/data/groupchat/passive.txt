@@ -1,0 +1,34 @@
+# Driven as a client that reads and writes for itself drives it: it asks
+# what to send, writes it when it can, and says where each message landed.
+# A message changes rosters only once it has landed, so numbering waits
+# for its control message, and an upload cancelled before it lands leaves
+# its acks owed again.
+
+option passive on
+option delay-writes on
+new-group alice bob carol
+introduce carol dave
+read alice carol
+send alice hi            # a control message numbering dave, then "hi"
+roster alice alice       # dave is reserved, not numbered, until it lands
+----
+carol alice bob
+
+land alice
+roster alice alice
+----
+carol alice bob dave
+
+send bob b0
+land bob
+read alice bob
+send alice upload        # acks bob@0
+abandon alice
+send alice again         # acks bob@0 again
+land alice
+read carol alice
+----
+alice@0 numbers 3:dave acks 0:carol@0
+alice@1 "hi"
+alice@2 "again" acks 2:bob@0
+alice@3 not found

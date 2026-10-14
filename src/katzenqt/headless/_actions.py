@@ -102,14 +102,19 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from . import _args
 from .. import epochs
-from .. import conversation_handlers, models, network, persistent, removal
+from .. import acks, conversation_handlers, models, network, persistent, removal
 from ..tally import engine as tally_engine
 from ..tally import events as tally_events
 from ..tally import schema as tally_schema
 from ..tally import send as tally_send
 from ..tally import sync as tally_sync
 from ..tally.controller import INSTANCE as tally_instance
-from ..voucher import await_and_open, derive_read_and_induct, mint_and_publish
+from ..voucher import (
+    await_and_open,
+    derive_read_and_induct,
+    introductions_written,
+    mint_and_publish,
+)
 
 logger = logging.getLogger("katzen.headless")
 
@@ -295,6 +300,11 @@ async def _action_voucher_induct(args: _args.VoucherInduct) -> int:
             connection, conv_id, args.peer_name, voucher,
         )
         logger.info("INDUCTED=%s", joiner_name)
+        # The other members learn of the new one from its Introduction,
+        # which only this process can write until it next runs.
+        if not await introductions_written():
+            logger.error("introduction of %s not written", joiner_name)
+            return 3
         return 0
     finally:
         await _shutdown(bg, connection)
@@ -337,33 +347,25 @@ async def _send_one_gcm(
         if convo is None:
             logger.error("conversation %r not found", conv_name)
             return 2
-        conversation_id = convo.id
         # Outgoing writes for this conversation go on the write-cap's
         # bacap_stream (i.e., the WriteCapWAL primary key). find_resendable
         # requires the PWAL's bacap_stream to match a fully-provisioned
         # WriteCapWAL, so using e.g. own_peer.read_cap_id silently stalls.
-        own_bacap_stream = convo.write_cap
-        gcm.membership_hash = await conversation_handlers.local_membership_hash(
-            sess, convo
-        )
-
-    send_op = models.SendOperation(
-        bacap_stream=own_bacap_stream, messages=[gcm],
-    )
-    new_write_caps, db_entries = await send_op.serialize_async(
-        chunk_size=1530, conversation_id=conversation_id,
-    )
-    final_pwal_id = db_entries[-1].id
-    num_pwals = sum(
-        1 for e in db_entries if isinstance(e, persistent.PlaintextWAL)
-    )
-
-    async with persistent.asession() as sess:
-        for cap_uuid in new_write_caps:
-            sess.add(persistent.WriteCapWAL(id=cap_uuid))
-        for obj in db_entries:
-            sess.add(obj)
-        await sess.commit()
+        # The message's pending acknowledgements are attached and recorded
+        # in the same transaction that queues it, under the writer lock.
+        async with persistent.conversation_log_order_lock(convo.id):
+            new_write_caps, db_entries = await acks.serialize_with_acks(
+                sess, convo, gcm,
+            )
+            final_pwal_id = db_entries[-1].id
+            num_pwals = sum(
+                1 for e in db_entries if isinstance(e, persistent.PlaintextWAL)
+            )
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            await sess.commit()
 
     headroom_s = max(120.0, num_pwals * 60.0)
     budget_s = (
@@ -391,10 +393,31 @@ async def _send_one_gcm(
         await _shutdown(bg, connection)
 
 
+async def _queue_text(
+    conversation_id: int, gcm: models.GroupChatMessage,
+) -> uuid.UUID:
+    """Queue ``gcm`` on the conversation's own stream, with whatever
+    acknowledgements are pending, in one transaction under the writer lock.
+    Returns the id of the final PlaintextWAL, which lands in SentLog once the
+    message has cleared."""
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            convo = await sess.get(persistent.Conversation, conversation_id)
+            assert convo is not None
+            new_write_caps, db_entries = await acks.serialize_with_acks(
+                sess, convo, gcm,
+            )
+            final_pwal_id = db_entries[-1].id
+            for cap_uuid in new_write_caps:
+                sess.add(persistent.WriteCapWAL(id=cap_uuid))
+            for obj in db_entries:
+                sess.add(obj)
+            await sess.commit()
+            return final_pwal_id
+
+
 async def _action_send(args: _args.Send) -> int:
-    gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8, text=args.text,
-    )
+    gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8, text=args.text)
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
@@ -415,9 +438,7 @@ async def _action_send_file(args: _args.SendFile) -> int:
         filetype=args.filetype or "application/octet-stream",
         basename=args.basename or path.name,
     )
-    gcm = models.GroupChatMessage(
-        version=0, membership_hash=b"TODO" * 8, file_upload=file_upload,
-    )
+    gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8, file_upload=file_upload)
     return await _send_one_gcm(args.conv_name, gcm, timeout=args.timeout)
 
 
@@ -505,31 +526,12 @@ async def _action_multi_send(args: _args.MultiSend) -> int:
             logger.error("conversation %r not found", args.conv_name)
             return 2
         conversation_id = convo.id
-        own_bacap_stream = convo.write_cap
 
     texts = args.texts.split("|")
     final_pwal_ids: "list[uuid.UUID]" = []
     for text in texts:
-        # Recompute per send: membership can change mid-session (an
-        # INTRODUCTION between sends), so the hash is fetched here, not once
-        # up front.
-        membership_hash = await conversation_handlers.membership_hash_for(
-            conversation_id
-        )
-        gcm = models.GroupChatMessage(
-            version=0, membership_hash=membership_hash, text=text,
-        )
-        send_op = models.SendOperation(
-            bacap_stream=own_bacap_stream, messages=[gcm],
-        )
-        _, db_entries = await send_op.serialize_async(
-            chunk_size=1530, conversation_id=conversation_id,
-        )
-        final_pwal_ids.append(db_entries[-1].id)
-        async with persistent.asession() as sess:
-            for obj in db_entries:
-                sess.add(obj)
-            await sess.commit()
+        gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8, text=text)
+        final_pwal_ids.append(await _queue_text(conversation_id, gcm))
 
     connection, bg = await _connect_and_start()
     try:
@@ -610,7 +612,6 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
             return 2
         own_peer_id = convo.own_peer_id
         conversation_id = convo.id
-        own_bacap_stream = convo.write_cap
 
     connection, bg = await _connect_and_start()
     try:
@@ -621,24 +622,8 @@ async def _action_chat_session(args: _args.ChatSession) -> int:
         for step_idx, raw in enumerate(args.steps):
             kind, _, payload = raw.partition(":")
             if kind == "SEND":
-                # Recompute per send: membership can change mid-session (F3).
-                membership_hash = await conversation_handlers.membership_hash_for(
-                    conversation_id
-                )
-                gcm = models.GroupChatMessage(
-                    version=0, membership_hash=membership_hash, text=payload,
-                )
-                send_op = models.SendOperation(
-                    bacap_stream=own_bacap_stream, messages=[gcm],
-                )
-                _, db_entries = await send_op.serialize_async(
-                    chunk_size=1530, conversation_id=conversation_id,
-                )
-                final_pwal_id = db_entries[-1].id
-                async with persistent.asession() as sess:
-                    for obj in db_entries:
-                        sess.add(obj)
-                    await sess.commit()
+                gcm = models.GroupChatMessage(version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8, text=payload)
+                final_pwal_id = await _queue_text(conversation_id, gcm)
                 # Marker for the reconnect integration test: the write is now
                 # committed to MixWAL but has not yet been handed to the
                 # drain, so a subprocess killed on this token is killed with
@@ -783,6 +768,55 @@ async def _action_read(args: _args.Read) -> int:
         await _shutdown(bg, connection)
 
 
+async def _action_scan(args: _args.Scan) -> int:
+    """Scan one member's stream, and log what the scan did as one line of
+    JSON. A scan runs only when asked for: see "Rewrite and scan" in
+    the group chat spec."""
+    async with persistent.asession() as sess:
+        conv = (await sess.exec(
+            select(persistent.Conversation).where(
+                persistent.Conversation.name == args.conv_name
+            )
+        )).first()
+        if conv is None:
+            logger.error("conversation %r not found", args.conv_name)
+            return 2
+        conversation_id = conv.id
+        peer = next((
+            p for p in conv.peers
+            if p.name == args.member and p.id != conv.own_peer_id
+        ), None)
+        if peer is None:
+            logger.error("member %r not found in %r", args.member, args.conv_name)
+            return 2
+        peer_id = peer.id
+    connection, bg = await _connect_and_start()
+    try:
+        result = await network.scan_member(
+            connection, conversation_id=conversation_id, peer_id=peer_id,
+        )
+    finally:
+        await _shutdown(bg, connection)
+    if result is None:
+        logger.error("nothing to scan on %r's stream", args.member)
+        return 1
+    logger.info("SCANNED=%s", json.dumps(result._asdict()))
+    return 0
+
+
+async def _action_disappear(args: _args.Disappear) -> int:
+    """Set a conversation's disappearing messages policy. The running client
+    applies it within the hour."""
+    conversation_id = await _conv_id_by_name(args.conv_name)
+    if conversation_id is None:
+        logger.error("conversation %r not found", args.conv_name)
+        return 2
+    policy = persistent.Retention(args.received_days or None, args.sent_days or None)
+    await persistent.set_retention(conversation_id, policy)
+    logger.info("RETENTION=%s", json.dumps(policy._asdict()))
+    return 0
+
+
 async def _action_info(args: _args.Info) -> int:
     """Print one line of JSON describing this state file's schema,
     conversations, and outstanding WAL counts.
@@ -790,6 +824,11 @@ async def _action_info(args: _args.Info) -> int:
     Synthetic substream peers (whose names begin with the
     ``:substream:`` marker) are excluded from per-conversation peer
     counts so the output reflects only user-facing peers.
+
+    For a conversation that keeps rosters, ``roster`` is our own roster as
+    display names in order; it is null otherwise. ``acked`` maps each member
+    that has acknowledged our stream to the ``Idx64`` of the last box of ours
+    it acknowledged.
     """
     with persistent._engine_sync.connect() as conn:
         ctx = MigrationContext.configure(conn)
@@ -810,11 +849,14 @@ async def _action_info(args: _args.Info) -> int:
                     persistent.ConversationLog.conversation_id == c.id
                 )
             )).one()
+            roster, acked = await acks.summary(sess, c)
             conv_summaries.append({
                 "id": c.id,
                 "name": c.name,
                 "peer_count": len(real_peers),
                 "messages": int(msg_count),
+                "roster": roster,
+                "acked": acked,
             })
 
         pwal_count = (await sess.exec(
@@ -1005,18 +1047,19 @@ async def _action_tally_vote(args: _args.TallyVote) -> int:
             if convo is None:
                 logger.error("conversation %r not found", args.conv_name)
                 return 2
-            try:
-                version = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
-            except ValueError as exc:
-                logger.error("invalid vote: %s", exc)
-                return 2
-            if version is None:
-                logger.error("could not apply vote to survey %s", survey_id.hex())
-                return 1
-            final_pwal_id = await tally_send.stage_outbound(
-                sess, convo, tally_events.build_vote(survey_id, choice, version),
-            )
-            await sess.commit()
+            async with persistent.conversation_log_order_lock(convo.id):
+                try:
+                    version = await tally_instance.cast_local_vote(sess, convo, survey_id, choice)
+                except ValueError as exc:
+                    logger.error("invalid vote: %s", exc)
+                    return 2
+                if version is None:
+                    logger.error("could not apply vote to survey %s", survey_id.hex())
+                    return 1
+                final_pwal_id = await tally_send.stage_outbound(
+                    sess, convo, tally_events.build_vote(survey_id, choice, version),
+                )
+                await sess.commit()
 
         await network.check_for_new()
         if await _wait_for_sent(
@@ -1077,13 +1120,14 @@ async def _action_tally_close(args: _args.TallyClose) -> int:
             if convo is None:
                 logger.error("conversation %r not found", args.conv_name)
                 return 2
-            if not await tally_instance.close_local(sess, convo, survey_id):
-                logger.error("could not close survey %s (only the creator may)", survey_id.hex())
-                return 1
-            final_pwal_id = await tally_send.stage_outbound(
-                sess, convo, tally_events.build_close(survey_id),
-            )
-            await sess.commit()
+            async with persistent.conversation_log_order_lock(convo.id):
+                if not await tally_instance.close_local(sess, convo, survey_id):
+                    logger.error("could not close survey %s (only the creator may)", survey_id.hex())
+                    return 1
+                final_pwal_id = await tally_send.stage_outbound(
+                    sess, convo, tally_events.build_close(survey_id),
+                )
+                await sess.commit()
 
         await network.check_for_new()
         if await _wait_for_sent(

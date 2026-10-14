@@ -1,0 +1,39 @@
+# Fix for flaw (a). A member numbers another in a control message, which
+# carries no content, so the retention policy never deletes it. Alice's
+# text disappears after an epoch, but bob, reading late, still learns that
+# alice numbered dave and resolves her ack of dave.
+
+option keep-sent 1
+new-group alice bob carol
+introduce carol dave
+read alice carol
+send alice hi            # a control message numbering dave goes first
+----
+alice@0 numbers 3:dave acks 0:carol@0
+alice@1 "hi"
+
+tick
+read bob carol
+read bob alice
+----
+alice@0 numbers 3:dave acks 0:carol@0
+alice@1 tombstone
+alice@2 not found
+
+read dave carol
+send dave hello
+read alice dave
+send alice again         # acks dave
+read bob dave
+read bob alice
+roster alice alice
+----
+carol alice bob dave
+
+roster bob alice
+----
+carol alice bob dave
+
+acks bob alice 2
+----
+dave=dave@1

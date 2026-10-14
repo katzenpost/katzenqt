@@ -70,8 +70,7 @@ def _fatal_db_error() -> OperationalError:
 
 def _f_payload(text: str = "hello") -> bytes:
     gcm = models.GroupChatMessage(
-        version=0,
-        membership_hash=b"X" * 32,
+        version=0, membership_hash=bytes(32),
         text=text,
     )
     return b"F" + bytes(gcm.to_cbor())
@@ -602,6 +601,7 @@ class TestReadSubstreamFailures:
             peer: object,
             gcm: object,
             full_payload: object,
+            **_: object,
         ) -> tuple[bool, bool, None, bool]:
             raise _fatal_db_error()
 

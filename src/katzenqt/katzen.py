@@ -36,7 +36,7 @@ from PySide6.QtTest import QAbstractItemModelTester
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFontDialog, QInputDialog, QLabel,
                                QFormLayout, QHBoxLayout, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
+                               QMessageBox, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
                                QTextBrowser, QTableView, QToolButton, QTreeView,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 from sqlmodel import col, select
@@ -58,10 +58,10 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      voucher_code)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
-from .models import (NAME_POLICY_HASH, NAME_POLICY_KEEP,
+from .models import (GROUP_CHAT_VERSION, NAME_POLICY_HASH, NAME_POLICY_KEEP,
                      NAME_POLICY_SETTING, GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation,
-                     outgoing_basename)
+                     box_plaintext_length, outgoing_basename)
 #from ui_mixchat_chatview import Ui_ChatForm
 # qt_models.py also re-exports ConversationUIState (moved here so the
 # headless `models` module can stay PySide6-free).
@@ -92,6 +92,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("katzen")
 DELIVERY_TICK = "\u2713"
+MEMBER_ACK_TICKS = "\u2713\u2713"
 logger.setLevel("INFO")
 
 
@@ -682,6 +683,60 @@ class StatsDialog(QDialog):
     def hideEvent(self, event: "QHideEvent") -> None:
         self._timer.stop()
         super().hideEvent(event)
+
+
+class GroupInfoDialog(QDialog):
+    """Read-only view of a group chat's roster, how far each member has
+    read our stream, and what is known about each member's stream."""
+
+    def __init__(self, parent: "QWidget | None", title: str, info: "network.GroupInfo") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{title}: members")
+        layout = QFormLayout(self)
+        roster = QLabel(", ".join(f"{i} {name}" for i, name in enumerate(info.roster)))
+        roster.setWordWrap(True)
+        layout.addRow("Roster", roster)
+        for name, read, hint in info.members:
+            ours = "nothing of ours yet" if read is None else (
+                f"our first {read} box{'es' * (read != 1)}"
+            )
+            label = QLabel(f"Has read {ours}. {hint}.")
+            label.setWordWrap(True)
+            layout.addRow(name, label)
+
+
+class RetentionDialog(QDialog):
+    """A conversation's disappearing messages policy: days to keep received
+    and sent messages, where 0 keeps them."""
+
+    def __init__(self, parent: "QWidget | None", title: str, policy: "persistent.Retention") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{title}: disappearing messages")
+        layout = QFormLayout(self)
+        self.received = self._days(policy.received_days)
+        self.sent = self._days(policy.sent_days)
+        layout.addRow("Delete messages I receive after", self.received)
+        layout.addRow("Delete messages I send after", self.sent)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    @staticmethod
+    def _days(days: "int | None") -> QSpinBox:
+        box = QSpinBox()
+        box.setRange(0, 3650)
+        box.setSuffix(" days")
+        box.setSpecialValueText("Never")
+        box.setValue(days or 0)
+        return box
+
+    def policy(self) -> "persistent.Retention":
+        return persistent.Retention(
+            self.received.value() or None, self.sent.value() or None,
+        )
 
 
 class ConsensusDialog(QDialog):
@@ -1994,7 +2049,7 @@ class MainWindow(QMainWindow):
         )
         logger.debug("serializing %d outgoing message(s)", len(send_op.messages))
         new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
+            chunk_size=box_plaintext_length(),
             conversation_id=convo_state.conversation_id,
         )
 
@@ -2072,18 +2127,8 @@ class MainWindow(QMainWindow):
             )
         )
         group_chat_message = GroupChatMessage(
-            version=0, membership_hash=membership_hash, text=msg
+            version=GROUP_CHAT_VERSION, membership_hash=membership_hash, text=msg
         )
-
-        # TODO: this is general code that should live in a shared place:
-        send_op = SendOperation(
-            bacap_stream=convo_state.own_peer_bacap_uuid,
-            messages=[group_chat_message]
-        )
-        # TODO this code is duplicated in self.send_file
-        new_write_caps, db_entries = await send_op.serialize_async(
-            chunk_size=1530, # TODO SphinxGeometry.somethingPayloadLength
-            conversation_id=convo_state.conversation_id)
 
         # conversation_order is a count subquery evaluated at commit. The
         # receive/voucher paths append on the io loop; the send path funnels
@@ -2091,18 +2136,15 @@ class MainWindow(QMainWindow):
         # the per-conversation lock, so two transactions can never stamp the
         # same order and trip the unique constraint.
         #
-        # One run_in_io hop, not three: append, the queue-put that wakes
-        # receive_msg_listener, and check_for_new all happen inside the same
-        # io-loop coroutine instead of three separate cross-thread round trips.
+        # The message is serialized on the io loop too: its pending
+        # acknowledgements are attached and recorded in the transaction that
+        # queues it. One run_in_io hop covers that, the queue-put that wakes
+        # receive_msg_listener, and check_for_new.
         await self.iothread.run_in_io(
-            network.notify_outbound_chat_sent(
+            network.notify_outbound_text_sent(
                 conversation_id=convo_state.conversation_id,
                 conversation_peer_id=convo_state.own_peer_id,
-                new_write_caps=new_write_caps,
-                db_entries=db_entries,
-                payload=b"F" + group_chat_message.to_cbor(),
-                # TODO massive hack here because we don't reassemble sendops yet
-                final_pwal_id=db_entries[-1].id,
+                gcm=group_chat_message,
             )
         )
 
@@ -2193,10 +2235,9 @@ class MainWindow(QMainWindow):
     def _note_first_delivery_mark(self, conversation_id: int) -> None:
         """Say once per conversation what the first delivery mark means.
 
-        A mark is a courier or replica acknowledgement, which is the only
-        delivery this client can observe. It is not a peer having read
-        anything, and until a second acknowledgement exists we hold the
-        only copy anyone can fetch, so the message has to be kept.
+        The first mark is a courier or replica acknowledgement, not a peer
+        having read anything. The second is a member's acknowledgement,
+        carried on a message of theirs.
         """
         if conversation_id in self._ticked_conversations:
             return
@@ -2205,7 +2246,7 @@ class MainWindow(QMainWindow):
                 select(persistent.ConversationLog).where(
                     persistent.ConversationLog.conversation_id
                     == conversation_id,
-                    persistent.ConversationLog.network_status == 2,
+                    col(persistent.ConversationLog.network_status) >= 2,
                 )
             ).first()
         if marked is None:
@@ -2213,14 +2254,14 @@ class MainWindow(QMainWindow):
         self._ticked_conversations.add(conversation_id)
         logger.info(
             "conversation %s carries its first courier or replica "
-            "acknowledgement; the message is kept until a second one exists",
+            "acknowledgement",
             conversation_id,
         )
         self._show_status_message(
             "",
             f"{DELIVERY_TICK} means a courier or replica has the message, "
-            "not that anyone read it; it is kept until a second mark "
-            "appears",
+            f"not that anyone read it; {MEMBER_ACK_TICKS} means a member has "
+            "acknowledged reading it",
         )
 
     async def _process_conversation_update(
@@ -2230,6 +2271,9 @@ class MainWindow(QMainWindow):
             return
         convo_state = self.conversation_state_by_id[conversation_id]
         if redraw_only:
+            # Rows can go too: disappearing messages deletes them.
+            if convo_state.conversation_log_model.lost_rows():
+                convo_state.conversation_log_model.refresh_row_count()
             convo_state.conversation_log_model.redraw_network_status()
             self._note_first_delivery_mark(conversation_id)
             return
@@ -2391,6 +2435,10 @@ class MainWindow(QMainWindow):
         start = api.addAction("Resume reading from this group chat")
         stop.setEnabled(conversation_id is not None and not paused)
         start.setEnabled(conversation_id is not None and paused)
+        members = api.addAction("Members and acknowledgements...")
+        members.setEnabled(conversation_id is not None)
+        disappear = api.addAction("Disappearing messages...")
+        disappear.setEnabled(conversation_id is not None)
         api.addSeparator()
         copy_voucher = api.addAction("Copy voucher")
         show_voucher = api.addAction("Show voucher...")
@@ -2402,6 +2450,10 @@ class MainWindow(QMainWindow):
         chosen = await _menu_chosen(api, global_pos)
         if chosen is remove:
             await self._remove_conversation(item)
+        elif chosen is members and conversation_id is not None:
+            await self._show_members(conversation_id, item.text())
+        elif chosen is disappear and conversation_id is not None:
+            await self._edit_retention(conversation_id, item.text())
         elif chosen is stop and conversation_id is not None:
             await self.iothread.run_in_io(
                 network.pause_conversation_reads(
@@ -2430,6 +2482,26 @@ class MainWindow(QMainWindow):
         elif chosen is show_voucher:
             await _dialog_finished(VoucherDialog(self, voucher_code(token)))
 
+    async def _edit_retention(self, conversation_id: int, title: str) -> None:
+        policy = await self.iothread.run_in_io(persistent.current_retention(conversation_id))
+        dialog = RetentionDialog(self, title, policy)
+        if await _dialog_finished(dialog) != QDialog.DialogCode.Accepted.value:
+            return
+        await self.iothread.run_in_io(
+            persistent.set_retention(conversation_id, dialog.policy()),
+        )
+
+    async def _show_members(self, conversation_id: int, title: str) -> None:
+        info = await self.iothread.run_in_io(
+            network.group_info(conversation_id=conversation_id),
+        )
+        if info is None:
+            self.ui.statusbar.showMessage(
+                "This group chat keeps no rosters", 5000,
+            )
+            return
+        await _dialog_finished(GroupInfoDialog(self, title, info))
+
     async def _pending_voucher(self, item: "ContactsItem") -> "bytes | None":
         conversation_id = getattr(item, "conversation_id", None)
         if conversation_id is None:
@@ -2457,16 +2529,29 @@ class MainWindow(QMainWindow):
             )).first()
             rcw = sess.get(persistent.ReadCapWAL, read_cap_id)
             active = bool(solo and solo.active and rcw and not rcw.paused)
+        conversation_id = cast("ContactsItem", item.parent()).conversation_id
+        stream = await self.iothread.run_in_io(network.member_stream(
+            conversation_id=conversation_id, read_cap_id=read_cap_id,
+        ))
         # A throwaway menu so we never clobber the tray's contextMenu().
         api = QMenu(self.ui.contacts_treeWidget)
         pgm = api.addAction(f"Do not read from {item.text()} any more")
         rgm = api.addAction(f"Resume reading from {item.text()}")
         api.addSeparator()
+        # A scan runs only when asked for: nothing can tell a quiet stream
+        # from one stuck behind a missing box.
+        scan = api.addAction(f"Scan {item.text()}'s messages")
+        scan.setEnabled(stream is not None and self.iothread.kp_client is not None)
+        if stream is not None:
+            api.addAction(network.stream_hint(stream)).setEnabled(False)
+        api.addSeparator()
         rm = api.addAction(f"Remove {item.text()} from this group chat...")
         pgm.setEnabled(active)
         rgm.setEnabled(not active)
         chosen = await _menu_chosen(api, global_pos)
-        if chosen is pgm and active:
+        if chosen is scan:
+            await self._scan_peer(conversation_id, read_cap_id)
+        elif chosen is pgm and active:
             await self.iothread.run_in_io(
                 network.pause_peer_reads(bacap_stream=read_cap_id),
             )
@@ -2476,6 +2561,26 @@ class MainWindow(QMainWindow):
             )
         elif chosen is rm:
             await self._remove_peer(item)
+
+    async def _scan_peer(self, conversation_id: int, read_cap_id: uuid.UUID) -> None:
+        client = self.iothread.kp_client
+        if client is None:
+            return
+        peer_id = await self.iothread.run_in_io(persistent.peer_id_by_read_cap(
+            conversation_id=conversation_id, read_cap_id=read_cap_id,
+        ))
+        if peer_id is None:
+            return
+        self.ui.statusbar.showMessage("Scanning...")
+        try:
+            result = await self.iothread.run_in_io(network.scan_member(
+                client, conversation_id=conversation_id, peer_id=peer_id,
+            ))
+        except Exception as e:
+            logger.exception("scan of %s failed", read_cap_id)
+            self.ui.statusbar.showMessage(f"Scan failed: {_error_detail(e)}", 5000)
+            return
+        self.ui.statusbar.showMessage(network.scan_summary(result), 5000)
 
     async def _confirm(self, text: str) -> bool:
         box = QMessageBox(QMessageBox.Icon.Warning, APP_NAME, text, parent=self)
@@ -2824,7 +2929,7 @@ class MainWindow(QMainWindow):
                 hash_all=policy == NAME_POLICY_HASH,
             )
             gcm = GroupChatMessage(
-                version=0,
+                version=GROUP_CHAT_VERSION,
                 membership_hash=membership_hash,
                 file_upload=upload,
             )

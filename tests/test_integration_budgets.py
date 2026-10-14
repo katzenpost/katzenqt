@@ -37,18 +37,29 @@ def _long_literals(text: str) -> list[str]:
 
 
 def test_budget_for_adds_the_headroom_to_the_epoch() -> None:
-    assert helpers.budget_for(120.0, 630.0) == 750.0
     assert helpers.budget_for(1200.0, 630.0) == 1830.0
+    assert helpers.budget_for(2400.0, 630.0) == 3030.0
+
+
+def test_a_short_epoch_does_not_shrink_the_wait() -> None:
+    """The headrooms are tuned where an epoch is 1200s. A mixnet with a
+    2m epoch must not get waits 1080s shorter for the same work, which is
+    what ran the three-party tests out of budget at 750s."""
+    assert helpers.budget_for(120.0, 630.0) == 1830.0
+    assert helpers.budget_for(30.0, 630.0) == 1830.0
+    assert helpers.budget_for(120.0, 630.0) == helpers.budget_for(
+        1200.0, 630.0
+    )
 
 
 def test_budget_s_reads_the_epoch_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KQT_EPOCH_DURATION_S", "300")
+    monkeypatch.setenv("KQT_EPOCH_DURATION_S", "1500")
     helpers.epoch_duration_s.cache_clear()
     try:
-        assert helpers.budget_s(630.0) == 930.0
-        assert helpers.deadline_arg(780.0) == "1080"
+        assert helpers.budget_s(630.0) == 2130.0
+        assert helpers.deadline_arg(780.0) == "2280"
     finally:
         helpers.epoch_duration_s.cache_clear()
 

@@ -145,15 +145,34 @@ def epoch_duration_s() -> float:
     return _parse_go_duration(match.group(1))
 
 
-def budget_for(epoch_s: float, headroom_s: float) -> float:
-    """A wait that rides out one epoch plus ``headroom_s`` of slack.
+RIDE_OUT_FLOOR_S = 1200.0
+"""The least the epoch term may contribute to a wait.
 
-    >>> budget_for(120.0, 630.0)
-    750.0
+Every ``headroom_s`` in this suite was tuned against namenlos, where one
+epoch is 1200s, so each wait was really headroom PLUS twenty minutes. On
+the docker mixnet an epoch is 120s and the same waits came out 1080s
+shorter, which is what ejected two pull requests from the merge queue:
+the heaviest three-party tests ran out of budget at exactly 750s while
+the same tests passed against namenlos at 1830s. The work is network
+bound and spans many short epochs, so it does not shrink when the epoch
+does, and the allowance must not either.
+"""
+
+
+def budget_for(epoch_s: float, headroom_s: float) -> float:
+    """A wait that rides out an epoch plus ``headroom_s`` of slack, with
+    the epoch term floored at :data:`RIDE_OUT_FLOOR_S`.
+
     >>> budget_for(1200.0, 630.0)
     1830.0
+    >>> budget_for(120.0, 630.0)
+    1830.0
+    >>> budget_for(30.0, 180.0)
+    1380.0
+    >>> budget_for(2400.0, 630.0)
+    3030.0
     """
-    return epoch_s + headroom_s
+    return max(epoch_s, RIDE_OUT_FLOOR_S) + headroom_s
 
 
 def budget_s(headroom_s: float) -> float:

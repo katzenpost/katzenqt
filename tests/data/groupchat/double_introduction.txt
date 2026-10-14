@@ -1,0 +1,68 @@
+# Fix for flaw (d). Alice invites dave and catches up. Bob then introduces
+# erin and carol numbers her, so when alice commits, her roster has no erin
+# but carol's has. Carol introduces dave as well. Dave's roster began as a
+# copy of alice's, and his first message says so with IntroducedAt; bob
+# takes dave's roster from alice's Introduction, not carol's, and reads
+# dave's indexes right.
+
+new-group alice bob carol
+invite alice dave
+introduce bob erin
+read carol bob
+send carol c0            # carol numbers erin
+introduce alice dave
+introduce carol dave
+----
+alice@0 introduces dave numbers 3:dave
+alice@1 not found
+bob@1 not found
+erin@0 not found
+dave already joined
+carol@2 numbers 4:dave acks 1:alice@0
+carol@3 introduces dave
+
+roster dave dave
+----
+carol alice bob dave
+
+read dave alice
+send dave d0             # a control message stating where dave joined goes first
+read bob alice
+read bob carol
+read bob dave
+roster bob dave
+----
+carol alice bob dave
+
+read dave bob
+send dave d1             # numbers erin, acks bob
+send erin e0
+read dave erin
+send dave d2             # acks erin
+read bob erin
+read bob dave
+roster dave dave
+----
+carol alice bob dave erin
+
+roster bob dave
+----
+carol alice bob dave erin
+
+# IntroducedAt can be read before the Introduction it names: gina learns of
+# ivy from hal's Introduction and reads ivy before fred's stream.
+new-group fred gina hal
+introduce fred ivy
+introduce hal ivy
+read ivy fred
+send ivy i0              # introduced-at fred's Introduction goes first
+read gina hal
+read gina ivy
+roster gina ivy          # not yet known
+----
+unknown
+
+read gina fred
+roster gina ivy
+----
+fred hal gina ivy

@@ -1,0 +1,227 @@
+"""Edges of the group chat state machine and its simulator that no scenario
+reaches."""
+
+from __future__ import annotations
+
+import cbor2
+import pytest
+
+from katzenqt import models
+from katzenqt.groupchat import events, sim, state, wire
+from katzenqt.groupchat.group import Group
+from katzenqt.groupchat.ledger import Ledger
+from katzenqt.groupchat.numbering import Entry, Rosters
+
+
+def test_a_malformed_message_is_ignored() -> None:
+    assert wire.CborCodec().decode(b"\xa1\x01") is None
+
+
+def test_unknown_events_and_streams_do_nothing() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    stranger = b"\x01" * 32
+    assert alice.handle(object()) == []  # type: ignore[arg-type]
+    assert alice.handle(events.Read(stranger)) == []
+    assert alice.handle(events.Scan(stranger)) == []
+    effects = alice.handle(events.BoxRead(stranger, bytes(104), events.Missing.NOT_FOUND))
+    assert all(isinstance(effect, events.DeriveIndexes) for effect in effects)
+    assert alice.observe(stranger, bytes(104), None, bytes(104)) == []
+    assert alice.handle(events.Walked(stranger, None, ())) == []
+
+
+def test_a_stale_read_is_ignored() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    bob = world.members["bob"].key
+    stale = events.BoxRead(bob, bytes(104), b"late", bytes(104))
+    effects = world.group("alice").handle(stale)
+    assert all(isinstance(effect, events.DeriveIndexes) for effect in effects)
+
+
+def test_an_undecodable_box_is_passed_over() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    reader = alice.readers[world.members["bob"].key]
+    alice.handle(events.Read(reader.stream))
+    effects = alice.handle(
+        events.BoxRead(reader.stream, reader.next, b"\xff", bytes(104))
+    )
+    assert not any(isinstance(effect, events.Deliver) for effect in effects)
+    assert reader.next == bytes(104)
+
+
+def test_malformed_acks_are_dropped() -> None:
+    codec = wire.CborCodec()
+    plaintext = cbor2.dumps({"Version": 1, "Content": b"x", "Acks": b"\x01\x02"})
+    message = codec.decode(plaintext)
+    assert message is not None and message.acks == {}
+
+
+def test_a_second_read_waits_for_the_first() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    bob = world.members["bob"].key
+    assert alice.handle(events.Read(bob))
+    assert alice.handle(events.Read(bob)) == []
+
+
+def test_an_introduction_whose_member_is_not_known_waits() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    stranger = b"\x01" * 32
+    alice.unnumbered.append((stranger, b"i5"))
+    bob = world.members["bob"].key
+    alice.rosters.introductions[bob, b"i3"] = b"\x03" * 32
+    alice.unnumbered.append((bob, b"i3"))
+    world.run("send alice hi")
+    assert alice.unnumbered == [(stranger, b"i5")]
+    assert alice.rosters.resolve(alice.me, 2) == b"\x03" * 32
+
+
+def test_a_number_without_its_introduction_names_nobody() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    bob = world.members["bob"].key
+    reader = alice.readers[bob]
+    plaintext = alice.codec.encode(wire.Message(numbers=((5, None),)))
+    alice.observe(bob, reader.next, plaintext, sim.step(reader.next))
+    assert alice.rosters.entries[bob][5] == Entry()
+    assert alice.rosters.resolve(bob, 5) is None
+
+
+def test_numbering_through_an_unknown_introducer() -> None:
+    rosters = Rosters()
+    rosters.found([b"a"])
+    rosters.number(b"a", 1, Entry())
+    assert rosters.resolve(b"a", 1) is None
+    assert rosters.resolve(b"a", 7) is None
+
+
+def test_retiring_renames_every_mention() -> None:
+    rosters = Rosters()
+    rosters.found([b"a", b"b"])
+    rosters.introductions[b"b", b"i4"] = b"c"
+    rosters.learn(b"c")
+    rosters.number(b"a", 2, Entry(prefix=b"c"))
+    rosters.number(b"a", 3, Entry(prefix=b"b"))
+    rosters.started[b"c"] = (b"b", 2)
+    rosters.retire(b"b", b"gone")
+    assert rosters.introductions[b"gone", b"i4"] == b"c"
+    assert rosters.started[b"c"] == (b"gone", 2)
+    assert rosters.resolve(b"a", 2) == b"c"
+    assert rosters.resolve(b"a", 3) == b"gone"
+    assert b"gone" in rosters.entries and b"gone" in rosters.keys
+
+
+def test_retiring_leaves_a_place_another_member_may_hold() -> None:
+    rosters = Rosters()
+    rosters.found([b"a", b"bx", b"by"])
+    rosters.number(b"a", 3, Entry(prefix=b"b"))
+    rosters.number(b"a", 4, Entry(prefix=b"bx"))
+    rosters.retire(b"bx", b"gone")
+    assert rosters.entries[b"a"][3] == Entry(prefix=b"b")
+    assert rosters.resolve(b"a", 4) == b"gone"
+
+
+def test_the_replica_refuses_a_bad_signature() -> None:
+    world = sim.World()
+    world.run("new-group alice")
+    stored = sim.Stored(bytes(32), b"payload", bytes(64))
+    assert world.replica.write(stored) == "bad signature"
+
+
+def test_bad_commands() -> None:
+    world = sim.World()
+    with pytest.raises(ValueError, match="unknown command"):
+        world.run("frobnicate")
+    world.run("new-group alice")
+    with pytest.raises(ValueError, match="before new-group"):
+        world.run("option window 2")
+
+
+def test_where_and_who_for_unknown_boxes() -> None:
+    world = sim.World()
+    world.run("new-group alice")
+    assert world.where(bytes(104)) == "?"
+    assert world.name_of(None) == "?"
+    assert world.introduced(bytes(104)) == "?"
+    world.run("new-group bob")
+    assert world.run("acks alice bob 0") == ["not read"]
+
+
+def test_a_founder_alone() -> None:
+    alice = sim.World()
+    alice.run("new-group alice")
+    group: Group = alice.group("alice")
+    assert group.rosters.known(group.me) == {0: group.me}
+
+
+def test_unknown_tokens_are_ignored() -> None:
+    world = sim.World()
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    alice.written(99, bytes(104))
+    alice.abandoned(99)
+    assert alice.pending == {}
+
+
+def test_abandoning_restores_the_earlier_ack() -> None:
+    world = sim.World()
+    world.run("option passive on")
+    world.run("option delay-writes on")
+    world.run("new-group alice bob")
+    for line in ("send bob b0", "land bob", "read alice bob", "send alice a0", "land alice"):
+        world.run(line)
+    bob = world.members["bob"].key
+    alice = world.group("alice")
+    first = alice.ledger.published[bob]
+    for line in ("send bob b1", "land bob", "read alice bob", "send alice upload", "abandon alice"):
+        world.run(line)
+    assert alice.ledger.published[bob] == first
+
+
+def test_an_induction_can_be_called_off() -> None:
+    world = sim.World()
+    world.run("option passive on")
+    world.run("new-group alice bob")
+    alice = world.group("alice")
+    alice.begin_induction()
+    assert alice.ledger.holding
+    alice.cancel_induction()
+    assert not alice.ledger.holding
+
+
+def test_passive_reads_of_a_stream_not_followed() -> None:
+    world = sim.World()
+    world.run("option passive on")
+    world.run("new-group alice bob")
+    world.run("new-group carol")
+    assert world.run("read alice carol") == []
+    assert world.run("send alice hi") == ['alice@0 "hi"']
+
+
+def test_state_that_cannot_be_read() -> None:
+    with pytest.raises(state.StateError):
+        state.load(b"\xff")
+    with pytest.raises(state.StateError, match="version 7"):
+        state.load(cbor2.dumps([7, {}]))
+
+
+def test_forgetting_a_member_drops_what_it_acknowledged() -> None:
+    ledger = Ledger()
+    ledger.hear(b"alice", 1, by=b"bob")
+    ledger.hear(b"bob", 2, by=b"carol")
+    ledger.acked(b"bob", 3)
+    ledger.forget(b"bob")
+    assert ledger.heard == {b"alice": {}} and ledger.acked_by == {}
+
+
+def test_the_plain_codec_writes_the_current_version() -> None:
+    assert wire.VERSION == models.GROUP_CHAT_VERSION
+    assert cbor2.loads(wire.CborCodec().encode(wire.Message()))["Version"] == wire.VERSION

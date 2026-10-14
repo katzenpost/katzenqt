@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QMessageBox,
 )
 
-from katzenqt import katzen, network, persistent, removal  # noqa: E402
+from katzenqt import acks, katzen, network, persistent, removal  # noqa: E402
 from katzenqt.qt_models import FilterProxyModel  # noqa: E402
 from katzenqt.tally import schema as tally_schema  # noqa: E402
 
@@ -961,3 +961,208 @@ async def test_a_row_the_proxy_cannot_map_back_names_no_contact(
     )
 
     assert window._contact_item_at(pos) is None
+
+
+@pytest.fixture()
+def scans(
+    monkeypatch: pytest.MonkeyPatch, window: katzen.MainWindow,
+) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+
+    async def scan_member(client: object, **kwargs: object) -> network.ScanResult:
+        calls.append(kwargs)
+        return network.ScanResult(1, True, 0)
+
+    async def member_stream(**kwargs: object) -> acks.Stream:
+        return acks.Stream(b"", 2, True)
+
+    monkeypatch.setattr(network, "scan_member", scan_member)
+    monkeypatch.setattr(network, "member_stream", member_stream)
+    monkeypatch.setattr(window.iothread, "kp_client", object())
+    return calls
+
+
+async def _bob_menu(window: katzen.MainWindow) -> katzen.QStandardItem:
+    seeded = await seed_conversation(peers=("bob",))
+    await add_seeded_conversation(window, seeded.conversation_id)
+    for _ in range(80):
+        await asyncio.sleep(0)
+    window.show()
+    window.resize(900, 600)
+    return peer_named(window, "bob")
+
+
+@pytest.mark.asyncio
+async def test_scanning_a_peer_is_asked_for_from_its_menu(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    scans: list[dict[str, object]],
+) -> None:
+    bob = await _bob_menu(window)
+    shown: list[str] = []
+
+    def pick(menu: QMenu) -> QAction | None:
+        shown.extend(a.text() for a in menu.actions() if not a.isEnabled())
+        return by_text("Scan bob's messages")(menu)
+
+    chosen(pick)
+    await window.peer_context_menu(peer_position(window, bob))
+    assert "Others have read further; 2 boxes skipped are still unread" in shown
+    assert [c["conversation_id"] for c in scans] == [window.convo_state().conversation_id]
+    assert window.ui.statusbar.currentMessage() == "Scan read 1 skipped box, jumped ahead"
+
+
+@pytest.mark.asyncio
+async def test_a_scan_that_fails_says_so(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    scans: list[dict[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken(client: object, **kwargs: object) -> None:
+        raise OSError("gone")
+
+    monkeypatch.setattr(network, "scan_member", broken)
+    bob = await _bob_menu(window)
+    chosen(by_text("Scan bob's messages"))
+    await window.peer_context_menu(peer_position(window, bob))
+    assert window.ui.statusbar.currentMessage().startswith("Scan failed:")
+
+
+@pytest.mark.asyncio
+async def test_no_scan_without_a_connection_or_a_member(
+    window: katzen.MainWindow,
+    scans: list[dict[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bob = await _bob_menu(window)
+    conversation_id = window.convo_state().conversation_id
+    async def no_peer(**kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(persistent, "peer_id_by_read_cap", no_peer)
+    await window._scan_peer(conversation_id, cap_of(bob))
+    monkeypatch.setattr(window.iothread, "kp_client", None)
+    await window._scan_peer(conversation_id, cap_of(bob))
+    assert scans == []
+
+
+@pytest.mark.asyncio
+async def test_a_member_of_a_group_without_rosters_cannot_be_scanned(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+) -> None:
+    bob = await _bob_menu(window)
+    states: list[bool] = []
+
+    def pick(menu: QMenu) -> QAction | None:
+        action = by_text("Scan bob's messages")(menu)
+        assert action is not None
+        states.append(action.isEnabled())
+        return None
+
+    chosen(pick)
+    await window.peer_context_menu(peer_position(window, bob))
+    assert states == [False]
+
+
+@pytest.mark.asyncio
+async def test_the_members_of_a_group_are_shown_from_its_menu(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _bob_menu(window)
+    shown: list[list[str]] = []
+
+    async def group_info(**kwargs: object) -> network.GroupInfo:
+        return network.GroupInfo(
+            ["me", "bob", "carol"],
+            [("bob", 3, "Nothing known to be missing"), ("carol", None, "Not read as a member")],
+        )
+
+    async def opened(dialog: QDialog) -> int:
+        shown.append([label.text() for label in dialog.findChildren(katzen.QLabel)])
+        return 0
+
+    monkeypatch.setattr(network, "group_info", group_info)
+    monkeypatch.setattr(katzen, "_dialog_finished", opened)
+    chosen(by_text("Members and acknowledgements..."))
+    conversation = window.convo_state().contacts_standard_item
+    await window.peer_context_menu(peer_position(window, conversation))
+    assert shown and "0 me, 1 bob, 2 carol" in shown[0]
+    assert "Has read our first 3 boxes. Nothing known to be missing." in shown[0]
+    assert "Has read nothing of ours yet. Not read as a member." in shown[0]
+
+
+@pytest.mark.asyncio
+async def test_a_group_without_rosters_says_so(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+) -> None:
+    await _bob_menu(window)
+    chosen(by_text("Members and acknowledgements..."))
+    conversation = window.convo_state().contacts_standard_item
+    await window.peer_context_menu(peer_position(window, conversation))
+    assert window.ui.statusbar.currentMessage() == "This group chat keeps no rosters"
+
+
+@pytest.mark.asyncio
+async def test_the_disappearing_messages_policy_is_set_from_the_group_menu(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _bob_menu(window)
+    conversation_id = window.convo_state().conversation_id
+    await persistent.set_retention(conversation_id, persistent.Retention(3, None))
+    seen: list[tuple[int, int]] = []
+
+    async def answer(dialog: katzen.RetentionDialog) -> int:
+        seen.append((dialog.received.value(), dialog.sent.value()))
+        dialog.received.setValue(0)
+        dialog.sent.setValue(5)
+        return QDialog.DialogCode.Accepted.value
+
+    monkeypatch.setattr(katzen, "_dialog_finished", answer)
+    chosen(by_text("Disappearing messages..."))
+    conversation = window.convo_state().contacts_standard_item
+    await window.peer_context_menu(peer_position(window, conversation))
+    assert seen == [(3, 0)]
+    assert await persistent.current_retention(conversation_id) == persistent.Retention(None, 5)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_disappearing_messages_dialog_changes_nothing(
+    window: katzen.MainWindow,
+    chosen: Callable[[Pick], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _bob_menu(window)
+    conversation_id = window.convo_state().conversation_id
+
+    async def cancel(dialog: katzen.RetentionDialog) -> int:
+        dialog.sent.setValue(5)
+        return QDialog.DialogCode.Rejected.value
+
+    monkeypatch.setattr(katzen, "_dialog_finished", cancel)
+    chosen(by_text("Disappearing messages..."))
+    conversation = window.convo_state().contacts_standard_item
+    await window.peer_context_menu(peer_position(window, conversation))
+    assert await persistent.current_retention(conversation_id) == persistent.Retention()
+
+
+@pytest.mark.asyncio
+async def test_messages_that_disappeared_leave_the_view(window: katzen.MainWindow) -> None:
+    await _bob_menu(window)
+    state = window.convo_state()
+    with persistent.Session(persistent._engine_sync) as sess:
+        rows = sess.exec(select(persistent.ConversationLog).where(
+            persistent.ConversationLog.conversation_id == state.conversation_id,
+        )).all()
+        assert rows
+        for row in rows:
+            sess.delete(row)
+        sess.commit()
+    await window._process_conversation_update(state.conversation_id, True)
+    assert state.conversation_log_model.rowCount() == 0

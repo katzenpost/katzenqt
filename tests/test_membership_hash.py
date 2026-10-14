@@ -11,12 +11,10 @@ import logging
 import uuid
 
 import pytest
-from sqlmodel import select
 
-from katzenqt import conversation_handlers, models, persistent, voucher
-from katzenqt.tally import events as tally_events
-from katzenqt.tally import send as tally_send
-from katzenqt.models import GroupChatMessage, SendOperation
+from katzenqt import acks, conversation_handlers, models, persistent
+from katzenqt.headless import _actions, _args
+from katzenqt.models import GroupChatMessage
 
 
 def test_canonical_hash_is_deduped_sorted_and_domained() -> None:
@@ -92,6 +90,16 @@ async def test_local_membership_hash_uses_write_cap_and_peers() -> None:
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
         assert convo is not None
+        for name, active in (("paused", False), (models.SUBSTREAM_NAME_PREFIX + "x", True)):
+            rcw = persistent.ReadCapWAL(
+                id=uuid.uuid4(), read_cap=bytes([len(name)]) * 136, next_index=bytes(104),
+            )
+            sess.add(rcw)
+            sess.add(persistent.ConversationPeer(
+                name=name, read_cap_id=rcw.id, active=active, conversation=convo,
+            ))
+        await sess.commit()
+        await sess.refresh(convo)
         got = await conversation_handlers.local_membership_hash(sess, convo)
     want = models.canonical_membership_hash([b"\x02" * 136, b"\x01" * 136])
     assert got == want
@@ -134,18 +142,12 @@ async def test_a_conversation_awaiting_its_write_cap_still_counts_itself(
 @pytest.mark.asyncio
 async def test_send_stamps_the_real_membership_hash() -> None:
     conv_id = await _make_conversation()
+    gcm = GroupChatMessage(version=0, membership_hash=b"TODO" * 8, text="hello")
     async with persistent.asession() as sess:
         convo = await sess.get(persistent.Conversation, conv_id)
         assert convo is not None
         expected = await conversation_handlers.local_membership_hash(sess, convo)
-        gcm = GroupChatMessage(
-            version=0, membership_hash=b"TODO" * 8, text="hello",
-        )
-        gcm.membership_hash = expected
-        own_bacap_stream = convo.write_cap
-
-    send_op = SendOperation(bacap_stream=own_bacap_stream, messages=[gcm])
-    _, db_entries = send_op.serialize(chunk_size=1530, conversation_id=conv_id)
+        _, db_entries = await acks.serialize_with_acks(sess, convo, gcm)
     final = [
         e for e in db_entries
         if isinstance(e, persistent.PlaintextWAL)
@@ -154,135 +156,55 @@ async def test_send_stamps_the_real_membership_hash() -> None:
     assert final, "no final chunk on the wire"
     sent = GroupChatMessage.from_cbor(final[-1].bacap_payload[1:])
     assert sent.text == "hello"
-    assert not models.is_membership_sentinel(sent.membership_hash)
     assert sent.membership_hash == expected
 
 
 @pytest.mark.asyncio
-async def test_a_mismatched_membership_hash_is_reported(
+async def test_headless_prints_the_membership_hash(caplog: pytest.LogCaptureFixture) -> None:
+    conv_id = await _make_conversation("hashed")
+    async with persistent.asession() as sess:
+        convo = await sess.get(persistent.Conversation, conv_id)
+        assert convo is not None
+        expected = await conversation_handlers.local_membership_hash(sess, convo)
+    with caplog.at_level(logging.INFO):
+        assert await _actions._action_membership_hash(
+            _args.MembershipHash(action="membership-hash", conv_name="hashed")
+        ) == 0
+        assert await _actions._action_membership_hash(
+            _args.MembershipHash(action="membership-hash", conv_name="missing")
+        ) == 2
+    assert f"MEMBERSHIP_HASH={expected.hex()}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_introduction_is_checked_against_the_group_before_its_member(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     conv_id = await _make_conversation()
+    me, alice = b"\x02" * 136, b"\x01" * 136
+
+    def introducing(read_cap: bytes, members: list[bytes]) -> GroupChatMessage:
+        return GroupChatMessage(
+            version=models.GROUP_CHAT_VERSION,
+            membership_hash=models.canonical_membership_hash(members),
+            msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+            introduction=models.GroupChatPleaseAdd(display_name="x", read_cap=read_cap),
+        )
+
     async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        peer = convo.own_peer
-        real = await conversation_handlers.local_membership_hash(sess, convo)
-        with caplog.at_level(
-            logging.INFO, logger=conversation_handlers.logger.name,
-        ):
+        peer = (await conversation_handlers._conversation_peers(sess, conv_id))[0]
+        with caplog.at_level(logging.INFO):
             await conversation_handlers._verify_membership_advisory(
-                sess, peer,
-                GroupChatMessage(
-                    version=0, membership_hash=b"\xff" * 32, text="hi",
+                sess, peer, introducing(me, [alice]),
+            )
+            await conversation_handlers._verify_membership_advisory(
+                sess, peer, introducing(b"\x05" * 136, [me, alice]),
+            )
+            assert "mismatch" not in caplog.text
+            await conversation_handlers._verify_membership_advisory(
+                sess, peer, GroupChatMessage(
+                    version=models.GROUP_CHAT_VERSION,
+                    membership_hash=models.canonical_membership_hash([alice]), text="hi",
                 ),
             )
-        assert any(
-            "membership_hash mismatch" in r.message for r in caplog.records
-        )
-        caplog.clear()
-        with caplog.at_level(
-            logging.INFO, logger=conversation_handlers.logger.name,
-        ):
-            await conversation_handlers._verify_membership_advisory(
-                sess, peer,
-                GroupChatMessage(version=0, membership_hash=real, text="hi"),
-            )
-        assert not any(
-            "membership_hash mismatch" in r.message for r in caplog.records
-        )
-_JOINER_CAP = b"\x07" * 136
-
-
-async def _add_joiner(conv_id: int) -> None:
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        rcw = persistent.ReadCapWAL(
-            id=uuid.uuid4(), read_cap=_JOINER_CAP, next_index=b"\x00" * 104,
-        )
-        sess.add(rcw)
-        sess.add(persistent.ConversationPeer(
-            name="bob", read_cap_id=rcw.id, active=True, conversation=convo,
-        ))
-        await sess.commit()
-
-
-@pytest.mark.asyncio
-async def test_local_membership_hash_can_exclude_one_member() -> None:
-    conv_id = await _make_conversation("excl")
-    await _add_joiner(conv_id)
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        full = await conversation_handlers.local_membership_hash(sess, convo)
-        without = await conversation_handlers.local_membership_hash(
-            sess, convo, exclude_read_cap=_JOINER_CAP,
-        )
-    assert full == models.canonical_membership_hash(
-        [b"\x02" * 136, b"\x01" * 136, _JOINER_CAP],
-    )
-    assert without == models.canonical_membership_hash(
-        [b"\x02" * 136, b"\x01" * 136],
-    )
-
-
-@pytest.mark.asyncio
-async def test_introduction_carries_the_group_before_the_addition() -> None:
-    conv_id = await _make_conversation("intro")
-    await _add_joiner(conv_id)
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        pre_add = await conversation_handlers.local_membership_hash(
-            sess, convo, exclude_read_cap=_JOINER_CAP,
-        )
-        post_add = await conversation_handlers.local_membership_hash(
-            sess, convo,
-        )
-    await voucher._write_introduction_log(conv_id, "bob", _JOINER_CAP)
-    async with persistent.asession() as sess:
-        pwals = (await sess.exec(
-            select(persistent.PlaintextWAL).where(
-                persistent.PlaintextWAL.conversation_id == conv_id
-            )
-        )).all()
-    finals = [p for p in pwals if p.bacap_payload[:1] == b"F"]
-    assert len(finals) == 1
-    gcm = GroupChatMessage.from_cbor(finals[0].bacap_payload[1:])
-    assert gcm.msg_type is models.GroupChatTypeEnum.INTRODUCTION
-    assert gcm.introduction is not None
-    assert gcm.introduction.read_cap == _JOINER_CAP
-    assert gcm.membership_hash == pre_add
-    assert gcm.membership_hash != post_add
-    assert not models.is_membership_sentinel(gcm.membership_hash)
-
-
-@pytest.mark.asyncio
-async def test_tally_send_replaces_the_placeholder_with_a_real_hash() -> None:
-    conv_id = await _make_conversation("tallyhash")
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        expected = await conversation_handlers.local_membership_hash(
-            sess, convo,
-        )
-        gcm = tally_events.build_create(b"s" * 32, b"state")
-        assert models.is_membership_sentinel(gcm.membership_hash)
-        await tally_send.stage_outbound(sess, convo, gcm)
-        await sess.commit()
-    assert gcm.membership_hash == expected
-    assert not models.is_membership_sentinel(gcm.membership_hash)
-
-
-@pytest.mark.asyncio
-async def test_tally_send_leaves_a_deliberate_hash_alone() -> None:
-    conv_id = await _make_conversation("tallykeep")
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        gcm = tally_events.build_create(b"s" * 32, b"state")
-        gcm.membership_hash = bytes(range(32))
-        await tally_send.stage_outbound(sess, convo, gcm)
-        await sess.commit()
-    assert gcm.membership_hash == bytes(range(32))
+    assert "mismatch" in caplog.text

@@ -85,8 +85,7 @@ def _raw(
     kind: GroupChatTypeEnum, tally: "GroupChatTally | None"
 ) -> GroupChatMessage:
     return GroupChatMessage(
-        version=0,
-        membership_hash=bytes(32),
+        version=0, membership_hash=bytes(32),
         msg_type=kind,
         tally=tally,
     )

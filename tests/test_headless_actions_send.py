@@ -182,6 +182,31 @@ async def test_voucher_induct_logs_the_joiner(
 
 
 @pytest.mark.asyncio
+async def test_voucher_induct_waits_for_the_introduction(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    order: list[str] = []
+
+    async def induct(*args: object) -> str:
+        order.append("induct")
+        return "bob"
+
+    async def written() -> bool:
+        order.append("written")
+        return False
+
+    monkeypatch.setattr(_actions, "derive_read_and_induct", induct)
+    monkeypatch.setattr(_actions, "introductions_written", written)
+    await make_conversation("inducting")
+    payload = b64encode(b"voucher").decode()
+    assert await run_action(["voucher-induct", "inducting", "bob", payload, *ADDRESS]) == 3
+    assert order == ["induct", "written"]
+    assert "introduction of bob not written" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_voucher_await_refuses_an_unknown_conversation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

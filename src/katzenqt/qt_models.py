@@ -1144,7 +1144,7 @@ def lru_cache_for_data_roles(maxsize: int = 10000) -> "Callable[[_DataMethod], _
                 return status
             else:
                 ret = func(clm, index, role)
-                if ret != 1:  # received or sent, but not "pending"
+                if ret in (0, 3):  # received, or acknowledged by a member
                     indices_with_stable_network_status[index] = ret
                 return ret
         # Expose a cache_clear so a model reset (row removal) can drop stale
@@ -1320,6 +1320,10 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
         self._view_count = new_count
         self.endResetModel()
         return True
+
+    def lost_rows(self) -> bool:
+        """Whether a row the view shows is no longer in the log."""
+        return not set(self._orders) <= set(self._query_orders())
 
     def redraw_network_status(self) -> None:
         """Repaint the network-status column without changing the row set."""

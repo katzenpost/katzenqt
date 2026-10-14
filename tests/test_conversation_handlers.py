@@ -180,7 +180,7 @@ async def test_a_plain_chat_message_reports_no_peer_added() -> None:
             )
         )).one()
         gcm = models.GroupChatMessage(
-            version=0, membership_hash=b"0" * 32,
+            version=0, membership_hash=bytes(32),
             msg_type=models.GroupChatTypeEnum.TEXT,
             text="hello",
         )

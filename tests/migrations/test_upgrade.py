@@ -42,6 +42,7 @@ _HELPER = Path(__file__).with_name("_helper.py")
     "524576e2f8a5",  # network_status tracking
     "a430f7202849",  # ReceivedPiece introduced
     "93eef61c3c54",  # 64-bit-integer remediation; one before AppSetting
+    "3822561b8c5b",  # one before acknowledgements and rosters
 ])
 def test_upgrade_from_revision_reaches_head(revision, tmp_path: Path) -> None:
     """Each historical revision must upgrade to head and leave every

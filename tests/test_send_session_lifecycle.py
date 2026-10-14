@@ -6,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+from katzenqt import persistent
 from katzenqt.headless import _actions
 
 if TYPE_CHECKING:
@@ -52,25 +53,6 @@ class _Query:
         return self
 
 
-class _SendOperation:
-    def __init__(
-        self, *, bacap_stream: UUID, messages: list[object],
-    ) -> None:
-        pass
-
-    def serialize(
-        self, *, chunk_size: int, conversation_id: int,
-    ) -> tuple[list[UUID], list[_Pending]]:
-        return [], [_Pending()]
-
-    async def serialize_async(
-        self, *, chunk_size: int, conversation_id: int,
-    ) -> tuple[list[UUID], list[_Pending]]:
-        return self.serialize(
-            chunk_size=chunk_size, conversation_id=conversation_id,
-        )
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("acknowledged", [True, False])
 async def test_send_starts_and_closes_exactly_one_session(
@@ -108,9 +90,10 @@ async def test_send_starts_and_closes_exactly_one_session(
     monkeypatch.setattr(_actions, "persistent", SimpleNamespace(
         asession=Session, Conversation=SimpleNamespace(name="demo"),
         PlaintextWAL=_Pending, SentLog=SimpleNamespace(id=7),
+        conversation_log_order_lock=persistent.conversation_log_order_lock,
     ))
-    monkeypatch.setattr(_actions, "models", SimpleNamespace(
-        SendOperation=_SendOperation,
+    monkeypatch.setattr(_actions, "acks", SimpleNamespace(
+        serialize_with_acks=AsyncMock(return_value=([], [_Pending()])),
     ))
     monkeypatch.setattr(_actions, "conversation_handlers", SimpleNamespace(
         local_membership_hash=AsyncMock(return_value=b"m" * 32),

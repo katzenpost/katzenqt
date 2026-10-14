@@ -4,6 +4,11 @@ Removal is local: nothing is sent to the other members. It stops reading the
 removed streams and deletes every row that names them, so the state file keeps
 no trace of the chat or the member. This module is free of Qt.
 
+One thing outlasts a removed member: its place in the rosters. Every member
+numbers the others, nobody is told of a removal, and so every roster still
+counts from the place the removed member held. The place is kept and the key
+is forgotten (see ``acks.forget_member``).
+
 Removing a member changes the membership hash: ``local_membership_hash`` covers
 every active non-substream peer, so once a member is deleted this client hashes
 one peer fewer than the members who kept them. Every message this client sends
@@ -18,15 +23,13 @@ from __future__ import annotations
 import logging
 import shutil
 import uuid
-from pathlib import Path
 from typing import NamedTuple
 
-import cbor2
 import sqlalchemy as sa
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import conversation_handlers, models, network, persistent
+from . import acks, attachments, conversation_handlers, models, network, persistent
 from .tally import controller as tally_controller
 
 logger = logging.getLogger("katzen.removal")
@@ -44,51 +47,6 @@ class _Doomed(NamedTuple):
     @property
     def streams(self) -> "list[uuid.UUID]":
         return self.read_streams + self.write_streams
-
-
-def _attachment_paths(payload: bytes) -> "set[str]":
-    if payload[:1] != b"F":
-        return set()
-    try:
-        decoded = cbor2.loads(payload[1:])
-    except Exception:
-        return set()
-    if not isinstance(decoded, dict):
-        return set()
-    keys = ("rel_path", "thumb_rel_path")
-    return {p for p in (decoded.get(k) for k in keys) if isinstance(p, str)}
-
-
-def _attachment_file(rel_path: str) -> "Path | None":
-    root = (persistent.state_file.parent / "attachments").resolve()
-    path = (persistent.state_file.parent / rel_path).resolve()
-    return path if path.is_relative_to(root) else None
-
-
-def _unlink_attachments(rel_paths: "set[str]") -> None:
-    for rel_path in rel_paths:
-        path = _attachment_file(rel_path)
-        if path is None:
-            logger.warning(
-                "not deleting attachment outside the state dir: %r", rel_path
-            )
-            continue
-        path.unlink(missing_ok=True)
-
-
-async def _remaining_attachment_paths(
-    sess: AsyncSession,
-    conversation_id: int,
-) -> "set[str]":
-    payloads = (
-        await sess.exec(
-            select(persistent.ConversationLog.payload).where(
-                col(persistent.ConversationLog.conversation_id)
-                == conversation_id,
-            )
-        )
-    ).all()
-    return set().union(*(_attachment_paths(p) for p in payloads))
 
 
 async def _silence_peers(conversation_id: int, peer_id: int) -> _Doomed:
@@ -179,11 +137,12 @@ async def _delete_peer_rows(
         )
     ).all()
     candidates = set().union(
-        *(_attachment_paths(row.payload) for row in logs)
+        *(attachments.paths_in(row.payload) for row in logs)
     )
     for row in logs:
         await sess.delete(row)
     await sess.flush()
+    await _forget_in_rosters(sess, conversation_id, doomed)
     await _delete_read_state(sess, doomed.read_streams)
     await sess.exec(
         sa.delete(persistent.ConversationPeerLink).where(
@@ -198,9 +157,21 @@ async def _delete_peer_rows(
         )
     )
     await _delete_unshared_read_caps(sess, doomed.read_streams)
-    return candidates - await _remaining_attachment_paths(
+    return candidates - await attachments.remaining(
         sess, conversation_id
     )
+
+
+async def _forget_in_rosters(
+    sess: AsyncSession, conversation_id: int, doomed: _Doomed,
+) -> None:
+    """Replace the removed member's key by a placeholder wherever the
+    conversation's rosters hold it. ``doomed`` lists the member first, then
+    its download substreams, which no roster names."""
+    conv = await sess.get(persistent.Conversation, conversation_id)
+    rcw = await sess.get(persistent.ReadCapWAL, doomed.read_streams[0])
+    if conv is not None and rcw is not None and rcw.read_cap is not None:
+        await acks.forget_member(sess, conv, rcw.read_cap)
 
 
 def _announce_removed(streams: "list[uuid.UUID]") -> None:
@@ -216,10 +187,11 @@ async def remove_peer(*, conversation_id: int, peer_id: int) -> None:
     doomed = await _silence_peers(conversation_id, peer_id)
     for stream in doomed.streams:
         await network.stop_stream(stream)
-    async with persistent.asession() as sess:
-        orphaned = await _delete_peer_rows(sess, conversation_id, doomed)
-        await sess.commit()
-    _unlink_attachments(orphaned)
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            orphaned = await _delete_peer_rows(sess, conversation_id, doomed)
+            await sess.commit()
+    attachments.unlink(orphaned)
     _announce_removed(doomed.read_streams[1:])
     network.readables_to_mixwal_event.set()
 
@@ -327,7 +299,12 @@ async def _delete_conversation_rows(
 ) -> "list[uuid.UUID]":
     indirections = await _delete_outbound_state(sess, conversation_id, doomed)
     await _delete_read_state(sess, doomed.read_streams)
-    for model in (persistent.TallyState, persistent.PendingVoucher):
+    for model in (
+        persistent.TallyState,
+        persistent.PendingVoucher,
+        persistent.GroupWritten,
+        persistent.GroupState,
+    ):
         await sess.exec(
             sa.delete(model).where(
                 col(model.conversation_id) == conversation_id

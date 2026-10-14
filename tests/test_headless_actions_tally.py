@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import uuid
@@ -375,6 +376,44 @@ async def test_tally_vote_broadcasts_and_reports_voted(
         == 0
     )
     assert "VOTED" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleeps
+@pytest.mark.parametrize(
+    "verb, extra", [("tally-vote", ["--slot", "s0=yes"]), ("tally-close", [])]
+)
+async def test_a_tally_message_waits_for_the_writer_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_session: StubConnection,
+    verb: str,
+    extra: list[str],
+) -> None:
+    handle = await make_conversation("locked")
+    survey_id = uuid.uuid4().bytes
+    await _store_survey(handle, survey_id=survey_id)
+    monkeypatch.setattr(network, "check_for_new", _mark_every_plaintext_sent)
+    FakeClock().install(monkeypatch)
+    async with persistent.conversation_log_order_lock(handle.conversation_id):
+        acting = asyncio.create_task(
+            run_action(
+                [
+                    verb,
+                    "locked",
+                    "--survey",
+                    survey_id.hex(),
+                    *extra,
+                    "--timeout",
+                    "120",
+                    *ADDRESS,
+                ]
+            )
+        )
+        await asyncio.sleep(0.05)
+        async with persistent.asession() as sess:
+            queued = (await sess.exec(select(persistent.PlaintextWAL))).all()
+        assert queued == []
+    assert await acting == 0
 
 
 @pytest.mark.asyncio

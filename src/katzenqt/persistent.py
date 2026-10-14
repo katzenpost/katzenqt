@@ -1,4 +1,5 @@
 import asyncio
+import cbor2
 import sqlalchemy as sa
 from sqlalchemy.orm import declarative_base
 #from pydantic import BaseModel, ConfigDict, Field
@@ -7,6 +8,7 @@ from pathlib import Path
 import alembic.config
 import alembic.command
 import alembic.context
+import time
 import uuid
 from contextlib import asynccontextmanager
 from sqlmodel import Field, Relationship, Session, SQLModel, col, create_engine, UniqueConstraint, select
@@ -449,6 +451,48 @@ async def set_muted(conversation_id: int, *, muted: bool) -> None:
             await sess.delete(row)
         await sess.commit()
 
+
+class Retention(NamedTuple):
+    """A conversation's disappearing messages policy: how many days the
+    content of received and of sent messages is kept, or None to keep it.
+    See "Disappearing messages" in the group chat spec."""
+
+    received_days: int | None = None
+    sent_days: int | None = None
+
+
+def _retention_keys(conversation_id: int) -> tuple[str, str]:
+    return f"keep_received:{conversation_id}", f"keep_sent:{conversation_id}"
+
+
+async def retention(sess: "AsyncSession", conversation_id: int) -> Retention:
+    days = []
+    for key in _retention_keys(conversation_id):
+        row = await sess.get(AppSetting, key)
+        days.append(int(row.value) if row is not None else None)
+    return Retention(*days)
+
+
+async def current_retention(conversation_id: int) -> Retention:
+    async with asession() as sess:
+        return await retention(sess, conversation_id)
+
+
+async def set_retention(conversation_id: int, policy: Retention) -> None:
+    async with asession() as sess:
+        for key, days in zip(_retention_keys(conversation_id), policy):
+            row = await sess.get(AppSetting, key)
+            if days is None:
+                if row is not None:
+                    await sess.delete(row)
+                continue
+            if row is None:
+                row = AppSetting(id=key, type="int")
+            row.value = str(days)
+            sess.add(row)
+        await sess.commit()
+
+
 class MixWAL(SQLModel, table=True):
     """
     Stores EncryptWriteResult/EncryptReadResult from ThinClient.encrypt_read() and encrypt_write()
@@ -877,6 +921,25 @@ def _ensure_sent_log_and_flip_status(
     return conversation_id
 
 
+def _record_sent_box(
+    sess: "Session", box_index: bytes, pwal: "PlaintextWAL",
+) -> None:
+    """Note where a message of ours landed on a conversation's own stream,
+    for its group state machine to take in (see ``GroupWritten``). Shared
+    by both mark_sent finalize paths; safe to run twice for the same box."""
+    conv = sess.get(Conversation, pwal.conversation_id)
+    if conv is None or conv.write_cap != pwal.bacap_stream:
+        return
+    if sess.get(GroupState, conv.id) is None:
+        return
+    if sess.get(GroupWritten, pwal.id) is not None:
+        return
+    sess.add(GroupWritten(
+        pwal_id=pwal.id, conversation_id=conv.id, box_index=box_index,
+        payload=pwal.bacap_payload,
+    ))
+
+
 def _finalize_stale_ack(
     mw_id: uuid.UUID, plaintextwal_id: uuid.UUID,
 ) -> "int | None":
@@ -890,12 +953,14 @@ def _finalize_stale_ack(
     conversation_id = None
     with Session(_engine_sync) as sess:
         stale_mw = sess.get(MixWAL, mw_id)
-        if stale_mw is not None:
-            sess.delete(stale_mw)
         pwal = sess.get(PlaintextWAL, plaintextwal_id)
         if pwal is not None:
             conversation_id = _ensure_sent_log_and_flip_status(sess, pwal)
+            if stale_mw is not None:
+                _record_sent_box(sess, stale_mw.current_message_index, pwal)
             sess.delete(pwal)
+        if stale_mw is not None:
+            sess.delete(stale_mw)
         sess.commit()
     return conversation_id
 
@@ -939,6 +1004,7 @@ def _mark_sent_txn(mw_id: uuid.UUID, bacap_stream: uuid.UUID,
         if bacap_stream != pwal.bacap_stream:
             logger.error("mw.bacap_stream doesn't match pwal.bacap_stream")
         if mw_row := sess.get(MixWAL, mw_id):
+            _record_sent_box(sess, mw_row.current_message_index, pwal)
             sess.delete(mw_row)
         sess.delete(pwal)
         # TODO maybe update ConversationLog entry if we start tracking sent msgs in the UI
@@ -1224,8 +1290,14 @@ class ConversationLog(SQLModel, table=True):
 
     # TODO: envelope_hash: bytes - do we need this?
     payload: bytes  # This contains binary CBOR
+    logged_at: float | None = Field(default_factory=time.time)
+    """When the row was added, for the disappearing messages policy."""
 
-    network_status: int = Field(default=0) # 0: received; 1:pending; 2: fully sent
+    network_status: int = Field(default=0) # 0: received; 1:pending; 2: fully sent; 3: acknowledged by a member
+    sent_idx64: bytes | None = Field(default=None)
+    """The ``Idx64`` of the box our message ends in, big-endian so that it
+    orders as a number, matched against members' acknowledgements
+    (``Ledger.acked_by``)."""
     outgoing_pwal: uuid.UUID | None = Field(
         default=None,
         foreign_key="plaintextwal.id",
@@ -1246,6 +1318,70 @@ class ConversationLog(SQLModel, table=True):
             payload=payload,
             conversation_order=next_conversation_order(conversation_peer.conversation.id),
         )
+
+
+def position_bytes(position: int) -> bytes:
+    """A position on a BACAP stream, as stored. Positions are 64-bit
+    unsigned counters, which sqlite's signed integers cannot hold, so they
+    are stored as eight big-endian bytes, which sort as the numbers do.
+
+    >>> position_bytes(258).hex()
+    '0000000000000102'
+    >>> position_bytes(2**64 - 1) > position_bytes(2**63)
+    True
+    """
+    return position.to_bytes(8, "big")
+
+
+def position_int(stored: "bytes | None") -> int:
+    """The position :func:`position_bytes` stored; -1 for none.
+
+    >>> position_int(position_bytes(258)), position_int(None)
+    (258, -1)
+    """
+    return -1 if stored is None else int.from_bytes(stored, "big")
+
+
+def box_position(box_index: bytes) -> int:
+    """The position a BACAP ``MessageBoxIndex`` names on its stream: the
+    little-endian counter in its first eight bytes.
+
+    >>> box_position((258).to_bytes(8, "little") + bytes(96))
+    258
+    """
+    return int.from_bytes(box_index[:8], "little")
+
+
+class GroupState(SQLModel, table=True):
+    """One conversation's group state machine (see ``katzenqt.groupchat``
+    and ``katzenqt.acks``): its state as ``katzenqt.groupchat.state`` writes
+    it, the boxes read but held back behind one still arriving through a
+    substream, and which queued message carries which of its tokens."""
+    conversation_id: int = Field(foreign_key="conversation.id", primary_key=True)
+    state: bytes
+    held: bytes = Field(default=cbor2.dumps([]))
+    outgoing: bytes = Field(default=cbor2.dumps([]))
+
+
+class GroupWritten(SQLModel, table=True):
+    """Where a message of ours that the group state machine is waiting on
+    landed. Written by the send path, which runs off the event loop and so
+    never rewrites ``GroupState``; taken in and deleted the next time the
+    state is loaded."""
+    pwal_id: uuid.UUID = Field(primary_key=True)
+    conversation_id: int = Field(foreign_key="conversation.id", index=True)
+    box_index: bytes = Field(min_length=104, max_length=104)
+    payload: bytes | None = None
+    """What the box holds, for the Sent box to rewrite it with."""
+
+
+class GroupRewrite(SQLModel, table=True):
+    """A box of a conversation's own stream to write again, as the group
+    state machine's backfill asks: with ``payload``, or as a tombstone when
+    there is none. See "Backfill" in the group chat spec."""
+    conversation_id: int = Field(foreign_key="conversation.id", primary_key=True)
+    box_index: bytes = Field(primary_key=True, min_length=104, max_length=104)
+    payload: bytes | None = None
 
 
 class TallyState(SQLModel, table=True):
@@ -1271,6 +1407,9 @@ __all__ = [
     "ConversationPeer",
     "ConversationPeerLink",
     "Field",
+    "GroupRewrite",
+    "GroupState",
+    "GroupWritten",
     "Lock",
     "MixWAL",
     "NAMING_CONVENTION",
@@ -1281,6 +1420,7 @@ __all__ = [
     "PlaintextWAL",
     "ReadCapWAL",
     "ReceivedPiece",
+    "Retention",
     "Relationship",
     "SQLModel",
     "SentLog",
@@ -1299,6 +1439,7 @@ __all__ = [
     "asession",
     "asynccontextmanager",
     "asyncio",
+    "box_position",
     "cast",
     "context",
     "conversation_log_order_lock",
@@ -1319,6 +1460,8 @@ __all__ = [
     "peer_has_read_cap",
     "peer_named_in_conversation",
     "peer_named_in_conversation_sync",
+    "position_bytes",
+    "position_int",
     "sa",
     "select",
     "sqlalchemy",

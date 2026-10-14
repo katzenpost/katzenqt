@@ -81,7 +81,9 @@ from .katzen_util import create_task
 from ._thinclient import ThinClient
 from . import epochs
 from pydantic.dataclasses import dataclass
-from . import attachment_images, conversation_handlers, models, persistent
+from . import acks, attachment_images, conversation_handlers, disappearing, models, persistent
+from .groupchat import walk as groupchat_walk
+from .groupchat.events import BoxRead, Missing, ReadBox, Walk
 from sqlmodel import col, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -677,6 +679,36 @@ async def notify_outbound_chat_sent(
         final_pwal_id=final_pwal_id,
         log_id=log_id,
     )
+    await _announce_outbound(conversation_id, upload, payload)
+
+
+async def notify_outbound_text_sent(
+    *,
+    conversation_id: int,
+    conversation_peer_id: int,
+    gcm: "models.GroupChatMessage",
+) -> None:
+    """Queue an outbound text message, with whatever acknowledgements are
+    pending, and wake the receive-side listeners, all in one io-loop hop.
+
+    The message is serialized here, on the io loop, rather than by the
+    caller: its acknowledgements are decided and recorded in the same
+    transaction that queues it, so a message that is never queued
+    acknowledges nothing.
+    """
+    upload = await acks.append_outbound_text(
+        conversation_id=conversation_id,
+        conversation_peer_id=conversation_peer_id,
+        gcm=gcm,
+    )
+    await _announce_outbound(conversation_id, upload, b"F" + gcm.to_cbor())
+
+
+async def _announce_outbound(
+    conversation_id: int,
+    upload: "persistent.OutboundUpload | None",
+    payload: bytes,
+) -> None:
     await conversation_update_queue.put((conversation_id, False))
     if upload is not None:
         # Capture the filename label now: the I-chunk row linking the agg
@@ -724,7 +756,8 @@ _epoch_event = asyncio.Event()
 
 
 async def on_new_pki_document(event: "dict[str, bytes]") -> None:
-    """Bump _epoch_event on every epoch advance.
+    """Bump _epoch_event on every epoch advance, and note the replica epoch
+    the document's storage replicas are in.
 
     Parses the epoch out of the raw event ourselves (rather than going
     through connection.pki_document(), which needs a ThinClient instance
@@ -738,6 +771,7 @@ async def on_new_pki_document(event: "dict[str, bytes]") -> None:
     except Exception as e:
         logger.debug("on_new_pki_document: could not parse event payload: %s", e)
         return
+    await acks.note_pki_document(doc)
     lambda_p = doc.get("LambdaP")
     if (isinstance(lambda_p, (int, float)) and math.isfinite(lambda_p)
             and lambda_p > 0.0 and _pacer.follow_lambda_p(float(lambda_p))):
@@ -1062,6 +1096,7 @@ async def start_background_threads(connection: ThinClient) -> None:
             create_task(_supervised(drain_mixwal, connection)),
             create_task(_supervised(send_resendable_plaintexts, connection)),
             create_task(readables_to_mixwal_supervised(connection)),
+            create_task(_supervised(upkeep, connection)),
         ))
         done, _ = await asyncio.wait(
             [*workers, stopping], return_when=asyncio.FIRST_COMPLETED,
@@ -1993,6 +2028,12 @@ async def _try_assemble(
     chunks = [(rp.chunk_type, rp.chunk) for rp in chain]
     try:
         gcm = models.unserialize(chunks)
+    except models.UnsupportedVersion as exc:
+        logger.warning(
+            "dropping a message from a newer client at rcw=%s terminal=%s: %s",
+            rcw_id, terminal_idx_8b.hex(), exc,
+        )
+        return None
     except Exception as exc:  # malformed CBOR or framing: leave RPs for retry
         logger.warning(
             "could not assemble chain at rcw=%s terminal=%s: %s",
@@ -2079,11 +2120,13 @@ async def _record_substream_miss(
     return False
 
 
-async def _discard_substream_release(
+async def _substream_release_pieces(
     sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
     read_cap: bytes,
-) -> None:
-    pieces = (await sess.exec(
+) -> "Sequence[persistent.ReceivedPiece]":
+    """The parent stream's indirection pieces that point at the substream
+    read by ``read_cap``."""
+    return (await sess.exec(
         select(persistent.ReceivedPiece).where(
             persistent.ReceivedPiece.read_cap == parent_cap_id,
             persistent.ReceivedPiece.chunk_type == b"I",
@@ -2095,7 +2138,13 @@ async def _discard_substream_release(
             ) == read_cap,
         )
     )).all()
-    for piece in pieces:
+
+
+async def _discard_substream_release(
+    sess: persistent.AsyncSession, parent_cap_id: uuid.UUID,
+    read_cap: bytes,
+) -> None:
+    for piece in await _substream_release_pieces(sess, parent_cap_id, read_cap):
         await sess.delete(piece)
 
 
@@ -2508,6 +2557,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
     signal_send = False
     peer_added = None
     tally_added = False
+    member_acked: "set[int]" = set()
     notify_conv_id = cp.conversation.id
     parent_peer = None
 
@@ -2571,13 +2621,24 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # Substream's terminal F: commit the assembled message into the
                     # parent peer's ConversationLog, prune the parent's indirection
                     # piece, and retire this synthetic peer.
-                    added, sig, pa, ta = await conversation_handlers.dispatch(sess, parent_peer, gcm, full_payload)
+                    assert rcw.read_cap is not None
+                    added, sig, pa, ta = await conversation_handlers.dispatch(
+                        sess, parent_peer, gcm, full_payload, substream=rcw.read_cap,
+                    )
                     signal_send = signal_send or sig
                     peer_added = peer_added or pa
                     tally_added = tally_added or ta
                     await _discard_substream_release(
                         sess, parent_peer.read_cap_id, rcw.read_cap,
                     )
+                    # The parent's stream may now be acknowledged past the
+                    # box that announced this message.
+                    parent_rcw = await sess.get(
+                        persistent.ReadCapWAL, parent_peer.read_cap_id,
+                    )
+                    if parent_rcw is not None:
+                        await sess.flush()
+                        await acks.settle(sess, parent_peer, parent_rcw)
                     cp.active = False
                     rcw.substream_failure = None
                     rcw.substream_missing_since = None
@@ -2595,7 +2656,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     # Top-level F (single-box or contiguous on the parent stream):
                     # route by message type, chat into the log, tally into the
                     # controller.
-                    convlog_added, sig, peer_added, tally_added2 = await conversation_handlers.dispatch(sess, cp, gcm, full_payload)
+                    convlog_added, sig, peer_added, tally_added2 = await conversation_handlers.dispatch(
+                        sess, cp, gcm, full_payload, box=mw.current_message_index,
+                    )
                     signal_send = signal_send or sig
                     tally_added = tally_added or tally_added2
             for rp in chain:
@@ -2667,9 +2730,21 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                         rcw_id=new_rcw.id, reason=_OVER_CAP_FAILURE,
                     ))
 
+        # A box that ends a message on a member's own stream: note how far
+        # that stream has been read, for the next acknowledgement we send.
+        if (
+            chunk_type in (b"F", b"I")
+            and not cp.name.startswith(_SUBSTREAM_NAME_PREFIX)
+        ):
+            await acks.box_read(
+                sess, cp, rcw, mw.current_message_index,
+                substream=chunk_body[-136:] if chunk_type == b"I" else None,
+            )
+
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
         await sess.commit()
+        member_acked = acks.acked_in(sess)
     except OperationalError as e:
       if not _is_transient_sqlite_busy(e):
           raise
@@ -2741,6 +2816,9 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
 
   if convlog_added:
     create_task(conversation_update_queue.put((notify_conv_id, False)))
+
+  for acked_conv_id in member_acked:
+    create_task(conversation_update_queue.put((acked_conv_id, True)))
 
   if tally_added:
     # A tally event was consumed and its transaction committed. The GUI lists
@@ -2884,6 +2962,245 @@ async def resume_peer_reads(*, bacap_stream: uuid.UUID) -> None:
                 rcw_id=bacap_stream, direction="download", paused=False,
             ),
         )
+
+
+class ScanResult(NamedTuple):
+    rechecked: int
+    """Boxes a scan stepped past earlier that it has now read."""
+    walked: bool
+    """Whether it jumped forward to a box another member acknowledged."""
+    unread: int
+    """Boxes stepped past that are still unread."""
+
+
+async def scan_member(
+    connection: ThinClient, *, conversation_id: int, peer_id: int,
+) -> ScanResult | None:
+    """Scan one member's stream, because the user asked to: read again what
+    an earlier scan stepped past, and jump forward to the furthest box other
+    members have acknowledged. The reader then carries on from there. None
+    when there is nothing this conversation can scan on that stream right
+    now. See "Rewrite and scan" in the group chat spec."""
+    async with persistent.asession() as sess:
+        peer = await sess.get(persistent.ConversationPeer, peer_id)
+        rcw = await sess.get(persistent.ReadCapWAL, peer.read_cap_id) if peer else None
+        if rcw is None or rcw.read_cap is None:
+            return None
+        rcw_id, read_cap, was_paused = rcw.id, rcw.read_cap, rcw.paused
+    stream = acks.member_key(read_cap)
+    await pause_peer_reads(bacap_stream=rcw_id)
+    try:
+        effects = await _scanning(conversation_id, lambda sess: acks.scan(
+            sess, conversation_id, stream,
+        ))
+        if effects is None:
+            return None
+        rechecked, walked = 0, False
+        while effects:
+            match effects.pop(0):
+                case ReadBox(_, _, index, recheck=True):
+                    result, after = await _read_once(connection, read_cap, index)
+                    if isinstance(result, bytes):
+                        delivered = await _deliver_rechecked(conversation_id, peer_id, result)
+                        if delivered is None:
+                            continue
+                        result = delivered
+                    rechecked += result is not Missing.NOT_FOUND
+                    effects += await _scanning(conversation_id, lambda sess: acks.scanned(
+                        sess, conversation_id, BoxRead(stream, index, result, after),
+                    )) or []
+                case Walk() as walk:
+                    found = groupchat_walk.walk(walk, acks.WALK_LIMIT)
+                    walked = walked or found.target is not None
+                    effects += await _scanning(conversation_id, lambda sess: acks.scanned(
+                        sess, conversation_id, found,
+                    )) or []
+        async with persistent.conversation_log_order_lock(conversation_id):
+            async with persistent.asession() as sess:
+                now = await acks.stream(sess, conversation_id, stream)
+                rcw = await sess.get(persistent.ReadCapWAL, rcw_id)
+                assert now is not None and rcw is not None
+                rcw.next_index = now.next
+                sess.add(rcw)
+                await sess.commit()
+        return ScanResult(rechecked, walked, now.unread)
+    finally:
+        if not was_paused:
+            await resume_peer_reads(bacap_stream=rcw_id)
+
+
+async def member_stream(
+    *, conversation_id: int, read_cap_id: uuid.UUID,
+) -> "acks.Stream | None":
+    """What the user may want to know before scanning a member's stream."""
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, read_cap_id)
+        if rcw is None or rcw.read_cap is None:
+            return None
+        return await acks.stream(sess, conversation_id, acks.member_key(rcw.read_cap))
+
+
+class GroupInfo(NamedTuple):
+    roster: "list[str]"
+    """Our roster, in order: a member's place in it is its roster index."""
+    members: "list[tuple[str, int | None, str]]"
+    """Each member we read: its name, how many of our messages it has
+    acknowledged, if any, and what is known about its stream."""
+
+
+async def group_info(*, conversation_id: int) -> "GroupInfo | None":
+    """Rosters and acknowledgements, for the user to look at. None for a
+    conversation that keeps no rosters."""
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, conversation_id)
+        if conv is None:
+            return None
+        roster, acked = await acks.summary(sess, conv)
+        if roster is None:
+            return None
+        peers = (await sess.exec(
+            select(persistent.ConversationPeer, persistent.ReadCapWAL)
+            .join(persistent.ConversationPeerLink)
+            .join(
+                persistent.ReadCapWAL,
+                col(persistent.ReadCapWAL.id) == persistent.ConversationPeer.read_cap_id,
+            )
+            .where(persistent.ConversationPeerLink.conversation_id == conversation_id)
+        )).all()
+        members = []
+        for peer, rcw in peers:
+            if not _is_member(peer, conv.own_peer_id) or rcw.read_cap is None:
+                continue
+            stream = await acks.stream(sess, conversation_id, acks.member_key(rcw.read_cap))
+            hint = stream_hint(stream) if stream is not None else "Not read as a member"
+            seen = acked.get(peer.name)
+            members.append((peer.name, None if seen is None else seen + 1, hint))
+    return GroupInfo(roster, members)
+
+
+def stream_hint(stream: "acks.Stream") -> str:
+    """
+    >>> stream_hint(acks.Stream(b"", 2, True))
+    'Others have read further; 2 boxes skipped are still unread'
+    >>> stream_hint(acks.Stream(b"", 1, False))
+    '1 box skipped is still unread'
+    >>> stream_hint(acks.Stream(b"", 0, False))
+    'Nothing known to be missing'
+    """
+    parts = []
+    if stream.acked_ahead:
+        parts.append("Others have read further")
+    if stream.unread == 1:
+        parts.append("1 box skipped is still unread")
+    elif stream.unread:
+        parts.append(f"{stream.unread} boxes skipped are still unread")
+    if not parts:
+        return "Nothing known to be missing"
+    text = "; ".join(parts)
+    return text[0].upper() + text[1:]
+
+
+def scan_summary(result: "ScanResult | None") -> str:
+    """
+    >>> scan_summary(None)
+    'Nothing to scan'
+    >>> scan_summary(ScanResult(0, False, 0))
+    'Scan found nothing new'
+    >>> scan_summary(ScanResult(2, True, 1))
+    'Scan read 2 skipped boxes, jumped ahead; 1 box skipped is still unread'
+    """
+    if result is None:
+        return "Nothing to scan"
+    done = []
+    if result.rechecked:
+        done.append(f"read {result.rechecked} skipped box{'es' * (result.rechecked != 1)}")
+    if result.walked:
+        done.append("jumped ahead")
+    text = "Scan " + (", ".join(done) if done else "found nothing new")
+    if result.unread:
+        text += "; " + stream_hint(acks.Stream(b"", result.unread, False)).lower()
+    return text
+
+
+_T = TypeVar("_T")
+
+
+async def _scanning(
+    conversation_id: int, step: "Callable[[persistent.AsyncSession], Awaitable[_T]]",
+) -> _T:
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            result = await step(sess)
+            await sess.commit()
+    for acked_conv_id in acks.acked_in(sess):
+        await conversation_update_queue.put((acked_conv_id, True))
+    return result
+
+
+async def _read_once(
+    connection: ThinClient, read_cap: bytes, index: bytes,
+) -> "tuple[bytes | Missing, bytes]":
+    """Read one box without waiting for it to be written, and the index
+    after it."""
+    key = ("scan", index)
+    rcr = await _rpc_racing_connection_life(
+        bacap_uuid=key,
+        what="encrypt_read",
+        rpc_factory=lambda: connection.encrypt_read(
+            read_cap=read_cap, message_box_index=index,
+        ),
+        backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+    )
+    try:
+        reply = await _delivery_racing_connection_life(
+            bacap_uuid=key,
+            what="start_resending_encrypted_message",
+            rpc_factory=lambda: connection.start_resending_encrypted_message(
+                read_cap=read_cap, write_cap=None, message_box_index=index,
+                reply_index=None, envelope_descriptor=rcr.envelope_descriptor,
+                message_ciphertext=rcr.message_ciphertext,
+                envelope_hash=rcr.envelope_hash,
+                no_retry_on_box_id_not_found=True,
+            ),
+        )
+    except BoxIDNotFoundError:
+        return Missing.NOT_FOUND, rcr.next_message_box_index
+    except TombstoneError:
+        return Missing.TOMBSTONE, rcr.next_message_box_index
+    return reply.plaintext, rcr.next_message_box_index
+
+
+async def _deliver_rechecked(
+    conversation_id: int, peer_id: int, payload: bytes,
+) -> bytes | None:
+    """Show a message found in a box an earlier scan stepped past, and
+    return what the state machine reads of it. None for a box announcing a
+    file, which a scan leaves for the reader to fetch later."""
+    if payload[:1] != b"F":
+        return None
+    try:
+        gcm = models.GroupChatMessage.from_cbor(payload[1:])
+    except Exception:
+        return b""
+    if gcm.file_upload is not None:
+        return None
+    if gcm.text is not None:
+        gcm.text = models.clamp_message_text(gcm.text)
+    async with persistent.conversation_log_order_lock(conversation_id):
+        async with persistent.asession() as sess:
+            peer = await sess.get(persistent.ConversationPeer, peer_id)
+            assert peer is not None
+            added, _, peer_added, tally_added = await conversation_handlers.dispatch(
+                sess, peer, gcm, b"F" + gcm.to_cbor(),
+            )
+            await sess.commit()
+    if added:
+        await conversation_update_queue.put((conversation_id, False))
+    if tally_added:
+        tally_update_queue.put_nowait(conversation_id)
+    if peer_added:
+        peer_added_queue.put_nowait(peer_added)
+    return gcm.to_cbor()
 
 
 def _is_member(
@@ -3067,7 +3384,7 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
                 logger.exception("write drain failed during cancel of %s", agg)
     _inflight_writes.pop(agg, None)
     __resend_queue.discard(agg)
-    async with persistent.asession() as sess:
+    async with persistent.conversation_log_order_lock(conv_id), persistent.asession() as sess:
         # Re-check in the same transaction as the deletes: a chunk ACK that
         # landed while the write task was winding down can complete the
         # upload, which makes it uncancellable.
@@ -3102,6 +3419,8 @@ async def cancel_upload(*, rcw_id: uuid.UUID) -> None:
         ))).first()
         if convlog is not None:
             await sess.delete(convlog)
+        # What the message acknowledged goes unsent with it.
+        await acks.forget_outgoing(sess, conv_id, i_chunk_id)
         await sess.delete(i_chunk_row)
         rcw_row = await sess.get(persistent.ReadCapWAL, rcw_id)
         if rcw_row is not None:
@@ -3137,6 +3456,7 @@ async def _upload_stream_for_rcw(rcw_id: uuid.UUID) -> "uuid.UUID | None":
 
 
 async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
+    released: "list[tuple[int, int, uuid.UUID]]" = []
     async with persistent.asession() as sess:
         rcw = await sess.get(persistent.ReadCapWAL, bacap_stream)
         if rcw is None:
@@ -3158,6 +3478,9 @@ async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
                 await _discard_substream_release(
                     sess, parent.read_cap_id, rcw.read_cap,
                 )
+                released.append(
+                    (parent.conversation.id, parent.id, parent.read_cap_id)
+                )
             peer.active = False
             sess.add(peer)
         for piece in (await sess.exec(select(persistent.ReceivedPiece).where(
@@ -3174,6 +3497,15 @@ async def dismiss_failed_transfer(*, bacap_stream: uuid.UUID) -> None:
         rcw.paused = False
         sess.add(rcw)
         await sess.commit()
+    # Whatever waited on the dismissed message can now be acknowledged.
+    for conversation_id, parent_id, parent_rcw_id in released:
+        async with persistent.conversation_log_order_lock(conversation_id):
+            async with persistent.asession() as sess:
+                parent_peer = await sess.get(persistent.ConversationPeer, parent_id)
+                parent_rcw = await sess.get(persistent.ReadCapWAL, parent_rcw_id)
+                if parent_peer is not None and parent_rcw is not None:
+                    await acks.settle(sess, parent_peer, parent_rcw)
+                    await sess.commit()
 
 
 async def _wait_for_connection_or_shutdown(*, idle_retry_s: float = 0.0) -> bool:
@@ -3678,6 +4010,66 @@ class _ResendDispatch(NamedTuple):
     bacap_payload: bytes
 
 
+_UPKEEP_SWEEP_S = 3600.0
+"""How often every group's backfill and retention are looked at: far
+shorter than a replica epoch, so each epoch's rewrites go out early in it."""
+
+
+async def upkeep(connection: ThinClient) -> None:
+    """Rewrite what each group's Sent box asks to, once per replica epoch
+    (see ``acks.tick`` and "Backfill" in the group chat spec), and delete
+    what each conversation's disappearing messages policy no longer keeps."""
+    while not __should_quit.is_set():
+        for conversation_id in await disappearing.expire(time.time()):
+            await conversation_update_queue.put((conversation_id, True))
+        if await _wait_for_connection_or_shutdown(idle_retry_s=_CONNECTION_IDLE_RETRY_S):
+            await acks.tick()
+            for rewrite in await acks.rewrites():
+                await _send_rewrite(connection, rewrite)
+        try:
+            await asyncio.wait_for(__should_quit.wait(), timeout=_UPKEEP_SWEEP_S)
+        except TimeoutError:
+            pass
+
+
+_REWRITE_TRANSIENT_ERRORS: "tuple[type[Exception], ...]" = (
+    *_REMINT_TRANSIENT_ERRORS, TimeoutError, OSError,
+)
+
+
+async def _send_rewrite(connection: ThinClient, rewrite: acks.Rewrite) -> None:
+    """Write one box again, at its own index, without moving the stream on.
+    A failure leaves it queued for the next sweep."""
+    stream = ("rewrite", rewrite.conversation_id, rewrite.box_index)
+    try:
+        wcr: "EncryptWriteResult" = await _rpc_racing_connection_life(
+            bacap_uuid=stream,
+            what="encrypt_write",
+            rpc_factory=lambda: connection.encrypt_write(
+                write_cap=rewrite.write_cap,
+                message_box_index=rewrite.box_index,
+                plaintext=rewrite.payload,
+            ),
+            backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
+        )
+        await _delivery_racing_connection_life(
+            bacap_uuid=stream,
+            what="start_resending_encrypted_message",
+            rpc_factory=lambda: connection.start_resending_encrypted_message(
+                write_cap=rewrite.write_cap,
+                envelope_descriptor=wcr.envelope_descriptor,
+                envelope_hash=wcr.envelope_hash,
+                message_ciphertext=wcr.message_ciphertext,
+                read_cap=None, message_box_index=None, reply_index=None,
+            ),
+        )
+    except _REWRITE_TRANSIENT_ERRORS as e:
+        logger.warning("rewrite for conversation %s failed; will retry: %s",
+                       rewrite.conversation_id, e)
+        return
+    await acks.rewritten(rewrite)
+
+
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
     # look at persistent.PlaintextWAL:
     # PICK OUT stuff in PlaintextWAL that we aren't currently resending
@@ -3846,6 +4238,7 @@ async def on_daemon_disconnected(event: "Mapping[str, object]") -> None:
 async def on_connection_status(status: "Mapping[str, object]") -> None:
     global _last_connected, _reconnect_event
     connected = bool(status["is_connected"])
+    models.note_pigeonhole_geometry(status.get("pigeonhole_geometry"))
     transitioned = _last_connected is not None and _last_connected != connected
     err = status.get("err") or status.get("Err")
     if connected:

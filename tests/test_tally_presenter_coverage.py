@@ -31,8 +31,7 @@ def _message(
     version: int = 0,
 ) -> GroupChatMessage:
     return GroupChatMessage(
-        version=0,
-        membership_hash=bytes(32),
+        version=0, membership_hash=bytes(32),
         msg_type=kind,
         tally=GroupChatTally(
             survey_id=survey_id,

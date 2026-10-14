@@ -366,6 +366,7 @@ def test_voucher_overlapping_await(
 
 
 @pytest.mark.integration
+@pytest.mark.long_epoch
 def test_voucher_3party(
     kpclientd_endpoint: "tuple[str, int]",
     tmp_path_factory: pytest.TempPathFactory,

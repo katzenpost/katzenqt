@@ -63,6 +63,9 @@ class _BoomLogModel:
     def redraw_network_status(self) -> None:
         self.calls.append("redraw")
 
+    def lost_rows(self) -> bool:
+        return False
+
 
 class _ConvoState:
     def __init__(self, log_model: _BoomLogModel) -> None:

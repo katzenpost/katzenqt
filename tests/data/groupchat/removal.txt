@@ -1,0 +1,39 @@
+# Removal is local. Alice stops reading carol, stops acking her and stops
+# waiting for her acks, and forgets her key while keeping her place in every
+# roster. A member alice introduces later is handed carol's slot empty.
+# Carol keeps her read cap, so she can still read alice.
+
+new-group alice bob carol
+send carol c0
+read alice carol
+remove alice carol
+roster alice alice
+----
+removed alice bob
+
+read alice carol
+----
+
+send alice a0            # no ack of carol
+read bob alice
+send bob b0
+read alice bob
+tick
+peek alice 0             # dropped: bob, the only member alice reads, acked
+----
+tombstone
+
+introduce alice dave
+read dave alice
+roster dave alice
+----
+removed alice bob dave
+
+read dave carol
+----
+
+read carol alice
+----
+alice@0 tombstone
+alice@1 introduces dave numbers 3:dave
+alice@2 not found

@@ -1,0 +1,25 @@
+# An invitation begins with the introducer catching up on every stream; the
+# new member starts each one where the introducer had read it then. Until
+# the Introduction is committed the introducer sends no acks, so no member
+# drops a box the new member is owed, and the new member gets everything
+# written since the invitation.
+
+new-group alice bob carol
+send carol c0
+read alice carol
+invite alice dave
+send alice a0            # no acks while inducting
+----
+alice@0 "a0"
+
+introduce alice dave
+send carol c1
+read dave carol          # dave starts where alice had read carol when inviting
+----
+carol@1 "c1"
+carol@2 not found
+
+read alice carol
+send alice a1            # acks resume
+----
+alice@2 "a1" acks 0:carol@1

@@ -218,6 +218,25 @@ def _read(
 
 
 @verbs.command(
+    "scan",
+    help="scan MEMBER's stream: read again the boxes an earlier scan "
+         "stepped past, and jump to the furthest box other members have "
+         "acknowledged",
+)
+@connection
+@click.argument("conv_name")
+@click.argument("member")
+def _scan(
+    config: "str | None", address: "str | None", network: str,
+    conv_name: str, member: str,
+) -> "Plan[_args.Scan]":
+    require_one(config, address)
+    return plan("_action_scan", _args.Scan(
+        action=verb(), config=config, address=address, network=network, conv_name=conv_name, member=member,
+    ))
+
+
+@verbs.command(
     "chat-session",
     help="run steps like SEND:text, READ:text, SLEEP:seconds in one session",
 )
@@ -279,6 +298,22 @@ def _read_file(
     return plan("_action_read_file", _args.ReadFile(
         action=verb(), config=config, address=address, network=network, conv_name=conv_name, to_dir=to_dir,
         timeout=timeout, basename=basename,
+    ))
+
+
+@verbs.command(
+    "disappear",
+    help="delete messages received more than RECEIVED_DAYS ago and sent "
+         "more than SENT_DAYS ago; 0 keeps them",
+)
+@click.argument("conv_name")
+@click.argument("received_days", type=click.IntRange(min=0))
+@click.argument("sent_days", type=click.IntRange(min=0))
+def _disappear(
+    conv_name: str, received_days: int, sent_days: int,
+) -> "Plan[_args.Disappear]":
+    return plan("_action_disappear", _args.Disappear(
+        action=verb(), conv_name=conv_name, received_days=received_days, sent_days=sent_days,
     ))
 
 

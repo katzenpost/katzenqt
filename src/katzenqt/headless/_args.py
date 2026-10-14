@@ -60,6 +60,12 @@ class Read(Connected):
 
 
 @dataclass(frozen=True)
+class Scan(Connected):
+    conv_name: str
+    member: str
+
+
+@dataclass(frozen=True)
 class ChatSession(Connected):
     conv_name: str
     steps: "list[str]"
@@ -80,6 +86,13 @@ class ReadFile(Connected):
     to_dir: str
     timeout: float
     basename: "str | None"
+
+
+@dataclass(frozen=True)
+class Disappear(Offline):
+    conv_name: str
+    received_days: int
+    sent_days: int
 
 
 @dataclass(frozen=True)

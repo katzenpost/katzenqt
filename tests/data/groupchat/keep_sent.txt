@@ -1,0 +1,20 @@
+# A retention policy that expires sent plaintext after one epoch, whether or
+# not it was acked: the disappearing-messages case. The message becomes a
+# tombstone, and a member who had not read it yet only learns it missed it.
+
+option keep-sent 1
+new-group alice bob
+send alice hello
+tick
+peek alice 0
+----
+tombstone
+
+read bob alice
+----
+alice@0 tombstone
+alice@1 not found
+
+scan bob alice           # a tombstone counts as read: nothing to recheck
+----
+alice@1 not found

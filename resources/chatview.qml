@@ -230,7 +230,7 @@ TreeView {
             Layout.alignment: Qt.AlignTop
             textFormat: Text.PlainText
             text: (
-              model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "\u2713 " : "")
+              model.network_status == 1 ? "⮍ " : (model.network_status == 2 ? "\u2713 " : (model.network_status == 3 ? "\u2713\u2713 " : ""))
 	    ) + model.author + (model.network_status == 0 && ctx.first_unread <= row ? " (*)" : "")
 	    font.family: (ctx["contactName.font.family"] ?ctx["contactName.font.family"]:"Sans Serif")
 	    font.pointSize: (ctx["contactName.font.pointSize"] ? ctx["contactName.font.pointSize"] : 13)

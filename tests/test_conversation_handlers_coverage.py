@@ -71,52 +71,6 @@ async def _seed(extra_name: str | None, extra_active: bool) -> int:
         return int(convo.id)
 
 
-def _expected_without_extra() -> bytes:
-    return bytes(models.canonical_membership_hash([OWN_CAP[32:], ALICE_CAP]))
-
-
-@pytest.mark.asyncio
-async def test_an_inactive_peer_is_left_out_of_the_hash() -> None:
-    conv_id = await _seed("bob", False)
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        got = await conversation_handlers.local_membership_hash(sess, convo)
-    assert got == _expected_without_extra()
-
-
-@pytest.mark.asyncio
-async def test_a_substream_peer_is_left_out_of_the_hash() -> None:
-    name = f"{models.SUBSTREAM_NAME_PREFIX}parent:beef"
-    conv_id = await _seed(name, True)
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        got = await conversation_handlers.local_membership_hash(sess, convo)
-    assert got == _expected_without_extra()
-
-
-@pytest.mark.asyncio
-async def test_an_active_ordinary_peer_does_change_the_hash() -> None:
-    conv_id = await _seed("bob", True)
-    async with persistent.asession() as sess:
-        convo = await sess.get(persistent.Conversation, conv_id)
-        assert convo is not None
-        got = await conversation_handlers.local_membership_hash(sess, convo)
-    assert got != _expected_without_extra()
-    assert got == models.canonical_membership_hash(
-        [OWN_CAP[32:], ALICE_CAP, EXTRA_CAP],
-    )
-
-
-@pytest.mark.asyncio
-async def test_membership_hash_for_opens_its_own_session() -> None:
-    conv_id = await _seed(None, True)
-    got = await conversation_handlers.membership_hash_for(conv_id)
-    assert got == _expected_without_extra()
-    assert not models.is_membership_sentinel(got)
-
-
 @pytest.mark.asyncio
 async def test_already_has_is_false_when_the_cap_is_missing() -> None:
     conv_id = await _seed(None, True)

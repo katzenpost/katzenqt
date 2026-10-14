@@ -24,6 +24,8 @@ dependencies = [
     # .github/workflows/test-integration-docker.yml.
     "katzenpost-thinclient==0.0.24",
     "rustic-audio-tool",
+    # BACAP index arithmetic for acknowledgements (Idx64 to MessageBoxIndex).
+    "hpqc",
 ]
 
 [dependency-groups]
@@ -69,6 +71,7 @@ build-backend = "flit_core.buildapi"
 name = "katzenqt"
 
 [tool.uv.sources]
+hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "d836052c3ad7461abc2bdb02a7e0867b88665123", subdirectory = "py" }
 rustic-audio-tool = { git = "https://github.com/katzenpost/Rustic_Audio_PyO3", rev = "a7f5c4877f1aa84f312cc7a23fd85a445225393b" }
 
 [tool.mypy]
@@ -107,6 +110,7 @@ markers = [
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
     "serial_docker: bounces shared docker containers (kpclientd/gateway); run after and separately from the parallel workers",
     "epoch_driven: needs a PKI epoch to roll over mid-test; only affordable on a mixnet with a short epoch_duration",
+    "long_epoch: must finish inside one PKI epoch; only runnable on a mixnet whose epoch_duration outlasts a multi-party handshake",
 ]
 # We have to re-state the .hypothesis ignore that pytest defaults to,
 # because setting norecursedirs at all replaces the built-in list

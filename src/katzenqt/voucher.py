@@ -20,7 +20,7 @@ import asyncio
 import logging
 import uuid
 from base64 import b64encode
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
@@ -29,8 +29,7 @@ from katzenpost_thinclient import (
 from sqlalchemy import exists, func, insert, literal
 from sqlmodel import col, select
 
-from . import models, persistent
-from .katzen_util import create_task
+from . import acks, models, persistent
 from .network import (
     _DAEMON_RPC_TIMEOUT_SECONDS, _SUBSTREAM_NAME_PREFIX, _box_position,
     _rpc_racing_connection_life, READ_WATCHDOG_SECONDS,
@@ -95,6 +94,10 @@ def _brief(b: "bytes | None") -> str:
     return b[:8].hex() + ".." + b[-8:].hex()
 
 MAX_GROUP_MEMBERS = 256
+
+# How long, beyond one epoch, an induction waits for our own queued
+# acknowledgements to be written before it builds its reply.
+_OUTGOING_ACKS_SLACK_SECONDS = 60.0
 
 
 class AlreadyJoinedError(Exception):
@@ -672,6 +675,10 @@ async def await_and_open(
         ))
         capped = False
         for please_add in reply_who.please_adds:
+            if please_add is None:
+                # A place in the introducer's roster whose member it no
+                # longer reads: there is nobody to add.
+                continue
             if await persistent.peer_has_read_cap(
                 sess, conversation_id, please_add.read_cap,
             ):
@@ -699,34 +706,55 @@ async def await_and_open(
             )
         row = await sess.get(persistent.PendingVoucher, pv_id)
         await _finish_pending_voucher(sess, conv, row)
+        await _adopt_rosters(
+            sess, conv, opened.mutated_message_write_cap[32:], reply_who,
+        )
         await sess.commit()
     return added
+
+
+async def _adopt_rosters(
+    sess: persistent.AsyncSession,
+    conv: persistent.Conversation,
+    own_read_cap: bytes,
+    reply_who: models.GroupChatReplyWho,
+) -> None:
+    """Start the conversation's rosters from the reply, if it carries any.
+    A reply that cannot be read costs the conversation its acknowledgements,
+    never the join: whatever it had begun to store is rolled back."""
+    try:
+        async with sess.begin_nested():
+            adopted = await acks.adopt(sess, conv, own_read_cap, reply_who)
+    except Exception as e:
+        logger.warning(
+            "could not read the rosters handed over for conversation %d; it "
+            "will not acknowledge: %s", conv.id, e, exc_info=True,
+        )
+        return
+    if not adopted:
+        logger.info(
+            "the reply for conversation %d carried no rosters; it will not "
+            "acknowledge", conv.id,
+        )
 
 
 async def _write_introduction_log(conversation_id: int, display_name: str, read_cap: bytes) -> "uuid.UUID":
     """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
     final PlaintextWAL id, for the caller to wait on the ack."""
-    from . import conversation_handlers
-
+    gcm = models.GroupChatMessage(
+        version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8,
+        msg_type=models.GroupChatTypeEnum.INTRODUCTION,
+        introduction=models.GroupChatPleaseAdd(
+            display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,
+        ),
+    )
     async with persistent.conversation_log_order_lock(conversation_id):
         async with persistent.asession() as sess:
             conv = await sess.get(persistent.Conversation, conversation_id)
             assert conv is not None
-            before_add = await conversation_handlers.local_membership_hash(
-                sess, conv, exclude_read_cap=read_cap,
-            )
-            gcm = models.GroupChatMessage(
-                version=0, membership_hash=before_add,
-                msg_type=models.GroupChatTypeEnum.INTRODUCTION,
-                introduction=models.GroupChatPleaseAdd(
-                    display_name=_sanitize_peer_name(display_name)[:30],
-                    read_cap=read_cap,
-                ),
-            )
-            send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
-            new_write_caps, db_entries = await send_op.serialize_async(
-                chunk_size=1530, conversation_id=conversation_id,
-            )
+            # The new member takes the next place in our roster once this
+            # message is written.
+            new_write_caps, db_entries = await acks.serialize_introduction(sess, conv, gcm)
             final_pwal_id = db_entries[-1].id
             for cap_uuid in new_write_caps:
                 sess.add(persistent.WriteCapWAL(id=cap_uuid))
@@ -751,9 +779,10 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     stream (their salt-mutated read cap), so every peer that reads this
     stream can add the member and start reading their messages without any
     further coordination. It is sent after the induction has committed and is
-    genuinely fire-and-forget: a failure (writing the announcement, or its
-    eventual delivery) is logged, never raised, so the induction result
-    (already durable by the time this is called) always stands.
+    genuinely fire-and-forget: a failure writing the announcement is logged,
+    never raised, so the induction result (already durable by the time this
+    is called) always stands. ``introductions_written`` waits for it to be
+    sent.
 
     A pending ConversationLog row is also written for the sender's own peer,
     so the local UI shows the announcement (e.g. 'bob added carol') at the
@@ -761,7 +790,7 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     stream.
     """
     try:
-        final_pwal_id = await _write_introduction_log(conversation_id, display_name, read_cap)
+        await _write_introduction_log(conversation_id, display_name, read_cap)
     except Exception as e:
         logger.error(
             "send_introduction_message: failed to write INTRODUCTION for "
@@ -775,20 +804,15 @@ async def send_introduction_message(conversation_id: int, display_name: str, rea
     await conversation_update_queue.put((conversation_id, False))
 
     await check_for_new()
-    # Background, not awaited: this function's own contract is
-    # fire-and-forget, so a caller (e.g. derive_read_and_induct, right after
-    # durably committing the induction) must not be made to wait up to 180s
-    # -- or see an exception from -- confirming delivery of the announcement.
-    create_task(_wait_intro_acked(final_pwal_id, display_name, conversation_id))
 
 
 async def _wait_intro_acked(
     final_pwal_id: uuid.UUID, display_name: str, conversation_id: int,
-) -> None:
+) -> bool:
     """Wait until the INTRODUCTION announcement is acked into SentLog.
 
-    Fire-and-forget: a timeout is logged, never raised, so the induction
-    result stands even if the announcement never gets delivered.
+    A timeout is logged, never raised, so the induction result stands even
+    if the announcement never gets delivered.
     """
     if not await persistent.wait_for_sent(
         final_pwal_id, deadline_s=180.0, epoch_s=epoch_period_seconds(),
@@ -797,6 +821,40 @@ async def _wait_intro_acked(
             "introduction for %r not acked within 180s (conversation %d)",
             display_name, conversation_id,
         )
+        return False
+    return True
+
+
+async def _queued_introductions() -> "list[tuple[uuid.UUID, str, int]]":
+    """The Introductions we wrote that are not yet sent: each one's final
+    PlaintextWAL id, who it introduces, and its conversation."""
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.ConversationLog).where(
+            persistent.ConversationLog.network_status == 1,
+            col(persistent.ConversationLog.outgoing_pwal).is_not(None),
+        ))).all()
+    queued = []
+    for row in rows:
+        if row.payload[:1] != b"F" or row.outgoing_pwal is None:
+            continue
+        gcm = models.GroupChatMessage.from_cbor(row.payload[1:])
+        if gcm.introduction is not None:
+            queued.append((row.outgoing_pwal, gcm.introduction.display_name, row.conversation_id))
+    return queued
+
+
+async def introductions_written() -> bool:
+    """Wait until every Introduction we wrote and have not yet sent is
+    written, or its wait gives up. A process that exits sooner, as the
+    headless CLI does after an induction, leaves the Introduction queued
+    until it next runs, and until then no other member learns of the new
+    one. False if any was not written."""
+    return all(await asyncio.gather(*(
+        _wait_intro_acked(*queued) for queued in await _queued_introductions()
+    )))
+
+
+_induction_locks: "dict[int, asyncio.Lock]" = {}
 
 
 async def derive_read_and_induct(
@@ -808,7 +866,33 @@ async def derive_read_and_induct(
     box 1, and add the joiner (on their salt-mutated read cap) as a peer. Returns
     the joiner's display name, or None if this joiner had already been
     inducted (a retry of an already-committed handshake), so the caller does
-    not report a duplicate contact or a duplicate introduction announcement."""
+    not report a duplicate contact or a duplicate introduction announcement.
+
+    The reply tells the joiner its place in our roster, so our roster must
+    not change between building the reply and queueing the Introduction: that
+    part runs one induction at a time per conversation, and no message of
+    ours acknowledges anything meanwhile (see ``acks.held_back``). Reading
+    box 0 may wait on a human, so it stays outside."""
+    pending = await _read_joiner_payload(connection, conversation_id, peer_name, voucher)
+    lock = _induction_locks.setdefault(conversation_id, asyncio.Lock())
+    async with lock, acks.held_back(conversation_id):
+        await check_for_new()
+        return await _reply_and_introduce(
+            connection, conversation_id, peer_name, voucher, pending,
+        )
+
+
+class _JoinerPayload(NamedTuple):
+    pending_id: uuid.UUID
+    voucher_write_cap: bytes
+    voucher_payload: bytes
+    box1_index: bytes
+
+
+async def _read_joiner_payload(
+    connection: "ThinClient", conversation_id: int, peer_name: str,
+    voucher: bytes,
+) -> _JoinerPayload:
     derived = await _rpc_racing_connection_life(
         bacap_uuid=_brief(voucher), what="voucher_derive_stream",
         rpc_factory=lambda: connection.voucher_derive_stream(voucher=voucher),
@@ -838,16 +922,37 @@ async def derive_read_and_induct(
         _brief(derived.voucher_read_cap), _brief(box1_index),
     )
 
+    return _JoinerPayload(
+        pv_id, derived.voucher_write_cap, voucher_payload, box1_index,
+    )
+
+
+async def _reply_and_introduce(
+    connection: "ThinClient", conversation_id: int, peer_name: str,
+    voucher: bytes, pending: _JoinerPayload,
+) -> "str | None":
+    if not await acks.wait_for_outgoing(
+        conversation_id, deadline_s=_OUTGOING_ACKS_SLACK_SECONDS,
+        epoch_s=epoch_period_seconds(),
+    ):
+        raise RuntimeError(
+            "an earlier message is still being sent; try the induction again "
+            "once it has gone"
+        )
     who_reply = await _build_who_reply(conversation_id)
     induct = await _rpc_racing_connection_life(
         bacap_uuid=_brief(voucher), what="voucher_induct",
         rpc_factory=lambda: connection.voucher_induct(
-            voucher=voucher, voucher_payload=voucher_payload, who_reply=who_reply.to_cbor(),
+            voucher=voucher, voucher_payload=pending.voucher_payload,
+            who_reply=who_reply.to_cbor(),
         ),
         backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
     )
 
-    await _publish_box(connection, derived.voucher_write_cap, box1_index, induct.sealed_reply)
+    await _publish_box(
+        connection, pending.voucher_write_cap, pending.box1_index,
+        induct.sealed_reply,
+    )
 
     joiner_name = _sanitize_peer_name(induct.display_name or peer_name)
     already_inducted = False
@@ -877,7 +982,7 @@ async def derive_read_and_induct(
                 joiner_name, _brief(induct.mutated_message_read_cap),
                 conversation_id,
             )
-        row = await sess.get(persistent.PendingVoucher, pv_id)
+        row = await sess.get(persistent.PendingVoucher, pending.pending_id)
         await _finish_pending_voucher(sess, conv, row)
         await sess.commit()
 
@@ -892,12 +997,20 @@ async def derive_read_and_induct(
 
 async def _build_who_reply(conversation_id: int) -> models.GroupChatReplyWho:
     """The existing members' read caps the joiner needs to read the group: the
-    inductor's own stream plus any already-active peers."""
+    inductor's own stream plus any already-active peers. When the
+    conversation keeps rosters the members are listed in our roster's order,
+    with what the joiner needs to follow every roster (see
+    ``acks.hand_over``)."""
     async with persistent.asession() as sess:
         conv = await sess.get(persistent.Conversation, conversation_id)
         assert conv is not None
+        handed = await acks.hand_over(sess, conv)
+        if handed is not None:
+            # hand_over may have started our own roster.
+            await sess.commit()
+            return handed
         own_read_cap = await persistent.own_read_cap(sess, conv)
-        please_adds = []
+        please_adds: "list[models.GroupChatPleaseAdd | None]" = []
         if own_read_cap is not None:
             please_adds.append(models.GroupChatPleaseAdd(
                 display_name=conv.own_peer.name, read_cap=own_read_cap,

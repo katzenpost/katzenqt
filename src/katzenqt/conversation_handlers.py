@@ -16,7 +16,7 @@ from typing import NamedTuple
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from . import models, persistent
+from . import acks, models, persistent
 from .models import GroupChatPleaseAdd, GroupChatTypeEnum
 from .tally import controller as tally_controller
 
@@ -42,10 +42,21 @@ async def dispatch(
     peer: persistent.ConversationPeer,
     gcm: models.GroupChatMessage,
     full_payload: bytes,
+    *,
+    box: "bytes | None" = None,
+    substream: "bytes | None" = None,
 ) -> DispatchResult:
     """Handle ``gcm`` for ``peer``. See :class:`DispatchResult` for what each
-    field means."""
+    field means.
+
+    ``box`` is the index of the box on ``peer``'s own stream the message
+    was read from; ``substream`` is the read cap of the substream it arrived
+    through instead, which a box of that stream announced. When either is
+    known, what the message says about rosters (whom it acknowledges, whom
+    it introduces) is recorded before it is routed."""
     await _verify_membership_advisory(sess, peer, gcm)
+    if box is not None or substream is not None:
+        await acks.on_message(sess, peer, gcm, box=box, substream=substream)
     handler = _HANDLERS.get(gcm.msg_type, _handle_chat)
     return await handler(sess, peer, gcm, full_payload)
 
@@ -72,9 +83,10 @@ async def local_membership_hash(
     (GROUP_CHAT_PROTOCOL.md 6b): every active, non-substream peer's read cap,
     plus ourself as ``persistent.own_read_cap`` derives it.
 
-    ``exclude_read_cap`` drops one member from the set, which an
-    INTRODUCTION needs because it must describe the group as it stood
-    before the addition it announces (GROUP_CHAT_PROTOCOL.md 6b.5)."""
+    ``exclude_read_cap`` drops one member from the set, by its public key,
+    which an ``Introduction`` needs because it describes the group as it
+    stood before the addition it announces. The member dropped may be us,
+    when we read our own ``Introduction``."""
     peers = await _conversation_peers(sess, conv.id)
     caps: "set[bytes]" = set()
     for p in peers:
@@ -84,11 +96,12 @@ async def local_membership_hash(
             continue
         rcw = await sess.get(persistent.ReadCapWAL, p.read_cap_id)
         if rcw is not None and rcw.read_cap is not None:
-            if rcw.read_cap != exclude_read_cap:
+            if exclude_read_cap is None or rcw.read_cap[:32] != exclude_read_cap[:32]:
                 caps.add(rcw.read_cap)
     own = await persistent.own_read_cap(sess, conv)
     if own is not None:
-        caps.add(own)
+        if exclude_read_cap is None or own[:32] != exclude_read_cap[:32]:
+            caps.add(own)
     return models.canonical_membership_hash(caps)
 
 
@@ -107,13 +120,18 @@ async def _verify_membership_advisory(
     peer: persistent.ConversationPeer,
     gcm: models.GroupChatMessage,
 ) -> None:
-    """Advisory membership check: a sender that computed a real hash and
-    disagrees with our view is logged, never dropped. Every shipping client
-    still sends a sentinel, so this does no work until a real hash appears."""
+    """Advisory membership check: a sender whose hash disagrees with our
+    view is logged, never dropped. A sentinel, which an older client sends,
+    is not compared. An ``Introduction`` is compared with our view less the
+    member it introduces, whether or not we hold that member yet: we may be
+    it."""
     got = gcm.membership_hash
     if models.is_membership_sentinel(got):
         return
-    local = await local_membership_hash(sess, peer.conversation)
+    intro = gcm.as_introduction
+    local = await local_membership_hash(
+        sess, peer.conversation, exclude_read_cap=intro.read_cap if intro else None,
+    )
     if got != local:
         logger.info(
             "membership_hash mismatch on conversation %s (advisory): peer "
@@ -226,8 +244,18 @@ _TALLY_TYPES = (
     GroupChatTypeEnum.TALLY_SYNC_RESP,
 )
 
+async def _handle_control(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+    full_payload: bytes,
+) -> DispatchResult:
+    return DispatchResult(False, False, None, False)
+
+
 _HANDLERS = {
     GroupChatTypeEnum.INTRODUCTION: _handle_introduction,
+    GroupChatTypeEnum.CONTROL: _handle_control,
     **{t: _handle_chat for t in _CHAT_TYPES},
     **{t: _handle_tally for t in _TALLY_TYPES},
 }
@@ -235,6 +263,7 @@ __all__ = [
     "AsyncSession",
     "GroupChatPleaseAdd",
     "GroupChatTypeEnum",
+    "acks",
     "annotations",
     "dispatch",
     "local_membership_hash",

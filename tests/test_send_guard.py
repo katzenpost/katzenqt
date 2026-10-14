@@ -123,9 +123,8 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     monkeypatch.setattr(
         katzen.conversation_handlers, "membership_hash_for", membership_hash_for,
     )
-    monkeypatch.setattr(
-        katzen.network, "notify_outbound_chat_sent", notify_outbound_chat_sent,
-    )
+    for name in ("notify_outbound_chat_sent", "notify_outbound_text_sent"):
+        monkeypatch.setattr(katzen.network, name, notify_outbound_chat_sent)
     return sent
 
 

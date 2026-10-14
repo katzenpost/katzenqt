@@ -187,3 +187,13 @@ async def test_serialize_async_matches_serialize() -> None:
 async def test_serialize_async_empty_message_list() -> None:
     s = models.SendOperation(messages=[], bacap_stream=uuid.uuid4())
     assert await s.serialize_async(chunk_size=1530, conversation_id=1) == ([], [])
+
+
+def test_boxes_hold_what_the_daemon_says(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(models, "_box_plaintext_length", None)
+    assert models.box_plaintext_length() == models.BOX_PLAINTEXT_FALLBACK
+    models.note_pigeonhole_geometry({"MaxPlaintextPayloadLength": 1677})
+    assert models.box_plaintext_length() == 1677
+    models.note_pigeonhole_geometry(None)
+    models.note_pigeonhole_geometry({"MaxPlaintextPayloadLength": 1})
+    assert models.box_plaintext_length() == 1677
