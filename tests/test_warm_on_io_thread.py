@@ -12,6 +12,7 @@ import logging
 import threading
 import warnings
 from collections.abc import Awaitable, Callable
+from typing import cast
 
 import pytest
 
@@ -97,3 +98,38 @@ async def test_a_thread_dead_before_warming_does_not_block_startup(caplog: pytes
         await _finishes(katzen._wait_for_engine_warmed(thread))
 
     assert "exited before it warmed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_wait_sleeps_when_the_engine_is_not_warm_yet() -> None:
+    """One pass through the loop, deterministically.
+
+    The other tests here start a real io thread, so whether the wait ever
+    sleeps depends on who wins a race: if the thread warms the engine
+    before the first check, the loop body never runs. That makes the
+    sleep's coverage a coin flip and the 100 percent gate with it. Here
+    the event is unset for the first check and set for the second, so the
+    body runs exactly once however anything is scheduled.
+    """
+    checks = 0
+
+    class Warming:
+        engine_warmed: threading.Event
+
+        def is_alive(self) -> bool:
+            return True
+
+    def is_set() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    thread = Warming()
+    thread.engine_warmed = threading.Event()
+    thread.engine_warmed.is_set = is_set  # type: ignore[method-assign]
+    await _finishes(
+        katzen._wait_for_engine_warmed(
+            cast("katzen.AsyncioThread", thread),
+        ),
+    )
+    assert checks == 2
