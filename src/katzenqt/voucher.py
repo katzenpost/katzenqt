@@ -26,7 +26,7 @@ from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
 )
-from sqlalchemy import func
+from sqlalchemy import exists, func, insert, literal
 from sqlmodel import col, select
 
 from . import models, persistent
@@ -489,6 +489,35 @@ def _add_peer(
     ))
 
 
+async def _insert_pending_if_absent(
+    sess: persistent.AsyncSession, pv: persistent.PendingVoucher,
+) -> bool:
+    """True if the row went in, False if one was already there.
+
+    The look and the insert are ONE statement, so two callers racing for
+    the same conversation cannot both pass: sqlite evaluates the NOT
+    EXISTS and the INSERT together. A separate SELECT would not do,
+    because pysqlite opens no transaction before a read and the table
+    carries no unique constraint to fall back on.
+    """
+    table = persistent.PendingVoucher.metadata.tables["pendingvoucher"]
+    taken = exists(
+        select(literal(1)).where(
+            table.c.conversation_id == pv.conversation_id,
+            table.c.role == pv.role,
+        )
+    )
+    row = select(*[
+        literal(getattr(pv, c.name), type_=c.type).label(c.name)
+        for c in table.columns
+    ]).where(~taken)
+    conn = await sess.connection()
+    done = await conn.execute(
+        insert(table).from_select([c.name for c in table.columns], row)
+    )
+    return bool(done.rowcount)
+
+
 async def mint_and_publish(
     connection: "ThinClient", conversation_id: int, display_name: str,
 ) -> bytes:
@@ -497,8 +526,10 @@ async def mint_and_publish(
 
     Refuses to mint for a conversation the client already belongs to, or one that
     already has a voucher in flight: joining twice duplicates members and
-    messages. These checks run before any network IO, so a caller can pass a
-    dead connection and still rely on them."""
+    messages. The first two checks run before any network IO, so a caller can
+    pass a dead connection and still rely on them. The third is the insert
+    itself, which happens after the mint RPC, so a voucher refused there has
+    already cost a daemon round trip and is logged as discarded."""
     if await conversation_is_joined(conversation_id):
         raise AlreadyJoinedError(
             f"already a member of conversation {conversation_id}; no voucher needed"
@@ -528,14 +559,18 @@ async def mint_and_publish(
         display_name=display_name,
     )
     async with persistent.asession() as sess:
-        if await _pending_voucher_in(sess, conversation_id) is not None:
+        if not await _insert_pending_if_absent(sess, pv):
+            await sess.rollback()
+            logger.info(
+                "mint_and_publish: conversation %d gained a pending voucher "
+                "while this one was being minted; discarding the mint",
+                conversation_id,
+            )
             raise PendingVoucherExistsError(
                 f"conversation {conversation_id} gained a pending voucher "
                 "while this one was being minted"
             )
-        sess.add(pv)
         await sess.commit()
-        await sess.refresh(pv)
         pv_id = pv.id
 
     box1_index = await _publish_box(

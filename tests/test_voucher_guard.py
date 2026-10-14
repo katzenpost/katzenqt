@@ -154,13 +154,9 @@ async def test_a_voucher_that_appears_while_minting_is_refused(
             voucher_payload=b"payload",
         )
 
-    async def published(*_a: object, **_k: object) -> bytes:
-        return bytes(104)
-
     monkeypatch.setattr(
         voucher, "_rpc_racing_connection_life", mint_and_race,
     )
-    monkeypatch.setattr(voucher, "_publish_box", published)
     with pytest.raises(voucher.PendingVoucherExistsError):
         await voucher.mint_and_publish(
             cast("ThinClient", None), conv_id, "me",
@@ -168,6 +164,72 @@ async def test_a_voucher_that_appears_while_minting_is_refused(
     async with persistent.asession() as sess:
         rows = (await sess.exec(select(persistent.PendingVoucher))).all()
     assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_mints_for_one_conversation_leave_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conv_id = await _make_conversation()
+    at_the_mint = asyncio.Event()
+    mints = 0
+
+    async def mint(**_kwargs: object) -> SimpleNamespace:
+        nonlocal mints
+        mints += 1
+        if mints == 1:
+            at_the_mint.set()
+        else:
+            await at_the_mint.wait()
+        return SimpleNamespace(
+            voucher=b"v" * 32,
+            voucher_write_cap=b"\x01" * 168,
+            voucher_read_cap=bytes(136),
+            voucher_secret_key=bytes(32),
+            voucher_payload=b"payload",
+        )
+
+    async def published(*_a: object, **_k: object) -> bytes:
+        return bytes(104)
+
+    monkeypatch.setattr(voucher, "_rpc_racing_connection_life", mint)
+    monkeypatch.setattr(voucher, "_publish_box", published)
+    outcomes = await asyncio.gather(
+        voucher.mint_and_publish(cast("ThinClient", None), conv_id, "a"),
+        voucher.mint_and_publish(cast("ThinClient", None), conv_id, "b"),
+        return_exceptions=True,
+    )
+    refused = [
+        o for o in outcomes
+        if isinstance(o, voucher.PendingVoucherExistsError)
+    ]
+    assert len(refused) == 1, outcomes
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.PendingVoucher))).all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_insert_itself_refuses_a_second_joiner_row() -> None:
+    """The guard is in the statement that writes, not in an earlier read:
+    a session that has read nothing still cannot add a second row."""
+    conv_id = await _make_conversation()
+
+    def row(name: str) -> persistent.PendingVoucher:
+        return persistent.PendingVoucher(
+            role="joiner", conversation_id=conv_id, step="minted",
+            voucher=b"v" * 32, display_name=name,
+        )
+
+    async with persistent.asession() as sess:
+        assert await voucher._insert_pending_if_absent(sess, row("first"))
+        await sess.commit()
+    async with persistent.asession() as sess:
+        assert not await voucher._insert_pending_if_absent(sess, row("2nd"))
+        await sess.rollback()
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.PendingVoucher))).all()
+    assert [r.display_name for r in rows] == ["first"]
 
 
 @pytest.mark.asyncio
