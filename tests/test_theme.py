@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QWidget,
 )
 
-from katzenqt import persistent  # noqa: E402
+from katzenqt import persistent, prefs  # noqa: E402
 from katzenqt.theme import (  # noqa: E402
     DEFAULT_MODE,
     THEME_SETTING,
@@ -220,7 +220,7 @@ def _fully_opaque_colors(icon: QIcon, size: int) -> set[tuple[int, int, int]]:
 
 def _stored_mode() -> str | None:
     with persistent.Session(persistent._engine_sync) as sess:
-        row = sess.get(persistent.AppSetting, THEME_SETTING)
+        row = sess.get(persistent.AppSetting, prefs.PREFIX + THEME_SETTING)
         return None if row is None else str(row.value)
 
 
@@ -228,7 +228,7 @@ def _seed_mode(value: str) -> None:
     with persistent.Session(persistent._engine_sync) as sess:
         sess.add(
             persistent.AppSetting(
-                id=THEME_SETTING,
+                id=prefs.PREFIX + THEME_SETTING,
                 type="str",
                 value=value,
             )
@@ -434,7 +434,7 @@ def test_apply_reuses_a_single_settings_row(make_theme: MakeTheme) -> None:
     assert _stored_mode() == "solarized_light"
     assert _setting_row_count() == 1
     with persistent.Session(persistent._engine_sync) as sess:
-        row = sess.get(persistent.AppSetting, THEME_SETTING)
+        row = sess.get(persistent.AppSetting, prefs.PREFIX + THEME_SETTING)
         assert row is not None
         assert row.type == "str"
 
@@ -494,10 +494,10 @@ def test_load_mode_survives_a_broken_session(
 
     harness = make_theme("none")
     monkeypatch.setattr(persistent, "Session", boom)
-    caplog.set_level(logging.WARNING, logger="katzen.theme")
+    caplog.set_level(logging.WARNING, logger="katzen.prefs")
     harness.manager.restore()
     assert harness.manager.mode == "system"
-    assert "could not load theme mode: no database" in caplog.text
+    assert "could not read preference" in caplog.text
 
 
 def test_save_mode_survives_a_broken_session(
@@ -510,7 +510,7 @@ def test_save_mode_survives_a_broken_session(
 
     harness = make_theme("none")
     monkeypatch.setattr(persistent, "Session", boom)
-    caplog.set_level(logging.WARNING, logger="katzen.theme")
+    caplog.set_level(logging.WARNING, logger="katzen.prefs")
     harness.manager.apply("dark")
     assert harness.manager.mode == "dark"
     assert harness.app.palette().color(QPalette.ColorRole.Window) == QColor(
@@ -518,7 +518,7 @@ def test_save_mode_survives_a_broken_session(
         0x35,
         0x35,
     )
-    assert "could not persist theme mode: disk on fire" in caplog.text
+    assert "could not persist preference" in caplog.text
 
 
 def test_system_mode_follows_a_dark_desktop(make_theme: MakeTheme) -> None:
