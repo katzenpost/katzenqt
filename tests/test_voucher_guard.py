@@ -8,6 +8,7 @@ layer that the GUI relies on to prevent that.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import uuid
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from katzenqt import models, network, persistent, voucher
 from sqlmodel import col, Session, select
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from katzenqt._thinclient import ThinClient
 
 
@@ -170,17 +173,21 @@ async def test_a_voucher_that_appears_while_minting_is_refused(
 async def test_two_mints_for_one_conversation_leave_one_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Two mints that both pass the look before the RPC still leave one row.
+
+    The interleave is forced, not hoped for. Each mint marks its task on
+    the way out of the RPC, and the next session that task opens waits
+    until both are waiting. A guard that looks and then inserts therefore
+    has both looks finish before either write, on every run.
+    """
     conv_id = await _make_conversation()
-    at_the_mint = asyncio.Event()
-    mints = 0
+    minted: "set[object]" = set()
+    at_the_insert = asyncio.Event()
+    arrived = 0
+    real_asession = persistent.asession
 
     async def mint(**_kwargs: object) -> SimpleNamespace:
-        nonlocal mints
-        mints += 1
-        if mints == 1:
-            at_the_mint.set()
-        else:
-            await at_the_mint.wait()
+        minted.add(asyncio.current_task())
         return SimpleNamespace(
             voucher=b"v" * 32,
             voucher_write_cap=b"\x01" * 168,
@@ -189,22 +196,37 @@ async def test_two_mints_for_one_conversation_leave_one_row(
             voucher_payload=b"payload",
         )
 
+    @contextlib.asynccontextmanager
+    async def gated_asession() -> "AsyncIterator[persistent.AsyncSession]":
+        nonlocal arrived
+        task = asyncio.current_task()
+        if task in minted:
+            minted.discard(task)
+            arrived += 1
+            if arrived == 2:
+                at_the_insert.set()
+            await at_the_insert.wait()
+        async with real_asession() as sess:
+            yield sess
+
     async def published(*_a: object, **_k: object) -> bytes:
         return bytes(104)
 
     monkeypatch.setattr(voucher, "_rpc_racing_connection_life", mint)
     monkeypatch.setattr(voucher, "_publish_box", published)
+    monkeypatch.setattr(persistent, "asession", gated_asession)
     outcomes = await asyncio.gather(
         voucher.mint_and_publish(cast("ThinClient", None), conv_id, "a"),
         voucher.mint_and_publish(cast("ThinClient", None), conv_id, "b"),
         return_exceptions=True,
     )
+    assert arrived == 2, "the two mints were never made to interleave"
     refused = [
         o for o in outcomes
         if isinstance(o, voucher.PendingVoucherExistsError)
     ]
     assert len(refused) == 1, outcomes
-    async with persistent.asession() as sess:
+    async with real_asession() as sess:
         rows = (await sess.exec(select(persistent.PendingVoucher))).all()
     assert len(rows) == 1
 
