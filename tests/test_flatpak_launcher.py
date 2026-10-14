@@ -273,6 +273,98 @@ def test_install_service_keeps_a_matching_unit(
     assert ["systemctl", "--user", "enable", "--now", "kpclientd"] in ran
 
 
+def test_installing_the_unit_is_quiet_on_its_own(
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Someone who asked for the install is not told how to stop it."""
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_daemon(tmp_path, "hand-tuned\n")
+    monkeypatch.setattr(
+        launcher.shutil,
+        "which",
+        lambda name: "/usr/bin/systemctl",
+    )
+    monkeypatch.setattr(launcher.subprocess, "run", _recording_run([]))
+    assert launcher.install_service() is True
+    assert capsys.readouterr().err == ""
+
+
+def test_asking_for_the_install_is_not_told_how_to_stop_it(
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_daemon(tmp_path, "hand-tuned\n")
+    monkeypatch.setattr(
+        launcher.shutil,
+        "which",
+        lambda name: "/usr/bin/systemctl",
+    )
+    monkeypatch.setattr(launcher.subprocess, "run", _recording_run([]))
+    monkeypatch.setattr(sys, "argv", ["launcher", "--install-service"])
+    launcher.main()
+    said = capsys.readouterr()
+    assert "installed, enabled, and started" in said.out
+    assert "KATZENQT_NO_AUTO_INSTALL" not in said.err
+
+
+def test_the_automatic_install_says_what_it_is_doing(
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The notice belongs where katzenqt acts by itself, and it does not
+    claim an install when the unit is already there and matching."""
+    calls = {"install": 0}
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_daemon(tmp_path, "hand-tuned\n")
+    monkeypatch.setattr(
+        launcher.shutil,
+        "which",
+        lambda name: "/usr/bin/systemctl",
+    )
+    monkeypatch.setattr(launcher, "install_service", _counting_install(calls))
+    monkeypatch.setattr(
+        launcher,
+        "endpoint",
+        lambda: launcher.HOST if calls["install"] else None,
+    )
+    monkeypatch.setattr(launcher.time, "sleep", lambda _: None)
+    monkeypatch.setattr(launcher.subprocess, "call", lambda *a: 0)
+    monkeypatch.setattr(sys, "argv", ["launcher"])
+    with pytest.raises(SystemExit):
+        launcher.main()
+    said = capsys.readouterr().err
+    assert "enabling and starting the kpclientd systemd user unit" in said
+    assert "installing it first if it is missing or out of date" in said
+    assert "KATZENQT_NO_AUTO_INSTALL=1" in said
+    assert calls["install"] == 1
+
+
+def test_an_automatic_install_that_cannot_happen_says_nothing(
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(launcher, "FLATPAK", False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(launcher, "endpoint", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["launcher"])
+    with pytest.raises(SystemExit, match="kpclientd is unavailable"):
+        launcher.main()
+    assert capsys.readouterr().err == ""
+
+
 def test_install_service_skips_without_binary(
     launcher: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
