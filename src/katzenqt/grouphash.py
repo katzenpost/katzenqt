@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 
-MEMBERSHIP_SENTINELS = (b"TODO" * 8, bytes(32))
+from .models import is_membership_sentinel
+
 SUSPECT_COLOR = "#ff3b30"
 NO_COLOR = ""
 
@@ -23,7 +24,7 @@ def is_real_hash(value: "bytes | None") -> bool:
     return (
         value is not None
         and len(value) == 32
-        and value not in MEMBERSHIP_SENTINELS
+        and not is_membership_sentinel(value)
     )
 
 
@@ -48,8 +49,7 @@ def color_for(value: "bytes | None") -> str:
         return NO_COLOR
     if not is_real_hash(value):
         return SUSPECT_COLOR
-    digest = hashlib.sha256(value).digest()
-    return "#{:02x}{:02x}{:02x}".format(digest[0], digest[1], digest[2])
+    return "#" + hashlib.sha256(value).digest()[:3].hex()
 
 
 def boundaries(values: "Sequence[bytes | None]") -> "list[bool]":

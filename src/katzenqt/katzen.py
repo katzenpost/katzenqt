@@ -1442,16 +1442,15 @@ class MainWindow(QMainWindow):
     def set_group_tint(self, enabled: bool) -> None:
         """Turn the membership tint on or off, and remember the choice."""
         logger.info("membership tint %s", "on" if enabled else "off")
-        self.settings = {
-            **self.settings, GROUP_TINT_SETTING: int(bool(enabled)),
-        }
+        wanted = int(bool(enabled))
+        self.settings = {**self.settings, GROUP_TINT_SETTING: wanted}
         try:
             with persistent.Session(persistent._engine_sync) as sess:
                 row = sess.get(persistent.AppSetting, GROUP_TINT_SETTING)
                 if not row:
                     row = persistent.AppSetting(id=GROUP_TINT_SETTING)
                 row.type = "int"
-                row.value = str(int(bool(enabled)))
+                row.value = str(wanted)
                 sess.add(row)
                 sess.commit()
         except Exception as e:
