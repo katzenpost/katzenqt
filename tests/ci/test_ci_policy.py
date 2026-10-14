@@ -148,6 +148,23 @@ def test_workflow_has_a_required_result_and_separate_epoch_job() -> None:
     assert "continue-on-error" not in epoch
 
 
+def test_a_multi_party_test_runs_where_the_epoch_outlasts_it() -> None:
+    """A three-party handshake takes longer than the docker mixnet's 2m
+    epoch, so it cannot finish there without surviving a rollover. It is
+    excluded from that job and kept in the namenlos one, whose epoch is
+    1200s: excluding it from one job must not drop it from all of them."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    docker = text.split("  docker-integration:", 1)[1].split(
+        "  epoch-integration:", 1,
+    )[0]
+    namenlos = text.split("  namenlos-integration:", 1)[1].split(
+        "  docker-integration:", 1,
+    )[0]
+    assert "not long_epoch" in docker
+    assert "not long_epoch" not in namenlos
+    assert 'KQT_EPOCH_DURATION_S: "1200"' in namenlos
+
+
 def test_live_run_removes_the_previous_report_first() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     clear = text.index("rm -f integration-results/namenlos.json")

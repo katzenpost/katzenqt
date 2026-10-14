@@ -286,7 +286,7 @@ jobs:
         run: |
           mkdir -p integration-results
           bash tools/ci-timeout.sh .venv/bin/pytest tests/integration --no-cov -vv -n "${KQT_INTEGRATION_PARALLEL}" \
-            --dist loadscope -m "not serial_docker" \
+            --dist loadscope -m "not serial_docker and not long_epoch" \
             --basetemp=integration-results/parallel \
             --junitxml=integration-results/parallel.xml
 

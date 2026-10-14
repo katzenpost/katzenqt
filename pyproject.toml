@@ -110,6 +110,7 @@ markers = [
     "real_sleeps: opt out of the autouse fast asyncio.sleep monkeypatch",
     "serial_docker: bounces shared docker containers (kpclientd/gateway); run after and separately from the parallel workers",
     "epoch_driven: needs a PKI epoch to roll over mid-test; only affordable on a mixnet with a short epoch_duration",
+    "long_epoch: must finish inside one PKI epoch; only runnable on a mixnet whose epoch_duration outlasts a multi-party handshake",
 ]
 # We have to re-state the .hypothesis ignore that pytest defaults to,
 # because setting norecursedirs at all replaces the built-in list

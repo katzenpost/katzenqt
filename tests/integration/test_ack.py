@@ -100,6 +100,7 @@ def _read(state: Path, text: str) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.long_epoch
 def test_acknowledgements_are_named_by_roster_index(
     kpclientd_endpoint: "tuple[str, int]",
     tmp_path_factory: pytest.TempPathFactory,
