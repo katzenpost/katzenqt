@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import persistent
+from . import prefs
 
 logger = logging.getLogger("katzen.theme")
 
@@ -373,27 +373,13 @@ class ThemeManager(QObject):
                 invite_btn.setIcon(QIcon("resources/invite.svg"))
 
     def _load_mode(self) -> str:
-        try:
-            with persistent.Session(persistent._engine_sync) as sess:
-                row = sess.get(persistent.AppSetting, THEME_SETTING)
-                if row and row.value:
-                    return normalize_mode(row.value)
-        except Exception as e:  # a missing setting must never block startup
-            logger.warning("could not load theme mode: %s", e)
-        return DEFAULT_MODE
+        stored = prefs.get(
+            THEME_SETTING, DEFAULT_MODE, legacy=THEME_SETTING,
+        )
+        return normalize_mode(str(stored))
 
     def _save_mode(self, mode: str) -> None:
-        try:
-            with persistent.Session(persistent._engine_sync) as sess:
-                row = sess.get(persistent.AppSetting, THEME_SETTING)
-                if not row:
-                    row = persistent.AppSetting(id=THEME_SETTING)
-                row.type = "str"
-                row.value = mode
-                sess.add(row)
-                sess.commit()
-        except Exception as e:
-            logger.warning("could not persist theme mode: %s", e)
+        prefs.put(THEME_SETTING, mode)
 
 
 class ThemeDialog(QDialog):
