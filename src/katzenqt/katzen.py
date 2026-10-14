@@ -401,6 +401,7 @@ async def _qml_source_ready(widget: "QQuickWidget") -> None:
 
 
 SECRET_CLIPBOARD_MS = 60_000
+SECRET_TIMER_NAME = "katzenSecretClipboard"
 
 
 def clear_secret(text: str) -> None:
@@ -409,9 +410,43 @@ def clear_secret(text: str) -> None:
         clipboard.clear()
 
 
-def copy_secret(text: str, owner: QObject) -> None:
+def _forget_secret(timer: QTimer) -> None:
+    timer.stop()
+    secret = timer.property("secret")
+    if secret:
+        timer.setProperty("secret", None)
+        clear_secret(str(secret))
+
+
+def _secret_timer() -> "QTimer | None":
+    """The one timer that clears a copied secret.
+
+    It belongs to the application, not to the widget the copy came from:
+    VoucherDialog is WA_DeleteOnClose, and a timer owned by a button
+    inside it is dropped when the dialog closes, which is the usual
+    flow and well inside the minute. Restarting one timer also means a
+    second copy cannot be cleared early by the first copy's timer.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return None
+    timer = app.findChild(QTimer, SECRET_TIMER_NAME)
+    if timer is None:
+        timer = QTimer(app)
+        timer.setObjectName(SECRET_TIMER_NAME)
+        timer.setSingleShot(True)
+        timer.timeout.connect(partial(_forget_secret, timer))
+        app.aboutToQuit.connect(partial(_forget_secret, timer))
+    return timer
+
+
+def copy_secret(text: str) -> None:
     QApplication.clipboard().setText(text)
-    QTimer.singleShot(SECRET_CLIPBOARD_MS, owner, partial(clear_secret, text))
+    timer = _secret_timer()
+    if timer is None:
+        return
+    timer.setProperty("secret", text)
+    timer.start(SECRET_CLIPBOARD_MS)
 
 
 class VoucherDialog(QDialog):
@@ -458,7 +493,7 @@ class VoucherDialog(QDialog):
         layout.addWidget(buttons)
 
     def copy_code(self) -> None:
-        copy_secret(self.code, self.copy_button)
+        copy_secret(self.code)
         self.copy_button.setText(self.COPIED_LABEL)
         QTimer.singleShot(
             self.COPIED_SHOWN_MS, self.copy_button, self.restore_copy_label,
@@ -2389,7 +2424,7 @@ class MainWindow(QMainWindow):
         elif token is None:
             return
         elif chosen is copy_voucher:
-            copy_secret(voucher_code(token), self)
+            copy_secret(voucher_code(token))
             self.ui.statusbar.showMessage(
                 "Voucher copied to clipboard; it clears in a minute", 3000,
             )

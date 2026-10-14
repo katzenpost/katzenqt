@@ -107,18 +107,11 @@ def _install(
         katzen, "VoucherDialog",
         lambda parent, code: SimpleNamespace(code=code),
     )
-    monkeypatch.setattr(
-        katzen, "QApplication",
-        SimpleNamespace(clipboard=lambda: SimpleNamespace(
-            setText=harness.copied.append,
-        )),
-    )
-    monkeypatch.setattr(
-        katzen, "QTimer",
-        SimpleNamespace(
-            singleShot=lambda ms, owner, fn: harness.cleared_after.append(ms),
-        ),
-    )
+    def copied(text: str) -> None:
+        harness.copied.append(text)
+        harness.cleared_after.append(katzen.SECRET_CLIPBOARD_MS)
+
+    monkeypatch.setattr(katzen, "copy_secret", copied)
     window = SimpleNamespace(
         ui=SimpleNamespace(
             contacts_treeWidget=object(),
