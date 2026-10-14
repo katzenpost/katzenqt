@@ -29,6 +29,10 @@ GIT_CONFIG_COUNT=1
 GIT_CONFIG_KEY_0=safe.directory
 GIT_CONFIG_VALUE_0="$work/src"
 export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
-$(command -v make) -C "$work/src" "$target"
+build_once() {
+    git -C "$work/src" clean -xdq
+    "$(command -v make)" -C "$work/src" "$target"
+}
+retry build_once
 cp "$work/src"/dist/$debs "$out"/
 rm -rf "$work"
