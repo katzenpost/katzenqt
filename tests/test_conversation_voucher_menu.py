@@ -69,6 +69,7 @@ class _Harness:
         self.messages: "list[str]" = []
         self.copied: "list[str]" = []
         self.shown: "list[str]" = []
+        self.cleared_after: "list[int]" = []
 
 
 def _install(
@@ -106,12 +107,11 @@ def _install(
         katzen, "VoucherDialog",
         lambda parent, code: SimpleNamespace(code=code),
     )
-    monkeypatch.setattr(
-        katzen, "QApplication",
-        SimpleNamespace(clipboard=lambda: SimpleNamespace(
-            setText=harness.copied.append,
-        )),
-    )
+    def copied(text: str) -> None:
+        harness.copied.append(text)
+        harness.cleared_after.append(katzen.SECRET_CLIPBOARD_MS)
+
+    monkeypatch.setattr(katzen, "copy_secret", copied)
     window = SimpleNamespace(
         ui=SimpleNamespace(
             contacts_treeWidget=object(),
@@ -146,7 +146,10 @@ async def test_copying_puts_the_voucher_on_the_clipboard(
     )
     await katzen.MainWindow._conversation_menu(window, _item(7), QPoint())
     assert harness.copied == ["dG9r"]
-    assert harness.messages == ["Voucher copied to clipboard"]
+    assert harness.messages == [
+        "Voucher copied to clipboard; it clears in a minute",
+    ]
+    assert harness.cleared_after == [katzen.SECRET_CLIPBOARD_MS]
     assert harness.shown == []
     window._remove_conversation.assert_not_awaited()
 

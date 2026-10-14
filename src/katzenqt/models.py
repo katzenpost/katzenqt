@@ -540,21 +540,60 @@ def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | 
         ...
     ValueError: unknown chunk type: b'X'
     """
+    blob = unserialize_opaque(kind + data for kind, data in chunks)
+    return None if blob is None else GroupChatMessage.from_cbor(blob)
+
+
+
+def unserialize_opaque(
+    chunks: "Iterable[bytes]",
+) -> "bytes | None":
+    """The blob a run of opaque box payloads carries, or None.
+
+    None means "not all of it is here", which is the whole point: a
+    reader that holds a prefix of the run has nothing to act on, so a
+    write that stopped half way cannot be mistaken for a shorter blob.
+
+    >>> boxes = [b"Ca sea", b"Cled r", b"Feply"]
+    >>> unserialize_opaque(boxes)
+    b'a sealed reply'
+    >>> unserialize_opaque(boxes[:-1]) is None
+    True
+    >>> unserialize_opaque([]) is None
+    True
+    >>> unserialize_opaque([b"Fone box"])
+    b'one box'
+    >>> unserialize_opaque([b"Fa", b"Cb"])
+    Traceback (most recent call last):
+        ...
+    ValueError: 'F' chunk at index 0 but 1 chunk(s) follow
+    >>> unserialize_opaque([b"Xa"])
+    Traceback (most recent call last):
+        ...
+    ValueError: unknown chunk type: b'X'
+    >>> unserialize_opaque([b""])
+    Traceback (most recent call last):
+        ...
+    ValueError: empty box payload carries no marker
+    """
     parts = []
-    chunk_list = list(chunks)
-    for i, (kind, data) in enumerate(chunk_list):
+    boxes = list(chunks)
+    for i, box in enumerate(boxes):
+        if not box:
+            raise ValueError("empty box payload carries no marker")
+        kind, data = box[:1], box[1:]
         if kind == b"C":
-            if i == len(chunk_list) - 1:
-                return None  # chain still open, no terminating 'F'
+            if i == len(boxes) - 1:
+                return None
             parts.append(data)
         elif kind == b"F":
-            if i != len(chunk_list) - 1:
+            if i != len(boxes) - 1:
                 raise ValueError(
-                    f"'F' chunk at index {i} but {len(chunk_list) - 1 - i} "
+                    f"'F' chunk at index {i} but {len(boxes) - 1 - i} "
                     "chunk(s) follow"
                 )
             parts.append(data)
-            return GroupChatMessage.from_cbor(b"".join(parts))
+            return b"".join(parts)
         elif kind == b"I":
             raise ValueError(
                 "indirection ('I') framing must be resolved by the network "

@@ -8,6 +8,7 @@ layer that the GUI relies on to prevent that.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import uuid
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from katzenqt import models, network, persistent, voucher
 from sqlmodel import col, Session, select
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from katzenqt._thinclient import ThinClient
 
 
@@ -136,6 +139,119 @@ async def test_mint_refuses_when_voucher_pending() -> None:
     await _add_pending(conv_id)
     with pytest.raises(voucher.PendingVoucherExistsError):
         await voucher.mint_and_publish(cast("ThinClient", None), conv_id, "me")
+
+
+@pytest.mark.asyncio
+async def test_a_voucher_that_appears_while_minting_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conv_id = await _make_conversation()
+
+    async def mint_and_race(**_kwargs: object) -> SimpleNamespace:
+        await _add_pending(conv_id)
+        return SimpleNamespace(
+            voucher=b"v" * 32,
+            voucher_write_cap=b"\x01" * 168,
+            voucher_read_cap=bytes(136),
+            voucher_secret_key=bytes(32),
+            voucher_payload=b"payload",
+        )
+
+    monkeypatch.setattr(
+        voucher, "_rpc_racing_connection_life", mint_and_race,
+    )
+    with pytest.raises(voucher.PendingVoucherExistsError):
+        await voucher.mint_and_publish(
+            cast("ThinClient", None), conv_id, "me",
+        )
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.PendingVoucher))).all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_mints_for_one_conversation_leave_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two mints that both pass the look before the RPC still leave one row.
+
+    The interleave is forced, not hoped for. Each mint marks its task on
+    the way out of the RPC, and the next session that task opens waits
+    until both are waiting. A guard that looks and then inserts therefore
+    has both looks finish before either write, on every run.
+    """
+    conv_id = await _make_conversation()
+    minted: "set[object]" = set()
+    at_the_insert = asyncio.Event()
+    arrived = 0
+    real_asession = persistent.asession
+
+    async def mint(**_kwargs: object) -> SimpleNamespace:
+        minted.add(asyncio.current_task())
+        return SimpleNamespace(
+            voucher=b"v" * 32,
+            voucher_write_cap=b"\x01" * 168,
+            voucher_read_cap=bytes(136),
+            voucher_secret_key=bytes(32),
+            voucher_payload=b"payload",
+        )
+
+    @contextlib.asynccontextmanager
+    async def gated_asession() -> "AsyncIterator[persistent.AsyncSession]":
+        nonlocal arrived
+        task = asyncio.current_task()
+        if task in minted:
+            minted.discard(task)
+            arrived += 1
+            if arrived == 2:
+                at_the_insert.set()
+            await at_the_insert.wait()
+        async with real_asession() as sess:
+            yield sess
+
+    async def published(*_a: object, **_k: object) -> bytes:
+        return bytes(104)
+
+    monkeypatch.setattr(voucher, "_rpc_racing_connection_life", mint)
+    monkeypatch.setattr(voucher, "_publish_box", published)
+    monkeypatch.setattr(persistent, "asession", gated_asession)
+    outcomes = await asyncio.gather(
+        voucher.mint_and_publish(cast("ThinClient", None), conv_id, "a"),
+        voucher.mint_and_publish(cast("ThinClient", None), conv_id, "b"),
+        return_exceptions=True,
+    )
+    assert arrived == 2, "the two mints were never made to interleave"
+    refused = [
+        o for o in outcomes
+        if isinstance(o, voucher.PendingVoucherExistsError)
+    ]
+    assert len(refused) == 1, outcomes
+    async with real_asession() as sess:
+        rows = (await sess.exec(select(persistent.PendingVoucher))).all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_insert_itself_refuses_a_second_joiner_row() -> None:
+    """The guard is in the statement that writes, not in an earlier read:
+    a session that has read nothing still cannot add a second row."""
+    conv_id = await _make_conversation()
+
+    def row(name: str) -> persistent.PendingVoucher:
+        return persistent.PendingVoucher(
+            role="joiner", conversation_id=conv_id, step="minted",
+            voucher=b"v" * 32, display_name=name,
+        )
+
+    async with persistent.asession() as sess:
+        assert await voucher._insert_pending_if_absent(sess, row("first"))
+        await sess.commit()
+    async with persistent.asession() as sess:
+        assert not await voucher._insert_pending_if_absent(sess, row("2nd"))
+        await sess.rollback()
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.PendingVoucher))).all()
+    assert [r.display_name for r in rows] == ["first"]
 
 
 @pytest.mark.asyncio

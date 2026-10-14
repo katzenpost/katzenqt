@@ -550,7 +550,10 @@ class PendingVoucher(SQLModel, table=True):
     conversation_id: int = Field(foreign_key="conversation.id", index=True,
         description="joiner: the conversation whose write cap is the MessageStream; "
                     "inductor: the group the joiner is being inducted into")
-    step: str = Field(description="minted/published/awaiting/sealed/done")
+    step: str = Field(
+        description="minted/awaiting/inducting; the row is deleted "
+                    "when the handshake finishes, so no row is done",
+    )
     voucher: bytes = Field(description="the token; derives the VoucherStream")
     voucher_write_cap: bytes | None = Field(None, min_length=168, max_length=168)
     voucher_read_cap: bytes | None = Field(None, min_length=136, max_length=136)
