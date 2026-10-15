@@ -24,7 +24,7 @@ SYSTEM_STAMP := .system-setup.stamp
 
 KATZENPOST_DIR := katzenpost
 KATZENPOST_URL := https://github.com/katzenpost/katzenpost.git
-KATZENPOST_REV := 97cef8b2eddc8b7e19b60bc982e95fd2b36fa58e
+KATZENPOST_REV := 6f6b13d4524ec2da68ca3ba18fefe4a181af8a04
 KPCLIENTD_BIN := $(KATZENPOST_DIR)/cmd/kpclientd/kpclientd
 
 GEN_RES := src/katzenqt/resources_rc.py

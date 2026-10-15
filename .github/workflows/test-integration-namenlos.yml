@@ -39,13 +39,13 @@ jobs:
         with:
           clean: ${{ env.KATZENQT_CHECKOUT_CLEAN }}
           repository: katzenpost/katzenpost
-          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          ref: 6f6b13d4524ec2da68ca3ba18fefe4a181af8a04
           path: ${{ env.KATZENPOST_CI_PATH }}
 
       - name: Set up Go (for kpclientd build)
         uses: actions/setup-go@v7
         with:
-          go-version: '>=1.26'
+          go-version: '>=1.26.9'
           cache: false
 
       - name: Install uv
@@ -203,7 +203,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          ref: 6f6b13d4524ec2da68ca3ba18fefe4a181af8a04
           path: ${{ env.KATZENPOST_CI_PATH }}
 
       - name: Use the local mixnet cache
@@ -242,7 +242,7 @@ jobs:
       - name: Set up Go (for kpclientd build)
         uses: actions/setup-go@v7
         with:
-          go-version: '>=1.26'
+          go-version: '>=1.26.9'
           cache: false
 
       - name: Install uv
@@ -356,7 +356,7 @@ jobs:
         with:
           clean: ${{ env.KATZENQT_CHECKOUT_CLEAN }}
           repository: katzenpost/katzenpost
-          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          ref: 6f6b13d4524ec2da68ca3ba18fefe4a181af8a04
           path: ${{ env.KATZENPOST_CI_PATH }}
 
       - name: Use the local mixnet cache
