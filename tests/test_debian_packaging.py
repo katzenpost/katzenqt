@@ -39,9 +39,9 @@ def test_every_place_that_states_a_version_states_the_same_one() -> None:
     under one tag.
     """
     pyproject = (ROOT / "pyproject.toml").read_text()
-    version = re.search(
-        r'(?m)^version = "(\d+\.\d+\.\d+)"$', pyproject
-    ).group(1)
+    stated = re.search(r'(?m)^version = "(\d+\.\d+\.\d+)"$', pyproject)
+    assert stated is not None, "pyproject.toml states no version"
+    version = stated.group(1)
 
     changelog = (DEBIAN / "changelog").read_text()
     assert changelog.startswith(f"katzenqt ({version}) unstable"), (
