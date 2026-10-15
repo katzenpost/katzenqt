@@ -8,7 +8,7 @@ classifiers = [
 ]
 license = { text = "Public Domain" }
 requires-python = ">=3.11"
-version = "0.0.1"
+version = "0.0.3"
 
 dependencies = [
     "pynacl==1.6.0",
@@ -21,7 +21,7 @@ dependencies = [
     "pycrdt~=0.13.1",
     "click~=8.1",
     # Keep in lockstep with the katzenpost daemon ref in
-    # .github/workflows/test-integration-docker.yml.
+    # .github/workflows/test-integration-namenlos.yml.
     "katzenpost-thinclient==0.0.24",
     "rustic-audio-tool",
     # BACAP index arithmetic for acknowledgements (Idx64 to MessageBoxIndex).

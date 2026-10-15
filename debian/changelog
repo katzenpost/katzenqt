@@ -1,3 +1,10 @@
+katzenqt (0.0.3) unstable; urgency=medium
+
+  * Release 0.0.3, against katzenpost v0.0.106 and hpqc v0.0.93.
+  * Move the namenlos integration pin to katzenpost v0.0.106.
+
+ -- Katzenpost <packages@katzenpost.network>  Thu, 15 Oct 2026 15:21:47 +0200
+
 katzenqt (0.0.1) unstable; urgency=medium
 
   * Initial Debian packaging.

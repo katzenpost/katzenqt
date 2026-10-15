@@ -39,7 +39,7 @@ jobs:
         with:
           clean: ${{ env.KATZENQT_CHECKOUT_CLEAN }}
           repository: katzenpost/katzenpost
-          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          ref: 6906f4ec4dee76e55137a56aa61a441db59f8879
           path: ${{ env.KATZENPOST_CI_PATH }}
 
       - name: Set up Go (for kpclientd build)
@@ -203,7 +203,7 @@ jobs:
           # both katzenqt and thin_client must exercise the same
           # kpclientd sha or protocol drift will hit one workflow
           # before the other.
-          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          ref: 6906f4ec4dee76e55137a56aa61a441db59f8879
           path: ${{ env.KATZENPOST_CI_PATH }}
 
       - name: Use the local mixnet cache
@@ -356,7 +356,7 @@ jobs:
         with:
           clean: ${{ env.KATZENQT_CHECKOUT_CLEAN }}
           repository: katzenpost/katzenpost
-          ref: 214161aa511a01c1c8d43247cf1dea2472fc2ebc
+          ref: 6906f4ec4dee76e55137a56aa61a441db59f8879
           path: ${{ env.KATZENPOST_CI_PATH }}
 
       - name: Use the local mixnet cache

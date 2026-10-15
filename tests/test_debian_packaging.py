@@ -22,8 +22,39 @@ def test_control_is_project_authored_with_apt_deps() -> None:
 
 def test_changelog_is_native_versioned_and_project_authored() -> None:
     changelog = (DEBIAN / "changelog").read_text()
-    assert changelog.startswith("katzenqt (0.0.1) unstable")
+    assert re.match(r"^katzenqt \(\d+\.\d+\.\d+\) unstable", changelog)
     assert "Katzenpost" in changelog
+
+
+def test_every_place_that_states_a_version_states_the_same_one() -> None:
+    """The release version is written in three files, and nothing made
+    them agree.
+
+    This assertion used to name 0.0.1 literally, so it passed while
+    pyproject said 0.0.1 and the newest tag was 0.0.2: the drift it
+    would have caught was the drift it was pinned to. It now reads the
+    version from pyproject and requires the Debian changelog's newest
+    entry and the AppStream release list to match, so a bump that misses
+    one of the three fails here rather than shipping two version numbers
+    under one tag.
+    """
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    version = re.search(
+        r'(?m)^version = "(\d+\.\d+\.\d+)"$', pyproject
+    ).group(1)
+
+    changelog = (DEBIAN / "changelog").read_text()
+    assert changelog.startswith(f"katzenqt ({version}) unstable"), (
+        f"debian/changelog's newest entry is not {version}"
+    )
+
+    metainfo = (
+        ROOT / "packaging" / "flatpak"
+        / "network.katzenpost.katzenqt.metainfo.xml"
+    ).read_text()
+    assert f'<release version="{version}"' in metainfo, (
+        f"the AppStream release list has no {version} entry"
+    )
 
 
 def test_copyright_declares_project_and_file_licenses() -> None:
