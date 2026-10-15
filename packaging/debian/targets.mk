@@ -14,7 +14,7 @@ HIGHCTIDH_REV := 15e284352a9db95838744cbfe9fe7c570b262d17
 DEB_DISTROS ?= debian-13 debian-forky ubuntu-26.04
 
 .PHONY: deb deb-ci deb-test deb-image-ref deb-image deb-image-push \
-	deb-image-refs check-version check-version-test
+	deb-image-refs check-version check-version-test check-stale
 
 deb:
 	@$(MAKE) -C packaging/debian
@@ -30,6 +30,9 @@ check-version:
 
 check-version-test:
 	@packaging/debian/check-version-test.sh
+
+check-stale:
+	@python3 tools/check_stale.py
 
 deb-image-ref:
 	@packaging/container/deb-image.sh --ref $(DISTRO)
@@ -53,6 +56,7 @@ PACKAGING_HELP += '' 'Debian packaging:' \
 	'  make deb-test              Test an installed package' \
 	'  make check-version         Check the three version statements' \
 	'  make check-version-test    Test the version check' \
+	'  make check-stale           Report pins upstream moved past' \
 	'  make deb-image             Build the CI image for DISTRO' \
 	'  make deb-image-push        Build and push it for DISTRO' \
 	'  make deb-image-ref         Print the image ref for DISTRO' \
