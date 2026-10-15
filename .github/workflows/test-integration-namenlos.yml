@@ -281,6 +281,7 @@ jobs:
         working-directory: katzenqt
         timeout-minutes: 90
         env:
+          KQT_EPOCH_DURATION_S: "120"
           KATZENQT_DOCKER_INTEGRATION: "1"
           KQT_INTEGRATION_PARALLEL: "2"
         run: |
@@ -295,6 +296,7 @@ jobs:
         if: ${{ !cancelled() && steps.start_mixnet.outcome == 'success' }}
         timeout-minutes: 90
         env:
+          KQT_EPOCH_DURATION_S: "120"
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
@@ -413,7 +415,7 @@ jobs:
       - name: Build a short-epoch mixnet and install deps in parallel
         run: |
           set -euo pipefail
-          ( cd "$KATZENPOST_DIR/docker" && exec bash "$GITHUB_WORKSPACE/katzenqt/tools/ci-timeout.sh" make base_port=62331 epoch_duration=30s start ) &
+          ( cd "$KATZENPOST_DIR/docker" && exec bash "$GITHUB_WORKSPACE/katzenqt/tools/ci-timeout.sh" make base_port=62331 epoch_duration=2m start ) &
           mixnet=$!
           trap 'kill "$mixnet" 2>/dev/null || true; wait "$mixnet" 2>/dev/null || true' EXIT
           ( cd katzenqt && bash tools/ci-timeout.sh bash tools/ci-deps.sh )
@@ -421,9 +423,11 @@ jobs:
           trap - EXIT
 
       # Not `make wait`: that runs fetch --require-ready, which compares each
-      # node's epoch against epochtime.Now(). The binaries are built with the
-      # warped 2m period and epoch_duration only reaches genconfig, so at 30s
-      # the two never match and every mix reports not-ready forever. Without
+      # node's epoch against epochtime.Now(). epoch_duration only reaches
+      # genconfig, and katzenpost refuses anything under 2m0s, so it
+      # is 2m here, which is also the warped period the binaries are built
+      # with. Left on the weaker wait regardless, which is the readiness the
+      # tests actually need and does not depend on the two agreeing. Without
       # --require-ready fetch just waits for a consensus carrying 2 storage
       # replicas, which is the readiness the tests actually need. Take the
       # command from the Makefile rather than rewriting it here, so the
@@ -434,7 +438,7 @@ jobs:
           set -euo pipefail
           test -f mixnet-alpine/running.stamp
           make base_port=62331 mixnet-alpine/client/thinclient-bridge.toml
-          cmd=$(make base_port=62331 -n wait | sed 's/\\$//' | tr '\n' ' ')
+          cmd=$(make base_port=62331 -n wait)
           test "$(grep -c -o -- '--require-ready' <<<"$cmd")" = 1
           bash "$GITHUB_WORKSPACE/katzenqt/tools/ci-timeout.sh" timeout 600 bash -c "${cmd/ --require-ready/}"
 
@@ -444,6 +448,7 @@ jobs:
       - name: Run the epoch-driven integration tests
         working-directory: katzenqt
         env:
+          KQT_EPOCH_DURATION_S: "120"
           KATZENQT_DOCKER_INTEGRATION: "1"
         run: |
           mkdir -p integration-results
