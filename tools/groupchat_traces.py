@@ -1,5 +1,5 @@
 """Record traces of the group chat simulator for CryptWalker's replay
-(``lake exe CryptWalker.GroupChat.replay``): every scenario under
+(``lake exe CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay``): every scenario under
 ``tests/data/groupchat``, a fixed set of the stateful test's random runs, and
 a group chat driven through the app's own adapter (``acks``), as
 ``adapter-scenario.jsonl``.

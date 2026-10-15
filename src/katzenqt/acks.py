@@ -175,7 +175,7 @@ class _Stored(NamedTuple):
 TRACE_DIR = "GROUPCHAT_ADAPTER_TRACE_DIR"
 """The environment variable naming a directory to record, for each
 conversation, every call made on its state machine, for CryptWalker's
-replay (``lake exe CryptWalker.GroupChat.replay``). Unset in use."""
+replay (``lake exe CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay``). Unset in use."""
 
 
 def _kind() -> type[Group]:
