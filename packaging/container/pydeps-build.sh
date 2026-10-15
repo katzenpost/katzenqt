@@ -75,4 +75,4 @@ build_deb python3-rustic-audio-tool amd64 "$work/wh-audio" \
 
 dep="$(dirname "$0")/dep-deb.sh"
 "$dep" "$out" "$HPQC_URL" "$HPQC_REV" deb-build "python3-*.deb"
-"$dep" "$out" "$HIGHCTIDH_URL" "$HIGHCTIDH_REV" deb
+"$dep" "$out" "$HIGHCTIDH_URL" "$HIGHCTIDH_REV" deb-build
