@@ -1,3 +1,9 @@
+katzenqt (0.0.3) unstable; urgency=medium
+
+  * Release 0.0.3.
+
+ -- Katzenpost <packages@katzenpost.network>  Thu, 15 Oct 2026 16:04:00 +0200
+
 katzenqt (0.0.1) unstable; urgency=medium
 
   * Initial Debian packaging.
