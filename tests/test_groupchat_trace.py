@@ -85,7 +85,7 @@ def test_the_lean_member_agrees(tmp_path: Path) -> None:
     subprocess.run([sys.executable, str(tool), str(tmp_path), "200"], check=True)
     lake = shutil.which("lake") or str(Path.home() / ".elan" / "bin" / "lake")
     replay = subprocess.run(
-        [lake, "exe", "CryptWalker.GroupChat.replay", str(tmp_path)],
+        [lake, "exe", "CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay", str(tmp_path)],
         cwd=root, capture_output=True, text=True,
     )
     assert replay.returncode == 0, replay.stdout[-4000:]
