@@ -74,7 +74,7 @@ apt install -y \
     "$debs"/python3-hpqc_*.deb \
     "$debs"/python3-katzenpost-thinclient_*.deb \
     "$debs"/katzenpost_*.deb \
-    "$debs"/katzenqt_0.0.1_all.deb
+    "$debs"/katzenqt_*.deb
 
 packaging/debian/test.sh
 packaging/debian/assert-reproducible.sh "$debs"

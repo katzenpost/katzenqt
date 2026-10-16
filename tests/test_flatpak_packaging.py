@@ -219,6 +219,41 @@ def test_flathub_skips_unsupported_arch() -> None:
     assert json.loads(flathub.read_text()) == {"skip-arches": ["aarch64"]}
 
 
+def test_the_flatpak_asks_for_the_versions_pyproject_pins() -> None:
+    """pyproject.toml is the single source for dependency versions.
+
+    The flatpak installs offline, so its manifest has to repeat each
+    constraint rather than read pyproject, and a repeated version is one
+    that can drift. packaging/flatpak/check.py drifted exactly this way:
+    it held a thin-client version that outlived the pin and failed the
+    build. check.py now derives the version; the manifest cannot, so it
+    is compared here instead. A name the manifest does not install is
+    not required to appear.
+    """
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    pinned = {}
+    for dep in project["project"]["dependencies"]:
+        found = re.match(r"([A-Za-z0-9_.-]+)(==|~=)([0-9][0-9.]*)$", dep)
+        if found:
+            pinned[found.group(1).replace("_", "-").lower()] = (
+                found.group(2), found.group(3)
+            )
+
+    manifest = json.loads((FLATPAK / "python3-deps.json").read_text())
+    for module in manifest["modules"]:
+        for command in module.get("build-commands", []):
+            for name, op, version in re.findall(
+                r'"?([A-Za-z0-9_.-]+)(==|~=)([0-9][0-9.]*)"?', command
+            ):
+                key = name.replace("_", "-").lower()
+                if key not in pinned:
+                    continue
+                assert (op, version) == pinned[key], (
+                    f"{module['name']} installs {name}{op}{version}, "
+                    f"pyproject pins {pinned[key][0]}{pinned[key][1]}"
+                )
+
+
 def test_flatpak_pins_match_the_application_lock() -> None:
     lock = tomllib.loads((ROOT / "uv.lock").read_text())
     thin = next(

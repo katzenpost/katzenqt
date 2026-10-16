@@ -86,6 +86,13 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: make check-version-test
+      - run: make check-version tag=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      - name: Report pins upstream has moved past
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make check-stale
       - run: make deb-ci
 
   deb-result:

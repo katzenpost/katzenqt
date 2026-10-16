@@ -2,13 +2,29 @@ import configparser
 import importlib
 import importlib.metadata
 import importlib.resources
+import re
 import sys
+
+
+def _pinned_thinclient() -> str:
+    """The thin-client version katzenqt itself declares.
+
+    Read from katzenqt's own metadata rather than written here, so a
+    version bump does not have to remember this file. The hardcoded
+    0.0.24 it replaces outlived the pin and failed the build.
+    """
+    for req in importlib.metadata.requires("katzenqt") or ():
+        pin = re.match(r"katzenpost-thinclient==([0-9][0-9.]*)", req)
+        if pin:
+            return pin.group(1)
+    raise RuntimeError("katzenqt declares no thin-client pin")
 
 
 def imports() -> None:
     for name in ("katzenqt", "katzenpost_thinclient", "rustic_audio_tool"):
         importlib.import_module(name)
-    if importlib.metadata.version("katzenpost-thinclient") != "0.0.24":
+    installed = importlib.metadata.version("katzenpost-thinclient")
+    if installed != _pinned_thinclient():
         raise RuntimeError("unexpected thin-client version")
     package = importlib.resources.files("katzenqt")
     if not (package / "migrations").is_dir():

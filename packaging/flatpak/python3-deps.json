@@ -396,7 +396,7 @@
             "name": "python3-katzenpost_thinclient",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"katzenpost_thinclient==0.0.24\" --no-build-isolation"
+                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"katzenpost_thinclient==0.0.25\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -421,13 +421,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/b4/e3/739aca17b3a1428550f9f7d7d8dd9d8a60232cd39929c8cb276cbbd2b4ff/katzenpost_thinclient-0.0.24-py3-none-any.whl",
-                    "sha256": "5e542c3f1bb4c3c2c4814e67bd5f7d8f941d4f95d20f9244fda957f796510c60"
-                },
-                {
-                    "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/4e/d1/e4ed95fdd3ef13b78630280d9e9e240aeb65cc7c544ec57106149c3942fb/pprintpp-0.4.0-py2.py3-none-any.whl",
-                    "sha256": "b6b4dcdd0c0c0d75e4d7b2f21a9e933e5b2ce62b26e1a54537f9651ae5a5c01d"
+                    "url": "https://files.pythonhosted.org/packages/aa/05/f9e4879eb1daa26a3f9541b4a02543bdfebf102445519eac3823e07edc0d/katzenpost_thinclient-0.0.25-py3-none-any.whl",
+                    "sha256": "85bfbe0645f2f57272e64188652eeb11b8e253c866427c87fdaac9c4812a2052"
                 },
                 {
                     "type": "file",

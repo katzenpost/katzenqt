@@ -1,7 +1,7 @@
 PYCRDT_URL := https://github.com/y-crdt/pycrdt.git
 PYCRDT_REV := 7fc0f7330fd55a0e99b91683b2820ebcd02a50a2
 THINCLIENT_URL := https://github.com/katzenpost/thin_client.git
-THINCLIENT_REV := 7c7de9128033554ecff355020dcccb22b4d5bb25
+THINCLIENT_REV := b5c465d47542395bcfe311e7818fa88bf292effa
 PIP_VER := 24.2
 MATURIN_VER := 1.8.2
 RUSTIC_AUDIO_URL := https://github.com/katzenpost/Rustic_Audio_PyO3
@@ -14,7 +14,7 @@ HIGHCTIDH_REV := 15e284352a9db95838744cbfe9fe7c570b262d17
 DEB_DISTROS ?= debian-13 debian-forky ubuntu-26.04
 
 .PHONY: deb deb-ci deb-test deb-image-ref deb-image deb-image-push \
-	deb-image-refs
+	deb-image-refs check-version check-version-test check-stale
 
 deb:
 	@$(MAKE) -C packaging/debian
@@ -24,6 +24,15 @@ deb-ci:
 
 deb-test:
 	@packaging/debian/test.sh
+
+check-version:
+	@packaging/debian/check-version.sh "$(tag)"
+
+check-version-test:
+	@packaging/debian/check-version-test.sh
+
+check-stale:
+	@python3 tools/check_stale.py
 
 deb-image-ref:
 	@packaging/container/deb-image.sh --ref $(DISTRO)
@@ -45,6 +54,9 @@ PACKAGING_HELP += '' 'Debian packaging:' \
 	'  make deb                   Build the packages in a container' \
 	'  make deb-ci                Build, test, check reproducibility' \
 	'  make deb-test              Test an installed package' \
+	'  make check-version         Check the three version statements' \
+	'  make check-version-test    Test the version check' \
+	'  make check-stale           Report pins upstream moved past' \
 	'  make deb-image             Build the CI image for DISTRO' \
 	'  make deb-image-push        Build and push it for DISTRO' \
 	'  make deb-image-ref         Print the image ref for DISTRO' \

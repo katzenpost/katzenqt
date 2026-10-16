@@ -22,7 +22,7 @@ def test_control_is_project_authored_with_apt_deps() -> None:
 
 def test_changelog_is_native_versioned_and_project_authored() -> None:
     changelog = (DEBIAN / "changelog").read_text()
-    assert changelog.startswith("katzenqt (0.0.1) unstable")
+    assert re.match(r"^katzenqt \(\d+\.\d+\.\d+\) unstable", changelog)
     assert "Katzenpost" in changelog
 
 
