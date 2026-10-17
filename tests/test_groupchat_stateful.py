@@ -31,7 +31,7 @@ FOUNDERS = ("alice", "bob", "carol")
 NEWCOMERS = ("dave", "erin")
 NAMES = FOUNDERS + NEWCOMERS
 TRACE_DIR = os.environ.get("GROUPCHAT_TRACE_DIR")
-"""Where to write a trace of every run, for CryptWalker's replay."""
+"""Where to write a trace of every run, for Cryptlib's replay."""
 
 
 class GroupChat(RuleBasedStateMachine):

@@ -1,6 +1,6 @@
 """Record what each member of a simulated group was told and what it did,
-for checking against CryptWalker's Lean model of a member
-(``lake exe CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay``).
+for checking against Cryptlib's Lean model of a member
+(``lake exe Cryptlib.Protocols.GroupComm.GroupChatKatzenqt1.replay``).
 
 A :class:`TracedGroup` is a :class:`~.group.Group` that writes one JSON line
 per call made on it from outside: what was called, with what, what it

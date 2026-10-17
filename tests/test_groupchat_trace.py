@@ -1,4 +1,4 @@
-"""The traces CryptWalker's replay checks the group state machine against:
+"""The traces Cryptlib's replay checks the group state machine against:
 one JSON line per call made on a member, with its whole state after."""
 
 from __future__ import annotations
@@ -76,16 +76,16 @@ def test_a_box_a_client_wrote_is_kept_as_its_bytes() -> None:
 
 
 @pytest.mark.nightly
-@pytest.mark.skipif(not os.environ.get("CRYPTWALKER"), reason="needs a CryptWalker checkout")
+@pytest.mark.skipif(not os.environ.get("CRYPTLIB"), reason="needs a Cryptlib checkout (path in CRYPTLIB)")
 def test_the_lean_member_agrees(tmp_path: Path) -> None:
-    """Fresh random runs, replayed through CryptWalker's Lean model of a
+    """Fresh random runs, replayed through Cryptlib's Lean model of a
     member, which must give the same results and state at every call."""
-    root = Path(os.environ["CRYPTWALKER"])
+    root = Path(os.environ["CRYPTLIB"])
     tool = Path(__file__).parent.parent / "tools" / "groupchat_traces.py"
     subprocess.run([sys.executable, str(tool), str(tmp_path), "200"], check=True)
     lake = shutil.which("lake") or str(Path.home() / ".elan" / "bin" / "lake")
     replay = subprocess.run(
-        [lake, "exe", "CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay", str(tmp_path)],
+        [lake, "exe", "Cryptlib.Protocols.GroupComm.GroupChatKatzenqt1.replay", str(tmp_path)],
         cwd=root, capture_output=True, text=True,
     )
     assert replay.returncode == 0, replay.stdout[-4000:]
