@@ -117,6 +117,11 @@ class GcmCodec:
             numbers=wire.decode_numbers(gcm.numbers or b""),
             introduced_at=wire.decode_introduced_at(gcm.introduced_at or b""),
             acks=acks,
+            membership_hash=(
+                gcm.membership_hash
+                if control and not models.is_membership_sentinel(gcm.membership_hash)
+                else None
+            ),
         )
 
     def encode(self, message: wire.Message) -> bytes:
@@ -128,7 +133,7 @@ class GcmCodec:
         elif message.introduction is not None:
             gcm = models.GroupChatMessage(
                 version=models.GROUP_CHAT_VERSION,
-                membership_hash=models.MEMBERSHIP_SENTINELS[1],
+                membership_hash=message.membership_hash or models.MEMBERSHIP_SENTINELS[1],
                 msg_type=models.GroupChatTypeEnum.INTRODUCTION,
                 introduction=models.GroupChatPleaseAdd(
                     display_name=message.introduction.name,
@@ -138,7 +143,7 @@ class GcmCodec:
         else:
             gcm = models.GroupChatMessage(
                 version=models.GROUP_CHAT_VERSION,
-                membership_hash=models.MEMBERSHIP_SENTINELS[1],
+                membership_hash=message.membership_hash or models.MEMBERSHIP_SENTINELS[1],
                 msg_type=models.GroupChatTypeEnum.CONTROL,
             )
         gcm.acks = ack_codec.encode(message.acks) or None
@@ -463,20 +468,13 @@ async def _queue(
 ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
     """Serialize what the state machine asks to send, one message to a box
     or substream, each written after the one before. A message the state
-    machine makes itself carries our membership hash, an ``Introduction``
-    the hash before the member it introduces; one it was handed carries its
-    own."""
-    from .conversation_handlers import local_membership_hash
-
+    machine makes itself carries the membership hash it stamped, an
+    ``Introduction`` the hash before the member it introduces; one it was
+    handed carries its own."""
     write_caps: list[uuid.UUID] = []
     entries: list[models.SerializedRow] = []
     for item in outgoing:
         gcm = CODEC.gcm(item.message)
-        if item.message.content is None:
-            intro = item.message.introduction
-            gcm.membership_hash = await local_membership_hash(
-                sess, conv, exclude_read_cap=intro.read_cap if intro else None,
-            )
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
         new_write_caps, db_entries = await send_op.serialize_async(
             chunk_size=models.box_plaintext_length(), conversation_id=conv.id
@@ -815,6 +813,10 @@ async def wait_for_outgoing(
 # Inducting.
 
 
+class RosterFull(Exception):
+    """The conversation's roster has no index left for another member."""
+
+
 @asynccontextmanager
 async def held_back(conversation_id: int) -> AsyncIterator[None]:
     """Hold this conversation's acknowledgements and numbering back while a
@@ -829,6 +831,8 @@ async def held_back(conversation_id: int) -> AsyncIterator[None]:
                 assert conv is not None
                 stored = await _founded(sess, conv)
                 if stored is not None:
+                    if not stored.group.room:
+                        raise RosterFull(conversation_id)
                     outgoing = stored.group.begin_induction()
                     _store(sess, *await _queue(sess, conv, stored, outgoing))
                     await _save(sess, stored)
@@ -1053,6 +1057,7 @@ __all__ = [
     "REPLICA_EPOCH_SECONDS",
     "REPLICA_EPOCH_SETTING",
     "Rewrite",
+    "RosterFull",
     "Stream",
     "WALK_LIMIT",
     "adopt",

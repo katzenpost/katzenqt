@@ -114,7 +114,8 @@ class Rosters:
     def retire(self, member: Key, token: Key) -> None:
         """Forget ``member``'s key, keeping every place it holds. A place
         named by a prefix is ``member``'s only if the prefix names no other
-        member known."""
+        member known. ``token`` stands in a place, never among the keys a
+        prefix can name."""
 
         def renamed(key: Key) -> Key:
             return token if key == member else key
@@ -133,4 +134,4 @@ class Rosters:
             (renamed(intro[0]), intro[1]): renamed(key)
             for intro, key in self.introductions.items()
         }
-        self.keys = [renamed(key) for key in self.keys]
+        self.keys = [key for key in self.keys if key != member]

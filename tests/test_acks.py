@@ -24,6 +24,7 @@ from katzenqt import (
     removal,
     voucher,
 )
+from katzenqt.groupchat import numbering
 from katzenqt.groupchat import state as group_state
 from katzenqt.groupchat import wire
 from katzenqt.groupchat.group import Group
@@ -637,6 +638,24 @@ async def test_an_induction_left_by_a_process_that_has_gone_is_released() -> Non
 
 
 @pytest.mark.asyncio
+async def test_no_induction_starts_once_the_roster_is_full() -> None:
+    chat, _ = await _with_bob()
+    group = await chat.group()
+    for index in range(wire.ROSTER_MAX):
+        group.rosters.number(group.me, index, numbering.Entry(b"retired" + bytes([index])))
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.GroupState, chat.conversation_id)
+        assert row is not None
+        row.state = group_state.dump(group)
+        sess.add(row)
+        await sess.commit()
+    with pytest.raises(acks.RosterFull):
+        async with acks.held_back(chat.conversation_id):
+            pytest.fail("inducted into a full roster")
+    assert not (await chat.group()).ledger.holding
+
+
+@pytest.mark.asyncio
 async def test_owed_numbering_goes_out_before_an_induction() -> None:
     chat, bob = await _with_bob()
     await chat.receive("bob", _introduction("carol", secrets.token_bytes(136)), 4)
@@ -644,6 +663,19 @@ async def test_owed_numbering_goes_out_before_an_induction() -> None:
         async with persistent.asession() as sess:
             (queued,) = (await sess.exec(select(persistent.PlaintextWAL))).all()
         assert _sent(queued).numbers is not None
+
+
+@pytest.mark.asyncio
+async def test_a_control_message_carries_our_view_of_the_group() -> None:
+    chat, bob = await _with_bob()
+    await chat.receive("bob", _introduction("carol", secrets.token_bytes(136)), 4)
+    (control, _) = await chat.queue(_text())
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        ours = await conversation_handlers.local_membership_hash(sess, conv)
+    assert _sent(control).numbers is not None
+    assert _sent(control).membership_hash == ours
 
 
 @pytest.mark.asyncio
@@ -909,6 +941,8 @@ def test_the_codec_reads_what_it_writes() -> None:
         numbers=((3, None),),
     )
     assert acks.CODEC.decode(acks.CODEC.encode(intro)) == intro
+    stamped = wire.Message(numbers=((2, b"\x07" * 8),), membership_hash=bytes(range(32)))
+    assert acks.CODEC.decode(acks.CODEC.encode(stamped)) == stamped
     text = _text().to_cbor()
     decoded = acks.CODEC.decode(acks.CODEC.encode(wire.Message(content=text)))
     assert decoded is not None and decoded.content is not None

@@ -54,6 +54,7 @@ def message(value: Message | None) -> Any:
         "numbers": [[k, ref] for k, ref in value.numbers],
         "introduced_at": value.introduced_at,
         "acks": sorted(value.acks.items()),
+        "membership_hash": value.membership_hash,
     }
 
 

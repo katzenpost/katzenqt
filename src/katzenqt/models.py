@@ -8,6 +8,7 @@ import uuid
 import secrets
 import io
 from . import persistent
+from .groupchat import wire as groupchat_wire
 import hashlib
 from base64 import b64encode, b64decode
 from collections.abc import Iterable, Mapping
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
 SUBSTREAM_NAME_PREFIX = ":substream:"
 
-MEMBERSHIP_DOMAIN = b"KP:membership:v1"
+MEMBERSHIP_DOMAIN = groupchat_wire.MEMBERSHIP_DOMAIN
 
 MEMBERSHIP_SENTINELS = (b"TODO" * 8, bytes(32))
 
@@ -76,11 +77,7 @@ def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
     >>> len(canonical_membership_hash([cap_a]))
     32
     """
-    digest = hashlib.sha256()
-    digest.update(MEMBERSHIP_DOMAIN)
-    for key in sorted({cap[:32] for cap in read_caps}):
-        digest.update(key)
-    return digest.digest()
+    return groupchat_wire.membership_hash(cap[:32] for cap in read_caps)
 
 
 # Version 1 carries acknowledgements and drops the membership hash.

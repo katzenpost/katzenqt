@@ -39,8 +39,8 @@ class Reader:
     will never be read, so acknowledgements stop before it for good."""
     mode: Mode = Mode.IDLE
     tried: list[int] = field(default_factory=list)
-    """The ``Idx64`` of each acknowledged box a scan has already looked
-    for."""
+    """The ``Idx64`` of each acknowledged box ahead that a scan has already
+    looked for, while it is still heard: no more than there are members."""
 
     def read(self) -> list[Effect]:
         if self.mode is not Mode.IDLE:
@@ -49,14 +49,17 @@ class Reader:
         return [ReadBox(self.stream, self.read_cap, self.next)]
 
     def ahead(self, heard: list[int]) -> list[int]:
-        """Acknowledged boxes a scan has not looked for yet."""
+        """Acknowledged boxes ahead of here a scan has not looked for yet,
+        each once. A walk only goes forward, so one behind is never found."""
         here = counter(self.next)
-        return [h for h in heard if h != here and h not in self.tried]
+        return list(dict.fromkeys(h for h in heard if h > here and h not in self.tried))
 
     def scan(self, heard: list[int], window: int) -> list[Effect]:
         """Recheck what was kept, then look for acknowledged boxes ahead,
         or probe forward from here."""
         self.mode = Mode.SCANNING
+        here = counter(self.next)
+        self.tried = [t for t in self.tried if t > here and t in heard]
         effects: list[Effect] = [
             ReadBox(self.stream, self.read_cap, index, recheck=True) for index, _, _ in self.kept
         ]
