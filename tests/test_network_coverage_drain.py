@@ -279,7 +279,6 @@ class TestWriteAckBookkeeping:
         async def _boom(
             connection: object,
             mw: object,
-            queue: object,
             **kwargs: object,
         ) -> int:
             raise _fatal_db_error()
@@ -309,7 +308,6 @@ class TestWriteAckBookkeeping:
         async def _slow(
             connection: object,
             mw: object,
-            queue: object,
             **kwargs: object,
         ) -> int:
             entered.set()
