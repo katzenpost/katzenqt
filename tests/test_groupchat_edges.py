@@ -7,7 +7,7 @@ import io
 from pathlib import Path
 
 from katzenqt.groupchat.wire import ROSTER_MAX
-from tests.groupchat_edges import EDGES, record, roster_full
+from tests.groupchat_edges import EDGES, record, retired_prefix, roster_full
 
 
 def test_numbering_stops_where_the_roster_ends() -> None:
@@ -18,6 +18,14 @@ def test_numbering_stops_where_the_roster_ends() -> None:
     assert len(group.unnumbered) == 2
     assert not group.room
     assert group.compose() == []
+
+
+def test_a_retired_place_names_no_member() -> None:
+    group = retired_prefix(io.StringIO())
+    assert not any(key.startswith(b"retired") for key in group.rosters.keys)
+    bob = next(key for key in group.readers)
+    assert group.rosters.resolve(bob, 3) is None
+    assert all(not key.startswith(b"retired") for key in group.ledger.heard)
 
 
 def test_every_edge_is_recorded(tmp_path: Path) -> None:

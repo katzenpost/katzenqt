@@ -61,7 +61,28 @@ def roster_full(trace: IO[str]) -> TracedGroup:
     return group
 
 
-EDGES: dict[str, Callable[[IO[str]], TracedGroup]] = {"roster_full": roster_full}
+def retired_prefix(trace: IO[str]) -> TracedGroup:
+    """Alice removes Carol. Bob then numbers an index by the prefix that
+    stands in Carol's place, and acknowledges a box at it: a prefix names
+    only a member whose key is known, so Alice resolves neither."""
+    alice, bob, carol = (read_cap(name) for name in ("alice", "bob", "carol"))
+    group = TracedGroup.found(alice, [alice, bob, carol], tracer=Recorder(trace))
+    group.remove(key_of(carol))
+    (token,) = (
+        entry.key
+        for entry in group.rosters.entries[group.me].values()
+        if entry.key is not None and entry.key.startswith(b"retired")
+    )
+    at = boxes(bob, 2)
+    message = Message(content=b"hi", numbers=((3, token),), acks={3: 5})
+    group.observe(key_of(bob), at[0], group.codec.encode(message), at[1])
+    return group
+
+
+EDGES: dict[str, Callable[[IO[str]], TracedGroup]] = {
+    "retired_prefix": retired_prefix,
+    "roster_full": roster_full,
+}
 
 
 def record(out: Path) -> None:
