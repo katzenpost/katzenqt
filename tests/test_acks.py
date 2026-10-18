@@ -24,6 +24,7 @@ from katzenqt import (
     removal,
     voucher,
 )
+from katzenqt.groupchat import numbering
 from katzenqt.groupchat import state as group_state
 from katzenqt.groupchat import wire
 from katzenqt.groupchat.group import Group
@@ -633,6 +634,24 @@ async def test_an_induction_left_by_a_process_that_has_gone_is_released() -> Non
         row.state = group_state.dump(group)
         sess.add(row)
         await sess.commit()
+    assert not (await chat.group()).ledger.holding
+
+
+@pytest.mark.asyncio
+async def test_no_induction_starts_once_the_roster_is_full() -> None:
+    chat, _ = await _with_bob()
+    group = await chat.group()
+    for index in range(wire.ROSTER_MAX):
+        group.rosters.number(group.me, index, numbering.Entry(b"retired" + bytes([index])))
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.GroupState, chat.conversation_id)
+        assert row is not None
+        row.state = group_state.dump(group)
+        sess.add(row)
+        await sess.commit()
+    with pytest.raises(acks.RosterFull):
+        async with acks.held_back(chat.conversation_id):
+            pytest.fail("inducted into a full roster")
     assert not (await chat.group()).ledger.holding
 
 

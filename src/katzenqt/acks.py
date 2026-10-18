@@ -815,6 +815,10 @@ async def wait_for_outgoing(
 # Inducting.
 
 
+class RosterFull(Exception):
+    """The conversation's roster has no index left for another member."""
+
+
 @asynccontextmanager
 async def held_back(conversation_id: int) -> AsyncIterator[None]:
     """Hold this conversation's acknowledgements and numbering back while a
@@ -829,6 +833,8 @@ async def held_back(conversation_id: int) -> AsyncIterator[None]:
                 assert conv is not None
                 stored = await _founded(sess, conv)
                 if stored is not None:
+                    if not stored.group.room:
+                        raise RosterFull(conversation_id)
                     outgoing = stored.group.begin_induction()
                     _store(sess, *await _queue(sess, conv, stored, outgoing))
                     await _save(sess, stored)
@@ -1053,6 +1059,7 @@ __all__ = [
     "REPLICA_EPOCH_SECONDS",
     "REPLICA_EPOCH_SETTING",
     "Rewrite",
+    "RosterFull",
     "Stream",
     "WALK_LIMIT",
     "adopt",

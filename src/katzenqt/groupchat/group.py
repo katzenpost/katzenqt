@@ -46,6 +46,7 @@ from .reader import Mode, Reader
 from .sentbox import Retention, SentBox
 from .wire import (
     KEY_SIZE,
+    ROSTER_MAX,
     CborCodec,
     Codec,
     Introduction,
@@ -255,9 +256,16 @@ class Group:
         if pending.introduced is None:
             self.unnumbered.extend(at for _, at in pending.numbers if at is not None)
 
+    @property
+    def room(self) -> bool:
+        """Whether our roster has an index left for one more member. Without
+        one an ``Introduction`` numbers nobody, and its member cannot join."""
+        return self._size() < ROSTER_MAX
+
     def begin_induction(self) -> list[Outgoing]:
         """Begin inducting a member, starting each stream where we have read
-        it now. Anything owed goes out first; send it before :meth:`reply`."""
+        it now. Anything owed goes out first; send it before :meth:`reply`.
+        Check :attr:`room` first."""
         outgoing = self.compose()
         self._hold()
         return outgoing
@@ -377,19 +385,19 @@ class Group:
     def _owes_control(self) -> bool:
         if self.ledger.holding:
             return False
-        return self.introduced_at is not None or any(
+        return self.introduced_at is not None or self.room and any(
             at in self.rosters.introductions for at in self.unnumbered
         )
 
     def _control(self) -> tuple[Message, Pending]:
-        """Number every member whose ``Introduction`` we have read, and say
-        where we were introduced."""
+        """Number every member whose ``Introduction`` we have read, while our
+        roster has room, and say where we were introduced."""
         numbers: list[tuple[int, bytes | None]] = []
         assigned: list[tuple[int, At | None]] = []
         size = self._size()
         for at in list(self.unnumbered):
             new = self.rosters.introductions.get(at)
-            if new is None:
+            if new is None or size >= ROSTER_MAX:
                 continue
             self.unnumbered.remove(at)
             numbers.append((size, prefix_of(new)))
@@ -403,7 +411,7 @@ class Group:
         new = key_of(read_cap)
         numbers: Numbers = ()
         assigned: tuple[tuple[int, At | None], ...] = ()
-        if not self._numbered(new):
+        if not self._numbered(new) and self.room:
             size = self._size()
             numbers = ((size, None),)
             assigned = ((size, None),)
