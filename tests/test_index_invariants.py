@@ -150,6 +150,40 @@ def test_mark_sent_advances_by_exactly_one() -> None:
         assert sess.exec(select(persistent.SentLog)).first() is not None
 
 
+def test_an_ack_releases_the_stream_for_its_next_plaintext() -> None:
+    """mark_sent deletes the MixWAL row, and with it the only thing holding
+    the stream: the next PlaintextWAL on it is resendable at once."""
+    bacap_stream = uuid.uuid4()
+    _, pwal = _insert_write_stream(bacap_stream=bacap_stream, next_idx=42)
+    with Session(persistent._engine_sync, expire_on_commit=False) as sess:
+        sess.add(persistent.ReadCapWAL(
+            id=uuid.uuid4(), write_cap_id=bacap_stream,
+            read_cap=b"R" * 136, next_index=mbi(42),
+        ))
+        nxt = persistent.PlaintextWAL(
+            id=uuid.uuid4(), after_id=pwal.id, bacap_stream=bacap_stream,
+            conversation_id=1, bacap_payload=b"Fnext",
+        )
+        sess.add(nxt)
+        sess.commit()
+    mw = _make_mw(
+        bacap_stream=bacap_stream, pwal_id=pwal.id,
+        current_idx=42, next_idx=43,
+    )
+    _insert_mw(mw)
+
+    def resendable() -> set[uuid.UUID]:
+        with Session(persistent._engine_sync) as sess:
+            return {row.id for row in sess.exec(
+                persistent.PlaintextWAL.find_resendable(set()))}
+
+    assert resendable() == set()
+    asyncio.run(persistent.SentLog.mark_sent(
+        cast("ThinClient", _FakeConnection()), mw,
+    ))
+    assert resendable() == {nxt.id}
+
+
 # ---------------------------------------------------------------------------
 # Invariant 2: mark_sent refuses to regress wcw.next_index.
 # ---------------------------------------------------------------------------

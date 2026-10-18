@@ -4033,6 +4033,12 @@ async def _send_rewrite(connection: ThinClient, rewrite: acks.Rewrite) -> None:
     await acks.rewritten(rewrite)
 
 
+def _release_stream(
+    held: "set[uuid.UUID]", stream: uuid.UUID, _task: "asyncio.Task[None]",
+) -> None:
+    held.discard(stream)
+
+
 async def send_resendable_plaintexts(connection:ThinClient) -> None:
     # look at persistent.PlaintextWAL:
     # PICK OUT stuff in PlaintextWAL that we aren't currently resending:
@@ -4120,9 +4126,9 @@ async def send_resendable_plaintexts(connection:ThinClient) -> None:
                     t.add_done_callback(requests.discard)
                     # Released however the task ends: on success its MixWAL
                     # row has been committed and holds the stream instead.
-                    t.add_done_callback(
-                        lambda _t, s=pwal.bacap_stream: encrypting.discard(s),
-                    )
+                    t.add_done_callback(functools.partial(
+                        _release_stream, encrypting, pwal.bacap_stream,
+                    ))
                     _done_callback(t, desc="start_resending failed")
 
     finally:
