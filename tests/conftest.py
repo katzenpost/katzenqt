@@ -67,7 +67,6 @@ def _reset_network_module_state() -> Iterator[None]:
     initial_clear = (
         "__should_quit",
         "__mixnet_connected",
-        "__resend_queue_populated",
         # _await_read_reply() waits on both of these while every drain is
         # in flight, so each must be a fresh, unset Event per test just
         # like the rest.
@@ -82,7 +81,6 @@ def _reset_network_module_state() -> Iterator[None]:
             setattr(network, name, ev)
         for name in initial_clear:
             setattr(network, name, asyncio.Event())
-        getattr(network, "__resend_queue").clear()
         getattr(network, "__on_message_queues").clear()
         # Tally events are drained by the GUI in whole lumps; a fresh queue per
         # test keeps leftovers from one test out of the next.
@@ -175,11 +173,6 @@ async def live_network(fake_thinclient: FakeThinClient) -> AsyncIterator["LiveNe
 
     handle = LiveNetwork(fake=fake_thinclient, task=task)
     try:
-        # Give the background loops a chance to populate `__resend_queue`
-        # from disk; tests that probe persistent state want that done.
-        await asyncio.wait_for(
-            getattr(network, "__resend_queue_populated").wait(), timeout=2.0,
-        )
         yield handle
     finally:
         network.shutdown()

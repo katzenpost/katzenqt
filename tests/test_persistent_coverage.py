@@ -40,26 +40,3 @@ def test_write_cap_select_by_uuid_filters_on_the_primary_key() -> None:
     assert wanted in stmt.compile().params.values()
 
 
-@pytest.mark.asyncio
-async def test_resend_queue_from_disk_is_empty_without_rows() -> None:
-    assert await persistent.MixWAL.resend_queue_from_disk() == set()
-
-
-@pytest.mark.asyncio
-async def test_resend_queue_from_disk_reports_stored_streams() -> None:
-    stream = uuid.uuid4()
-    row = persistent.MixWAL(
-        id=uuid.uuid4(),
-        plaintextwal=uuid.uuid4(),
-        bacap_stream=stream,
-        envelope_hash=b"\x00" * 32,
-        encrypted_payload=b"payload",
-        envelope_descriptor=b"descriptor",
-        current_message_index=b"\x00" * 104,
-        next_message_index=b"\x01" * 104,
-        is_read=False,
-    )
-    async with persistent.asession() as sess:
-        sess.add(row)
-        await sess.commit()
-    assert await persistent.MixWAL.resend_queue_from_disk() == {stream}

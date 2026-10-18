@@ -162,7 +162,6 @@ async def test_the_write_dispatch_registers_the_task_for_cancellation(
         ))
         sess.add(_write_mixwal(stream))
         await sess.commit()
-    getattr(network, "__resend_queue_populated").set()
     getattr(network, "__mixwal_updated").set()
     getattr(network, "__mixnet_connected").set()
     drain = network.drain_mixwal2(object())  # type: ignore[arg-type]
