@@ -7,7 +7,8 @@ import io
 from pathlib import Path
 
 from katzenqt.groupchat.wire import ROSTER_MAX
-from tests.groupchat_edges import EDGES, record, retired_prefix, roster_full
+from tests.groupchat_edges import EDGES, bounded_state, record, retired_prefix, roster_full
+from katzenqt.groupchat.wire import counter
 
 
 def test_numbering_stops_where_the_roster_ends() -> None:
@@ -26,6 +27,16 @@ def test_a_retired_place_names_no_member() -> None:
     bob = next(key for key in group.readers)
     assert group.rosters.resolve(bob, 3) is None
     assert all(not key.startswith(b"retired") for key in group.ledger.heard)
+
+
+def test_what_a_member_remembers_stays_bounded() -> None:
+    group = bounded_state(io.StringIO())
+    assert group.received == {}
+    bob = next(r for r in group.readers.values() if r.passed == 3)
+    here = counter(bob.next)
+    assert bob.tried and all(t > here for t in bob.tried)
+    heard = set(group.ledger.heard[bob.stream].values())
+    assert set(bob.tried) <= heard
 
 
 def test_every_edge_is_recorded(tmp_path: Path) -> None:

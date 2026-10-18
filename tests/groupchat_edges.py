@@ -11,10 +11,11 @@ from typing import IO
 
 from hpqc.bacap import WriteCap
 
-from katzenqt.groupchat.events import JoinReply
+from katzenqt.groupchat.events import EpochChanged, JoinReply, Scan
+from katzenqt.groupchat.sentbox import Retention
 from katzenqt.groupchat.sim import seeded, step
 from katzenqt.groupchat.trace import Recorder, TracedGroup
-from katzenqt.groupchat.wire import ROSTER_MAX, Introduction, Message, key_of
+from katzenqt.groupchat.wire import ROSTER_MAX, Introduction, Message, counter, key_of
 
 
 def read_cap(name: str) -> bytes:
@@ -79,7 +80,34 @@ def retired_prefix(trace: IO[str]) -> TracedGroup:
     return group
 
 
+def bounded_state(trace: IO[str]) -> TracedGroup:
+    """What a member remembers stays bounded. Alice keeps no record of what
+    she reads while no policy expires it, and forgets the record once the
+    policy stops. A scan looks only for acknowledged boxes ahead of where it
+    is, and remembers looking only while someone still acknowledges them."""
+    alice, bob, carol = (read_cap(name) for name in ("alice", "bob", "carol"))
+    group = TracedGroup.found(alice, [alice, bob, carol], tracer=Recorder(trace))
+    on_bob, on_carol = boxes(bob, 14), boxes(carol, 4)
+    bob_at_carol = group.rosters.index_of(key_of(carol), key_of(bob))
+    assert bob_at_carol is not None
+
+    def read(stream: bytes, at: list[bytes], n: int, message: Message) -> None:
+        group.observe(key_of(stream), at[n], group.codec.encode(message), at[n + 1])
+
+    read(bob, on_bob, 0, Message(content=b"one"))
+    read(bob, on_bob, 1, Message(content=b"two"))
+    group.policy = Retention(keep_received=2)
+    read(bob, on_bob, 2, Message(content=b"three"))
+    group.policy = Retention()
+    group.handle(EpochChanged(1))
+    for n, acked in enumerate((0, 10, 12)):
+        read(carol, on_carol, n, Message(content=b"seen", acks={bob_at_carol: counter(on_bob[acked])}))
+        group.handle(Scan(key_of(bob)))
+    return group
+
+
 EDGES: dict[str, Callable[[IO[str]], TracedGroup]] = {
+    "bounded_state": bounded_state,
     "retired_prefix": retired_prefix,
     "roster_full": roster_full,
 }

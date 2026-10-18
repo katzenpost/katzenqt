@@ -118,7 +118,8 @@ class Group:
     awaiting_start: dict[Key, bytes] = field(default_factory=dict)
     """``IntroducedAt`` read before the ``Introduction`` it names."""
     received: dict[tuple[Key, bytes], int] = field(default_factory=dict)
-    """Content delivered, by sender and box, and the epoch it came."""
+    """Content delivered, by sender and box, and the epoch it came, while
+    the policy keeps received content only for a time."""
 
     def __post_init__(self) -> None:
         if not self.tip:
@@ -327,7 +328,8 @@ class Group:
                 self.ledger.hear(acked, value, sender)
         if message.content is None:
             return []
-        self.received[sender, index] = self.epoch
+        if self.policy.keep_received is not None:
+            self.received[sender, index] = self.epoch
         return [Deliver(sender, index, message.content)]
 
     def _introduced(self, introducer: Key, index: bytes, introduction: Introduction) -> None:
@@ -568,7 +570,9 @@ class Group:
         self.sent.retain(epoch, self.policy, self._everyone_acked)
         effects: list[Effect] = []
         keep = self.policy.keep_received
-        if keep is not None:
+        if keep is None:
+            self.received.clear()
+        else:
             for (sender, index), received in list(self.received.items()):
                 if epoch - received >= keep:
                     del self.received[sender, index]
