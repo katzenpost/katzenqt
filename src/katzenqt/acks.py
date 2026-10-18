@@ -28,7 +28,7 @@ import os
 import time
 import uuid
 from collections import Counter
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -298,7 +298,43 @@ async def _write_cap(sess: "AsyncSession", conversation_id: int) -> bytes | None
     return wcw.write_cap if wcw is not None else None
 
 
+_ONCE = "katzenqt.acks.once"
+
+
+@asynccontextmanager
+async def once(
+    sess: "AsyncSession",
+) -> AsyncIterator[Callable[[], Awaitable[None]]]:
+    """Load each conversation's state at most once in the block, and hold
+    back what is saved in it until the function it yields is awaited, which
+    saves each once. For reading a box, which tells the state machine both
+    the message and where its stream now stands."""
+    loaded: dict[int, tuple[_Stored, bool]] = {}
+
+    async def save() -> None:
+        for stored, saved in loaded.values():
+            if saved:
+                await _write(sess, stored)
+        loaded.clear()
+
+    sess.info[_ONCE] = loaded
+    try:
+        yield save
+    finally:
+        del sess.info[_ONCE]
+
+
 async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
+    loaded: dict[int, tuple[_Stored, bool]] | None = sess.info.get(_ONCE)
+    if loaded is not None and conversation_id in loaded:
+        return loaded[conversation_id][0]
+    stored = await _read(sess, conversation_id)
+    if loaded is not None and stored is not None:
+        loaded[conversation_id] = (stored, False)
+    return stored
+
+
+async def _read(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
     row = await sess.get(persistent.GroupState, conversation_id)
     if row is None:
         return None
@@ -327,6 +363,14 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
 
 
 async def _save(sess: "AsyncSession", stored: _Stored) -> None:
+    loaded = sess.info.get(_ONCE)
+    if loaded is not None:
+        loaded[stored.row.conversation_id] = (stored, True)
+        return
+    await _write(sess, stored)
+
+
+async def _write(sess: "AsyncSession", stored: _Stored) -> None:
     stored.row.state = group_state.dump(stored.group)
     _flush_trace(stored.group)
     stored.row.held = cbor2.dumps(stored.held)
