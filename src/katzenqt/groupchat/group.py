@@ -117,6 +117,11 @@ class Group:
     """Our introducer, until we have read our ``Introduction``."""
     awaiting_start: dict[Key, bytes] = field(default_factory=dict)
     """``IntroducedAt`` read before the ``Introduction`` it names."""
+    allocates: bool = True
+    """Whether this member picks the boxes it writes, as it does driven by
+    events. A client that writes for itself takes that over with its first
+    call to write, and from then on the member writes nothing by itself: its
+    pool would name boxes the client hands out too."""
     received: dict[tuple[Key, bytes], int] = field(default_factory=dict)
     """Content delivered, by sender and box, and the epoch it came, while
     the policy keeps received content only for a time."""
@@ -222,6 +227,7 @@ class Group:
     def compose(self, content: bytes | None = None) -> list[Outgoing]:
         """The messages to send now, in order: a control message if one is
         owed, then ``content``. Each takes effect when :meth:`written`."""
+        self.allocates = False
         staged = [self._control()] if self._owes_control() else []
         if content is not None:
             staged.append((Message(content=content), Pending()))
@@ -229,6 +235,10 @@ class Group:
 
     def written(self, token: int, index: bytes, plaintext: bytes | None = None) -> None:
         """The message ``token`` landed in the box ``index`` of our stream."""
+        self.allocates = False
+        self._written(token, index, plaintext)
+
+    def _written(self, token: int, index: bytes, plaintext: bytes | None) -> None:
         pending = self.pending.pop(token, None)
         if pending is None:
             return
@@ -274,8 +284,8 @@ class Group:
     def introduce_now(self, name: str, read_cap: bytes) -> Outgoing:
         """Commit the induction under way: the ``Introduction`` of the
         member read by ``read_cap``, to send."""
-        message, pending = self._introduction(name, read_cap)
-        return self._stage(message, pending)
+        self.allocates = False
+        return self._stage(*self._introduction(name, read_cap))
 
     def cancel_induction(self) -> None:
         self._release()
@@ -446,7 +456,7 @@ class Group:
     def _write(self, outgoing: Outgoing) -> list[Effect]:
         index = self.pool.pop(0)
         plaintext = self.codec.encode(outgoing.message)
-        self.written(outgoing.token, index, plaintext)
+        self._written(outgoing.token, index, plaintext)
         return [WriteBox(index, plaintext)]
 
     def _progress(self) -> list[Effect]:
@@ -458,6 +468,7 @@ class Group:
         if (
             self.ledger.induction is Induction.INDUCTING
             and self.ledger.commit
+            and self.allocates
             and self.pool
         ):
             effects += self._commit()
@@ -470,13 +481,13 @@ class Group:
 
     def _flush(self) -> list[Effect]:
         effects: list[Effect] = []
-        while self.pool and (self._owes_control() or self.outbox):
+        while self.allocates and self.pool and (self._owes_control() or self.outbox):
             if self._owes_control():
                 message, pending = self._control()
             else:
                 message, pending = Message(content=self.outbox.pop(0)), Pending()
             effects += self._write(self._stage(self._with_acks(message, pending), pending))
-        if len(self.pool) < 2 and not self.deriving:
+        if self.allocates and len(self.pool) < 2 and not self.deriving:
             self.deriving = True
             effects.append(DeriveIndexes(self.me, self.tip, POOL))
         return effects
@@ -513,7 +524,7 @@ class Group:
         assert self.ledger.invitee is not None
         name, read_cap = self.ledger.invitee
         reply = self.reply(self.pool[0])
-        effects = self._write(self.introduce_now(name, read_cap))
+        effects = self._write(self._stage(*self._introduction(name, read_cap)))
         return effects + [SendJoinReply(read_cap, reply)] + self._flush()
 
     def reply(self, own_start: bytes) -> JoinReply:

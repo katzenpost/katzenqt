@@ -11,7 +11,7 @@ from typing import IO
 
 from hpqc.bacap import WriteCap
 
-from katzenqt.groupchat.events import EpochChanged, JoinReply, Scan
+from katzenqt.groupchat.events import EpochChanged, Invite, JoinReply, Scan, Send
 from katzenqt.groupchat.sentbox import Retention
 from katzenqt.groupchat.sim import seeded, step
 from katzenqt.groupchat.trace import Recorder, TracedGroup
@@ -106,7 +106,22 @@ def bounded_state(trace: IO[str]) -> TracedGroup:
     return group
 
 
+def client_writes(trace: IO[str]) -> TracedGroup:
+    """Alice's client writes for her, from her stream's first box. Events
+    that would have her write, or derive boxes to write, then change only
+    what she owes: her pool would name the boxes her client hands out."""
+    alice, bob, dave = (read_cap(name) for name in ("alice", "bob", "dave"))
+    group = TracedGroup.found(alice, [alice, bob], tracer=Recorder(trace))
+    own = boxes(alice, 2)
+    (outgoing,) = group.compose(b"hi")
+    group.written(outgoing.token, own[0], group.codec.encode(outgoing.message))
+    group.handle(Send(b"again"))
+    group.handle(Invite("dave", dave))
+    return group
+
+
 EDGES: dict[str, Callable[[IO[str]], TracedGroup]] = {
+    "client_writes": client_writes,
     "bounded_state": bounded_state,
     "retired_prefix": retired_prefix,
     "roster_full": roster_full,

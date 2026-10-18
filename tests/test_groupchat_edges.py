@@ -6,9 +6,16 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from katzenqt.groupchat.wire import ROSTER_MAX
-from tests.groupchat_edges import EDGES, bounded_state, record, retired_prefix, roster_full
-from katzenqt.groupchat.wire import counter
+from katzenqt.groupchat.events import Send
+from katzenqt.groupchat.wire import ROSTER_MAX, counter
+from tests.groupchat_edges import (
+    EDGES,
+    bounded_state,
+    client_writes,
+    record,
+    retired_prefix,
+    roster_full,
+)
 
 
 def test_numbering_stops_where_the_roster_ends() -> None:
@@ -37,6 +44,17 @@ def test_what_a_member_remembers_stays_bounded() -> None:
     assert bob.tried and all(t > here for t in bob.tried)
     heard = set(group.ledger.heard[bob.stream].values())
     assert set(bob.tried) <= heard
+
+
+def test_a_member_whose_client_writes_writes_nothing_itself() -> None:
+    group = client_writes(io.StringIO())
+    start = group.read_cap[32:]
+    (record_,) = group.sent.records.values()
+    assert record_.index == start
+    message = group.codec.decode(record_.plaintext or b"")
+    assert message is not None and message.content == b"hi"
+    assert group.pool == [start] and not group.deriving
+    assert group.handle(Send(b"more")) == []
 
 
 def test_every_edge_is_recorded(tmp_path: Path) -> None:
