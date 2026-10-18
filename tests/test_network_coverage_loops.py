@@ -31,10 +31,6 @@ def _event(name: str) -> asyncio.Event:
     return cast(asyncio.Event, getattr(network, name))
 
 
-def _resend_queue() -> set[uuid.UUID]:
-    return cast("set[uuid.UUID]", getattr(network, "__resend_queue"))
-
-
 def _idx(counter: int) -> bytes:
     return counter.to_bytes(8, "little") + bytes(96)
 
@@ -71,7 +67,6 @@ async def _add_read_mixwal(stream: uuid.UUID) -> uuid.UUID:
 
 
 async def _run_one_drain_pass(fake: _Fake) -> None:
-    _event("__resend_queue_populated").set()
     updated = _event("__mixwal_updated")
     updated.set()
     task = asyncio.ensure_future(network.drain_mixwal2(_conn(fake)))
@@ -99,7 +94,6 @@ class TestDrainMixwalReadSkips:
         mw_id = await _add_read_mixwal(stream)
         await _run_one_drain_pass(fake_thinclient)
         assert fake_thinclient.call_count("encrypt_read") == 0
-        assert stream not in _resend_queue()
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, mw_id) is not None
 
@@ -123,7 +117,6 @@ class TestDrainMixwalReadSkips:
         mw_id = await _add_read_mixwal(stream)
         await _run_one_drain_pass(fake_thinclient)
         assert fake_thinclient.call_count("encrypt_read") == 0
-        assert stream not in _resend_queue()
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, mw_id) is not None
 
@@ -151,7 +144,6 @@ class TestDrainMixwalReadSkips:
             "has incorrect length" in r.message for r in caplog.records
         )
         assert fake_thinclient.call_count("encrypt_read") == 0
-        assert stream not in _resend_queue()
         async with persistent.asession() as sess:
             assert await sess.get(persistent.MixWAL, mw_id) is not None
 
@@ -229,7 +221,6 @@ class TestReadablesToMixwalShutdown:
         self,
         fake_thinclient: _Fake,
     ) -> None:
-        _event("__resend_queue_populated").set()
         task = asyncio.ensure_future(
             network.readables_to_mixwal(_conn(fake_thinclient)),
         )
@@ -264,7 +255,6 @@ class TestReadablesToMixwalShutdown:
         await network.on_connection_status(
             {"is_connected": True, "err": None}
         )
-        _event("__resend_queue_populated").set()
         updated = _event("__mixwal_updated")
         updated.clear()
         task = asyncio.ensure_future(
@@ -296,7 +286,7 @@ class TestSendResendablePlaintexts:
         task = asyncio.ensure_future(
             network.send_resendable_plaintexts(_conn(fake_thinclient)),
         )
-        await _event("__resend_queue_populated").wait()
+        await asyncio.sleep(0)
         network.shutdown()
         network.resendable_event.set()
         await asyncio.wait_for(task, timeout=10.0)
@@ -369,7 +359,7 @@ class TestSendResendablePlaintexts:
         task = asyncio.ensure_future(
             network.send_resendable_plaintexts(_conn(fake)),
         )
-        await _event("__resend_queue_populated").wait()
+        await asyncio.sleep(0)
         monkeypatch.setattr(persistent, "asession", _wrapped)
         network.resendable_event.set()
         try:
@@ -456,7 +446,6 @@ class TestDuplicateArming:
         await network.on_connection_status(
             {"is_connected": True, "err": None}
         )
-        _event("__resend_queue_populated").set()
         updated = _event("__mixwal_updated")
         updated.clear()
         task = asyncio.ensure_future(

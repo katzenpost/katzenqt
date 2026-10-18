@@ -527,15 +527,6 @@ class MixWAL(SQLModel, table=True):
     @classmethod
     def get_new(cls, except_these: "set[uuid.UUID]") -> "SelectOfScalar[Self]":
         return select(cls).where(col(cls.bacap_stream).not_in(except_these))
-    @classmethod
-    async def resend_queue_from_disk(cls) -> "set[uuid.UUID]":
-        # TODO something needs to restore the connection.ack_queues listeners, which means we need to know the message_id
-        # TODO associated with MixWALs that we send out
-        bacap_streams = set()
-        async with asession() as sess:
-            for stream in await sess.exec(select(cls.bacap_stream)):
-                bacap_streams.add(stream)
-        return bacap_streams
 
 class ReadCapWAL(SQLModel, table=True):
     id: uuid.UUID = Field(primary_key=True)
@@ -646,7 +637,7 @@ class SentLog(SQLModel, table=True):
     )
     @classmethod
     async def mark_sent(
-        cls, connection: "ThinClient", mw: MixWAL, resend_queue: "set[uuid.UUID]", *,
+        cls, connection: "ThinClient", mw: MixWAL, *,
         resolve_counter: Callable[[bytes], Awaitable[int]] | None = None,
     ) -> "int | None":
         """Add SentLog entry, delete corresponding MixWAL and PlaintextWAL entries.
@@ -695,38 +686,23 @@ class SentLog(SQLModel, table=True):
                 # MW to do it: in the crash-then-relaunch case (write drain
                 # died mid-commit) no later MW exists, and without this the
                 # message resends forever.
-                try:
-                    async with _MARK_SENT_THREAD_SEM:
-                        conversation_id = await _finish_thread(
-                            _finalize_stale_ack, mw.id, mw.plaintextwal,
-                        )
-                finally:
-                    # _finish_thread re-raises CancelledError (after the
-                    # thread write has already committed) rather than
-                    # swallowing it, so a cancellation landing here must
-                    # not skip this: the write is done regardless, and
-                    # skipping the discard would strand bacap_stream in
-                    # resend_queue forever.
-                    resend_queue.discard(mw.bacap_stream)
+                async with _MARK_SENT_THREAD_SEM:
+                    conversation_id = await _finish_thread(
+                        _finalize_stale_ack, mw.id, mw.plaintextwal,
+                    )
                 return conversation_id
         # Resolve the diagnostic counters once so the commit-time print is
         # as cheap as a tuple format rather than two more thinclient calls.
         new_idx = our_next if precheck_next_blob is not None else (
             await resolve_counter(mw.next_message_index)
         )
-        try:
-            async with _MARK_SENT_THREAD_SEM:
-                conversation_id = await _finish_thread(
-                    _mark_sent_txn,
-                    mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
-                    mw.next_message_index, new_idx,
-                    real_next if precheck_next_blob is not None else None,
-                )
-        finally:
-            # Same reasoning as the stale-ACK branch above: the write has
-            # already committed by the time _finish_thread could re-raise
-            # CancelledError, so the discard must still happen.
-            resend_queue.discard(mw.bacap_stream)
+        async with _MARK_SENT_THREAD_SEM:
+            conversation_id = await _finish_thread(
+                _mark_sent_txn,
+                mw.id, mw.bacap_stream, mw.plaintextwal, mw.is_read,
+                mw.next_message_index, new_idx,
+                real_next if precheck_next_blob is not None else None,
+            )
         return conversation_id
 
 
@@ -1050,13 +1026,14 @@ class PlaintextWAL(SQLModel, table=True):
     
 
     @classmethod
-    def find_resendable(cls, resend_queue: "set[uuid.UUID]") -> "Select[ResendableRow]":
+    def find_resendable(cls, encrypting: "set[uuid.UUID]") -> "Select[ResendableRow]":
         # We can start resending in these cases:
         # - after_stream IS NONE AND after_id IS NONE
         # - after_stream IS NONE AND after_id IN (sentIDs)
         # - after_stream IN (completedStreams) AND after_id IS NONE
         # - after_stream IN (completedStreams) AND after_id IN (sentIDs)
-        # ... but only if we aren't already resending msgs from this stream (resend_queue).
+        # ... but only if we aren't already resending msgs from this stream:
+        # it has a MixWAL row, or its encrypt_write is in flight (encrypting).
         # if indirection= IS NONE OR indirection EXISTS in ReadCapWAL.read_cap IS NOT NONE is populated
 
         # alternative:
@@ -1096,11 +1073,11 @@ class PlaintextWAL(SQLModel, table=True):
             )
             .where(
                 sa.and_(
-                    # __resend_queue holds bacap_stream UUIDs (not PWAL ids),
+                    # encrypting holds bacap_stream UUIDs (not PWAL ids),
                     # so the filter column has to match. The prior
-                    # PlaintextWAL.id.not_in(resend_queue) was a silent no-op
+                    # PlaintextWAL.id.not_in(...) was a silent no-op
                     # because the two UUID spaces essentially never overlap.
-                    col(PlaintextWAL.bacap_stream).not_in(resend_queue),
+                    col(PlaintextWAL.bacap_stream).not_in(encrypting),
                     sa.or_(col(PlaintextWAL.after_id).is_(None),
                         col(PlaintextWAL.after_id).in_(sent_cte)
                         ),
@@ -1130,7 +1107,6 @@ class PlaintextWAL(SQLModel, table=True):
         # TODO and selecting the first unsent for each BACAP stream means we'll eventually put all of them there.
         # TODO need to rethink the logic here; should probably not have more than one thing serialized per bacap stream at time.
         # TODO also dubious to have the insert into MixWAL be in a separate transaction from where we mark the PlaintextWAL as "spent"
-        # TODO - ie, shouldn't have __resend_queue be a python variable, but rather a database concept.
         return Select[ResendableRow](
             all_elig.c.id,
             all_elig.c.after_id,

@@ -78,8 +78,6 @@ def _install_loop(
     stage: str, prior_success: bool = False,
 ) -> tuple[_LoopState, "ThinClient"]:
     quit_event = asyncio.Event()
-    populated = asyncio.Event()
-    populated.set()
     arming = asyncio.Event()
     arming.set()
     state = _LoopState()
@@ -133,7 +131,6 @@ def _install_loop(
     monkeypatch.setattr(network, "OperationalError", OperationalError)
     monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.001)
     monkeypatch.setattr(network, "__should_quit", quit_event)
-    monkeypatch.setattr(network, "__resend_queue_populated", populated)
     monkeypatch.setattr(
         network, "__mixwal_updated", SimpleNamespace(set=state.publish),
     )
@@ -243,8 +240,6 @@ def _install_arming_rpc_failure(
     """A loop whose per-peer arming RPC always fails, so every pass ends in
     the retry_needed wait. Quits once ``waits`` waits have been recorded."""
     quit_event = asyncio.Event()
-    populated = asyncio.Event()
-    populated.set()
     arming = asyncio.Event()
     arming.set()
     state = _LoopState()
@@ -283,7 +278,6 @@ def _install_arming_rpc_failure(
     ))
     monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.001)
     monkeypatch.setattr(network, "__should_quit", quit_event)
-    monkeypatch.setattr(network, "__resend_queue_populated", populated)
     monkeypatch.setattr(
         network, "__mixwal_updated", SimpleNamespace(set=state.publish),
     )

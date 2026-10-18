@@ -129,11 +129,9 @@ def test_mark_sent_advances_by_exactly_one() -> None:
     )
     _insert_mw(mw)
 
-    resend_queue: set[uuid.UUID] = {bacap_stream}
-
     async def _do() -> None:
         await persistent.SentLog.mark_sent(
-            cast("ThinClient", _FakeConnection()), mw, resend_queue,
+            cast("ThinClient", _FakeConnection()), mw,
         )
 
     asyncio.run(_do())
@@ -150,6 +148,40 @@ def test_mark_sent_advances_by_exactly_one() -> None:
         assert sess.get(persistent.MixWAL, mw.id) is None
         assert sess.get(persistent.PlaintextWAL, pwal.id) is None
         assert sess.exec(select(persistent.SentLog)).first() is not None
+
+
+def test_an_ack_releases_the_stream_for_its_next_plaintext() -> None:
+    """mark_sent deletes the MixWAL row, and with it the only thing holding
+    the stream: the next PlaintextWAL on it is resendable at once."""
+    bacap_stream = uuid.uuid4()
+    _, pwal = _insert_write_stream(bacap_stream=bacap_stream, next_idx=42)
+    with Session(persistent._engine_sync, expire_on_commit=False) as sess:
+        sess.add(persistent.ReadCapWAL(
+            id=uuid.uuid4(), write_cap_id=bacap_stream,
+            read_cap=b"R" * 136, next_index=mbi(42),
+        ))
+        nxt = persistent.PlaintextWAL(
+            id=uuid.uuid4(), after_id=pwal.id, bacap_stream=bacap_stream,
+            conversation_id=1, bacap_payload=b"Fnext",
+        )
+        sess.add(nxt)
+        sess.commit()
+    mw = _make_mw(
+        bacap_stream=bacap_stream, pwal_id=pwal.id,
+        current_idx=42, next_idx=43,
+    )
+    _insert_mw(mw)
+
+    def resendable() -> set[uuid.UUID]:
+        with Session(persistent._engine_sync) as sess:
+            return {row.id for row in sess.exec(
+                persistent.PlaintextWAL.find_resendable(set()))}
+
+    assert resendable() == set()
+    asyncio.run(persistent.SentLog.mark_sent(
+        cast("ThinClient", _FakeConnection()), mw,
+    ))
+    assert resendable() == {nxt.id}
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +224,9 @@ def test_mark_sent_refuses_regression_on_pwal_present_path() -> None:
     )
     _insert_mw(mw)
 
-    resend_queue: set[uuid.UUID] = {bacap_stream}
-
     async def _do() -> "int | None":
         return await persistent.SentLog.mark_sent(
-            cast("ThinClient", _FakeConnection()), mw, resend_queue,
+            cast("ThinClient", _FakeConnection()), mw,
         )
 
     conv_id = asyncio.run(_do())
@@ -219,16 +249,15 @@ def test_mark_sent_refuses_regression_on_pwal_present_path() -> None:
         assert reloaded_cl is not None
         assert reloaded_cl.network_status == 2
     assert conv_id == 1
-    assert bacap_stream not in resend_queue
 
 
 # ---------------------------------------------------------------------------
-# Invariant 7: find_resendable's resend_queue filter targets bacap_stream.
+# Invariant 7: find_resendable's encrypting filter targets bacap_stream.
 # ---------------------------------------------------------------------------
 
 def test_find_resendable_filter_targets_bacap_stream_not_pwal_id() -> None:
-    """__resend_queue holds bacap_stream UUIDs. The SQL filter in
-    find_resendable must exclude PWALs whose bacap_stream is in the queue.
+    """encrypting holds bacap_stream UUIDs. The SQL filter in
+    find_resendable must exclude PWALs whose bacap_stream is in it.
 
     Current behavior: the filter incorrectly compares against
     `PlaintextWAL.id`, which essentially never matches a bacap_stream UUID,
@@ -240,7 +269,7 @@ def test_find_resendable_filter_targets_bacap_stream_not_pwal_id() -> None:
     with Session(persistent._engine_sync) as sess:
         # Both streams are fully provisioned (read_cap + write_cap populated)
         # so that the find_resendable CTEs allow them through. We only care
-        # about the resend_queue filter here.
+        # about the encrypting filter here.
         wcw_busy = persistent.WriteCapWAL(
             id=bacap_stream_busy, write_cap=b"W" * 168, next_index=mbi(1),
         )
@@ -267,19 +296,19 @@ def test_find_resendable_filter_targets_bacap_stream_not_pwal_id() -> None:
             sess.add(o)
         sess.commit()
 
-        # The resend_queue guard is supposed to say "don't pick up another
-        # PWAL whose bacap_stream is already being drained".
-        resend_queue = {bacap_stream_busy}
-        rows = list(sess.exec(persistent.PlaintextWAL.find_resendable(resend_queue)))
+        # The encrypting guard says "don't pick up another PWAL whose
+        # bacap_stream is already on its way to a MixWAL row".
+        encrypting = {bacap_stream_busy}
+        rows = list(sess.exec(persistent.PlaintextWAL.find_resendable(encrypting)))
         returned_streams = {row.bacap_stream for row in rows}
 
         assert bacap_stream_busy not in returned_streams, (
             f"find_resendable must exclude PWALs whose bacap_stream is in "
-            f"resend_queue; got streams={returned_streams}"
+            f"encrypting; got streams={returned_streams}"
         )
         assert bacap_stream_free in returned_streams, (
             f"find_resendable must include PWALs whose bacap_stream is not "
-            f"in resend_queue; got streams={returned_streams}"
+            f"in encrypting; got streams={returned_streams}"
         )
 
 
