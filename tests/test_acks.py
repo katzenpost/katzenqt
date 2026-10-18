@@ -8,6 +8,7 @@ import hashlib
 import secrets
 import time
 import uuid
+from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
 import cbor2
@@ -987,6 +988,38 @@ async def test_a_box_read_through_the_network_is_told_in_order(
         assert stored is not None
     assert stored.group.readers[stream].last == setup["first_message_index"]
     assert stored.held == []
+
+
+@pytest.mark.asyncio
+async def test_a_box_read_through_the_network_loads_and_saves_its_state_once(
+    fake_thinclient: FakeThinClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _set_up_read_flow(fake_thinclient)
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+        assert rcw is not None and rcw.read_cap is not None
+        peer = (await sess.exec(select(persistent.ConversationPeer).where(
+            persistent.ConversationPeer.read_cap_id == rcw.id
+        ))).one()
+        own = secrets.token_bytes(136)
+        group = Group.found(own, [own, rcw.read_cap])
+        sess.add(persistent.GroupState(
+            conversation_id=peer.conversation.id, state=group_state.dump(group),
+        ))
+        await sess.commit()
+        mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        assert mw is not None
+    calls: Counter[str] = Counter()
+    for name in ("load", "dump"):
+        def counted(*args: Any, _f: Any = getattr(group_state, name), _n: str = name) -> Any:
+            calls[_n] += 1
+            return _f(*args)
+        monkeypatch.setattr(group_state, name, counted)
+    await network.drain_mixwal_read_single(
+        connection=fake_thinclient, rcw_read_cap=setup["read_cap"], mw=mw,
+        draining_right_now={setup["bacap_stream"]},
+    )
+    assert calls == {"load": 1, "dump": 1}
 
 
 def _redraws() -> list[tuple[int, bool]]:
