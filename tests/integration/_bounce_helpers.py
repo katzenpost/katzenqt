@@ -71,6 +71,9 @@ PYTHON = os.environ.get(
 
 _GO_DURATION_TERM_RE = re.compile(r"(\d+(?:\.\d+)?)(h|ms|m|s)")
 _ENV_LINE_RE = re.compile(r"KATZENPOST_EPOCH_DURATION=(\S+)")
+# docker compose v2 names a container <project>-<service>-<n>, podman
+# compose <project>_<service>_<n>.
+_KPCLIENTD_NAME_RE = re.compile(r"^(?P<project>.+)(?P<sep>[-_])kpclientd(?P=sep)(?P<n>\d+)$")
 
 
 def _parse_go_duration(text: str) -> float:
@@ -293,7 +296,7 @@ def find_kpclientd_container() -> str:
     """The kpclientd container actually publishing KATZENQT_KPCLIENTD_PORT.
 
     Multiple mixnet networks (this host's other sessions/checkouts) can be
-    running at once, each with its own *-kpclientd-1 container on a
+    running at once, each with its own kpclientd container on a
     different published port; matching on name suffix alone picked
     whichever one podman listed first, which could be a container this
     test has no business touching. Correlate on the published port instead.
@@ -311,7 +314,7 @@ def find_kpclientd_container() -> str:
     candidates = []
     for line in proc.stdout.splitlines():
         name, _, ports = line.partition("\t")
-        if not name.endswith("-kpclientd-1"):
+        if not _KPCLIENTD_NAME_RE.match(name):
             continue
         candidates.append(name)
         if f":{port}->" in ports:
@@ -334,10 +337,11 @@ def find_same_network_container(kpclientd_container: str, role: str) -> str:
     output again) means this can never resolve to a different session's
     network, however many are running on the host.
     """
-    if not kpclientd_container.endswith("-kpclientd-1"):
+    match = _KPCLIENTD_NAME_RE.match(kpclientd_container)
+    if match is None:
         raise ValueError(f"not a kpclientd container name: {kpclientd_container!r}")
-    prefix = kpclientd_container[: -len("-kpclientd-1")]
-    name = f"{prefix}-{role}-1"
+    project, sep, n = match.group("project", "sep", "n")
+    name = f"{project}{sep}{role}{sep}{n}"
     proc = subprocess.run(
         _engine_command(["ps", "--format", "{{.Names}}"]),
         capture_output=True, text=True, check=False, timeout=10.0,

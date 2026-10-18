@@ -68,6 +68,38 @@ def test_bounce_helpers_use_the_selected_engine(
     assert run.call_args.args[0] == [engine, "restart", "mix-kpclientd-1"]
 
 
+@pytest.mark.parametrize("listing, kpclientd, gateway", [
+    (
+        "mix-kpclientd-1\t127.0.0.1:41042->41042/tcp\nmix-gateway1-1\t\n",
+        "mix-kpclientd-1", "mix-gateway1-1",
+    ),
+    (
+        "other_kpclientd_1\t127.0.0.1:50000->50000/tcp\n"
+        "mixnet-alpine_f09dd_kpclientd_1\t127.0.0.1:41042->41042/tcp\n"
+        "mixnet-alpine_f09dd_gateway1_1\t\n",
+        "mixnet-alpine_f09dd_kpclientd_1", "mixnet-alpine_f09dd_gateway1_1",
+    ),
+])
+def test_kpclientd_and_its_siblings_are_found_under_either_compose_naming(
+    monkeypatch: pytest.MonkeyPatch, listing: str, kpclientd: str, gateway: str,
+) -> None:
+    monkeypatch.delenv("KATZENQT_KPCLIENTD_CONTAINER", raising=False)
+    monkeypatch.setenv("KATZENQT_KPCLIENTD_PORT", "41042")
+    names = "".join(line.split("\t")[0] + "\n" for line in listing.splitlines())
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=[
+        subprocess.CompletedProcess([], 0, listing, ""),
+        subprocess.CompletedProcess([], 0, names, ""),
+    ]))
+    found = helpers.find_kpclientd_container()
+    assert found == kpclientd
+    assert helpers.find_same_network_container(found, "gateway1") == gateway
+
+
+def test_a_container_that_is_not_kpclientd_is_refused() -> None:
+    with pytest.raises(ValueError, match="not a kpclientd container"):
+        helpers.find_same_network_container("mixnet-alpine_f09dd_gateway1_1", "mix1")
+
+
 def test_engine_selection_does_not_change_the_existing_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
