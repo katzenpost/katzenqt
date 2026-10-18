@@ -46,6 +46,7 @@ from .reader import Mode, Reader
 from .sentbox import Retention, SentBox
 from .wire import (
     KEY_SIZE,
+    PREFIX_SIZE,
     ROSTER_MAX,
     CborCodec,
     Codec,
@@ -404,20 +405,32 @@ class Group:
     def _owes_control(self) -> bool:
         if self.ledger.holding:
             return False
-        return self.introduced_at is not None or self.room and any(
-            at in self.rosters.introductions for at in self.unnumbered
-        )
+        return self.introduced_at is not None or bool(self._numberable())
+
+    def _numberable(self) -> list[tuple[At, Key]]:
+        """Whom a control message would number now: each member whose
+        ``Introduction`` we have read, while our roster has room, once per
+        key prefix, so that the ``Numbers`` field can name each. One whose
+        prefix is taken waits for the next control message."""
+        out: list[tuple[At, Key]] = []
+        prefixes: set[bytes] = set()
+        for at in self.unnumbered:
+            new = self.rosters.introductions.get(at)
+            if new is None or self._size() + len(out) >= ROSTER_MAX:
+                continue
+            prefix = prefix_of(new)
+            if len(prefix) == PREFIX_SIZE and prefix not in prefixes:
+                prefixes.add(prefix)
+                out.append((at, new))
+        return out
 
     def _control(self) -> tuple[Message, Pending]:
-        """Number every member whose ``Introduction`` we have read, while our
-        roster has room, and say where we were introduced."""
+        """Number whom :meth:`_numberable` names, and say where we were
+        introduced."""
         numbers: list[tuple[int, bytes | None]] = []
         assigned: list[tuple[int, At | None]] = []
         size = self._size()
-        for at in list(self.unnumbered):
-            new = self.rosters.introductions.get(at)
-            if new is None or size >= ROSTER_MAX:
-                continue
+        for at, new in self._numberable():
             self.unnumbered.remove(at)
             numbers.append((size, prefix_of(new)))
             assigned.append((size, at))

@@ -120,11 +120,30 @@ def client_writes(trace: IO[str]) -> TracedGroup:
     return group
 
 
+def shared_prefix(trace: IO[str]) -> TracedGroup:
+    """Bob introduces two members whose keys begin alike, as far as a
+    ``Numbers`` field names them. Alice numbers one in each control message,
+    so that each field names its members apart."""
+    alice, bob = read_cap("alice"), read_cap("bob")
+    group = TracedGroup.found(alice, [alice, bob], tracer=Recorder(trace))
+    twins = [b"twin" * 2 + bytes([n]) * 24 + read_cap(f"twin{n}")[32:] for n in range(2)]
+    at = boxes(bob, 3)
+    for n, cap in enumerate(twins):
+        message = Message(introduction=Introduction(f"twin{n}", cap), numbers=((2 + n, None),))
+        group.observe(key_of(bob), at[n], group.codec.encode(message), at[n + 1])
+    own = boxes(alice, 2)
+    for n in range(2):
+        (control,) = group.compose()
+        group.written(control.token, own[n], group.codec.encode(control.message))
+    return group
+
+
 EDGES: dict[str, Callable[[IO[str]], TracedGroup]] = {
     "client_writes": client_writes,
     "bounded_state": bounded_state,
     "retired_prefix": retired_prefix,
     "roster_full": roster_full,
+    "shared_prefix": shared_prefix,
 }
 
 

@@ -15,6 +15,7 @@ from tests.groupchat_edges import (
     record,
     retired_prefix,
     roster_full,
+    shared_prefix,
 )
 
 
@@ -55,6 +56,14 @@ def test_a_member_whose_client_writes_writes_nothing_itself() -> None:
     assert message is not None and message.content == b"hi"
     assert group.pool == [start] and not group.deriving
     assert group.handle(Send(b"more")) == []
+
+
+def test_a_numbers_field_names_each_of_its_members_apart() -> None:
+    group = shared_prefix(io.StringIO())
+    numbered = group.rosters.known(group.me)
+    assert sorted(numbered) == [0, 1, 2, 3]
+    assert group.unnumbered == []
+    assert group.compose() == []
 
 
 def test_every_edge_is_recorded(tmp_path: Path) -> None:
