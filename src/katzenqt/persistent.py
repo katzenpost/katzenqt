@@ -291,9 +291,16 @@ def _set_sqlite_pragmas(
     sustained contention degrades to the drains' give_up-and-retry path
     instead of a blocking stall. WAL is file-persistent; busy_timeout is per
     connection, hence the connect event rather than engine-level setup.
+
+    synchronous=FULL syncs the WAL on every commit. A commit is what lets
+    the next step go out to the mixnet (an ACK covering what was read, a
+    cursor past it), so it must survive a power loss; NORMAL, which some
+    sqlite builds default to under WAL, may lose the last commits. Set per
+    connection rather than left to however sqlite was built.
     """
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=FULL")
     cursor.execute("PRAGMA busy_timeout=250")
     cursor.close()
     # journal_mode=WAL lazily creates the -wal/-shm sidecars on first write,
