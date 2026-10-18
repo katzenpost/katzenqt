@@ -29,6 +29,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from tests.integration._process import run_logged, spawn_logged
@@ -110,11 +111,12 @@ def epoch_duration_s() -> float:
 
     KQT_EPOCH_DURATION_S overrides everything else, for targets with no
     docker-compose.yml to read (e.g. namenlos). Otherwise this comes from
-    the generated docker-compose.yml: genconfig's GenDockerCompose writes
-    KATZENPOST_EPOCH_DURATION into every service's environment block from
-    the same --epochDuration value the mixnet's own processes were started
-    with, so this reads the value actually governing the running network
-    rather than a second guess at it.
+    the generated network: genconfig writes its --epochDuration as
+    EpochDuration into client/client.toml beside docker-compose.yml, so
+    this reads the value actually governing the running network rather
+    than a second guess at it. Networks generated before that carry it as
+    KATZENPOST_EPOCH_DURATION in every service's environment block
+    instead; genconfig now exports it only to nodes on older releases.
     """
     override = os.environ.get("KQT_EPOCH_DURATION_S")
     if override is not None:
@@ -129,6 +131,13 @@ def epoch_duration_s() -> float:
         "KATZENPOST_DOCKER_COMPOSE",
         str(REPO_ROOT / "katzenpost" / "docker" / "mixnet-alpine" / "docker-compose.yml"),
     ))
+    client_toml = compose_path.parent / "client" / "client.toml"
+    try:
+        client = tomllib.loads(client_toml.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        client = {}
+    if isinstance(duration := client.get("EpochDuration"), str):
+        return _parse_go_duration(duration)
     try:
         text = compose_path.read_text()
     except OSError as e:
@@ -139,8 +148,9 @@ def epoch_duration_s() -> float:
     match = _ENV_LINE_RE.search(text)
     if not match:
         raise RuntimeError(
-            f"can't determine epoch_duration: no KATZENPOST_EPOCH_DURATION "
-            f"in {compose_path}; set KQT_EPOCH_DURATION_S to override"
+            f"can't determine epoch_duration: no EpochDuration in "
+            f"{client_toml} and no KATZENPOST_EPOCH_DURATION in "
+            f"{compose_path}; set KQT_EPOCH_DURATION_S to override"
         )
     return _parse_go_duration(match.group(1))
 

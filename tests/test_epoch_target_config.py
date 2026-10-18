@@ -76,6 +76,55 @@ def test_docker_epoch_is_parsed_from_generated_service_env(
     assert math.isclose(helpers.epoch_duration_s(), seconds)
 
 
+@pytest.mark.parametrize("duration, seconds", [
+    ("2m0s", 120), ("20m0s", 1200), ("1h0m0s", 3600),
+])
+def test_docker_epoch_is_read_from_the_generated_client_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    duration: str, seconds: float,
+) -> None:
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services:\n  kpclientd:\n", encoding="ascii")
+    (tmp_path / "client").mkdir()
+    (tmp_path / "client" / "client.toml").write_text(
+        f'ListenNetwork = "tcp"\nEpochDuration = "{duration}"\n',
+        encoding="ascii",
+    )
+    monkeypatch.setenv("KATZENPOST_DOCKER_COMPOSE", str(compose))
+    assert math.isclose(helpers.epoch_duration_s(), seconds)
+
+
+@pytest.mark.parametrize("client_toml", [
+    None, 'ListenNetwork = "tcp"\n', "not = [toml\n",
+])
+def test_docker_epoch_without_client_config_falls_back_to_service_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client_toml: str | None,
+) -> None:
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n  kpclientd:\n    environment:\n"
+        "      - KATZENPOST_EPOCH_DURATION=3m\n",
+        encoding="ascii",
+    )
+    if client_toml is not None:
+        (tmp_path / "client").mkdir()
+        (tmp_path / "client" / "client.toml").write_text(
+            client_toml, encoding="ascii",
+        )
+    monkeypatch.setenv("KATZENPOST_DOCKER_COMPOSE", str(compose))
+    assert helpers.epoch_duration_s() == 180
+
+
+def test_docker_epoch_found_nowhere_names_both_places(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services:\n  kpclientd:\n", encoding="ascii")
+    monkeypatch.setenv("KATZENPOST_DOCKER_COMPOSE", str(compose))
+    with pytest.raises(RuntimeError, match="no EpochDuration in .*client.toml"):
+        helpers.epoch_duration_s()
+
+
 @pytest.mark.parametrize("duration", ["-2m", "2mgarbage", "garbage2m", "0s"])
 def test_malformed_docker_duration_is_rejected(duration: str) -> None:
     with pytest.raises(ValueError):
