@@ -1,9 +1,13 @@
-"""Engine-level sqlite pragmas: WAL journaling and a busy timeout.
+"""Engine-level sqlite pragmas: WAL journaling, a busy timeout and a sync
+on every commit.
 
 These keep concurrent writers (the GUI send thread and the io receive
 loop) from failing instantly with ``database is locked``, which used to
 crash a drain task mid-commit and strand its stream.
 """
+import sqlite3
+from pathlib import Path
+
 import pytest
 from sqlmodel import select
 
@@ -46,3 +50,19 @@ async def test_engines_enable_wal_and_busy_timeout() -> None:
     busy, = busy_row
     assert wal == "wal"
     assert busy == 250
+
+
+@pytest.mark.asyncio
+async def test_engines_sync_every_commit() -> None:
+    with persistent._engine_sync.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA synchronous").scalar() == 2
+    async with persistent._engine.connect() as conn:
+        assert (await conn.exec_driver_sql("PRAGMA synchronous")).scalar() == 2
+
+
+def test_pragmas_override_a_build_default_of_normal(tmp_path: Path) -> None:
+    conn = sqlite3.connect(tmp_path / "db")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    persistent._set_sqlite_pragmas(conn, None)  # type: ignore[arg-type]
+    assert conn.execute("PRAGMA synchronous").fetchone() == (2,)
+    conn.close()
