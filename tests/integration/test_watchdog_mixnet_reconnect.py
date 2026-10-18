@@ -21,6 +21,7 @@ running on this host. Skipped unless KATZENQT_DOCKER_INTEGRATION=1.
 """
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -31,9 +32,13 @@ from tests.integration._outcomes import check_roles
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role,
     find_kpclientd_container, find_gateways, podman,
-    PhaseStopwatch,
+    PhaseStopwatch, epoch_duration_s,
 )
 from tests.integration._bounce_helpers import budget_s
+
+# As in test_watchdog_epoch_rollover.py: "(from None)" is the first
+# document after connect, not an advance.
+_EPOCH_ADVANCE_RE = re.compile(r"PKI epoch advanced to \d+ \(from \d+\)")
 
 
 def _poll_for(path: Path, needle: str, deadline_s: float) -> bool:
@@ -61,6 +66,26 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
     log_dir = tmp_path_factory.mktemp("mixnet_reconnect_logs")
     bootstrap_voucher(alice_state, bob_state)
     gateways = find_gateways(find_kpclientd_container())
+
+    # An epoch rollover during Alice's read would decide its race before
+    # the reconnect does, so start the read just after one: Bob's client
+    # watches for an advance, and Alice's read then has most of an epoch.
+    watch_err = log_dir / "watch.err"
+    watch_proc = spawn_role(
+        bob_state, "chat-session", "demo", "READ:watch:600",
+        stdout_path=log_dir / "watch.out", stderr_path=watch_err,
+    )
+    try:
+        deadline = time.time() + 3 * epoch_duration_s() + 30.0
+        while not _EPOCH_ADVANCE_RE.search(watch_err.read_text()):
+            assert time.time() < deadline, (
+                f"PKI epoch did not advance within "
+                f"{3 * epoch_duration_s() + 30.0:.0f}s\n{watch_err.read_text()[-4000:]}"
+            )
+            time.sleep(1.0)
+    finally:
+        watch_proc.kill()
+        watch_proc.wait()
 
     alice_out = log_dir / "alice.out"
     alice_err = log_dir / "alice.err"
