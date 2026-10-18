@@ -56,6 +56,7 @@ from .wire import (
     Numbers,
     counter,
     key_of,
+    membership_hash,
     prefix_of,
 )
 
@@ -378,6 +379,12 @@ class Group:
 
     # Writing.
 
+    def membership(self, leaving: Key | None = None) -> bytes:
+        """Our view of the group, as a message we make ourselves says it:
+        ourselves and every member we read, but for ``leaving``."""
+        keys = [self.me, *self.readers]
+        return membership_hash(key for key in keys if key != leaving)
+
     def _numbered(self, member: Key) -> bool:
         """Whether ``member`` is in our roster, or will be once what we have
         composed is written."""
@@ -415,7 +422,10 @@ class Group:
             numbers.append((size, prefix_of(new)))
             assigned.append((size, at))
             size += 1
-        message = Message(numbers=tuple(numbers), introduced_at=self.introduced_at)
+        message = Message(
+            numbers=tuple(numbers), introduced_at=self.introduced_at,
+            membership_hash=self.membership(),
+        )
         self.introduced_at = None
         return message, Pending(numbers=tuple(assigned), control=True)
 
@@ -430,7 +440,10 @@ class Group:
         if new not in self.readers:
             self._follow(read_cap, read_cap[KEY_SIZE:])
         self._release()
-        message = Message(introduction=Introduction(name, read_cap), numbers=numbers)
+        message = Message(
+            introduction=Introduction(name, read_cap), numbers=numbers,
+            membership_hash=self.membership(leaving=new),
+        )
         return message, Pending(numbers=assigned, introduced=new, control=True)
 
     def _with_acks(self, message: Message, pending: Pending) -> Message:
@@ -445,7 +458,8 @@ class Group:
                 pending.acks[reader.stream] = (self.ledger.published.get(reader.stream), owed)
                 self.ledger.publish(reader.stream, owed)
         return Message(
-            message.content, message.introduction, message.numbers, message.introduced_at, acks
+            message.content, message.introduction, message.numbers, message.introduced_at, acks,
+            message.membership_hash,
         )
 
     def _stage(self, message: Message, pending: Pending) -> Outgoing:

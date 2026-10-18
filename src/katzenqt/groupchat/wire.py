@@ -10,7 +10,8 @@ back into the whole index.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -28,6 +29,7 @@ ROSTER_MAX = 256
 """The most entries a roster holds: roster indexes are one byte."""
 PREFIX_SIZE = 8
 """How much of a member's key a ``Numbers`` field names it by."""
+MEMBERSHIP_DOMAIN = b"KP:membership:v1"
 
 
 def key_of(read_cap: bytes) -> Key:
@@ -36,6 +38,15 @@ def key_of(read_cap: bytes) -> Key:
 
 def prefix_of(key: Key) -> bytes:
     return key[:PREFIX_SIZE]
+
+
+def membership_hash(keys: Iterable[Key]) -> bytes:
+    """What a message says of its sender's view of the group: SHA-256,
+    under a domain, of the members' keys, each once, in byte order."""
+    digest = hashlib.sha256(MEMBERSHIP_DOMAIN)
+    for key in sorted(set(keys)):
+        digest.update(key)
+    return digest.digest()
 
 
 def counter(index: bytes) -> int:
@@ -76,6 +87,10 @@ class Message:
     introduced_at: IntroRef | None = None
     acks: Mapping[int, int] = field(default_factory=dict)
     """Roster index to the ``Idx64`` of the box acknowledged."""
+    membership_hash: bytes | None = None
+    """The membership hash a message the member makes itself carries, fixed
+    when it is composed so that a rewrite writes the same box. Content
+    carries its own."""
 
     @property
     def control(self) -> bool:
@@ -167,6 +182,8 @@ class CborCodec:
             gcm["IntroducedAt"] = encode_introduced_at(message.introduced_at)
         if message.acks:
             gcm["Acks"] = ack_codec.encode(message.acks)
+        if message.membership_hash is not None:
+            gcm["MembershipHash"] = message.membership_hash
         return cbor2.dumps(gcm)
 
     def decode(self, plaintext: bytes) -> Message | None:
@@ -194,6 +211,7 @@ class CborCodec:
                 numbers=decode_numbers(gcm.get("Numbers") or b""),
                 introduced_at=decode_introduced_at(gcm.get("IntroducedAt") or b""),
                 acks=acks,
+                membership_hash=gcm.get("MembershipHash"),
             )
         except (cbor2.CBORDecodeError, AttributeError, KeyError, TypeError):
             return None

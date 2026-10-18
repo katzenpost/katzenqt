@@ -666,6 +666,19 @@ async def test_owed_numbering_goes_out_before_an_induction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_control_message_carries_our_view_of_the_group() -> None:
+    chat, bob = await _with_bob()
+    await chat.receive("bob", _introduction("carol", secrets.token_bytes(136)), 4)
+    (control, _) = await chat.queue(_text())
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        ours = await conversation_handlers.local_membership_hash(sess, conv)
+    assert _sent(control).numbers is not None
+    assert _sent(control).membership_hash == ours
+
+
+@pytest.mark.asyncio
 async def test_an_introduction_carries_the_hash_before_its_member() -> None:
     chat, _ = await _with_bob()
     async with persistent.asession() as sess:
@@ -928,6 +941,8 @@ def test_the_codec_reads_what_it_writes() -> None:
         numbers=((3, None),),
     )
     assert acks.CODEC.decode(acks.CODEC.encode(intro)) == intro
+    stamped = wire.Message(numbers=((2, b"\x07" * 8),), membership_hash=bytes(range(32)))
+    assert acks.CODEC.decode(acks.CODEC.encode(stamped)) == stamped
     text = _text().to_cbor()
     decoded = acks.CODEC.decode(acks.CODEC.encode(wire.Message(content=text)))
     assert decoded is not None and decoded.content is not None
