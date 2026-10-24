@@ -375,7 +375,7 @@ run-docker:
 		KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml \
 		$(MAKE) run
 
-kpclientd: $(KATZENPOST_DIR)
+$(KPCLIENTD_BIN): | $(KATZENPOST_DIR)
 	@set +e; \
 	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v ) ; \
 	rc=$$?; \
