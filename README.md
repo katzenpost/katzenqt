@@ -52,6 +52,32 @@ kpclientd(path): found
 
 Once that looks right, `make run` launches the GUI.
 
+### NixOS (and Nix on any Linux)
+
+The repo ships a `shell.nix` and a `flake.nix` that provide Python, uv, Go,
+the Rust toolchain and the Qt runtime libraries, so no `apt` or `sudo` is
+involved. Inside the shell, `make system-setup` skips the `apt` and `pipx`
+steps. Skip `make deps`: the tests under `tests/ci/` exercise Debian CI
+scripts that expect `/bin/bash`, so its test step fails on NixOS.
+
+```shell
+git clone https://www.github.com/katzenpost/katzenqt ~/katzenqt
+cd ~/katzenqt
+nix develop    # or: nix-shell
+make kpclientd install-kpclient kpclientd.service
+uv sync
+uv run katzenqt
+```
+
+Without the systemd unit, start the daemon yourself and run the GUI from a
+second shell:
+
+```shell
+make kpclientd
+./katzenpost/cmd/kpclientd/kpclientd --config config/client.toml
+```
+
+
 ## Headless CLI (no GUI)
 
 `katzenqt` can be driven without the Qt interface through the `katzenqt-headless`
