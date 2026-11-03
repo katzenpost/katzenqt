@@ -602,8 +602,47 @@ class GroupChatMessage(BaseModel):
         ...     version=0, membership_hash=bytes(32), text="hi", acks=bytes([9]) + bytes(104))
         >>> len(cbor2.loads(acked.to_cbor())["acks"])
         105
+
+        A message read in the version 4 form is written back in it:
+
+        >>> v4 = cbor2.dumps([4, bytes(32), 0, "hi", b"a"])
+        >>> GroupChatMessage.from_cbor(v4).to_cbor() == v4
+        True
         """
-        return cbor2.dumps(self.model_dump(exclude_none=True))
+        if self.version < 4:
+            return cbor2.dumps(self.model_dump(exclude_none=True))
+        fields = [
+            self.version, self.membership_hash, self.msg_type.value,
+            self._array_body(), self.acks, self.numbers, self.introduced_at,
+        ]
+        while len(fields) > 4 and fields[-1] is None:
+            fields.pop()
+        return cbor2.dumps(fields)
+
+    def _array_body(self) -> Any:
+        """The type's field as the version 4 array carries it.
+
+        >>> h = bytes(32)
+        >>> intro = GroupChatPleaseAdd(display_name="bob", read_cap=bytes(136))
+        >>> GroupChatMessage(version=4, membership_hash=h, introduction=intro)._array_body()[0]
+        'bob'
+        >>> upload = GroupChatFileUpload(payload=b"x", filetype="image/png", basename="x.png")
+        >>> GroupChatMessage(version=4, membership_hash=h, file_upload=upload)._array_body()
+        [b'x', 'image/png', 'x.png']
+        >>> tally = GroupChatTally(survey_id=b"s")
+        >>> GroupChatMessage(version=4, membership_hash=h, msg_type=GroupChatTypeEnum.TALLY_CLOSE, tally=tally)._array_body()
+        {'survey_id': b's', 'version': 0}
+        >>> GroupChatMessage(version=4, membership_hash=h, who="w")._array_body()
+        'w'
+        """
+        if self.introduction is not None:
+            return [self.introduction.display_name, self.introduction.read_cap]
+        if self.file_upload is not None:
+            return [self.file_upload.payload, self.file_upload.filetype, self.file_upload.basename]
+        if self.tally is not None:
+            return self.tally.model_dump(exclude_none=True)
+        key = _ARRAY_BODY_KEYS.get(self.msg_type.value)
+        return getattr(self, key) if key in ("text", "who", "reply_who") else None
 
     @classmethod
     def from_cbor(cls, cbor_bytes:bytes) -> "GroupChatMessage":

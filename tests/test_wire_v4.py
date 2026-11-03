@@ -51,6 +51,14 @@ def test_message_reads_as_its_vector(e: dict[str, Any]) -> None:
     message = acks.CODEC.decode(bytes.fromhex(e["cbor"]))
     assert message is not None
     assert _message_json(message) == e["message"]
+    if e["rewritten"] == e["cbor"]:
+        # What the member keeps of a box is written back as it was read.
+        assert (
+            models.GroupChatMessage.from_cbor(bytes.fromhex(e["cbor"]))
+            .to_cbor()
+            .hex()
+            == e["cbor"]
+        )
 
 
 @pytest.mark.parametrize(
