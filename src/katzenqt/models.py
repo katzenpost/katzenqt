@@ -12,7 +12,7 @@ from .groupchat import wire as groupchat_wire
 import hashlib
 from base64 import b64encode, b64decode
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, List, Tuple, Union
 from pathlib import Path
 
 SerializedRow = Union[persistent.PlaintextWAL, persistent.ReadCapWAL]
@@ -247,7 +247,56 @@ class GroupChatReplyWho(BaseModel):
         >>> GroupChatReplyWho.from_cbor(handed.to_cbor()) == handed
         True
         """
-        return cls(**cbor2.loads(data))
+        fields = cbor2.loads(data)
+        if isinstance(fields, list):
+            fields = _reply_who_fields(fields)
+        return cls(**fields)
+
+    def to_cbor_array(self) -> bytes:
+        """The version 4 form: the array ``[please_adds, rosters,
+        introductions, introducer, newcomer]``, trailing nulls left out.
+
+        >>> alice = GroupChatPleaseAdd(display_name="alice", read_cap=bytes(136))
+        >>> who = GroupChatReplyWho(please_adds=[alice, None])
+        >>> cbor2.loads(who.to_cbor_array())[0][0][0], len(cbor2.loads(who.to_cbor_array()))
+        ('alice', 1)
+        >>> GroupChatReplyWho.from_cbor(who.to_cbor_array()) == who
+        True
+        """
+        fields = [
+            [None if p is None else [p.display_name, p.read_cap] for p in self.please_adds],
+            self.rosters, self.introductions, self.introducer, self.newcomer,
+        ]
+        while len(fields) > 1 and fields[-1] is None:
+            fields.pop()
+        return cbor2.dumps(fields)
+
+
+def _reply_who_fields(fields: list[Any]) -> dict[str, Any]:
+    """The map form of a version 4 ReplyWho array.
+
+    >>> _reply_who_fields([[None, ["a", b"c"]], None, [], 0])["please_adds"]
+    [None, {'display_name': 'a', 'read_cap': b'c'}]
+    >>> _reply_who_fields([])
+    Traceback (most recent call last):
+        ...
+    ValueError: not a version 4 ReplyWho
+    >>> _reply_who_fields([[["a"]]])
+    Traceback (most recent call last):
+        ...
+    ValueError: not a version 4 ReplyWho
+    """
+    if not 1 <= len(fields) <= 5 or not isinstance(fields[0], list) or not all(
+        p is None or isinstance(p, list) and len(p) == 2 for p in fields[0]
+    ):
+        raise ValueError("not a version 4 ReplyWho")
+    names = ("please_adds", "rosters", "introductions", "introducer", "newcomer")
+    out = dict(zip(names, fields))
+    out["please_adds"] = [
+        None if p is None else {"display_name": p[0], "read_cap": p[1]}
+        for p in fields[0]
+    ]
+    return out
 
 
 class GroupChatTypeEnum(Enum):
@@ -581,7 +630,72 @@ class GroupChatMessage(BaseModel):
             version = fields.get("version")
             if isinstance(version, int) and version > GROUP_CHAT_VERSION:
                 raise UnsupportedVersion(version)
-        return cls(**fields) # TODO not at all what we want but here we go
+        return cls(**gcm_fields(fields)) # TODO not at all what we want but here we go
+
+_ARRAY_BODY_KEYS = {
+    GroupChatTypeEnum.TEXT.value: "text",
+    GroupChatTypeEnum.INTRODUCTION.value: "introduction",
+    GroupChatTypeEnum.FILE_UPLOAD.value: "file_upload",
+    GroupChatTypeEnum.WHO.value: "who",
+    GroupChatTypeEnum.REPLY_WHO.value: "reply_who",
+    **{kind.value: "tally" for kind in (
+        GroupChatTypeEnum.TALLY_CREATE, GroupChatTypeEnum.TALLY_VOTE,
+        GroupChatTypeEnum.TALLY_CLOSE, GroupChatTypeEnum.TALLY_SYNC_REQ,
+        GroupChatTypeEnum.TALLY_SYNC_RESP,
+    )},
+}
+
+
+def gcm_fields(decoded: Any) -> Any:
+    """The map a decoded GroupChatMessage is read as. A version 4 message,
+    the array ``[version, membership_hash, msg_type, body, acks, numbers,
+    introduced_at]``, becomes the version 3 map; anything else comes back
+    as it is. An array that is not a version 4 message raises ValueError.
+
+    >>> gcm_fields([4, bytes(32), 0, "hi"])["text"]
+    'hi'
+    >>> gcm_fields([4, bytes(32), 1, ["bob", bytes(136)]])["introduction"]["display_name"]
+    'bob'
+    >>> sorted(gcm_fields([4, bytes(32), 2, [b"x", "image/png", "x.png"]])["file_upload"])
+    ['basename', 'filetype', 'payload']
+    >>> gcm_fields([4, bytes(32), 10, None, None, b"n"])["numbers"]
+    b'n'
+    >>> gcm_fields({"text": "hi"})
+    {'text': 'hi'}
+    >>> gcm_fields([3, bytes(32), 0, "hi"])
+    Traceback (most recent call last):
+        ...
+    ValueError: not a version 4 GroupChatMessage
+    """
+    if not isinstance(decoded, list):
+        return decoded
+    if not 4 <= len(decoded) <= 7:
+        raise ValueError("not a version 4 GroupChatMessage")
+    version, membership_hash, msg_type, body, *rest = decoded + [None] * (7 - len(decoded))
+    if (
+        not isinstance(version, int) or version < 4
+        or not all(f is None or isinstance(f, bytes) for f in rest)
+        or (msg_type == GroupChatTypeEnum.TEXT.value and not isinstance(body, str))
+        or (msg_type == GroupChatTypeEnum.INTRODUCTION.value
+            and not (isinstance(body, list) and len(body) == 2))
+        or (msg_type == GroupChatTypeEnum.FILE_UPLOAD.value
+            and not (isinstance(body, list) and len(body) == 3))
+        or (msg_type == GroupChatTypeEnum.CONTROL.value and body is not None)
+    ):
+        raise ValueError("not a version 4 GroupChatMessage")
+    fields: dict[str, Any] = {"version": version, "membership_hash": membership_hash, "msg_type": msg_type}
+    if msg_type == GroupChatTypeEnum.INTRODUCTION.value:
+        body = {"display_name": body[0], "read_cap": body[1]}
+    elif msg_type == GroupChatTypeEnum.FILE_UPLOAD.value:
+        body = {"payload": body[0], "filetype": body[1], "basename": body[2]}
+    key = _ARRAY_BODY_KEYS.get(msg_type)
+    if key is not None and body is not None:
+        fields[key] = body
+    for name, value in zip(("acks", "numbers", "introduced_at"), rest):
+        if value is not None:
+            fields[name] = value
+    return fields
+
 
 def unserialize(chunks: "Iterable[tuple[bytes, bytes]]") -> "GroupChatMessage | None":
     """Reassemble a serialised ``SendOperation`` chain into a
