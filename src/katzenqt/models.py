@@ -7,7 +7,7 @@ from enum import Enum
 import uuid
 import secrets
 import io
-from . import persistent
+from . import persistent, prefs
 from .groupchat import wire as groupchat_wire
 import hashlib
 from base64 import b64encode, b64decode
@@ -85,6 +85,25 @@ def canonical_membership_hash(read_caps: Iterable[bytes]) -> bytes:
 # Version 3 names acknowledged boxes by Idx64, and carries the membership
 # hash again.
 GROUP_CHAT_VERSION = 3
+
+WIRE_VERSIONS = (3, 4)
+WIRE_VERSION_SETTING = "wire_version"
+# The version the messages this client makes are written in: 4 the array
+# form, with compact vouchers; 3 the map form, with long vouchers.
+WIRE_VERSION = 4
+
+
+def use_wire_version(chosen: "int | None" = None) -> int:
+    """Write ``chosen``, recording it as the setting, or else the version
+    the setting records, 4 if none."""
+    global WIRE_VERSION
+    if chosen is not None:
+        if chosen not in WIRE_VERSIONS:
+            raise ValueError(f"wire version {chosen} is not one of {WIRE_VERSIONS}")
+        prefs.put(WIRE_VERSION_SETTING, chosen)
+    stored = prefs.get(WIRE_VERSION_SETTING, 4)
+    WIRE_VERSION = stored if isinstance(stored, int) and stored in WIRE_VERSIONS else 4
+    return WIRE_VERSION
 
 
 class UnsupportedVersion(ValueError):

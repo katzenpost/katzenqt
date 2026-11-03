@@ -41,7 +41,7 @@ from typing import AsyncIterator
 from katzenpost_thinclient import ThinClient
 
 from . import _actions, _args, _cli
-from .. import network, persistent
+from .. import models, network, persistent
 from ..network import resolve_thinclient_config
 
 
@@ -185,6 +185,7 @@ def cli(argv: "list[str] | None" = None) -> int:
     # afterwards lets our level stand.
     persistent.init_and_migrate()
     _configure_logging()
+    models.use_wire_version(chosen.wire_version)
 
     # Connecting verbs carry the explicit `--config` / `--address`; resolve them
     # to a thinclient.toml path now and hand it to the actions. `info` has no

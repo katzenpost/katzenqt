@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
+    VOUCHER_FORM_COMPACT, VOUCHER_FORM_LONG,
 )
 from sqlalchemy import exists, func, insert, literal
 from sqlmodel import col, select
@@ -549,6 +550,7 @@ async def mint_and_publish(
         bacap_uuid=_brief(message_write_cap), what="voucher_mint",
         rpc_factory=lambda: connection.voucher_mint(
             message_write_cap=message_write_cap, display_name=display_name,
+            form=VOUCHER_FORM_COMPACT if models.WIRE_VERSION >= 4 else VOUCHER_FORM_LONG,
         ),
         backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
     )
@@ -752,7 +754,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
     """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
     final PlaintextWAL id, for the caller to wait on the ack."""
     gcm = models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8,
+        version=models.WIRE_VERSION, membership_hash=b"TODO" * 8,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(
             display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,

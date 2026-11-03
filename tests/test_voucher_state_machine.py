@@ -68,6 +68,7 @@ class VoucherDaemon(FakeThinClient):
         self,
         message_write_cap: bytes,
         display_name: str,
+        form: int = 1,
     ) -> VoucherMintResult:
         voucher_write_cap = _fresh_write_cap()
         voucher_read_cap = voucher_write_cap[32:]
