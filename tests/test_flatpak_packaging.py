@@ -265,11 +265,9 @@ def test_flatpak_pins_match_the_application_lock() -> None:
     module = next(
         p for p in modules if p["name"] == "python3-katzenpost_thinclient"
     )
-    wheel = thin["wheels"][0]
+    commit = thin["source"]["git"].rpartition("#")[2]
     assert any(
-        source.get("url") == wheel["url"]
-        and source["sha256"] == wheel["hash"].removeprefix("sha256:")
-        for source in module["sources"]
+        source.get("commit") == commit for source in module["sources"]
     )
     audio = json.loads((FLATPAK / "rustic-audio-tool.json").read_text())
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
