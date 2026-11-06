@@ -116,7 +116,8 @@ def test_retiring_renames_every_mention() -> None:
     assert rosters.started[b"c"] == (b"gone", 2)
     assert rosters.resolve(b"a", 2) == b"c"
     assert rosters.resolve(b"a", 3) == b"gone"
-    assert b"gone" in rosters.entries and b"gone" in rosters.keys
+    assert b"gone" in rosters.entries
+    assert b"gone" not in rosters.keys and b"b" not in rosters.keys
 
 
 def test_retiring_leaves_a_place_another_member_may_hold() -> None:

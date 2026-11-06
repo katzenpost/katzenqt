@@ -107,3 +107,24 @@ def test_local_run_without_shared_paths_stops_before_checkout(tmp_path: Path) ->
     assert result.returncode != 0
     assert "use make ci-local" in result.stderr
     assert not (tmp_path / "env").exists()
+
+
+def test_every_gateway_beside_kpclientd_is_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    listing = (
+        "mix-kpclientd-1\nmix-gateway3-1\nmix-gateway1-1\nmix-mix1-1\n"
+        "mix-servicenode1-1\nother-gateway1-1\n"
+    )
+    monkeypatch.setattr(subprocess, "run", Mock(
+        return_value=subprocess.CompletedProcess([], 0, listing, ""),
+    ))
+    assert helpers.find_gateways("mix-kpclientd-1") == ["mix-gateway1-1", "mix-gateway3-1"]
+
+
+def test_no_gateways_beside_kpclientd_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", Mock(
+        return_value=subprocess.CompletedProcess([], 0, "mix-kpclientd-1\n", ""),
+    ))
+    with pytest.raises(RuntimeError, match="no gateway containers"):
+        helpers.find_gateways("mix-kpclientd-1")
+    with pytest.raises(ValueError, match="not a kpclientd container"):
+        helpers.find_gateways("mix-gateway1-1")

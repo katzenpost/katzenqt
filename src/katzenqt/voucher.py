@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from katzenpost_thinclient import (
     BoxIDNotFoundError, CourierError, CourierInvalidEpochError,
     DatabaseFailureError, InvalidEpochError, ThinClientOfflineError,
+    VOUCHER_FORM_COMPACT, VOUCHER_FORM_LONG,
 )
 from sqlalchemy import exists, func, insert, literal
 from sqlmodel import col, select
@@ -549,6 +550,7 @@ async def mint_and_publish(
         bacap_uuid=_brief(message_write_cap), what="voucher_mint",
         rpc_factory=lambda: connection.voucher_mint(
             message_write_cap=message_write_cap, display_name=display_name,
+            form=VOUCHER_FORM_COMPACT if models.WIRE_VERSION >= 4 else VOUCHER_FORM_LONG,
         ),
         backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
     )
@@ -623,9 +625,19 @@ async def await_and_open(
         assert box1_index is not None
         assert voucher_read_cap is not None
 
-    sealed_reply, _ = await _read_box(
+    sealed_reply, index = await _read_box(
         connection, voucher_read_cap, box1_index, stage="await_and_open(box1)",
     )
+    # An array-form payload is answered framed over boxes 1 on; a map-form
+    # one unframed in box 1, an MKEM CBOR map whose first byte is never C or F.
+    if sealed_reply[:1] in (b"C", b"F"):
+        pieces = [sealed_reply]
+        while pieces[-1][:1] == b"C":
+            box, index = await _read_box(
+                connection, voucher_read_cap, index, stage="await_and_open(box1+)",
+            )
+            pieces.append(box)
+        sealed_reply = models.unserialize_opaque(pieces) or b""
     logger.debug(
         "await_and_open: received box1 sealed reply on voucher read_cap %s",
         _brief(voucher_read_cap),
@@ -742,7 +754,7 @@ async def _write_introduction_log(conversation_id: int, display_name: str, read_
     """Write the INTRODUCTION ConversationLog/PlaintextWAL rows. Returns the
     final PlaintextWAL id, for the caller to wait on the ack."""
     gcm = models.GroupChatMessage(
-        version=models.GROUP_CHAT_VERSION, membership_hash=b"TODO" * 8,
+        version=models.WIRE_VERSION, membership_hash=b"TODO" * 8,
         msg_type=models.GroupChatTypeEnum.INTRODUCTION,
         introduction=models.GroupChatPleaseAdd(
             display_name=_sanitize_peer_name(display_name)[:30], read_cap=read_cap,
@@ -940,19 +952,28 @@ async def _reply_and_introduce(
             "once it has gone"
         )
     who_reply = await _build_who_reply(conversation_id)
+    # A map-form payload (CBOR major type 5) is answered wholly in version 3.
+    compact = not pending.voucher_payload or pending.voucher_payload[0] >> 5 != 5
     induct = await _rpc_racing_connection_life(
         bacap_uuid=_brief(voucher), what="voucher_induct",
         rpc_factory=lambda: connection.voucher_induct(
             voucher=voucher, voucher_payload=pending.voucher_payload,
-            who_reply=who_reply.to_cbor(),
+            who_reply=who_reply.to_cbor_array() if compact else who_reply.to_cbor(),
         ),
         backstop_s=_DAEMON_RPC_TIMEOUT_SECONDS,
     )
 
-    await _publish_box(
-        connection, pending.voucher_write_cap, pending.box1_index,
-        induct.sealed_reply,
-    )
+    boxes = [induct.sealed_reply]
+    if compact:
+        piece = models.box_plaintext_length() - 1
+        sealed = induct.sealed_reply
+        boxes = [
+            (b"C" if i + piece < len(sealed) else b"F") + sealed[i:i + piece]
+            for i in range(0, max(len(sealed), 1), piece)
+        ]
+    index = pending.box1_index
+    for box in boxes:
+        index = await _publish_box(connection, pending.voucher_write_cap, index, box)
 
     joiner_name = _sanitize_peer_name(induct.display_name or peer_name)
     already_inducted = False

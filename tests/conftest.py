@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import TYPE_CHECKING, AsyncIterator, Iterator
 
 import katzenpost_thinclient
@@ -49,6 +50,29 @@ def _fresh_tables(request: pytest.FixtureRequest) -> Iterator[None]:
     SQLModel.metadata.drop_all(persistent._engine_sync)
     SQLModel.metadata.create_all(persistent._engine_sync)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging() -> Iterator[None]:
+    """Undo logger changes a test makes, such as ``headless.cli()`` setting
+    ``katzen.headless.propagate = False``, which hides its records from
+    every later test's ``caplog``."""
+    loggers = [
+        logging.getLogger(n) for n in sorted(logging.root.manager.loggerDict)
+    ]
+    loggers.append(logging.root)
+    saved = {
+        lg: (list(lg.handlers), lg.level, lg.propagate, lg.disabled)
+        for lg in loggers
+    }
+    try:
+        yield
+    finally:
+        for lg, (handlers, level, propagate, disabled) in saved.items():
+            lg.handlers[:] = handlers
+            lg.setLevel(level)
+            lg.propagate = propagate
+            lg.disabled = disabled
 
 
 @pytest.fixture(autouse=True)

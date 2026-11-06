@@ -46,6 +46,8 @@ from .reader import Mode, Reader
 from .sentbox import Retention, SentBox
 from .wire import (
     KEY_SIZE,
+    PREFIX_SIZE,
+    ROSTER_MAX,
     CborCodec,
     Codec,
     Introduction,
@@ -55,6 +57,7 @@ from .wire import (
     Numbers,
     counter,
     key_of,
+    membership_hash,
     prefix_of,
 )
 
@@ -116,8 +119,14 @@ class Group:
     """Our introducer, until we have read our ``Introduction``."""
     awaiting_start: dict[Key, bytes] = field(default_factory=dict)
     """``IntroducedAt`` read before the ``Introduction`` it names."""
+    allocates: bool = True
+    """Whether this member picks the boxes it writes, as it does driven by
+    events. A client that writes for itself takes that over with its first
+    call to write, and from then on the member writes nothing by itself: its
+    pool would name boxes the client hands out too."""
     received: dict[tuple[Key, bytes], int] = field(default_factory=dict)
-    """Content delivered, by sender and box, and the epoch it came."""
+    """Content delivered, by sender and box, and the epoch it came, while
+    the policy keeps received content only for a time."""
 
     def __post_init__(self) -> None:
         if not self.tip:
@@ -220,6 +229,7 @@ class Group:
     def compose(self, content: bytes | None = None) -> list[Outgoing]:
         """The messages to send now, in order: a control message if one is
         owed, then ``content``. Each takes effect when :meth:`written`."""
+        self.allocates = False
         staged = [self._control()] if self._owes_control() else []
         if content is not None:
             staged.append((Message(content=content), Pending()))
@@ -227,6 +237,10 @@ class Group:
 
     def written(self, token: int, index: bytes, plaintext: bytes | None = None) -> None:
         """The message ``token`` landed in the box ``index`` of our stream."""
+        self.allocates = False
+        self._written(token, index, plaintext)
+
+    def _written(self, token: int, index: bytes, plaintext: bytes | None) -> None:
         pending = self.pending.pop(token, None)
         if pending is None:
             return
@@ -255,9 +269,16 @@ class Group:
         if pending.introduced is None:
             self.unnumbered.extend(at for _, at in pending.numbers if at is not None)
 
+    @property
+    def room(self) -> bool:
+        """Whether our roster has an index left for one more member. Without
+        one an ``Introduction`` numbers nobody, and its member cannot join."""
+        return self._size() < ROSTER_MAX
+
     def begin_induction(self) -> list[Outgoing]:
         """Begin inducting a member, starting each stream where we have read
-        it now. Anything owed goes out first; send it before :meth:`reply`."""
+        it now. Anything owed goes out first; send it before :meth:`reply`.
+        Check :attr:`room` first."""
         outgoing = self.compose()
         self._hold()
         return outgoing
@@ -265,8 +286,8 @@ class Group:
     def introduce_now(self, name: str, read_cap: bytes) -> Outgoing:
         """Commit the induction under way: the ``Introduction`` of the
         member read by ``read_cap``, to send."""
-        message, pending = self._introduction(name, read_cap)
-        return self._stage(message, pending)
+        self.allocates = False
+        return self._stage(*self._introduction(name, read_cap))
 
     def cancel_induction(self) -> None:
         self._release()
@@ -319,7 +340,8 @@ class Group:
                 self.ledger.hear(acked, value, sender)
         if message.content is None:
             return []
-        self.received[sender, index] = self.epoch
+        if self.policy.keep_received is not None:
+            self.received[sender, index] = self.epoch
         return [Deliver(sender, index, message.content)]
 
     def _introduced(self, introducer: Key, index: bytes, introduction: Introduction) -> None:
@@ -358,6 +380,12 @@ class Group:
 
     # Writing.
 
+    def membership(self, leaving: Key | None = None) -> bytes:
+        """Our view of the group, as a message we make ourselves says it:
+        ourselves and every member we read, but for ``leaving``."""
+        keys = [self.me, *self.readers]
+        return membership_hash(key for key in keys if key != leaving)
+
     def _numbered(self, member: Key) -> bool:
         """Whether ``member`` is in our roster, or will be once what we have
         composed is written."""
@@ -377,25 +405,40 @@ class Group:
     def _owes_control(self) -> bool:
         if self.ledger.holding:
             return False
-        return self.introduced_at is not None or any(
-            at in self.rosters.introductions for at in self.unnumbered
-        )
+        return self.introduced_at is not None or bool(self._numberable())
+
+    def _numberable(self) -> list[tuple[At, Key]]:
+        """Whom a control message would number now: each member whose
+        ``Introduction`` we have read, while our roster has room, once per
+        key prefix, so that the ``Numbers`` field can name each. One whose
+        prefix is taken waits for the next control message."""
+        out: list[tuple[At, Key]] = []
+        prefixes: set[bytes] = set()
+        for at in self.unnumbered:
+            new = self.rosters.introductions.get(at)
+            if new is None or self._size() + len(out) >= ROSTER_MAX:
+                continue
+            prefix = prefix_of(new)
+            if len(prefix) == PREFIX_SIZE and prefix not in prefixes:
+                prefixes.add(prefix)
+                out.append((at, new))
+        return out
 
     def _control(self) -> tuple[Message, Pending]:
-        """Number every member whose ``Introduction`` we have read, and say
-        where we were introduced."""
+        """Number whom :meth:`_numberable` names, and say where we were
+        introduced."""
         numbers: list[tuple[int, bytes | None]] = []
         assigned: list[tuple[int, At | None]] = []
         size = self._size()
-        for at in list(self.unnumbered):
-            new = self.rosters.introductions.get(at)
-            if new is None:
-                continue
+        for at, new in self._numberable():
             self.unnumbered.remove(at)
             numbers.append((size, prefix_of(new)))
             assigned.append((size, at))
             size += 1
-        message = Message(numbers=tuple(numbers), introduced_at=self.introduced_at)
+        message = Message(
+            numbers=tuple(numbers), introduced_at=self.introduced_at,
+            membership_hash=self.membership(),
+        )
         self.introduced_at = None
         return message, Pending(numbers=tuple(assigned), control=True)
 
@@ -403,14 +446,17 @@ class Group:
         new = key_of(read_cap)
         numbers: Numbers = ()
         assigned: tuple[tuple[int, At | None], ...] = ()
-        if not self._numbered(new):
+        if not self._numbered(new) and self.room:
             size = self._size()
             numbers = ((size, None),)
             assigned = ((size, None),)
         if new not in self.readers:
             self._follow(read_cap, read_cap[KEY_SIZE:])
         self._release()
-        message = Message(introduction=Introduction(name, read_cap), numbers=numbers)
+        message = Message(
+            introduction=Introduction(name, read_cap), numbers=numbers,
+            membership_hash=self.membership(leaving=new),
+        )
         return message, Pending(numbers=assigned, introduced=new, control=True)
 
     def _with_acks(self, message: Message, pending: Pending) -> Message:
@@ -425,7 +471,8 @@ class Group:
                 pending.acks[reader.stream] = (self.ledger.published.get(reader.stream), owed)
                 self.ledger.publish(reader.stream, owed)
         return Message(
-            message.content, message.introduction, message.numbers, message.introduced_at, acks
+            message.content, message.introduction, message.numbers, message.introduced_at, acks,
+            message.membership_hash,
         )
 
     def _stage(self, message: Message, pending: Pending) -> Outgoing:
@@ -436,7 +483,7 @@ class Group:
     def _write(self, outgoing: Outgoing) -> list[Effect]:
         index = self.pool.pop(0)
         plaintext = self.codec.encode(outgoing.message)
-        self.written(outgoing.token, index, plaintext)
+        self._written(outgoing.token, index, plaintext)
         return [WriteBox(index, plaintext)]
 
     def _progress(self) -> list[Effect]:
@@ -448,6 +495,7 @@ class Group:
         if (
             self.ledger.induction is Induction.INDUCTING
             and self.ledger.commit
+            and self.allocates
             and self.pool
         ):
             effects += self._commit()
@@ -460,13 +508,13 @@ class Group:
 
     def _flush(self) -> list[Effect]:
         effects: list[Effect] = []
-        while self.pool and (self._owes_control() or self.outbox):
+        while self.allocates and self.pool and (self._owes_control() or self.outbox):
             if self._owes_control():
                 message, pending = self._control()
             else:
                 message, pending = Message(content=self.outbox.pop(0)), Pending()
             effects += self._write(self._stage(self._with_acks(message, pending), pending))
-        if len(self.pool) < 2 and not self.deriving:
+        if self.allocates and len(self.pool) < 2 and not self.deriving:
             self.deriving = True
             effects.append(DeriveIndexes(self.me, self.tip, POOL))
         return effects
@@ -503,7 +551,7 @@ class Group:
         assert self.ledger.invitee is not None
         name, read_cap = self.ledger.invitee
         reply = self.reply(self.pool[0])
-        effects = self._write(self.introduce_now(name, read_cap))
+        effects = self._write(self._stage(*self._introduction(name, read_cap)))
         return effects + [SendJoinReply(read_cap, reply)] + self._flush()
 
     def reply(self, own_start: bytes) -> JoinReply:
@@ -560,7 +608,9 @@ class Group:
         self.sent.retain(epoch, self.policy, self._everyone_acked)
         effects: list[Effect] = []
         keep = self.policy.keep_received
-        if keep is not None:
+        if keep is None:
+            self.received.clear()
+        else:
             for (sender, index), received in list(self.received.items()):
                 if epoch - received >= keep:
                     del self.received[sender, index]

@@ -11,6 +11,7 @@ PREFIX = "pref."
 
 KNOWN_KEYS: "dict[str, type]" = {
     "theme.mode": str,
+    "wire_version": int,
 }
 
 
