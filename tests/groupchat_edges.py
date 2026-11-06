@@ -1,4 +1,4 @@
-"""Members driven past what the scenarios reach, recorded for CryptWalker's
+"""Members driven past what the scenarios reach, recorded for Cryptlib's
 replay as ``edge-*.jsonl``: each function here drives one member through a
 case the scenario language cannot set up, and returns it for its test to
 check."""

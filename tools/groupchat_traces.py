@@ -1,5 +1,5 @@
-"""Record traces of the group chat simulator for CryptWalker's replay
-(``lake exe CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay``): every scenario under
+"""Record traces of the group chat simulator for Cryptlib's replay
+(``lake exe Cryptlib.Protocols.GroupComm.GroupChatKatzenqt1.replay``): every scenario under
 ``tests/data/groupchat``, the members ``tests/groupchat_edges.py`` drives
 past what a scenario reaches, a fixed set of the stateful test's random runs,
 and a group chat driven through the app's own adapter (``acks``), as
@@ -8,7 +8,7 @@ and a group chat driven through the app's own adapter (``acks``), as
     python tools/groupchat_traces.py OUT_DIR [EXAMPLES]
 
 EXAMPLES is the number of random runs of each stateful machine, 50 by
-default; 0 records the scenarios alone, as CryptWalker keeps them.
+default; 0 records the scenarios alone, as Cryptlib keeps them.
 """
 
 from __future__ import annotations

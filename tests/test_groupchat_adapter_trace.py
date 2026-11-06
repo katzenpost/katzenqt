@@ -1,6 +1,6 @@
 """A group chat driven through ``acks`` and ``network``, as the app drives
 it, with real BACAP indexes, recording every call made on its state
-machine for CryptWalker's replay of the Lean member."""
+machine for Cryptlib's replay of the Lean member."""
 
 from __future__ import annotations
 
@@ -145,7 +145,7 @@ async def test_no_trace_unless_asked(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.nightly
-@pytest.mark.skipif(not os.environ.get("CRYPTWALKER"), reason="needs a CryptWalker checkout")
+@pytest.mark.skipif(not os.environ.get("CRYPTLIB"), reason="needs a Cryptlib checkout (path in CRYPTLIB)")
 @pytest.mark.asyncio
 async def test_the_lean_member_agrees_with_the_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -153,8 +153,8 @@ async def test_the_lean_member_agrees_with_the_app(
     await run(tmp_path, monkeypatch)
     lake = shutil.which("lake") or str(Path.home() / ".elan" / "bin" / "lake")
     replay = subprocess.run(
-        [lake, "exe", "CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay", str(tmp_path)],
-        cwd=os.environ["CRYPTWALKER"], capture_output=True, text=True,
+        [lake, "exe", "Cryptlib.Protocols.GroupComm.GroupChatKatzenqt1.replay", str(tmp_path)],
+        cwd=os.environ["CRYPTLIB"], capture_output=True, text=True,
     )
     assert replay.returncode == 0, replay.stdout[-4000:]
 

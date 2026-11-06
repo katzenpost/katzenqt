@@ -1,5 +1,5 @@
 """The members ``groupchat_edges`` drives, checked here and recorded for
-CryptWalker's replay."""
+Cryptlib's replay."""
 
 from __future__ import annotations
 
