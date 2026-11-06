@@ -4,7 +4,6 @@ WireKEMScheme = "KYBER768-X25519"
 [Listen]
   [Listen.Unix]
     Address = "@katzenpost"
-    Addresses = ["$XDG_RUNTIME_DIR/katzenpost/kpclientd.sock"]
 
 [Logging]
   Disable = false
@@ -26,10 +25,11 @@ WireKEMScheme = "KYBER768-X25519"
   EnableTimeSync = true
 
 [PinnedGateways]
-
   [[PinnedGateways.Gateways]]
     WireKEMScheme = "KYBER768-X25519"
+    PKISignatureScheme = "Ed25519 Sphincs+"
     Name = "allmixedup"
+    Addresses = ["tcp://65.109.148.215:8443", "tcp://[2a01:4f9:3100:4b60:1010::1]:8433"]
     IdentityKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 NS5KsQ1YX1MRoRv+kBJnGT0O625ijNSp36vw/4u7tvgb/JAGrv1AWvELKJh4gGnW
 Pv8kwhxSbAB+BWQHQCyJ6IW56axDQQGIS168ddtNELje0BYkXbA4Hy0phi6UfCqK
@@ -64,12 +64,11 @@ YkiEtnohKAkYFCwV6lJYK7a4OLCe0sB4/BuZV48UYDTT8SUWjbxhLbo7MNRTO1Ps
 C29RWxbWMyh2lg/zC1BjDQ==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-    PKISignatureScheme = "Ed25519 Sphincs+"
-    Addresses = ["tcp://65.109.148.215:8443", "tcp://[2a01:4f9:3100:4b60:1010::1]:8433"]
-
   [[PinnedGateways.Gateways]]
     WireKEMScheme = "KYBER768-X25519"
+    PKISignatureScheme = "Ed25519 Sphincs+"
     Name = "gnunet"
+    Addresses = ["tcp://193.5.87.219:65534"]
     IdentityKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 nxNe8uGXZxhoIYc6yN9IA30HsKrj36gEhtRqX8CveBlyzd+2yacjJWE5kjqHswRP
 p6eeCEBnunewD4SJxZ0vUKPapQoDREia/hciTjbIgxwB9SF0qJsD+sscihKX4Bai
@@ -104,12 +103,11 @@ XGmXNgzf8LlvlcqGGs9CwJXS0r/4Mr7XkBXx4jJ3QWMtYhF4WudjApo/iwVptkgX
 yOI8nTetqeDu+SnWnhY7eQ==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-    PKISignatureScheme = "Ed25519 Sphincs+"
-    Addresses = ["tcp://193.5.87.219:65534"]
-
   [[PinnedGateways.Gateways]]
     WireKEMScheme = "KYBER768-X25519"
+    PKISignatureScheme = "Ed25519 Sphincs+"
     Name = "haywood"
+    Addresses = ["tcp://80.78.27.165:443", "tcp://[2a0a:3840:8078:27:0:504e:1ba5:1337]:443"]
     IdentityKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 6knlBiD1z67iCHCbdtoRK55pFoXYBqVwsSqPf25FfE4BFKm4TTE07u2MFxcuDgn2
 Ce4op3zubDpj4rjfXifVtq1WyWkWChAWdnsdz1ZQ0mLIIvujbabW/2YX+NqlONW2
@@ -144,12 +142,11 @@ bLoDaT7eyyVwlGMZtjYU2ol1USrLuTseVR3W1WM5qKwgSYl1Gok38BLBYAUN2VxB
 /LBG3CQL6nzCnXJa1EDj9w==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-    PKISignatureScheme = "Ed25519 Sphincs+"
-    Addresses = ["tcp://80.78.27.165:443", "tcp://[2a0a:3840:8078:27:0:504e:1ba5:1337]:443"]
-
   [[PinnedGateways.Gateways]]
     WireKEMScheme = "KYBER768-X25519"
+    PKISignatureScheme = "Ed25519 Sphincs+"
     Name = "waulandgateway"
+    Addresses = ["tcp://185.108.77.114:28182"]
     IdentityKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 T7iz8J/GZSEW/ElzCQc8lxnssdmo7XhdcftRQdb/PBDn3OmZHkYzl4zKKQR3r6MW
 +TwMZbEPeXWWCGGhX0JRakVKnSrdq05bsCP6jSAOk0lmpYiPy1A9seepX9EI16fk
@@ -184,48 +181,6 @@ Rzda5Fm6aAq2s75lIMb6k2ambIrqgHbV1L+b43DzgGklC47m4jXz3hQypkRjd+az
 hLryK+04ZlapmZfnHC9FCg==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-    PKISignatureScheme = "Ed25519 Sphincs+"
-    Addresses = ["tcp://185.108.77.114:28182"]
-
-  [[PinnedGateways.Gateways]]
-    WireKEMScheme = "KYBER768-X25519"
-    Name = "windfallgw"
-    IdentityKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
-Wyyr5BwC3mDLFinozim6EHkBVP6SH+7atnwbTjY/GLVJTG+R2jVHBT61l6so8c9p
-oma6r+eRKxzq+yyS8Timimw2X6HxW7DtwGmdCnWngBImmlF2hH2Ugf8cR08Lcs9h
------END ED25519 SPHINCS+ PUBLIC KEY-----
-"""
-    LinkKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
-uCkyIVjMQsOPAuEYwD1Tdtiz5JBVIrbEd9XyeXV25j4+GHDYAWaViCtvk2j+1TbK
-hiYq7EXvYAUGa2NsB4NwM7gdpzoDWBk1drzqlzbr1UhDlIL77E8Cq4o36npFy131
-qFjwmpUwqmwz2cSg1JVox7MQyiZmMTPumD55uMlXMhWJLIUd0V58JUHsuKOpUmdR
-yZw2XIiXEBJepsJ5g63w1IvdfEOfOFuEeSFQ93J+TGDc5Sozq0S/psX+DM1pm5qk
-60sIBQJ8cA/JA2uE678Hk3AHUJnXTIWJojUzQBlKwzVEKAzK114i8FohmcLLeD6e
-IzOJUci/7LMSOpZ6V7Cs3HakN3Y+ZqjkuVoF2idS28RawFy7uQm7XG+hYEod01np
-pq869xOStGgSGCZRVyVe9EtFcqIQpME6yK5wnDNg7K9PtYcKGToaAlmHCiIpam8d
-NXZkaALMl7468Y/1acEZKlH6KDNV5GvZFsxyY16ees/aW8mX1KIVKlAhm3AW2EjX
-1Rwcurq8lqz3aS8ppQXfzBcTTM4yalUK3MVb8cMP4lpwhR1LMZV2mzFEQ2kErHlt
-EYn4DB0XKnSx1Fdf88Xw2VSoRAzEpGM6R3kDgchM0nYg8G+Aoq++Z4yb8iHEIQNu
-FB9FciZUtHeAipVAhiWNh0eRU82a6SJdK4CwxFf3llpt6zdjFLF0U0Jp+aLfisgX
-vBo7NrX3aAAbq220s05ZCEnTDEjqxx0Ne2pktwf97AzbDJncCkY9GMCDWHAS1rAm
-dW1U2EiG2iAmEMM84EqaCD1VWBgyulaxoR1GYS2cYVrU3CxeuKAHlZnWe7r4K5TQ
-pLBjSc7Upz2bq0tz1xIKhas442hN+E1z95dRtSDPy4zsY3gBxYMMZZBCdXJZpCxc
-RGa7KV/Nu89XYs0OCM89l8+MKSTf3C3jA0QGdDyb5U6kOaGHeiRJaFHlUTXF4Wf2
-1iYJS8yWGEvc5Eo/AYYj837a7Fz3ZTZ7azFbEcaaZXnv1iGzRldhSm6CdJq8CgJv
-ebw+KaHpBpHl4g9CgsYaCDILA88TS4iCd5VSuio+koEiwGlu+WB1MLb713cY8yFi
-4cQfYWFyh8OiCz2KNpEGQV/HoIzayFr7u3eJsqsAqJ/8jI1Dx0D2gV+g9McZISOP
-uzNAglfQ7JjrFEsX+WvCihMvR3mn7J380iBelVPPQX2wyDkrocFm0X6dVTbnK67a
-5a+oWRMrdpda1kQeucqYECjOJggeOsGwVL2eSmrsKAdsux/N2h8FrGxwCCcbYnPl
-+3XmO7uHc34XUk4LCow4ITG02wIPI2QRS6b9gDYudJib8Rth/E2boT8yWCb1S5Af
-aACEI1Q1hE386Y3FwMKmGD1y2ozYxyQStVmN7EMN0zSp624leRfUsmNbtBhxArVH
-tsHjELOf8IAP4kehILGZE8ilJGFw0AbsNLKqtGYuEiJLwUQxmhmjpg9QzFVY1MRx
-yD7BB1vkVmX62RYCTISWcEbshYzjAMKNd4K4fECmlwMWJaVWBHbUIVK8zLq0aK84
-WWno6qlDYjFflGQCyk18JD6oO1aamaDTVrpy27RpBR+ZvLriSS0ijEc2mNt56Dqf
-w2YNHBv4TNsDa6dP6zCZyw==
------END KYBER768-X25519 PUBLIC KEY-----
-"""
-    PKISignatureScheme = "Ed25519 Sphincs+"
-    Addresses = ["tcp://74.50.67.182:30209"]
 
 [SphinxGeometry]
   PacketLength = 3082
@@ -245,17 +200,16 @@ w2YNHBv4TNsDa6dP6zCZyw==
 
 [VotingAuthority]
   [[VotingAuthority.Peers]]
-# annares
 Identifier = "annares"
 PKISignatureScheme = "Ed25519 Sphincs+"
 WireKEMScheme = "KYBER768-X25519"
-Addresses = [ "tcp://192.87.90.45:65534", "tcp://192.87.90.45:1984" ]
+Addresses = ["tcp://192.87.90.45:65534", "tcp://192.87.90.45:1984"]
 IdentityPublicKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 932/liFVC1u+d4EsMY0N9ia7Zyt4UfU6SzR1XgvZ4VfEldjNqXZKECh/QpD6fLcT
 wFaNH6vnHNTVbEJjGaFAKIA9F4Lqmi8Au9yrmvs1Xrp4Tz2otIzo27kGcYHQoHkb
 -----END ED25519 SPHINCS+ PUBLIC KEY-----
 """
-      LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
+LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
 umSA2o/w1ImwZ8xl+2kUMhXP7Axdfem2Y6+kvxzVCTT990l0FSOZMZ7/CoFBlhFP
 R7uZIA3BfBJBVsNbW49RGiNFx7XwQpF29oj+iphZUMqh88s5pyfWwVXj4070KIND
 gzyFVrWREnD5lKJv3MvDogMEZcpCAWEMMscCGaZ5WAwlaSBckFvrmMPDgYeOx882
@@ -284,20 +238,17 @@ XALDMzLzeopylkeR4zWi2LtcZVN3YHw5Ro24JLQ8uQDUHO9NreC4ihvJdsESxLek
 5OMs6+FG76A0Dieln320Jw==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-
   [[VotingAuthority.Peers]]
-# gnunet
 Identifier = "gnunet"
 PKISignatureScheme = "Ed25519 Sphincs+"
 WireKEMScheme = "KYBER768-X25519"
-Addresses = [ "tcp://212.51.151.254:52323" ]
+Addresses = ["tcp://212.51.151.254:52323"]
 IdentityPublicKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 ur8Z6vGOeMEwKONhWL1m0qXW1YEZ1yKXntMXETAwHbnPNsb0RuZBIB+bxOkVjVuQ
 qhy0RofQ/YUKoWXWfPIyZUwuryX5kN0tMlmL7J+tK5FfPgeyPxFkzLAoANehdYQ2
 -----END ED25519 SPHINCS+ PUBLIC KEY-----
 """
-      # from gnunet_auth_id_link_key.pem
-      LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
+LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
 1YJg5adePMACqWyEiZWK0MXQUyzucIr3zcorPson+Uw6VbEzYyM72geUTLpTnCc/
 Ei1IWaPYZF8PSEXakDjI26w/KVaucCB5Cp2HlLx6CjL7nFVQ11E4AS9o8GthNVJC
 QYFLtlOZYVk/UrF+JJyOxiPX52ajeUV9GlsjbECH8lgla5yBujtzcg2WxAlqLCug
@@ -327,7 +278,6 @@ GSB32Wo3TFlRql8bu7vf+6R9y6Jb8LQ+I4jWZKW5iV3IHp4eG/n/rFPBqUfg0uvj
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
   [[VotingAuthority.Peers]]
-# luscus
 Identifier = "luscus"
 PKISignatureScheme = "Ed25519 Sphincs+"
 WireKEMScheme = "KYBER768-X25519"
@@ -337,7 +287,7 @@ WcuY2MH6l9GRQ+7KFou6RbeyVxQpfiCQzf0jhHtAf4hLKiLf3tU59/2/dxGXKuTi
 nbSrDyL1aVctmtOC+5euRCfdN004p8Uv4YlLsIEuImKPbO38WYpx+ja4oF6xJLME
 -----END ED25519 SPHINCS+ PUBLIC KEY-----
 """
-      LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
+LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
 Kg5FB1+YqBNWhIiOBKHVGFZPBGjy8tG9s9rfiEP2KzCJuAOgyAO8Sc/VQRVWaw0M
 xH3oBqRE2GX2Gstdg6MKOZS0psgTt4IY8ym0kApZlSPDNWdIMWiGdy52V4tjij/o
 YxSa1hQrOl066QnMNnGnAZPB4rGvTINzF1MQ4E3AxoR+IbtaArh9G5HqY3e8KLX8
@@ -366,20 +316,17 @@ IUs4bICmwhqQc8ucUKZM+5RRB1KamAwNxpjj43yWtpNqpLV/tlrPLWrd6Rv13dE8
 skcGSJZWLn4Zty4MF473AA==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-
-
   [[VotingAuthority.Peers]]
-# respectmy
 Identifier = "respectmy"
 PKISignatureScheme = "Ed25519 Sphincs+"
 WireKEMScheme = "KYBER768-X25519"
-Addresses = [ "tcp://65.109.148.215:1984","tcp://[2a01:4f9:3100:4b60:1013::1]:1984" ]
-BindAddresses = [ "tcp://10.42.0.13:1984", "tcp://[2a01:4f9:3100:4b60:1013::1]:1984" ]
+Addresses = ["tcp://65.109.148.215:1984", "tcp://[2a01:4f9:3100:4b60:1013::1]:1984"]
+BindAddresses = ["tcp://10.42.0.13:1984", "tcp://[2a01:4f9:3100:4b60:1013::1]:1984"]
 IdentityPublicKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 dOZqjzKOSAVhc8242g0RcnDIEGFHxJuryxfb0FP8790D/C+vRkWN6ym+3qWCnRKI
 3Kzq9r5FKJ4mStpqwqWgu5w3Sc2mfJfDv4FoF8uCaOHWP1290ntg0LxNxowR/XBK
 -----END ED25519 SPHINCS+ PUBLIC KEY-----"""
-      LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
+LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
 a0wQavQiUKsDDAgqddO0L4Vo/0JbAI1E9hXLTfKFKG/B8qNUZJhqsD1u9QlxrJQ/
 2FDGd0P22xJAVCVRUlWz1alfhp7t8juL16IaXFoeV5Fsq2XPRZbampxu9w1baTjp
 DB/v+ECQCc4vusqTMjVNusQXNs9q+aA55SlD1kB5HJijWnkmoiY5Qq1TVpUyyVgf
@@ -407,9 +354,7 @@ kZ25dCYBMBjjrExMYixwakvVoSAgVM1n9c1BC1NA0rMaeDTb0Ci+S1HQI1XKGWFa
 hieM4hmFulJy4lnkS0OFBU3yKx+veCG45AOZUEkuKjG7cuC54SP+/7JseWGEOV+M
 rZsqGeBW2t/6Hrmd2PADng==
 -----END KYBER768-X25519 PUBLIC KEY-----"""
-
   [[VotingAuthority.Peers]]
-# wauland
 Identifier = "wauland"
 PKISignatureScheme = "Ed25519 Sphincs+"
 WireKEMScheme = "KYBER768-X25519"
@@ -449,9 +394,7 @@ OXJ1BY0kOVIXFXmFVCXYBHEMG5ExmKcFRXl8fAHt243yUEwNqbhL+Dm13KBG5m12
 xdjIiFZLivym1DKLBX6A2w==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-
   [[VotingAuthority.Peers]]
-# windfall
 Identifier = "windfall"
 PKISignatureScheme = "Ed25519 Sphincs+"
 WireKEMScheme = "KYBER768-X25519"
@@ -461,7 +404,7 @@ IdentityPublicKey = """-----BEGIN ED25519 SPHINCS+ PUBLIC KEY-----
 dfvVb+yOmo+pnbnEeWuCecXFplODH92p83pp+nzmMadGUprzadL9smufJlb7+GkD
 -----END ED25519 SPHINCS+ PUBLIC KEY-----
 """
-      LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
+LinkPublicKey = """-----BEGIN KYBER768-X25519 PUBLIC KEY-----
 MaoZ3OQXJXvoWu9v9Yq5aq+adWwzfAm8FYYXM0olCCXxTKnR/FPRoJKEGTtOU7VA
 VqgtGcFyFoxctB82pAapdjcn1FHxXMjUyMWUh4810MRiAVgU9F3/BKuv/HVholmX
 KLlRegvlhcf+VQlsAVDbXA3d87nHbG7gRqEARkRniTh4FlAok0eecZPmFkbt5EgT
@@ -490,4 +433,3 @@ EQQMNqHcB8Z61ya7aG6K9wHLlnNpF0ZPV8n4k0Sp1QmJGJYt7/HMTAIK/ZHtHoQf
 vkdQm1uuoKMh1qC6oRRsgQ==
 -----END KYBER768-X25519 PUBLIC KEY-----
 """
-
