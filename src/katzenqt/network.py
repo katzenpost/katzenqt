@@ -2596,7 +2596,10 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
             )
 
     try:
-      async with persistent.conversation_log_order_lock(notify_conv_id):
+      async with (
+          persistent.conversation_log_order_lock(notify_conv_id),
+          acks.once(sess) as save_group_states,
+      ):
         if assembled is not None and assembled[0] == "F":
             _, chunks, chain, gcm = assembled
             if cp.name.startswith(_SUBSTREAM_NAME_PREFIX) and parent_peer is None:
@@ -2741,6 +2744,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                 substream=chunk_body[-136:] if chunk_type == b"I" else None,
             )
 
+        await save_group_states()
         await sess.delete(mw)
         bacap_uuid = mw.bacap_stream
         await sess.commit()
