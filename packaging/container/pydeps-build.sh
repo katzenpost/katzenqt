@@ -47,7 +47,7 @@ build_deb() {
 Package: $debname
 Version: $ver
 Architecture: $arch
-Maintainer: Katzenpost <packages@katzenpost.network>
+Maintainer: David Stainton <dstainton415@gmail.com>
 Depends: $depends
 Section: python
 Priority: optional

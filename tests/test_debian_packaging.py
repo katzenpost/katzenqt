@@ -12,7 +12,7 @@ TEST_SH = ROOT / "packaging" / "debian" / "test.sh"
 def test_control_is_project_authored_with_apt_deps() -> None:
     control = (DEBIAN / "control").read_text()
     assert "Architecture: all" in control
-    assert "Maintainer: Katzenpost" in control
+    assert "Maintainer: David Stainton <dstainton415@gmail.com>" in control
     assert "jacob" not in control.lower()
     assert "python3-pyside6" in control
     assert "python3-nacl" in control
