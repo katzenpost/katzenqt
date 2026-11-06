@@ -7,7 +7,8 @@ network and no database.
 """
 from __future__ import annotations
 
-from ..models import GROUP_CHAT_VERSION, GroupChatMessage, GroupChatTally, GroupChatTypeEnum
+from .. import models
+from ..models import GroupChatMessage, GroupChatTally, GroupChatTypeEnum
 
 # A tally message is not a membership event, so it carries no membership hash;
 # the field is required to be 32 bytes, so we supply a fixed zero block.
@@ -27,7 +28,7 @@ def _message(kind: GroupChatTypeEnum, tally: GroupChatTally) -> GroupChatMessage
     True
     """
     return GroupChatMessage(
-        version=GROUP_CHAT_VERSION, membership_hash=_NO_MEMBERSHIP, msg_type=kind, tally=tally,
+        version=models.WIRE_VERSION, membership_hash=_NO_MEMBERSHIP, msg_type=kind, tally=tally,
     )
 
 

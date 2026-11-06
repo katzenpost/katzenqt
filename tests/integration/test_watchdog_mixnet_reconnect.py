@@ -7,7 +7,7 @@ test_watchdog_reconnect.py bounces kpclientd itself (a full process
 restart) and found empirically that on_connection_status never fires for
 that: the thin_client library reconnects the local socket below the
 callback layer, with no disconnected/reconnected transition surfaced to
-the app. This test instead pauses the GATEWAY container -- kpclientd
+the app. This test instead pauses every GATEWAY container -- kpclientd
 keeps running and the client's local socket to it never drops, but the
 daemon loses its route into the mixnet, which is exactly what the
 pre-existing "daemon reports disconnected from mixnet; ARQ rides out and
@@ -15,12 +15,13 @@ retries" log line (on_connection_status, unchanged by this branch) is
 about.
 
 Touches only containers on the SAME compose network as the kpclientd
-this session is configured against (see find_same_network_container),
+this session is configured against (see find_gateways),
 so it can never affect another session's mixnet even when several are
 running on this host. Skipped unless KATZENQT_DOCKER_INTEGRATION=1.
 """
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -30,10 +31,14 @@ from tests.integration._outcomes import check_roles
 
 from tests.integration._bounce_helpers import (
     bootstrap_voucher, spawn_role, run_role,
-    find_kpclientd_container, find_same_network_container, podman,
-    PhaseStopwatch,
+    find_kpclientd_container, find_gateways, podman,
+    PhaseStopwatch, epoch_duration_s,
 )
 from tests.integration._bounce_helpers import budget_s
+
+# As in test_watchdog_epoch_rollover.py: "(from None)" is the first
+# document after connect, not an advance.
+_EPOCH_ADVANCE_RE = re.compile(r"PKI epoch advanced to \d+ \(from \d+\)")
 
 
 def _poll_for(path: Path, needle: str, deadline_s: float) -> bool:
@@ -60,8 +65,27 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
     bob_state = tmp_path_factory.mktemp("bob") / "state"
     log_dir = tmp_path_factory.mktemp("mixnet_reconnect_logs")
     bootstrap_voucher(alice_state, bob_state)
-    kpclientd = find_kpclientd_container()
-    gateway = find_same_network_container(kpclientd, "gateway1")
+    gateways = find_gateways(find_kpclientd_container())
+
+    # An epoch rollover during Alice's read would decide its race before
+    # the reconnect does, so start the read just after one: Bob's client
+    # watches for an advance, and Alice's read then has most of an epoch.
+    watch_err = log_dir / "watch.err"
+    watch_proc = spawn_role(
+        bob_state, "chat-session", "demo", "READ:watch:600",
+        stdout_path=log_dir / "watch.out", stderr_path=watch_err,
+    )
+    try:
+        deadline = time.time() + 3 * epoch_duration_s() + 30.0
+        while not _EPOCH_ADVANCE_RE.search(watch_err.read_text()):
+            assert time.time() < deadline, (
+                f"PKI epoch did not advance within "
+                f"{3 * epoch_duration_s() + 30.0:.0f}s\n{watch_err.read_text()[-4000:]}"
+            )
+            time.sleep(1.0)
+    finally:
+        watch_proc.kill()
+        watch_proc.wait()
 
     alice_out = log_dir / "alice.out"
     alice_err = log_dir / "alice.err"
@@ -71,7 +95,7 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
         stdout_path=alice_out, stderr_path=alice_err,
     )
 
-    gateway_paused = False
+    gateways_paused = False
     tw = PhaseStopwatch("mixnet_reconnect")
     try:
         # Give Alice's read time to actually reach the daemon before we
@@ -79,15 +103,15 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
         time.sleep(10.0)
         tw.mark("alice_read_registered")
 
-        podman(["pause", gateway])
-        gateway_paused = True
+        podman(["pause", *gateways])
+        gateways_paused = True
         saw_disconnect = _poll_for(
             alice_err, "reports disconnected from mixnet", 60.0,
         )
         tw.mark("disconnect_seen")
 
-        podman(["unpause", gateway])
-        gateway_paused = False
+        podman(["unpause", *gateways])
+        gateways_paused = False
         saw_reconnect = _poll_for(
             alice_err, "reports reconnected to mixnet", 90.0,
         )
@@ -107,9 +131,9 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
         alice_proc.wait(timeout=budget_s(630.0))
     except Exception:
         alice_proc.kill()
-        if gateway_paused:
+        if gateways_paused:
             try:
-                podman(["unpause", gateway])
+                podman(["unpause", *gateways])
             except Exception:
                 pass
         raise
@@ -124,11 +148,11 @@ def test_read_recovers_promptly_after_mixnet_reconnect(
 
     assert saw_disconnect, (
         "on_connection_status never reported the mixnet disconnect within 60s "
-        f"of pausing the gateway\n{alice_err.read_text()[-6000:]}"
+        f"of pausing the gateways\n{alice_err.read_text()[-6000:]}"
     )
     assert saw_reconnect, (
         "on_connection_status never reported the mixnet reconnect within 90s "
-        f"of unpausing the gateway\n{alice_err.read_text()[-6000:]}"
+        f"of unpausing the gateways\n{alice_err.read_text()[-6000:]}"
     )
     check_roles([(alice_proc.returncode, alice_err)])
     assert alice_proc.returncode == 0, (

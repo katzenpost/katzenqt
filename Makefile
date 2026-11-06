@@ -183,8 +183,7 @@ $(STAMP_UV): system-setup $(PYPROJECT) $(UV_LOCK)
 	@if [[ ! -f "$(VENV)/pyvenv.cfg" ]]; then \
 		$(UV) venv "$(VENV)"; \
 	fi
-	@$(UV) pip install . >/dev/null 2>&1
-	@$(UV) pip install -U pytest >/dev/null 2>&1
+	@$(UV) sync --locked >/dev/null 2>&1
 	@touch $(BACKEND_UV)
 	@touch $(STAMP_UV)
 
