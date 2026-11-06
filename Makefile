@@ -1,4 +1,4 @@
-SHELL := /bin/bash
+SHELL := $(firstword $(wildcard /bin/bash) $(shell command -v bash))
 
 include $(dir $(lastword $(MAKEFILE_LIST)))ci.mk
 .ONESHELL:
@@ -122,9 +122,13 @@ help:
 
 system-setup: $(SYSTEM_STAMP)
 
+# Inside shell.nix (nix-shell or nix develop) the shell already
+# provides the system packages and uv, so there is nothing to install.
 $(SYSTEM_STAMP):
-	@$(MAKE) install-debian-packages
-	@$(MAKE) install-uv
+	@if [[ -z "$${IN_NIX_SHELL:-}" ]]; then \
+		$(MAKE) install-debian-packages; \
+		$(MAKE) install-uv; \
+	fi
 	@touch $(SYSTEM_STAMP)
 
 clean-system-stamp:
@@ -153,7 +157,7 @@ install-uv:
 	@pipx install -f uv >/dev/null
 
 deps-audio:
-	@$(MAKE) apt-install APT_PACKAGES="libasound2-dev cargo"
+	@[[ -n "$${IN_NIX_SHELL:-}" ]] || $(MAKE) apt-install APT_PACKAGES="libasound2-dev cargo"
 
 setup:
 	@$(MAKE) setup-status
