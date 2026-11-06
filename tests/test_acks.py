@@ -8,6 +8,7 @@ import hashlib
 import secrets
 import time
 import uuid
+from collections import Counter
 from typing import TYPE_CHECKING, Any, cast
 
 import cbor2
@@ -24,6 +25,7 @@ from katzenqt import (
     removal,
     voucher,
 )
+from katzenqt.groupchat import numbering
 from katzenqt.groupchat import state as group_state
 from katzenqt.groupchat import wire
 from katzenqt.groupchat.group import Group
@@ -637,6 +639,24 @@ async def test_an_induction_left_by_a_process_that_has_gone_is_released() -> Non
 
 
 @pytest.mark.asyncio
+async def test_no_induction_starts_once_the_roster_is_full() -> None:
+    chat, _ = await _with_bob()
+    group = await chat.group()
+    for index in range(wire.ROSTER_MAX):
+        group.rosters.number(group.me, index, numbering.Entry(b"retired" + bytes([index])))
+    async with persistent.asession() as sess:
+        row = await sess.get(persistent.GroupState, chat.conversation_id)
+        assert row is not None
+        row.state = group_state.dump(group)
+        sess.add(row)
+        await sess.commit()
+    with pytest.raises(acks.RosterFull):
+        async with acks.held_back(chat.conversation_id):
+            pytest.fail("inducted into a full roster")
+    assert not (await chat.group()).ledger.holding
+
+
+@pytest.mark.asyncio
 async def test_owed_numbering_goes_out_before_an_induction() -> None:
     chat, bob = await _with_bob()
     await chat.receive("bob", _introduction("carol", secrets.token_bytes(136)), 4)
@@ -644,6 +664,19 @@ async def test_owed_numbering_goes_out_before_an_induction() -> None:
         async with persistent.asession() as sess:
             (queued,) = (await sess.exec(select(persistent.PlaintextWAL))).all()
         assert _sent(queued).numbers is not None
+
+
+@pytest.mark.asyncio
+async def test_a_control_message_carries_our_view_of_the_group() -> None:
+    chat, bob = await _with_bob()
+    await chat.receive("bob", _introduction("carol", secrets.token_bytes(136)), 4)
+    (control, _) = await chat.queue(_text())
+    async with persistent.asession() as sess:
+        conv = await sess.get(persistent.Conversation, chat.conversation_id)
+        assert conv is not None
+        ours = await conversation_handlers.local_membership_hash(sess, conv)
+    assert _sent(control).numbers is not None
+    assert _sent(control).membership_hash == ours
 
 
 @pytest.mark.asyncio
@@ -909,6 +942,8 @@ def test_the_codec_reads_what_it_writes() -> None:
         numbers=((3, None),),
     )
     assert acks.CODEC.decode(acks.CODEC.encode(intro)) == intro
+    stamped = wire.Message(numbers=((2, b"\x07" * 8),), membership_hash=bytes(range(32)))
+    assert acks.CODEC.decode(acks.CODEC.encode(stamped)) == stamped
     text = _text().to_cbor()
     decoded = acks.CODEC.decode(acks.CODEC.encode(wire.Message(content=text)))
     assert decoded is not None and decoded.content is not None
@@ -987,6 +1022,38 @@ async def test_a_box_read_through_the_network_is_told_in_order(
         assert stored is not None
     assert stored.group.readers[stream].last == setup["first_message_index"]
     assert stored.held == []
+
+
+@pytest.mark.asyncio
+async def test_a_box_read_through_the_network_loads_and_saves_its_state_once(
+    fake_thinclient: FakeThinClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = await _set_up_read_flow(fake_thinclient)
+    async with persistent.asession() as sess:
+        rcw = await sess.get(persistent.ReadCapWAL, setup["bacap_stream"])
+        assert rcw is not None and rcw.read_cap is not None
+        peer = (await sess.exec(select(persistent.ConversationPeer).where(
+            persistent.ConversationPeer.read_cap_id == rcw.id
+        ))).one()
+        own = secrets.token_bytes(136)
+        group = Group.found(own, [own, rcw.read_cap])
+        sess.add(persistent.GroupState(
+            conversation_id=peer.conversation.id, state=group_state.dump(group),
+        ))
+        await sess.commit()
+        mw = await sess.get(persistent.MixWAL, setup["mw_id"])
+        assert mw is not None
+    calls: Counter[str] = Counter()
+    for name in ("load", "dump"):
+        def counted(*args: Any, _f: Any = getattr(group_state, name), _n: str = name) -> Any:
+            calls[_n] += 1
+            return _f(*args)
+        monkeypatch.setattr(group_state, name, counted)
+    await network.drain_mixwal_read_single(
+        connection=fake_thinclient, rcw_read_cap=setup["read_cap"], mw=mw,
+        draining_right_now={setup["bacap_stream"]},
+    )
+    assert calls == {"load": 1, "dump": 1}
 
 
 def _redraws() -> list[tuple[int, bool]]:

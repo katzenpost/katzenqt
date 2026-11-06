@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from katzenpost_thinclient import VOUCHER_FORM_COMPACT, VOUCHER_FORM_LONG
 from sqlmodel import select
 
 from katzenqt import models, persistent, voucher
@@ -52,7 +53,7 @@ class _Opened:
 class MintingThinClient(FakeThinClient):
     def __init__(self) -> None:
         super().__init__()
-        self.mint_calls: "list[tuple[bytes, str]]" = []
+        self.mint_calls: "list[tuple[bytes, str, int]]" = []
         self.payload = b"joiner voucher payload"
 
     async def voucher_mint(
@@ -60,8 +61,9 @@ class MintingThinClient(FakeThinClient):
         *,
         message_write_cap: bytes,
         display_name: str,
+        form: int,
     ) -> _Mint:
-        self.mint_calls.append((message_write_cap, display_name))
+        self.mint_calls.append((message_write_cap, display_name, form))
         keypair = await self.new_keypair(seed=bytes([0x11]) * 32)
         return _Mint(
             voucher=bytes([0x22]) * 32,
@@ -191,6 +193,18 @@ async def test_minting_refuses_a_conversation_without_a_write_cap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wire_version_3_mints_a_long_voucher(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(models, "WIRE_VERSION", 3)
+    client = MintingThinClient()
+    keypair = await client.new_keypair(seed=bytes([0x44]) * 32)
+    conversation_id = await _make_conversation(write_cap=keypair.write_cap)
+
+    await voucher.mint_and_publish(client, conversation_id, "me")
+
+    assert client.mint_calls == [(keypair.write_cap, "me", VOUCHER_FORM_LONG)]
+
+
+@pytest.mark.asyncio
 async def test_minting_publishes_box0_and_records_the_box1_index() -> None:
     client = MintingThinClient()
     keypair = await client.new_keypair(seed=bytes([0x44]) * 32)
@@ -199,7 +213,7 @@ async def test_minting_publishes_box0_and_records_the_box1_index() -> None:
     token = await voucher.mint_and_publish(client, conversation_id, "me")
 
     assert token == bytes([0x22]) * 32
-    assert client.mint_calls == [(keypair.write_cap, "me")]
+    assert client.mint_calls == [(keypair.write_cap, "me", VOUCHER_FORM_COMPACT)]
 
     async with persistent.asession() as sess:
         pending = (await sess.exec(select(persistent.PendingVoucher))).one()

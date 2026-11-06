@@ -22,6 +22,7 @@ make run
 ```
 
 If `sudo` refuses you, run `su -c 'apt install -y git make'` instead.
+On NixOS, or with Nix on any Linux, see [Building with Nix](docs/building.md#nix).
 
 katzenqt needs kpclientd running. `make deps` installs the system packages and the
 Python venv, runs the tests, builds kpclientd from a pinned

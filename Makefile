@@ -1,4 +1,4 @@
-SHELL := /bin/bash
+SHELL := $(firstword $(wildcard /bin/bash) $(shell command -v bash))
 
 include $(dir $(lastword $(MAKEFILE_LIST)))ci.mk
 .ONESHELL:
@@ -122,9 +122,13 @@ help:
 
 system-setup: $(SYSTEM_STAMP)
 
+# Inside shell.nix (nix-shell or nix develop) the shell already
+# provides the system packages and uv, so there is nothing to install.
 $(SYSTEM_STAMP):
-	@$(MAKE) install-debian-packages
-	@$(MAKE) install-uv
+	@if [[ -z "$${IN_NIX_SHELL:-}" ]]; then \
+		$(MAKE) install-debian-packages; \
+		$(MAKE) install-uv; \
+	fi
 	@touch $(SYSTEM_STAMP)
 
 clean-system-stamp:
@@ -153,7 +157,7 @@ install-uv:
 	@pipx install -f uv >/dev/null
 
 deps-audio:
-	@$(MAKE) apt-install APT_PACKAGES="libasound2-dev cargo"
+	@[[ -n "$${IN_NIX_SHELL:-}" ]] || $(MAKE) apt-install APT_PACKAGES="libasound2-dev cargo"
 
 setup:
 	@$(MAKE) setup-status
@@ -183,8 +187,7 @@ $(STAMP_UV): system-setup $(PYPROJECT) $(UV_LOCK)
 	@if [[ ! -f "$(VENV)/pyvenv.cfg" ]]; then \
 		$(UV) venv "$(VENV)"; \
 	fi
-	@$(UV) pip install . >/dev/null 2>&1
-	@$(UV) pip install -U pytest >/dev/null 2>&1
+	@$(UV) sync --locked >/dev/null 2>&1
 	@touch $(BACKEND_UV)
 	@touch $(STAMP_UV)
 
@@ -375,7 +378,7 @@ run-docker:
 		KATZENQT_THINCLIENT_CONFIG=$(CURDIR)/config/thinclient.docker.toml \
 		$(MAKE) run
 
-kpclientd: $(KATZENPOST_DIR)
+$(KPCLIENTD_BIN): | $(KATZENPOST_DIR)
 	@set +e; \
 	( cd $(KATZENPOST_DIR)/cmd/kpclientd/ && go build -v ) ; \
 	rc=$$?; \

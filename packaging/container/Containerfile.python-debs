@@ -8,7 +8,7 @@ RUN apt update \
 		build-essential cargo rustc git ca-certificates unzip dpkg-dev \
 		libasound2-dev pkg-config debhelper dh-golang dh-python \
 		golang-any pybuild-plugin-pyproject flit fakeroot clang \
-		python3-all-dev python3-build python3-setuptools python3-stdeb \
+		python3-all-dev python3-build python3-setuptools \
 		python3-wheel \
 	&& rm -rf /var/lib/apt/lists/*
 

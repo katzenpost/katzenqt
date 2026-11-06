@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import json
 import secrets
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -14,7 +17,9 @@ from katzenpost_thinclient.pigeonhole import (
 )
 from sqlmodel import col, select
 
-from katzenqt import persistent, voucher
+import cbor2
+
+from katzenqt import models, persistent, voucher
 from tests.fakes.thinclient import FakeThinClient
 
 if TYPE_CHECKING:
@@ -47,8 +52,14 @@ def _fresh_write_cap() -> bytes:
 
 
 class VoucherDaemon(FakeThinClient):
-    def __init__(self) -> None:
+    """Mints the compact payload, a CBOR array whose reply is framed over
+    boxes 1 on, unless ``compact`` is False: then the signed map, whose
+    sealed reply is a CBOR map alone in box 1."""
+
+    def __init__(self, compact: bool = True) -> None:
         super().__init__()
+        self.compact = compact
+        self.who_replies: list[bytes] = []
         self.streams: dict[bytes, tuple[bytes, bytes, bytes]] = {}
         self.mints: list[VoucherMintResult] = []
         self.tombstoned: set[tuple[bytes, bytes]] = set()
@@ -57,11 +68,15 @@ class VoucherDaemon(FakeThinClient):
         self,
         message_write_cap: bytes,
         display_name: str,
+        form: int = 1,
     ) -> VoucherMintResult:
         voucher_write_cap = _fresh_write_cap()
         voucher_read_cap = voucher_write_cap[32:]
         secret = secrets.token_bytes(32)
-        payload = voucher_read_cap + _pubkey(secret) + display_name.encode()
+        payload = (
+            (b"\x84" if self.compact else b"\xa2")
+            + voucher_read_cap + _pubkey(secret) + display_name.encode()
+        )
         token = hashlib.blake2b(payload, digest_size=32).digest()
         self.streams[token] = (
             voucher_write_cap,
@@ -100,15 +115,17 @@ class VoucherDaemon(FakeThinClient):
         ):
             raise ValueError("voucher payload does not hash to the voucher")
         write_cap, read_cap, joiner_write_cap = self.streams[voucher]
+        self.who_replies.append(who_reply)
         salt = secrets.token_bytes(32)
-        display_name = voucher_payload[_READ_CAP_LEN + 32 :].decode()
-        pubkey = voucher_payload[_READ_CAP_LEN : _READ_CAP_LEN + 32]
+        display_name = voucher_payload[1 + _READ_CAP_LEN + 32 :].decode()
+        pubkey = voucher_payload[1 + _READ_CAP_LEN : 1 + _READ_CAP_LEN + 32]
         return VoucherInductResult(
             display_name=display_name,
             mutated_message_read_cap=_mutate_read_cap(
                 joiner_write_cap[32:], salt
             ),
-            sealed_reply=pubkey + salt + who_reply,
+            sealed_reply=(b"" if self.compact else b"\xa3")
+            + pubkey + salt + who_reply,
             voucher_write_cap=write_cap,
             voucher_read_cap=read_cap,
             salt=salt,
@@ -120,6 +137,8 @@ class VoucherDaemon(FakeThinClient):
         sealed_reply: bytes,
         message_write_cap: bytes,
     ) -> VoucherOpenResult:
+        if not self.compact:
+            sealed_reply = sealed_reply[1:]
         if sealed_reply[:32] != _pubkey(voucher_secret_key):
             raise ValueError("sealed reply is not for this voucher key")
         salt = sealed_reply[32:64]
@@ -524,3 +543,102 @@ async def test_the_voucher_payload_is_tombstoned_after_induction(
     mint = daemon.mints[-1]
     index0 = mint.voucher_write_cap[-_INDEX:]
     assert (mint.voucher_read_cap, index0) in daemon.tombstoned
+
+
+def _voucher_boxes(daemon: VoucherDaemon) -> list[bytes]:
+    """The boxes written on the last minted voucher stream, box 0 first."""
+    mint = daemon.mints[-1]
+    index = mint.voucher_write_cap[-_INDEX:]
+    boxes = []
+    while (mint.voucher_read_cap, index) in daemon.box_store:
+        boxes.append(daemon.box_store[(mint.voucher_read_cap, index)])
+        index = daemon._bump_index(index)
+    return boxes
+
+
+@pytest.mark.asyncio
+async def test_a_compact_payload_is_answered_framed_over_boxes_one_on(
+    daemon: VoucherDaemon,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(models, "_box_plaintext_length", 50)
+    peers = await _grow_star(daemon, 3)
+    assert daemon.who_replies[-1][0] >> 5 == 4
+    reply = _voucher_boxes(daemon)[1:]
+    assert len(reply) > 2
+    assert all(len(box) <= 50 for box in reply)
+    assert [box[:1] for box in reply] == [b"C"] * (len(reply) - 1) + [b"F"]
+    assert b"".join(box[1:] for box in reply)[64:] == daemon.who_replies[-1]
+    assert dict(await peers[2].members())[peers[0].name] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_map_payload_is_answered_unframed_in_box_one() -> None:
+    daemon = VoucherDaemon(compact=False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(voucher, "check_for_new", _write_queued)
+        await _grow_star(daemon, 3)
+    assert isinstance(cbor2.loads(daemon.who_replies[-1]), dict)
+    reply = _voucher_boxes(daemon)[1:]
+    assert len(reply) == 1
+    assert reply[0][:1] == b"\xa3"
+    assert reply[0][65:] == daemon.who_replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_box_that_is_not_framed_fails_the_join(
+    daemon: VoucherDaemon,
+) -> None:
+    joiner = Peer("joiner", daemon)
+    await joiner.create_view()
+    await voucher.mint_and_publish(
+        joiner.connection, joiner.conversation_id, joiner.name,
+    )
+    mint = daemon.mints[-1]
+    box1 = daemon._bump_index(mint.voucher_write_cap[-_INDEX:])
+    daemon.box_store[(mint.voucher_read_cap, box1)] = b"Cpiece"
+    daemon.box_store[(mint.voucher_read_cap, daemon._bump_index(box1))] = b"Xjunk"
+    with pytest.raises(ValueError, match="unknown chunk type"):
+        await voucher.await_and_open(joiner.connection, joiner.conversation_id)
+
+
+_VOUCHER_VECTORS = json.loads(
+    (Path(__file__).parent / "data" / "voucher_vectors_v2.json").read_text()
+)
+
+
+class _VectorDaemon(VoucherDaemon):
+    """Hands out hpqc's compact sealed reply, so what travels over boxes 1
+    on is the real thing, and opens it only if it comes back whole."""
+
+    sealed = bytes.fromhex(_VOUCHER_VECTORS["induct"]["sealed_reply"])
+
+    async def voucher_induct(
+        self, voucher: bytes, voucher_payload: bytes, who_reply: bytes,
+    ) -> VoucherInductResult:
+        inducted = await super().voucher_induct(voucher, voucher_payload, who_reply)
+        self.fake_sealed = inducted.sealed_reply
+        return dataclasses.replace(inducted, sealed_reply=self.sealed)
+
+    async def voucher_open(
+        self, voucher_secret_key: bytes, sealed_reply: bytes,
+        message_write_cap: bytes,
+    ) -> VoucherOpenResult:
+        assert sealed_reply == self.sealed
+        return await super().voucher_open(
+            voucher_secret_key, self.fake_sealed, message_write_cap,
+        )
+
+
+@pytest.mark.asyncio
+async def test_hpqcs_sealed_reply_travels_framed_and_comes_back_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(voucher, "check_for_new", _write_queued)
+    monkeypatch.setattr(models, "_box_plaintext_length", 100)
+    daemon = _VectorDaemon()
+    await _grow_star(daemon, 2)
+    sealed = _VectorDaemon.sealed
+    assert _voucher_boxes(daemon)[1:] == [
+        b"C" + sealed[:99], b"C" + sealed[99:198], b"F" + sealed[198:],
+    ]

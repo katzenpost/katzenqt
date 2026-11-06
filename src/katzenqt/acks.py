@@ -28,7 +28,7 @@ import os
 import time
 import uuid
 from collections import Counter
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -117,6 +117,11 @@ class GcmCodec:
             numbers=wire.decode_numbers(gcm.numbers or b""),
             introduced_at=wire.decode_introduced_at(gcm.introduced_at or b""),
             acks=acks,
+            membership_hash=(
+                gcm.membership_hash
+                if control and not models.is_membership_sentinel(gcm.membership_hash)
+                else None
+            ),
         )
 
     def encode(self, message: wire.Message) -> bytes:
@@ -127,8 +132,8 @@ class GcmCodec:
             gcm = models.GroupChatMessage.from_cbor(message.content)
         elif message.introduction is not None:
             gcm = models.GroupChatMessage(
-                version=models.GROUP_CHAT_VERSION,
-                membership_hash=models.MEMBERSHIP_SENTINELS[1],
+                version=models.WIRE_VERSION,
+                membership_hash=message.membership_hash or models.MEMBERSHIP_SENTINELS[1],
                 msg_type=models.GroupChatTypeEnum.INTRODUCTION,
                 introduction=models.GroupChatPleaseAdd(
                     display_name=message.introduction.name,
@@ -137,8 +142,8 @@ class GcmCodec:
             )
         else:
             gcm = models.GroupChatMessage(
-                version=models.GROUP_CHAT_VERSION,
-                membership_hash=models.MEMBERSHIP_SENTINELS[1],
+                version=models.WIRE_VERSION,
+                membership_hash=message.membership_hash or models.MEMBERSHIP_SENTINELS[1],
                 msg_type=models.GroupChatTypeEnum.CONTROL,
             )
         gcm.acks = ack_codec.encode(message.acks) or None
@@ -298,7 +303,43 @@ async def _write_cap(sess: "AsyncSession", conversation_id: int) -> bytes | None
     return wcw.write_cap if wcw is not None else None
 
 
+_ONCE = "katzenqt.acks.once"
+
+
+@asynccontextmanager
+async def once(
+    sess: "AsyncSession",
+) -> AsyncIterator[Callable[[], Awaitable[None]]]:
+    """Load each conversation's state at most once in the block, and hold
+    back what is saved in it until the function it yields is awaited, which
+    saves each once. For reading a box, which tells the state machine both
+    the message and where its stream now stands."""
+    loaded: dict[int, tuple[_Stored, bool]] = {}
+
+    async def save() -> None:
+        for stored, saved in loaded.values():
+            if saved:
+                await _write(sess, stored)
+        loaded.clear()
+
+    sess.info[_ONCE] = loaded
+    try:
+        yield save
+    finally:
+        del sess.info[_ONCE]
+
+
 async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
+    loaded: dict[int, tuple[_Stored, bool]] | None = sess.info.get(_ONCE)
+    if loaded is not None and conversation_id in loaded:
+        return loaded[conversation_id][0]
+    stored = await _read(sess, conversation_id)
+    if loaded is not None and stored is not None:
+        loaded[conversation_id] = (stored, False)
+    return stored
+
+
+async def _read(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
     row = await sess.get(persistent.GroupState, conversation_id)
     if row is None:
         return None
@@ -327,6 +368,14 @@ async def _load(sess: "AsyncSession", conversation_id: int) -> _Stored | None:
 
 
 async def _save(sess: "AsyncSession", stored: _Stored) -> None:
+    loaded = sess.info.get(_ONCE)
+    if loaded is not None:
+        loaded[stored.row.conversation_id] = (stored, True)
+        return
+    await _write(sess, stored)
+
+
+async def _write(sess: "AsyncSession", stored: _Stored) -> None:
     stored.row.state = group_state.dump(stored.group)
     _flush_trace(stored.group)
     stored.row.held = cbor2.dumps(stored.held)
@@ -463,20 +512,13 @@ async def _queue(
 ) -> "tuple[list[uuid.UUID], list[models.SerializedRow]]":
     """Serialize what the state machine asks to send, one message to a box
     or substream, each written after the one before. A message the state
-    machine makes itself carries our membership hash, an ``Introduction``
-    the hash before the member it introduces; one it was handed carries its
-    own."""
-    from .conversation_handlers import local_membership_hash
-
+    machine makes itself carries the membership hash it stamped, an
+    ``Introduction`` the hash before the member it introduces; one it was
+    handed carries its own."""
     write_caps: list[uuid.UUID] = []
     entries: list[models.SerializedRow] = []
     for item in outgoing:
         gcm = CODEC.gcm(item.message)
-        if item.message.content is None:
-            intro = item.message.introduction
-            gcm.membership_hash = await local_membership_hash(
-                sess, conv, exclude_read_cap=intro.read_cap if intro else None,
-            )
         send_op = models.SendOperation(bacap_stream=conv.write_cap, messages=[gcm])
         new_write_caps, db_entries = await send_op.serialize_async(
             chunk_size=models.box_plaintext_length(), conversation_id=conv.id
@@ -815,6 +857,10 @@ async def wait_for_outgoing(
 # Inducting.
 
 
+class RosterFull(Exception):
+    """The conversation's roster has no index left for another member."""
+
+
 @asynccontextmanager
 async def held_back(conversation_id: int) -> AsyncIterator[None]:
     """Hold this conversation's acknowledgements and numbering back while a
@@ -829,6 +875,8 @@ async def held_back(conversation_id: int) -> AsyncIterator[None]:
                 assert conv is not None
                 stored = await _founded(sess, conv)
                 if stored is not None:
+                    if not stored.group.room:
+                        raise RosterFull(conversation_id)
                     outgoing = stored.group.begin_induction()
                     _store(sess, *await _queue(sess, conv, stored, outgoing))
                     await _save(sess, stored)
@@ -1053,6 +1101,7 @@ __all__ = [
     "REPLICA_EPOCH_SECONDS",
     "REPLICA_EPOCH_SETTING",
     "Rewrite",
+    "RosterFull",
     "Stream",
     "WALK_LIMIT",
     "adopt",

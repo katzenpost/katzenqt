@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Generic, TypeVar, cast
 
 import click
@@ -21,6 +21,7 @@ PATH = click.Path(path_type=str, readable=False)
 class Plan(Generic[A]):
     func: Action[A]
     args: A
+    wire_version: "int | None" = None
 
     def run(self) -> "Coroutine[Any, Any, int]":
         return self.func(self.args)
@@ -105,8 +106,18 @@ def plan(action: str, args: A) -> "Plan[A]":
     context_settings={"help_option_names": ["-h", "--help"]},
     help="Headless driver for katzenqt: send/receive over kpclientd.",
 )
-def verbs() -> None:
+@click.option(
+    "--wire-version", type=click.IntRange(3, 4), default=None,
+    help="katzenqt1 wire version to write, recorded in the state file "
+         "for later runs (default: the recorded one, else 4)",
+)
+def verbs(wire_version: "int | None") -> None:
     pass
+
+
+@verbs.result_callback()
+def _with_wire_version(chosen: "Plan[Any]", wire_version: "int | None") -> "Plan[Any]":
+    return replace(chosen, wire_version=wire_version)
 
 
 @verbs.command("create-conv")

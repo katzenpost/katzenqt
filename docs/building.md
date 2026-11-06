@@ -65,6 +65,30 @@ make status
 To use the standard `venv` and `pip` instead of `uv`, run `make setup-pip` in place of
 `make setup-uv`. `make run`, `make test` and `make mypy` use whichever backend is set up.
 
+## Nix
+
+On NixOS, or with Nix on any Linux, the repo's `shell.nix` and `flake.nix` provide
+Python, uv, Go, the Rust toolchain and the Qt runtime libraries, so no `apt` or `sudo` is
+involved. Inside the shell, `make system-setup` skips the `apt` and `pipx` steps. Skip
+`make deps`: the tests under `tests/ci/` exercise Debian CI scripts that expect
+`/bin/bash`, so its test step fails on NixOS.
+
+```shell
+git clone https://github.com/katzenpost/katzenqt ~/katzenqt
+cd ~/katzenqt
+nix develop    # or: nix-shell
+make kpclientd install-kpclient kpclientd.service
+uv sync
+uv run katzenqt
+```
+
+Without the systemd unit, start the daemon yourself and run the GUI from a second shell:
+
+```shell
+make kpclientd
+./katzenpost/cmd/kpclientd/kpclientd --config config/client.toml
+```
+
 ## kpclientd
 
 `kpclientd` is the Katzenpost client daemon; katzenqt talks to it over a local socket.
