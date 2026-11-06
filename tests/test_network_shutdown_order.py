@@ -65,9 +65,6 @@ def _dispatch_state(
         async def commit(self) -> None:
             pass
 
-    async def empty_queue() -> set[UUID]:
-        return set()
-
     def mixwal_query(excluded: set[UUID]) -> str:
         return "mixwal"
 
@@ -76,9 +73,7 @@ def _dispatch_state(
 
     monkeypatch.setattr(network, "persistent", SimpleNamespace(
         asession=Session, ReadCapWAL=object, WriteCapWAL=object,
-        MixWAL=SimpleNamespace(
-            get_new=mixwal_query, resend_queue_from_disk=empty_queue,
-        ),
+        MixWAL=SimpleNamespace(get_new=mixwal_query),
         PlaintextWAL=SimpleNamespace(find_resendable=plaintext_query),
     ))
 

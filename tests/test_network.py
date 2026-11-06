@@ -12,7 +12,6 @@ from katzenqt.network import (
     check_for_new,
     create_new_keypair,
     on_connection_status,
-    on_error,
     on_message_reply,
     on_message_sent,
     shutdown,
@@ -282,95 +281,6 @@ class TestOnMessageSent:
         await on_message_sent(
             cast("network._MessageSent", {"message_id": b"\x00" * 16}),
         )
-
-
-class TestOnError:
-    @pytest.mark.asyncio
-    async def test_callback_fires_on_exception(self) -> None:
-        called = []
-
-        async def boom() -> None:
-            raise RuntimeError("nope")
-
-        task = asyncio.create_task(boom())
-        on_error(task, lambda: called.append("fired"))
-        with pytest.raises(RuntimeError):
-            await task
-        assert called == ["fired"]
-
-    @pytest.mark.asyncio
-    async def test_callback_skipped_on_success(self) -> None:
-        called = []
-
-        async def ok() -> int:
-            return 42
-
-        task = asyncio.create_task(ok())
-        on_error(task, lambda: called.append("fired"))
-        assert await task == 42
-        assert called == []
-
-    @pytest.mark.asyncio
-    async def test_returns_the_task(self) -> None:
-        async def ok() -> None:
-            return None
-
-        task = asyncio.create_task(ok())
-        returned = on_error(task, lambda: None)
-        assert returned is task
-        await task
-
-    @pytest.mark.asyncio
-    async def test_passes_args_and_kwargs(self) -> None:
-        captured = []
-
-        async def boom() -> None:
-            raise ValueError("x")
-
-        task = asyncio.create_task(boom())
-        on_error(
-            task,
-            lambda *a, **k: captured.append((a, k)),
-            1, 2, key="value",
-        )
-        with pytest.raises(ValueError):
-            await task
-        assert captured == [((1, 2), {"key": "value"})]
-
-    @pytest.mark.asyncio
-    async def test_failed_task_does_not_noise_the_event_loop(self) -> None:
-        # The done callback must NOT re-raise the task's exception: a
-        # callback raise only surfaces as a spurious "Exception in
-        # callback" traceback via the loop's exception handler (seen in
-        # the client-reconnect integration test when a resendable
-        # plaintext hit the dead link during a bounce).
-        loop = asyncio.get_running_loop()
-        fired = []
-        handler_calls: "list[dict[str, object]]" = []
-        prev_handler = loop.get_exception_handler()
-
-        def stub_handler(
-            loop_: asyncio.AbstractEventLoop,
-            context: "dict[str, object]",
-        ) -> None:
-            handler_calls.append(context)
-
-        loop.set_exception_handler(stub_handler)
-        try:
-            async def boom() -> None:
-                raise RuntimeError("nope")
-
-            task = asyncio.create_task(boom())
-            on_error(task, lambda: fired.append("fired"))
-            with pytest.raises(RuntimeError):
-                await task
-            # Let the done_callback run.
-            await asyncio.sleep(0)
-        finally:
-            loop.set_exception_handler(prev_handler)
-
-        assert fired == ["fired"]
-        assert handler_calls == []
 
 
 class TestEpochRaceLivelock:
