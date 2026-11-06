@@ -1,7 +1,8 @@
 """Record traces of the group chat simulator for CryptWalker's replay
 (``lake exe CryptWalker.Protocols.GroupComm.GroupChatKatzenqt1.replay``): every scenario under
-``tests/data/groupchat``, a fixed set of the stateful test's random runs, and
-a group chat driven through the app's own adapter (``acks``), as
+``tests/data/groupchat``, the members ``tests/groupchat_edges.py`` drives
+past what a scenario reaches, a fixed set of the stateful test's random runs,
+and a group chat driven through the app's own adapter (``acks``), as
 ``adapter-scenario.jsonl``.
 
     python tools/groupchat_traces.py OUT_DIR [EXAMPLES]
@@ -32,12 +33,14 @@ def main() -> None:
     from hypothesis import settings
     from hypothesis.stateful import run_state_machine_as_test
 
+    from groupchat_edges import record
     from katzenqt.groupchat import sim
     from test_groupchat_stateful import GroupChat, PassiveGroupChat
 
     for path in sorted((ROOT / "tests/data/groupchat").glob("*.txt")):
         with (out / f"scenario-{path.stem}.jsonl").open("w") as trace:
             sim.run(path.read_text(), trace)
+    record(out)
     for machine in (GroupChat, PassiveGroupChat) if examples else ():
         run_state_machine_as_test(
             machine,

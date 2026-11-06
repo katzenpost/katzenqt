@@ -141,7 +141,7 @@ def test_closure_container_has_rust_toolchain() -> None:
         ROOT / "packaging" / "container" / "Containerfile.python-debs"
     ).read_text()
     for tool in ("cargo", "python3-dev", "dh-golang", "golang-any",
-                 "python3-stdeb", "flit"):
+                 "flit"):
         assert tool in dockerfile
 
 

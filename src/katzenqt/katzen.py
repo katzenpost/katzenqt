@@ -45,7 +45,7 @@ from sqlmodel import col, select
 from . import attachment_images
 from . import conversation_handlers
 from . import network  # this is network.py
-from . import persistent
+from . import models, persistent
 from . import removal
 from . import theme  # theme.py: light/dark/system theming
 from base64 import b64decode, b64encode
@@ -58,7 +58,7 @@ from .voucher import (await_and_open, cancel_pending_voucher,
                      voucher_code)
 from .audio_ptt import AudioEngineError, AudioEngineUnavailable, PttAudioBridge
 from .katzen_util import create_task, is_risky_attachment_extension
-from .models import (GROUP_CHAT_VERSION, NAME_POLICY_HASH, NAME_POLICY_KEEP,
+from .models import (NAME_POLICY_HASH, NAME_POLICY_KEEP,
                      NAME_POLICY_SETTING, GroupChatFileUpload,
                      GroupChatMessage, GroupChatPleaseAdd, SendOperation,
                      box_plaintext_length, outgoing_basename)
@@ -2127,7 +2127,7 @@ class MainWindow(QMainWindow):
             )
         )
         group_chat_message = GroupChatMessage(
-            version=GROUP_CHAT_VERSION, membership_hash=membership_hash, text=msg
+            version=models.WIRE_VERSION, membership_hash=membership_hash, text=msg
         )
 
         # conversation_order is a count subquery evaluated at commit. The
@@ -2929,7 +2929,7 @@ class MainWindow(QMainWindow):
                 hash_all=policy == NAME_POLICY_HASH,
             )
             gcm = GroupChatMessage(
-                version=GROUP_CHAT_VERSION,
+                version=models.WIRE_VERSION,
                 membership_hash=membership_hash,
                 file_upload=upload,
             )
@@ -4061,6 +4061,7 @@ def cli() -> object:
         persistent.init_and_migrate()  # this must be run outside the async loop
     except Exception as e:
         error_and_exit(app, f"Database schema migration failed:\n{repr(e)}")
+    models.use_wire_version()
 
     for logger_name, level in levels:
         try:

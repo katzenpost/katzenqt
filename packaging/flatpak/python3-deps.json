@@ -396,7 +396,7 @@
             "name": "python3-katzenpost_thinclient",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"katzenpost_thinclient==0.0.25\" --no-build-isolation"
+                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} ./thin_client --no-build-isolation"
             ],
             "sources": [
                 {
@@ -420,9 +420,10 @@
                     "sha256": "1697e1a8a8f550fd43c2865cd84542fc175a61dcb779b6fee18cf6b6ccba1477"
                 },
                 {
-                    "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/aa/05/f9e4879eb1daa26a3f9541b4a02543bdfebf102445519eac3823e07edc0d/katzenpost_thinclient-0.0.25-py3-none-any.whl",
-                    "sha256": "85bfbe0645f2f57272e64188652eeb11b8e253c866427c87fdaac9c4812a2052"
+                    "type": "git",
+                    "url": "https://github.com/katzenpost/thin_client.git",
+                    "commit": "98ff985ad348156eccbe7d3f4c4849a47041f2d3",
+                    "dest": "thin_client"
                 },
                 {
                     "type": "file",

@@ -27,7 +27,7 @@ apt install -y --no-install-recommends \
     build-essential cargo clang cmake curl dh-golang fakeroot git \
     golang-any libasound2-dev pkg-config python3-all-dev \
     python3-build python3-dev \
-    python3-pip python3-setuptools python3-stdeb python3-venv \
+    python3-pip python3-setuptools python3-venv \
     python3-wheel rustc systemd unzip
 
 if ! go version 2>/dev/null | grep -q "go$GO_VERSION"; then
