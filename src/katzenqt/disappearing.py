@@ -10,7 +10,7 @@ from __future__ import annotations
 import cbor2
 from sqlmodel import col, select
 
-from . import attachments, persistent
+from . import attachments, models, persistent
 
 DAY_SECONDS = 24 * 3600
 
@@ -25,11 +25,15 @@ def _is_content(payload: bytes) -> bool:
     False
     >>> _is_content(b"F" + bytes([130]))
     False
+    >>> _is_content(b"F" + cbor2.dumps([4, bytes(32), 0, "hi"]))
+    True
+    >>> _is_content(b"F" + cbor2.dumps([4, bytes(32), 1, ["bob", bytes(136)]]))
+    False
     """
     if payload[:1] != b"F":
         return False
     try:
-        decoded = cbor2.loads(payload[1:])
+        decoded = models.gcm_fields(cbor2.loads(payload[1:]))
     except Exception:
         return False
     return isinstance(decoded, dict) and decoded.get("introduction") is None
