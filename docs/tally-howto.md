@@ -1,5 +1,7 @@
 # Tally: how to
 
+[Back to the README](../README.md)
+
 Recipes for driving the tally protocol — the group-chat survey/voting feature —
 through its Python API. Each section is one task with the code that performs
 it. For what the types mean and what the protocol guarantees, see the

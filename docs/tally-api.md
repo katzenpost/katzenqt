@@ -1,5 +1,7 @@
 # The tally API
 
+[Back to the README](../README.md)
+
 `katzenqt.tally` implements **tally**: a decentralised survey ("vote", "poll",
 "Doodle") that runs over an existing group conversation. Every member holds a
 replica of the survey; the replicas converge without a coordinator because the

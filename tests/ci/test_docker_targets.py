@@ -52,8 +52,8 @@ def test_the_docker_daemon_config_dials_the_mixnet_kpclientd_over_tcp() -> (
     assert "Unix" not in config["Dial"]
 
 
-def test_the_readme_walks_through_two_instances() -> None:
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
+def test_the_testing_doc_walks_through_two_instances() -> None:
+    text = (ROOT / "docs" / "testing.md").read_text(encoding="utf-8")
     assert "make mixnet-up" in text
     assert "make run-docker INSTANCE=alice" in text
     assert "make run-docker INSTANCE=bob" in text
