@@ -855,11 +855,14 @@ def _claimed_membership_hash(payload: bytes) -> "bytes | None":
     True
     >>> _claimed_membership_hash(b"F" + cbor2.dumps("a bare string")) is None
     True
+    >>> _claimed_membership_hash(b"F" + cbor2.dumps([4, claim, 0, "hi"])) == claim
+    True
     """
     if payload[:1] != b"F":
         return None
+    from .models import gcm_fields
     try:
-        decoded = cbor2.loads(payload[1:])
+        decoded = gcm_fields(cbor2.loads(payload[1:]))
     except Exception:
         return None
     if not isinstance(decoded, dict):

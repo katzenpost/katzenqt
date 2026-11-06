@@ -132,7 +132,7 @@ class GcmCodec:
             gcm = models.GroupChatMessage.from_cbor(message.content)
         elif message.introduction is not None:
             gcm = models.GroupChatMessage(
-                version=models.GROUP_CHAT_VERSION,
+                version=models.WIRE_VERSION,
                 membership_hash=message.membership_hash or models.MEMBERSHIP_SENTINELS[1],
                 msg_type=models.GroupChatTypeEnum.INTRODUCTION,
                 introduction=models.GroupChatPleaseAdd(
@@ -142,7 +142,7 @@ class GcmCodec:
             )
         else:
             gcm = models.GroupChatMessage(
-                version=models.GROUP_CHAT_VERSION,
+                version=models.WIRE_VERSION,
                 membership_hash=message.membership_hash or models.MEMBERSHIP_SENTINELS[1],
                 msg_type=models.GroupChatTypeEnum.CONTROL,
             )
