@@ -1,169 +1,56 @@
 # katzenqt
 
-`katzenqt` is a PySide6 GUI chat client for Katzenpost mixnet group chat. It can
-also be driven headlessly from the command line.
+[![pytest](https://github.com/katzenpost/katzenqt/actions/workflows/pytest.yml/badge.svg?branch=main)](https://github.com/katzenpost/katzenqt/actions/workflows/pytest.yml)
 
-## Project status
+katzenqt is a desktop group chat client for the [Katzenpost](https://katzenpost.network)
+mixnet. It reaches the mixnet through the client daemon
+[kpclientd](https://github.com/katzenpost/katzenpost/tree/main/cmd/kpclientd), and it can
+also be driven from the command line without its Qt interface.
 
-This is pre-alpha developer software. There is **no easily installable package
-yet**, so the instructions below are aimed at developers building and running
-from source against a Katzenpost client daemon (`kpclientd`). A single,
-well-documented install command for end users is future work. Please read the
-warning at the end of this document.
+![katzenqt in dark mode, showing a group conversation](docs/screenshot.png)
 
-## Running the GUI
+## Quick start
 
-On Debian GNU/Linux, install `git` and `make`, clone the repo, and build.
-Debian may not add the first user to `sudoers`, so if `sudo` refuses you,
-run the `apt` steps as root instead (`su -c 'apt install -y git make'`);
-`make deps` does the same for the packages it installs.
+There are no release packages yet. On Debian or Ubuntu, build from source:
 
 ```shell
 sudo apt install -y git make
-git clone https://www.github.com/katzenpost/katzenqt ~/katzenqt
+git clone https://github.com/katzenpost/katzenqt ~/katzenqt
 cd ~/katzenqt
-make deps      # full bootstrap: system packages, the venv, kpclientd, a systemd unit
-make run       # launch the GUI
+make deps
+make run
 ```
 
-`make deps` is a first-time bootstrap and also runs the test suite. If you only
-need to refresh Python dependencies, use `uv sync` instead. If `make run` does
-not bring up a window, run the steps individually:
+If `sudo` refuses you, run `su -c 'apt install -y git make'` instead.
+On NixOS, or with Nix on any Linux, see [Building with Nix](docs/building.md#nix).
 
-```shell
-make system-setup
-make setup-uv
-make setup
-make kpclientd
-make install-kpclient
-make kpclientd.service
-make status
-```
+katzenqt needs kpclientd running. `make deps` installs the system packages and the
+Python venv, runs the tests, builds kpclientd from a pinned
+[katzenpost](https://github.com/katzenpost/katzenpost) checkout, and starts it as a user
+service that connects to the namenlos mixnet. `make status` shows whether it is active;
+[Building](docs/building.md) takes the steps one at a time.
 
-`make status` reports a working setup roughly as:
+## Docs
 
-```
-backend: uv
-venv: .venv
-kpclientd(bin): /home/user/.local/bin/kpclientd
-kpclientd(service): active
-kpclientd(path): found
-```
+- [Building](docs/building.md): the setup steps, Python backends, kpclientd
+- [Running](docs/running.md): configuration, state files, the daemon, troubleshooting
+- [Headless CLI](docs/headless.md): joining, messaging and voting from a shell
+- [Testing](docs/testing.md): unit tests, the docker mixnet, two GUIs on one machine
+- [Packaging](docs/packaging.md): Debian packages and the Flatpak
+- [Hacking](docs/hacking.md): code layout, database migrations, UI editing
+- [Tally API](docs/tally-api.md) and [Tally how-to](docs/tally-howto.md): polls and votes
+- [Group chat design](https://katzenpost.network/docs/specs/groupchat/) and
+  [thin client spec](https://katzenpost.network/docs/specs/thinclient/), on the website
 
-Once that looks right, `make run` launches the GUI.
-
-### NixOS (and Nix on any Linux)
-
-The repo ships a `shell.nix` and a `flake.nix` that provide Python, uv, Go,
-the Rust toolchain and the Qt runtime libraries, so no `apt` or `sudo` is
-involved. Inside the shell, `make system-setup` skips the `apt` and `pipx`
-steps. Skip `make deps`: the tests under `tests/ci/` exercise Debian CI
-scripts that expect `/bin/bash`, so its test step fails on NixOS.
-
-```shell
-git clone https://www.github.com/katzenpost/katzenqt ~/katzenqt
-cd ~/katzenqt
-nix develop    # or: nix-shell
-make kpclientd install-kpclient kpclientd.service
-uv sync
-uv run katzenqt
-```
-
-Without the systemd unit, start the daemon yourself and run the GUI from a
-second shell:
-
-```shell
-make kpclientd
-./katzenpost/cmd/kpclientd/kpclientd --config config/client.toml
-```
-
-
-## Headless CLI (no GUI)
-
-`katzenqt` can be driven without the Qt interface through the `katzenqt-headless`
-command installed in the venv. It talks to a running `kpclientd` and is quiet by
-default, printing only each verb's result token (set `KQT_LOG_LEVEL=DEBUG` for
-the full log).
-
-```shell
-.venv/bin/katzenqt-headless --help
-```
-
-Two things to know:
-
-- **The connection is explicit.** Every verb that talks to the daemon needs one
-  of `--config <thinclient.toml>` or `--address <addr> [--network tcp|unix]`.
-- **Each identity is a separate `KQT_STATE`** (its own SQLite file), so two
-  parties on one machine are just two `KQT_STATE` values sharing one daemon.
-
-The walkthrough below takes Alice and Bob through **joining a conversation with
-the Contact Voucher protocol**, then **exchanging messages**, then **running a
-vote**. It assumes a daemon reachable on TCP `127.0.0.1:64331` (for example the
-docker mixnet under `katzenpost/docker`); change `$CONN` to match yours.
-
-```shell
-KH=.venv/bin/katzenqt-headless
-CONN="--address 127.0.0.1:64331"     # or: --config /path/to/thinclient.toml
-ALICE=/tmp/alice; BOB=/tmp/bob
-
-# 1. Join the same conversation using the voucher token protocol
-KQT_STATE=$ALICE $KH create-conv demo alice $CONN
-KQT_STATE=$BOB   $KH create-conv demo bob   $CONN
-V=$(KQT_STATE=$BOB $KH voucher-mint demo bob $CONN 2>&1 | sed -n 's/^VOUCHER=//p')   # Bob mints a token
-KQT_STATE=$ALICE $KH voucher-induct demo bob "$V" $CONN                              # Alice inducts Bob
-KQT_STATE=$BOB   $KH voucher-await demo $CONN                                        # -> JOINED
-
-# 2. Exchange messages (the channel is bidirectional)
-KQT_STATE=$ALICE $KH send demo "hi bob"   $CONN
-KQT_STATE=$BOB   $KH read demo 600 $CONN          # -> RECV=hi bob
-KQT_STATE=$BOB   $KH send demo "hi alice" $CONN
-KQT_STATE=$ALICE $KH read demo 600 $CONN          # -> RECV=hi alice
-
-# 3. Vote: Bob opens an approval poll, both vote, the tool declares the winner
-S=$(KQT_STATE=$BOB $KH tally-create demo "Where to eat?" \
-      --mode approval --slot Pizza --slot Sushi --slot Tacos $CONN 2>&1 | sed -n 's/^TALLY_CREATED=//p')
-KQT_STATE=$BOB   $KH tally-vote demo --survey $S --slot s0=yes --slot s1=yes $CONN   # Bob: Pizza, Sushi
-KQT_STATE=$ALICE $KH tally-vote demo --survey $S --slot s0=yes --slot s2=yes $CONN   # Alice: Pizza, Tacos
-KQT_STATE=$BOB   $KH tally-close demo --survey $S $CONN                              # advisory; only the creator may close
-KQT_STATE=$ALICE $KH tally-result demo --survey $S --expect-voters 2 $CONN
-# -> TALLY={..., "outcome": "winner", "winners": [{"slot_id": "s0", "text": "Pizza", "yes": 2}]}
-# -> WINNER=Pizza (2 yes)
-```
-
-The winner is derivable from the votes at any time, so `tally-close` is not
-needed to read the result. Closing is **advisory**: it sets the survey's status
-to `closed` (and only the creator may do so), but it does **not** currently
-prevent further votes, a ballot cast after a close is still counted. Enforcing
-"no votes after close" convergently across peers needs causal ordering and is
-future work.
-
-The tally protocol has documentation of its own: `docs/tally-api.md` is the API
-reference (the CRDT data model, the pure engine, the controller, the wire
-messages, and this CLI's verbs and exit codes), and `docs/tally-howto.md`
-is a task-by-task guide to using that API: creating a survey, casting and
-changing a vote, reading the counts, closing, and catching up.
-
-Every network step crosses the mixnet, so over a real network each can take from
-seconds to minutes (the docker mixnet is near-instant). The full set of verbs,
-`info`, `multi-send`, `send-file`, `read-file`, `chat-session`, `tally-list`, and
-so on, is listed by `--help`; see HACKING.md for the fuller reference.
-
-## Two GUIs against the docker mixnet
-
-The katzenpost docker mixnet gives two instances on one machine a network to
-talk over, with epochs of minutes rather than hours. Each instance is its own
-`KQT_STATE`, and both dial the mixnet's `kpclientd` on TCP `127.0.0.1:64331`
-through `config/thinclient.docker.toml`:
-
-```shell
-make mixnet-up                  # clone ./katzenpost if needed, start it
-make run-docker INSTANCE=alice  # one GUI, state file alice.sqlite3
-make run-docker INSTANCE=bob    # a second GUI, state file bob.sqlite3
-make mixnet-down
-```
+katzenqt is part of the [Katzenpost](https://github.com/katzenpost) organization.
 
 ## Warning
 
 DO NOT USE THIS SOFTWARE UNLESS YOU ARE DEVELOPING IT AND AWARE OF THE TECHNICAL
 RISKS. DO NOT RELY ON THIS SOFTWARE FOR ANONYMITY, SECURITY, PRIVACY,
 RELIABILITY, RESILENCY, CREDIBILITY, FRIENDSHIP, FUN, OR ANY SERIOUS BUSINESS.
+
+## License
+
+Public domain, as declared in [pyproject.toml](pyproject.toml), except
+`src/katzenqt/theme.py`, which is AGPL-3.0-only; see [debian/copyright](debian/copyright).
