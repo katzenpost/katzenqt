@@ -431,13 +431,13 @@ class TestDrainMixwalWriteSingle:
         orig_mark_sent = persistent.SentLog.mark_sent
         fail = {"armed": True}
 
-        async def flaky_mark_sent(connection: FakeThinClient, mw: persistent.MixWAL, resend_queue: "set[uuid.UUID]", **kwargs: "Callable[[bytes], Awaitable[int]] | None") -> int | None:
+        async def flaky_mark_sent(connection: FakeThinClient, mw: persistent.MixWAL, **kwargs: "Callable[[bytes], Awaitable[int]] | None") -> int | None:
             if fail["armed"]:
                 fail["armed"] = False
                 raise OperationalError(
                     "INSERT INTO sentlog", {}, Exception("database is locked"),
                 )
-            return await orig_mark_sent(connection, mw, resend_queue, **kwargs)
+            return await orig_mark_sent(connection, mw, **kwargs)
 
         monkeypatch.setattr(persistent.SentLog, "mark_sent", flaky_mark_sent)
         async with persistent.asession() as sess:
@@ -2365,7 +2365,6 @@ class TestPauseResumePeerReads:
 
         # Prerequisites for readables_to_mixwal's loop to enter its body.
         await network.on_connection_status({"is_connected": True, "err": None})
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "readables_to_mixwal_event").set()
 
         async def rearmed() -> bool:
@@ -2413,7 +2412,6 @@ class TestPauseResumePeerReads:
             await sess.commit()
 
         await network.on_connection_status({"is_connected": True, "err": None})
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "readables_to_mixwal_event").set()
 
         async def armed_once() -> bool:
@@ -2659,7 +2657,6 @@ class TestDrainMixwal2:
         dispatched task gets real wall-time to complete its async DB
         commits inside SentLog.mark_sent."""
         setup = await _set_up_write_flow(fake_thinclient)
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
         getattr(network, "__mixnet_connected").set()
 
@@ -2689,7 +2686,6 @@ class TestDrainMixwal2:
         setup = await _set_up_read_flow(
             fake_thinclient, plaintext=_make_F_payload("hi"),
         )
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
         getattr(network, "__mixnet_connected").set()
 
@@ -2802,7 +2798,6 @@ class TestDrainMixwal2:
             sess.add(rcw)
             await sess.commit()
 
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
         getattr(network, "__mixnet_connected").set()
 
@@ -2846,7 +2841,6 @@ class TestDrainMixwal2:
             "start_resending_encrypted_message",
             CourierInvalidEpochError("stale"),
         )
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
         getattr(network, "__mixnet_connected").set()
 
@@ -2876,7 +2870,6 @@ class TestReadablesToMixwal:
         setup = await _insert_write_setup(fake_thinclient)
         # Prerequisites for the loop to enter the body.
         await network.on_connection_status({"is_connected": True, "err": None})
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "readables_to_mixwal_event").set()
 
         async def mixwal_inserted() -> bool:
@@ -2908,7 +2901,6 @@ class TestReadablesToMixwal:
             sess.add(peer)
             await sess.commit()
         await network.on_connection_status({"is_connected": True, "err": None})
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "readables_to_mixwal_event").set()
 
         async def quitter() -> None:
@@ -2965,41 +2957,58 @@ class TestSendResendablePlaintexts:
         assert fake_thinclient.call_count("encrypt_write") >= 1
 
     @pytest.mark.asyncio
-    async def test_resend_queue_guards_against_duplicate_dispatch(
-        self, fake_thinclient: FakeThinClient,
+    @pytest.mark.parametrize("outcome", ["raise", "cancel"])
+    async def test_a_stream_is_held_while_encrypting_and_released_after(
+        self, fake_thinclient: FakeThinClient, monkeypatch: pytest.MonkeyPatch,
+        outcome: str,
     ) -> None:
+        """No second start_resending for a stream while one is in flight;
+        once it fails or is cancelled the stream is swept again, with no
+        MixWAL row written and nothing told to forget it."""
         setup = await _insert_write_setup(fake_thinclient)
-        # Pre-mark the bacap_stream as in-flight so the second pass would
-        # otherwise re-dispatch.
         async with persistent.asession() as sess:
-            pwal = persistent.PlaintextWAL(
+            sess.add(persistent.PlaintextWAL(
                 bacap_stream=setup["bacap_stream"],
                 conversation_id=setup["conversation_id"],
                 bacap_payload=b"Fhi",
-            )
-            sess.add(pwal)
+            ))
             await sess.commit()
-        # Add the stream to the resend queue directly; the loop should skip it.
-        getattr(network, "__resend_queue").add(setup["bacap_stream"])
-        getattr(network, "resendable_event").set()
+        calls: list[uuid.UUID] = []
+        release = asyncio.Event()
+
+        async def held(connection: object, pwal: "network._Resendable") -> None:
+            calls.append(pwal.bacap_stream)
+            if len(calls) == 1:
+                await release.wait()
+                if outcome == "cancel":
+                    raise asyncio.CancelledError
+                raise RuntimeError("encrypt_write failed")
+            await release.wait()
+
+        monkeypatch.setattr(network, "start_resending", held)
         getattr(network, "__mixnet_connected").set()
-
-        async def quitter() -> None:
-            for _ in range(40):
-                await asyncio.sleep(0)
-            network.shutdown()
-
-        asyncio.create_task(quitter())
+        loop = asyncio.create_task(
+            network.send_resendable_plaintexts(fake_thinclient),
+        )
         try:
-            await asyncio.wait_for(
-                network.send_resendable_plaintexts(fake_thinclient),
-                timeout=3.0,
-            )
-        except asyncio.TimeoutError:
-            pass
-        # find_resendable filters out bacap_streams already in the queue,
-        # so encrypt_write must not have been called for the dup.
-        assert fake_thinclient.call_count("encrypt_write") == 0
+            for _ in range(5):
+                network.resendable_event.set()
+                await _REAL_SLEEP(0.01)
+            assert calls == [setup["bacap_stream"]]
+            release.set()
+            await _REAL_SLEEP(0)
+            release.clear()
+            for _ in range(50):
+                network.resendable_event.set()
+                await _REAL_SLEEP(0.01)
+                if len(calls) == 2:
+                    break
+            assert calls == [setup["bacap_stream"]] * 2
+        finally:
+            release.set()
+            network.shutdown()
+            network.resendable_event.set()
+            await asyncio.wait_for(loop, timeout=5.0)
 
     @pytest.mark.asyncio
     async def test_indirection_pwal_fills_read_cap_before_dispatch(
@@ -3174,7 +3183,6 @@ class TestDisconnectPauseAndResume:
     ) -> None:
         setup = await _set_up_write_flow(fake_thinclient)
         await network.on_connection_status({"is_connected": False, "err": None})
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
 
         loop_task = asyncio.create_task(network.drain_mixwal2(fake_thinclient))
@@ -3208,7 +3216,6 @@ class TestDisconnectPauseAndResume:
     ) -> None:
         await _insert_write_setup(fake_thinclient)
         await network.on_connection_status({"is_connected": False, "err": None})
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "readables_to_mixwal_event").set()
 
         loop_task = asyncio.create_task(
@@ -3240,7 +3247,6 @@ class TestDisconnectPauseAndResume:
         """With `__mixnet_connected` cleared and never re-set, the loop must
         still attempt an arming pass after the idle bound."""
         await _insert_write_setup(fake_thinclient)
-        getattr(network, "__resend_queue_populated").set()  # loop prelude
         monkeypatch.setattr(network, "_CONNECTION_IDLE_RETRY_S", 0.05)
         monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.05)
         # Latch cleared once (restart), and no reconnect ever reports in.
@@ -3270,7 +3276,6 @@ class TestDisconnectPauseAndResume:
         """The arming loop must run on the `_ARMING_SWEEP_S` cadence even when
         the event is never re-set again."""
         await _insert_write_setup(fake_thinclient)
-        getattr(network, "__resend_queue_populated").set()  # loop prelude
         monkeypatch.setattr(network, "_ARMING_SWEEP_S", 0.05)
         # Mixnet connected, latch set; event starts clear and stays clear.
         await network.on_connection_status({"is_connected": True, "err": None})
@@ -3383,7 +3388,6 @@ class TestDisconnectPauseAndResume:
         fake_thinclient.inject_error(
             "get_message_box_index_counter", ThinClientOfflineError(),
         )
-        getattr(network, "__resend_queue_populated").set()
         getattr(network, "__mixwal_updated").set()
         getattr(network, "__mixnet_connected").set()
 
@@ -3464,9 +3468,7 @@ class TestStartBackgroundThreads:
         when network.shutdown() is called. Exercises the gather +
         as_completed orchestration that nothing else touches."""
         # live_network has already started start_background_threads in a
-        # task. Confirm __resend_queue_populated was set by the
-        # send_resendable_plaintexts boot (the fixture waits on it).
-        assert getattr(network, "__resend_queue_populated").is_set()
+        # task.
         # The loops are running; teardown of the fixture will call
         # network.shutdown() and wait for the orchestrator to exit.
         assert not live_network.task.done()
@@ -3552,7 +3554,7 @@ class TestSendLoopResilience:
 
 class TestDoneCallbackPrimitive:
     """Direct tests of the shared fire-and-forget done-callback primitive
-    (`_done_callback`) that `_on_write_done` / `_on_read_done` / `on_error`
+    (`_done_callback`) that `_on_write_done` / `_on_read_done`
     are now thin wrappers over: the exception is consumed and logged, never
     re-raised (no asyncio "Exception in callback" spam), cancellation runs
     `on_cancel`, success runs neither hook."""
@@ -3679,7 +3681,6 @@ async def test_initial_read_setup_recovers_without_advancing(
     monkeypatch.setattr(fake_thinclient, "encrypt_read", encrypt_read)
     monkeypatch.setattr(network, "_DAEMON_RPC_TIMEOUT_SECONDS", 0.05)
     await network.on_connection_status({"is_connected": True})
-    getattr(network, "__resend_queue_populated").set()
     task = asyncio.create_task(network.readables_to_mixwal(fake_thinclient))
     try:
         await asyncio.wait_for(started.wait(), 2)
