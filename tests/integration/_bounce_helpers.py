@@ -9,7 +9,7 @@ subprocesses are launched or their output parsed can't be applied to one
 file and missed in the other.
 
 The podman helpers (kpclientd_reachable, find_kpclientd_container,
-find_same_network_container, podman, wait_reachable) serve the watchdog
+find_gateways, podman, wait_reachable) serve the watchdog
 tests that live-verify container restarts and mixnet blips
 (test_watchdog_reconnect.py, test_watchdog_mixnet_reconnect.py).
 
@@ -325,28 +325,30 @@ def find_kpclientd_container() -> str:
     )
 
 
-def find_same_network_container(kpclientd_container: str, role: str) -> str:
-    """A sibling container (e.g. "gateway1") on the SAME compose network as
-    an already-identified kpclientd container.
+def find_gateways(kpclientd_container: str) -> list[str]:
+    """Every gateway container on the SAME compose network as an
+    already-identified kpclientd container. The daemon connects to any one
+    of its pinned gateways, so cutting its route into the mixnet takes all
+    of them.
 
     Deriving the network prefix from a container we've already confirmed is
-    ours (rather than matching role names against the full `podman ps`
-    output again) means this can never resolve to a different session's
-    network, however many are running on the host.
+    ours means this can never resolve to a different session's network,
+    however many are running on the host.
     """
     if not kpclientd_container.endswith("-kpclientd-1"):
         raise ValueError(f"not a kpclientd container name: {kpclientd_container!r}")
-    prefix = kpclientd_container[: -len("-kpclientd-1")]
-    name = f"{prefix}-{role}-1"
+    prefix = re.escape(kpclientd_container[: -len("-kpclientd-1")])
     proc = subprocess.run(
         _engine_command(["ps", "--format", "{{.Names}}"]),
         capture_output=True, text=True, check=False, timeout=10.0,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"podman ps failed: {proc.stderr}")
-    if name not in proc.stdout.split():
-        raise RuntimeError(f"expected sibling container {name!r} not found running")
-    return name
+    pattern = re.compile(rf"^{prefix}-gateway\d+-1$")
+    gateways = sorted(n for n in proc.stdout.split() if pattern.match(n))
+    if not gateways:
+        raise RuntimeError(f"no gateway containers running beside {kpclientd_container!r}")
+    return gateways
 
 
 def podman(args: Sequence[str]) -> None:
