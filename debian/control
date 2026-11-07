@@ -1,7 +1,7 @@
 Source: katzenqt
 Section: net
 Priority: optional
-Maintainer: Katzenpost <packages@katzenpost.network>
+Maintainer: David Stainton <dstainton415@gmail.com>
 Build-Depends: debhelper-compat (= 13),
                dh-python,
                python3-all,
