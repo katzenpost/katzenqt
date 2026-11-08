@@ -2,6 +2,7 @@ name: Flatpak
 
 on:
   push:
+    branches: ['**']
     paths:
       - 'packaging/flatpak/**'
       - 'packaging/network.katzenpost.katzenqt.desktop'
@@ -11,6 +12,7 @@ on:
       - 'packaging/flatpak/**'
       - 'packaging/network.katzenpost.katzenqt.desktop'
       - '.github/workflows/flatpak.yml'
+  workflow_call:
 
 permissions:
   contents: read
@@ -23,3 +25,18 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - run: make flatpak-system-deps
       - run: make flatpak-build
+      - name: Bundle the Flatpak for the release
+        if: github.ref_type == 'tag'
+        run: |
+          mkdir release
+          flatpak build-bundle \
+            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+            .flatpak-repo \
+            "release/network.katzenpost.katzenqt_${GITHUB_REF_NAME}.flatpak" \
+            network.katzenpost.katzenqt master
+      - if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: flatpak
+          path: release/*
+          if-no-files-found: error

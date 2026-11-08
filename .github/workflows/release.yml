@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]*', 'v[0-9]*']
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    uses: ./.github/workflows/deb.yml
+    permissions:
+      contents: read
+      packages: write
+
+  flatpak:
+    uses: ./.github/workflows/flatpak.yml
+
+  release:
+    needs: [deb, flatpak]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - run: make check-version tag="$GITHUB_REF_NAME"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: assets
+          merge-multiple: true
+      - run: (cd assets && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -- --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          case $GITHUB_REF_NAME in *-*) set -- "$@" --prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" "$@" assets/*
