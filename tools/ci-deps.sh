@@ -12,7 +12,7 @@ sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
 sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
     apt-get install -y --no-install-recommends "${apt_options[@]}" \
     build-essential pkg-config libasound2-dev libxcb-cursor0 libegl1 libgl1 \
-    libpulse0 libfontconfig1 libxkbcommon0
+    libpulse0 libfontconfig1 libxkbcommon0 zbar-tools
 uv sync --all-extras --dev --locked --python 3.12
 .venv/bin/python -c "import rustic_audio_tool as r; assert hasattr(r, 'PttAudioEngine')"
 .venv/bin/python -c "from PySide6.QtGui import QGuiApplication"

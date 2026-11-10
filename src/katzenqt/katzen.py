@@ -20,6 +20,7 @@ from typing import NamedTuple, Optional, TYPE_CHECKING, assert_never, cast
 
 import cbor2
 import click
+from qrcodegen import QrCode, QrSegment
 
 import PySide6.QtAsyncio as QtAsyncio
 #from PySide6.QtCore.GObject.QtTest import QAbstractItemModelTester
@@ -28,7 +29,7 @@ from PySide6.QtCore import (QCoreApplication, QEvent, QFile, QItemSelectionModel
                             QModelIndex, QObject, QPoint, QSettings,
                             QSize, Property, Slot, QThread, QUrl,
                             Signal, QTimer)
-from PySide6.QtGui import (QAction, QActionGroup, QDesktopServices, QIcon,
+from PySide6.QtGui import (QAction, QActionGroup, QDesktopServices, QIcon, QImage,
                            QKeySequence, QPixmap, QShortcut, QStandardItem,
                            QStandardItemModel)
 from PySide6.QtQml import QQmlNetworkAccessManagerFactory, QQmlPropertyMap
@@ -450,6 +451,26 @@ def copy_secret(text: str) -> None:
     timer.start(SECRET_CLIPBOARD_MS)
 
 
+def voucher_qr_image(code: str, scale: int = 6) -> QImage:
+    """The voucher code as a QR code, as hushphone and the T-Deck show it:
+    the raw code in one byte-mode segment, level M, the smallest version,
+    dark on light with a quiet zone of four, ``scale`` pixels per module.
+
+    qrcodegen is the encoder hushphone uses, so the two match module for
+    module rather than merely decoding to the same text."""
+    qr = QrCode.encode_segments(
+        [QrSegment.make_bytes(code.encode())], QrCode.Ecc.MEDIUM,
+        boostecl=False,
+    )
+    n = (qr.get_size() + 8) * scale
+    data = bytes(
+        0 if qr.get_module(x // scale - 4, y // scale - 4) else 255
+        for y in range(n) for x in range(n)
+    )
+    # copy(): the QImage would otherwise borrow data, freed on return.
+    return QImage(data, n, n, n, QImage.Format.Format_Grayscale8).copy()
+
+
 class VoucherDialog(QDialog):
     COPY_LABEL = "Copy voucher"
     COPIED_LABEL = "Copied"
@@ -481,6 +502,10 @@ class VoucherDialog(QDialog):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
             | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard,
         )
+        self.qr = QLabel(self)
+        self.qr.setPixmap(QPixmap.fromImage(voucher_qr_image(code)))
+        self.qr.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.qr.setAccessibleName("Voucher QR code")
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Close, self,
         )
@@ -491,6 +516,7 @@ class VoucherDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addWidget(self.label)
+        layout.addWidget(self.qr)
         layout.addWidget(buttons)
 
     def copy_code(self) -> None:
