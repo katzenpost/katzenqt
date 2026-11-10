@@ -502,6 +502,31 @@ class TestTryAssemble:
         assert record.exc_info is None
 
     @pytest.mark.asyncio
+    async def test_a_message_of_a_type_not_read_is_assembled_for_its_notice(
+        self,
+    ) -> None:
+        stream = uuid.uuid4()
+        newer = cbor2.dumps([6, bytes(32), 0, "hi"])
+        async with persistent.asession() as sess:
+            sess.add(
+                persistent.ReceivedPiece(
+                    read_cap=stream,
+                    bacap_index=_idx(0)[:8],
+                    chunk_type=b"F",
+                    chunk=newer,
+                )
+            )
+            await sess.commit()
+        async with persistent.asession() as sess:
+            assembled = await network._try_assemble(
+                sess,
+                stream,
+                _idx(0)[:8],
+            )
+        assert assembled is not None and assembled[0] == "F"
+        assert assembled[3] == models.Unsupported(newer)
+
+    @pytest.mark.asyncio
     async def test_a_chain_that_decodes_to_nothing_is_not_assembled(
         self,
         monkeypatch: pytest.MonkeyPatch,

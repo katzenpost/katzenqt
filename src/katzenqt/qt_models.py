@@ -962,6 +962,37 @@ def _arrival_membership_rows(
     return rows
 
 
+def _notice_text(name: str, body: bytes) -> "str | None":
+    """What a row that is a notice rather than a message reads as: an
+    introduction, a ping, or a message this client cannot read. None for
+    any other row.
+
+    >>> import cbor2
+    >>> _notice_text("bob", cbor2.dumps([4, bytes(32), 11, None]))
+    'bob pinged'
+    >>> _notice_text("bob", cbor2.dumps([6, bytes(32), 0, "hi"]))
+    'bob sent a message this app cannot show (type 0, version 6): update the app'
+    >>> _notice_text("bob", cbor2.dumps([4, bytes(32), 0, "hi"])) is None
+    True
+    """
+    from .models import GroupChatMessage, GroupChatTypeEnum, UnsupportedMessage
+
+    try:
+        cm = GroupChatMessage.from_cbor(body)
+    except UnsupportedMessage as exc:
+        return (
+            f"{name} sent a message this app cannot show "
+            f"(type {exc.msg_type}, version {exc.version}): update the app"
+        )
+    except Exception:
+        return None
+    if intro := cm.as_introduction:
+        return f"{name} added {intro.display_name}"
+    if cm.msg_type == GroupChatTypeEnum.PING:
+        return f"{name} pinged"
+    return None
+
+
 def _decode_group_chat_payload(payload: bytes) -> AttachmentDisplay:
     # Keep ConversationLog as the source of truth and derive renderer-friendly
     # roles lazily so audio rows can share the same persistence format as text.
@@ -1500,16 +1531,10 @@ class ConversationLogModel(QtCore.QAbstractItemModel):
                     # announcement ("<author> added <name>") before the
                     # attachment-oriented decode handles the rest.
                     if role == 0 and cl.payload[:1] == b"F":
-                        try:
-                            from .models import GroupChatMessage
-                            cm = GroupChatMessage.from_cbor(cl.payload[1:])
-                        except Exception:
-                            cm = None
-                        if cm is not None and (intro := cm.as_introduction):
-                            return (
-                                f"{cl.conversation_peer.name} added "
-                                f"{intro.display_name}"
-                            )
+                        name = cl.conversation_peer.name if cl.conversation_peer else ""
+                        notice = _notice_text(name, cl.payload[1:])
+                        if notice is not None:
+                            return notice
                     info = _decode_group_chat_payload(cl.payload)
                     return _attachment_role_value(info, role)
                 # TODO here we want to have a ROLE_CHAT_ACKED to show which of our things have been sent

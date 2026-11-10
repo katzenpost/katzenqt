@@ -40,7 +40,7 @@ class DispatchResult(NamedTuple):
 async def dispatch(
     sess: AsyncSession,
     peer: persistent.ConversationPeer,
-    gcm: models.GroupChatMessage,
+    gcm: "models.GroupChatMessage | models.Unsupported",
     full_payload: bytes,
     *,
     box: "bytes | None" = None,
@@ -53,7 +53,12 @@ async def dispatch(
     was read from; ``substream`` is the read cap of the substream it arrived
     through instead, which a box of that stream announced. When either is
     known, what the message says about rosters (whom it acknowledges, whom
-    it introduces) is recorded before it is routed."""
+    it introduces) is recorded before it is routed.
+
+    An ``Unsupported`` message is logged for its notice and nothing else."""
+    if isinstance(gcm, models.Unsupported):
+        sess.add(persistent.ConversationLog.append_from(peer, full_payload))
+        return DispatchResult(True, False, None, False)
     await _verify_membership_advisory(sess, peer, gcm)
     if box is not None or substream is not None:
         await acks.on_message(sess, peer, gcm, box=box, substream=substream)
@@ -150,6 +155,24 @@ async def _handle_chat(
     return DispatchResult(True, False, None, False)
 
 
+async def _handle_packed(
+    sess: AsyncSession,
+    peer: persistent.ConversationPeer,
+    gcm: models.GroupChatMessage,
+    full_payload: bytes,
+) -> DispatchResult:
+    """A row for each text packed in the box, in the order sent."""
+    for text in gcm.texts or []:
+        one = models.GroupChatMessage(
+            version=gcm.version, membership_hash=gcm.membership_hash,
+            text=models.clamp_message_text(text),
+        )
+        sess.add(persistent.ConversationLog.append_from(peer, b"F" + one.to_cbor()))
+        # Each row's order is MAX + 1 at insert, so insert them one at a time.
+        await sess.flush()
+    return DispatchResult(True, False, None, False)
+
+
 async def _handle_introduction(
     sess: AsyncSession,
     peer: persistent.ConversationPeer,
@@ -235,6 +258,7 @@ _CHAT_TYPES = (
     GroupChatTypeEnum.FILE_UPLOAD,
     GroupChatTypeEnum.WHO,
     GroupChatTypeEnum.REPLY_WHO,
+    GroupChatTypeEnum.PING,
 )
 _TALLY_TYPES = (
     GroupChatTypeEnum.TALLY_CREATE,
@@ -256,6 +280,7 @@ async def _handle_control(
 _HANDLERS = {
     GroupChatTypeEnum.INTRODUCTION: _handle_introduction,
     GroupChatTypeEnum.CONTROL: _handle_control,
+    GroupChatTypeEnum.PACKED: _handle_packed,
     **{t: _handle_chat for t in _CHAT_TYPES},
     **{t: _handle_tally for t in _TALLY_TYPES},
 }
