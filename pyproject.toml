@@ -26,6 +26,7 @@ dependencies = [
     "rustic-audio-tool",
     # BACAP index arithmetic for acknowledgements (Idx64 to MessageBoxIndex).
     "hpqc",
+    "qrcodegen~=1.8",
 ]
 
 [dependency-groups]

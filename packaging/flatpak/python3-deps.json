@@ -353,6 +353,20 @@
             ]
         },
         {
+            "name": "python3-qrcodegen",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --ignore-installed --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"qrcodegen~=1.8\" --no-build-isolation"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/10/2b/fb03f5a840469f627d71690a95e8a53e3ea53ef6d752c93f34a5a65ee061/qrcodegen-1.8.0-py3-none-any.whl",
+                    "sha256": "06bf87021bc351f1c6e722ac67db8a059c4fe27bbfbca39ed7a9a2364abdd7a6"
+                }
+            ]
+        },
+        {
             "name": "python3-pycrdt",
             "buildsystem": "simple",
             "build-commands": [
