@@ -111,3 +111,15 @@ def test_malformed_array_is_refused(e: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         models.GroupChatMessage.from_cbor(bytes.fromhex(e["cbor"]))
     assert acks.CODEC.decode(bytes.fromhex(e["cbor"])) is None
+
+
+@pytest.mark.parametrize(
+    "e", V["unsupported"], ids=[e["name"] for e in V["unsupported"]]
+)
+def test_unsupported_is_refused_and_named(e: dict[str, Any]) -> None:
+    cbor = bytes.fromhex(e["cbor"])
+    want = None if e["version"] is None else (e["version"], e["msg_type"])
+    assert models.unsupported(cbor) == want
+    with pytest.raises(ValueError):
+        models.GroupChatMessage.from_cbor(cbor)
+    assert acks.CODEC.decode(cbor) is None

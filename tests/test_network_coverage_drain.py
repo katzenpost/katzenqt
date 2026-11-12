@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Iterator
 from typing import NamedTuple, Protocol, cast
 
+import cbor2
 import pytest
 from katzenpost_thinclient.pigeonhole import (
     EncryptReadResult,
@@ -661,3 +662,27 @@ class TestReadStagesOutboundWork:
         async with persistent.asession() as sess:
             staged = (await sess.exec(select(persistent.PlaintextWAL))).all()
             assert len(staged) >= 1
+
+
+class TestReadOfAMessageNotRead:
+    @pytest.mark.asyncio
+    async def test_it_is_logged_for_its_notice_and_the_stream_moves_on(
+        self,
+        fake_thinclient: _Fake,
+    ) -> None:
+        newer = cbor2.dumps([6, bytes(32), 0, "hi"])
+        flow = await _read_flow(fake_thinclient, payload=b"F" + newer)
+        mw = await _load_mw(flow.mw_id)
+        await network.drain_mixwal_read_single(
+            connection=_conn(fake_thinclient),
+            rcw_read_cap=flow.read_cap,
+            mw=mw,
+            draining_right_now={flow.stream},
+        )
+        async with persistent.asession() as sess:
+            rows = (await sess.exec(select(persistent.ConversationLog).where(
+                persistent.ConversationLog.conversation_id == flow.conversation_id,
+            ))).all()
+            rcw = await sess.get(persistent.ReadCapWAL, flow.stream)
+        assert [r.payload for r in rows][-1] == b"F" + newer
+        assert rcw is not None and rcw.next_index == flow.next_index

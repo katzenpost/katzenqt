@@ -1970,7 +1970,7 @@ async def _get_received_piece(
 async def _try_assemble(
     sess: "persistent.AsyncSession", rcw_id: "uuid.UUID",
     terminal_idx_8b: bytes,
-) -> "tuple[Literal['F'], list[tuple[bytes, bytes]], list[persistent.ReceivedPiece], models.GroupChatMessage] | tuple[Literal['I'], bytes, list[persistent.ReceivedPiece]] | None":
+) -> "tuple[Literal['F'], list[tuple[bytes, bytes]], list[persistent.ReceivedPiece], models.GroupChatMessage | models.Unsupported] | tuple[Literal['I'], bytes, list[persistent.ReceivedPiece]] | None":
     """Walk back from a freshly-inserted ``ReceivedPiece`` and try to
     coalesce a chain.
 
@@ -1979,7 +1979,8 @@ async def _try_assemble(
     * ``("F", chunks, chain, gcm)`` when ``terminal_idx_8b`` resolves
       to a ``b'F'`` chunk and every predecessor down to the substream's
       start (or the previous ``b'F'``/``b'I'`` boundary) is present
-      and the concatenated CBOR decodes to a :class:`GroupChatMessage`.
+      and the concatenated CBOR decodes to a :class:`GroupChatMessage`, or
+      is refused as one this client cannot read (:class:`models.Unsupported`).
       ``chunks`` is the ordered ``(type, body)`` list passed to
       :func:`models.unserialize`; ``chain`` is the ordered list of
       ``ReceivedPiece`` rows the caller may delete on commit.
@@ -2026,6 +2027,9 @@ async def _try_assemble(
     chunks = [(rp.chunk_type, rp.chunk) for rp in chain]
     try:
         gcm = models.unserialize(chunks)
+    except models.UnsupportedMessage:
+        # Shown as a notice; the reader moves past it as for any box.
+        return ("F", chunks, chain, models.Unsupported(b"".join(c for _, c in chunks)))
     except models.UnsupportedVersion as exc:
         logger.warning(
             "dropping a message from a newer client at rcw=%s terminal=%s: %s",
@@ -2578,7 +2582,7 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
         and not (cp.name.startswith(_SUBSTREAM_NAME_PREFIX) and parent_peer is None)
     ):
         spill_gcm = assembled[3]
-        if spill_gcm.file_upload is not None:
+        if isinstance(spill_gcm, models.GroupChatMessage) and spill_gcm.file_upload is not None:
             spill_conv_id = (
                 parent_peer.conversation.id
                 if parent_peer is not None
@@ -2606,10 +2610,13 @@ async def drain_mixwal_read_single(*, connection:ThinClient, rcw_read_cap: bytes
                     rcw_id=mw.bacap_stream, reason=rcw.substream_failure,
                 ))
             else:
-                if gcm.file_upload is not None:
+                full_payload: bytes
+                if isinstance(gcm, models.Unsupported):
+                    full_payload = b"F" + gcm.cbor
+                elif gcm.file_upload is not None:
                     # Spilled above, before the lock.
+                    assert spilled_payload is not None
                     full_payload = spilled_payload
-                    assert full_payload is not None
                 else:
                     if gcm.text is not None:
                         gcm.text = models.clamp_message_text(gcm.text)
@@ -3173,20 +3180,27 @@ async def _deliver_rechecked(
     file, which a scan leaves for the reader to fetch later."""
     if payload[:1] != b"F":
         return None
+    gcm: "models.GroupChatMessage | models.Unsupported"
     try:
         gcm = models.GroupChatMessage.from_cbor(payload[1:])
+    except models.UnsupportedMessage:
+        gcm = models.Unsupported(payload[1:])
     except Exception:
         return b""
-    if gcm.file_upload is not None:
+    if isinstance(gcm, models.Unsupported):
+        full_payload = payload
+    elif gcm.file_upload is not None:
         return None
-    if gcm.text is not None:
-        gcm.text = models.clamp_message_text(gcm.text)
+    else:
+        if gcm.text is not None:
+            gcm.text = models.clamp_message_text(gcm.text)
+        full_payload = b"F" + gcm.to_cbor()
     async with persistent.conversation_log_order_lock(conversation_id):
         async with persistent.asession() as sess:
             peer = await sess.get(persistent.ConversationPeer, peer_id)
             assert peer is not None
             added, _, peer_added, tally_added = await conversation_handlers.dispatch(
-                sess, peer, gcm, b"F" + gcm.to_cbor(),
+                sess, peer, gcm, full_payload,
             )
             await sess.commit()
     if added:
@@ -3195,7 +3209,7 @@ async def _deliver_rechecked(
         tally_update_queue.put_nowait(conversation_id)
     if peer_added:
         peer_added_queue.put_nowait(peer_added)
-    return gcm.to_cbor()
+    return b"" if isinstance(gcm, models.Unsupported) else gcm.to_cbor()
 
 
 def _is_member(

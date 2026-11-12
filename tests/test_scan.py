@@ -7,6 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import cast
 
+import cbor2
 import pytest
 from hpqc.bacap import MessageBoxIndex
 from sqlmodel import col, select
@@ -123,6 +124,20 @@ async def test_a_box_that_cannot_be_read_still_counts_as_read() -> None:
     await _scan(chat, client)
     client.box_store[BOB_CAP, _box(1)] = b"F\xff"
     assert await _scan(chat, client) == network.ScanResult(1, False, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_message_not_read_stepped_past_is_logged_for_its_notice() -> None:
+    chat, client = await _stuck()
+    await _scan(chat, client)
+    newer = cbor2.dumps([6, bytes(32), 0, "hi"])
+    client.box_store[BOB_CAP, _box(1)] = b"F" + newer
+    assert await _scan(chat, client) == network.ScanResult(1, False, 0)
+    async with persistent.asession() as sess:
+        rows = (await sess.exec(select(persistent.ConversationLog).where(
+            persistent.ConversationLog.conversation_id == chat.conversation_id,
+        ))).all()
+    assert b"F" + newer in [r.payload for r in rows]
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@ from .groupchat import wire as groupchat_wire
 import hashlib
 from base64 import b64encode, b64decode
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, List, NamedTuple, Tuple, Union
 from pathlib import Path
 
 SerializedRow = Union[persistent.PlaintextWAL, persistent.ReadCapWAL]
@@ -115,6 +115,67 @@ class UnsupportedVersion(ValueError):
             f"{GROUP_CHAT_VERSION}, the newest this client reads"
         )
         self.version = version
+
+
+ARRAY_VERSION_READ = 5
+"""The newest array form read: 5 adds ``PACKED``. Writing stays at
+``WIRE_VERSION``."""
+
+
+class UnsupportedMessage(ValueError):
+    """An array form message of a version above ``ARRAY_VERSION_READ`` or of
+    a type this client does not read: refused, and the user told of it."""
+
+    def __init__(self, version: int, msg_type: int) -> None:
+        super().__init__(f"message of type {msg_type}, version {version}, which this client cannot read")
+        self.version = version
+        self.msg_type = msg_type
+
+
+class Unsupported(NamedTuple):
+    """A box's message refused with ``UnsupportedMessage``. Its log row
+    shows a notice in its place, and the member reads the box as holding
+    nothing, as pigeonhole_protocols' engine does."""
+
+    cbor: bytes
+
+
+def unsupported(cbor_bytes: bytes) -> "tuple[int, int] | None":
+    """(version, msg_type) of an array form message this client refuses as
+    newer or of a type it does not know; None for anything else, readable
+    or merely malformed. pigeonhole_protocols' ``katzenqt1.wire.unsupported``.
+
+    >>> unsupported(cbor2.dumps([6, bytes(32), 0, "hi"]))
+    (6, 0)
+    >>> unsupported(cbor2.dumps([4, bytes(32), 12, ["a"]]))
+    (4, 12)
+    >>> unsupported(cbor2.dumps([5, bytes(32), 12, ["a"]])) is None
+    True
+    >>> unsupported(cbor2.dumps({"version": 9})) is None
+    True
+    >>> unsupported(b"") is None
+    True
+    >>> unsupported(cbor2.dumps([6, "not a hash", 0])) is None
+    True
+    """
+    try:
+        a = cbor2.loads(cbor_bytes)
+    except Exception:
+        return None
+    if not isinstance(a, list) or len(a) < 3:
+        return None
+    version, h, msg_type = a[:3]
+    if not (isinstance(version, int) and isinstance(h, bytes) and isinstance(msg_type, int)) or version < 0 or msg_type < 0:
+        return None
+    if version > ARRAY_VERSION_READ or not _known_type(msg_type, version):
+        return version, msg_type
+    return None
+
+
+def _known_type(msg_type: int, version: int) -> bool:
+    return msg_type <= GroupChatTypeEnum.PING.value or (
+        msg_type == GroupChatTypeEnum.PACKED.value and version >= 5
+    )
 
 BOX_PLAINTEXT_FALLBACK = 1530
 """The plaintext a box is taken to hold before the daemon has said."""
@@ -334,6 +395,10 @@ class GroupChatTypeEnum(Enum):
     TALLY_SYNC_RESP = 9
     # Numbers members or says where the sender was introduced; never shown.
     CONTROL = 10
+    # Asks its readers to play their ping sound; a null body.
+    PING = 11
+    # Version 5: several texts in one box, in the order sent; read only.
+    PACKED = 12
 
 class SendOperation(BaseModel):
     messages: "List[GroupChatMessage]"
@@ -538,6 +603,8 @@ class GroupChatMessage(BaseModel):
     who: str | None = Field(default=None)
     reply_who: str | None = Field(default=None)
     tally: GroupChatTally | None = Field(default=None)
+    # A PACKED message's texts, in the order sent.
+    texts: list[str] | None = Field(default=None)
 
     # Who this sender acknowledges, by roster index, and the BACAP Idx64 of
     # the box acknowledged for each; see ``katzenqt.ack_codec``. Absent when
@@ -660,6 +727,8 @@ class GroupChatMessage(BaseModel):
             return [self.file_upload.payload, self.file_upload.filetype, self.file_upload.basename]
         if self.tally is not None:
             return self.tally.model_dump(exclude_none=True)
+        if self.texts is not None:
+            return self.texts
         key = _ARRAY_BODY_KEYS.get(self.msg_type.value)
         return getattr(self, key) if key in ("text", "who", "reply_who") else None
 
@@ -682,12 +751,21 @@ class GroupChatMessage(BaseModel):
         Traceback (most recent call last):
             ...
         katzenqt.models.UnsupportedVersion: message version 4 is newer than version 3, the newest this client reads
+        >>> GroupChatMessage.from_cbor(cbor2.dumps([6, bytes(32), 0, "hi"]))
+        Traceback (most recent call last):
+            ...
+        katzenqt.models.UnsupportedMessage: message of type 0, version 6, which this client cannot read
         """
         fields = cbor2.loads(cbor_bytes)
         if isinstance(fields, dict):
             version = fields.get("version")
             if isinstance(version, int) and version > GROUP_CHAT_VERSION:
                 raise UnsupportedVersion(version)
+            msg_type = fields.get("msg_type")
+            if msg_type is not None and msg_type not in range(GroupChatTypeEnum.PING.value + 1):
+                raise ValueError("not a version 3 GroupChatMessage")
+        if (u := unsupported(cbor_bytes)) is not None:
+            raise UnsupportedMessage(*u)
         return cls(**gcm_fields(fields)) # TODO not at all what we want but here we go
 
 _ARRAY_BODY_KEYS = {
@@ -696,6 +774,7 @@ _ARRAY_BODY_KEYS = {
     GroupChatTypeEnum.FILE_UPLOAD.value: "file_upload",
     GroupChatTypeEnum.WHO.value: "who",
     GroupChatTypeEnum.REPLY_WHO.value: "reply_who",
+    GroupChatTypeEnum.PACKED.value: "texts",
     **{kind.value: "tally" for kind in (
         GroupChatTypeEnum.TALLY_CREATE, GroupChatTypeEnum.TALLY_VOTE,
         GroupChatTypeEnum.TALLY_CLOSE, GroupChatTypeEnum.TALLY_SYNC_REQ,
@@ -718,6 +797,8 @@ def gcm_fields(decoded: Any) -> Any:
     ['basename', 'filetype', 'payload']
     >>> gcm_fields([4, bytes(32), 10, None, None, b"n"])["numbers"]
     b'n'
+    >>> gcm_fields([5, bytes(32), 12, ["a", "b"]])["texts"]
+    ['a', 'b']
     >>> gcm_fields({"text": "hi"})
     {'text': 'hi'}
     >>> gcm_fields([3, bytes(32), 0, "hi"])
@@ -731,14 +812,18 @@ def gcm_fields(decoded: Any) -> Any:
         raise ValueError("not a version 4 GroupChatMessage")
     version, membership_hash, msg_type, body, *rest = decoded + [None] * (7 - len(decoded))
     if (
-        not isinstance(version, int) or version < 4
+        not isinstance(version, int) or not 4 <= version <= ARRAY_VERSION_READ
+        or not isinstance(msg_type, int) or not _known_type(msg_type, version)
         or not all(f is None or isinstance(f, bytes) for f in rest)
         or (msg_type == GroupChatTypeEnum.TEXT.value and not isinstance(body, str))
         or (msg_type == GroupChatTypeEnum.INTRODUCTION.value
             and not (isinstance(body, list) and len(body) == 2))
         or (msg_type == GroupChatTypeEnum.FILE_UPLOAD.value
             and not (isinstance(body, list) and len(body) == 3))
-        or (msg_type == GroupChatTypeEnum.CONTROL.value and body is not None)
+        or (msg_type in (GroupChatTypeEnum.CONTROL.value, GroupChatTypeEnum.PING.value)
+            and body is not None)
+        or (msg_type == GroupChatTypeEnum.PACKED.value
+            and not (isinstance(body, list) and body and all(isinstance(t, str) for t in body)))
     ):
         raise ValueError("not a version 4 GroupChatMessage")
     fields: dict[str, Any] = {"version": version, "membership_hash": membership_hash, "msg_type": msg_type}
