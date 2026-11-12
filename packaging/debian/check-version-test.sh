@@ -40,6 +40,9 @@ tree 0.0.3 0.0.3 0.0.3
 expect 0 "three agreeing versions pass"
 expect 0 "and pass against their own tag" 0.0.3
 expect 1 "but fail against another tag" 0.0.4
+expect 0 "a v prefix passes" v0.0.3
+expect 0 "a prerelease of the version passes" 0.0.3-rc1
+expect 1 "a prerelease of another version fails" 0.0.4-rc1
 
 tree 0.0.3 0.0.2 0.0.3
 expect 1 "a stale changelog fails"

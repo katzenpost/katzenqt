@@ -3,6 +3,9 @@ set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 tag=${1-}
+tag=${tag#v}
+# A prerelease tag such as 0.0.4-rc1 checks against version 0.0.4.
+tag=${tag%%-*}
 metainfo=$root/packaging/flatpak/network.katzenpost.katzenqt.metainfo.xml
 
 die() {

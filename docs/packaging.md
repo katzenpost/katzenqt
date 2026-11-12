@@ -2,8 +2,8 @@
 
 [Back to the README](../README.md)
 
-katzenqt has Debian and Flatpak packaging. Neither is published yet; both are built
-from this repository. The sources live in `debian/` and `packaging/`.
+katzenqt has Debian and Flatpak packaging, built from this repository and attached to a
+GitHub Release for each version tag. The sources live in `debian/` and `packaging/`.
 
 ## Debian
 
@@ -46,3 +46,17 @@ The app id is `network.katzenpost.katzenqt`, on the KDE 6.9 runtime. The Flatpak
 contain `kpclientd`: it reads the host daemon's socket at
 `$XDG_RUNTIME_DIR/katzenpost/kpclientd.sock`, so the daemon must be running on the host,
 as set up in [Building](building.md).
+
+## Releases
+
+1. Set the new version in `pyproject.toml`, `debian/changelog` and the `<release>` entry
+   of `packaging/flatpak/network.katzenpost.katzenqt.metainfo.xml`; `make check-version`
+   checks that they agree. Merge that change.
+2. Tag the merged commit with the bare version and push the tag:
+   `git tag 0.0.4 && git push origin 0.0.4`.
+
+The tag starts `.github/workflows/release.yml`, which runs the Debian and Flatpak
+workflows and creates a GitHub Release for the tag. It attaches one tar of `.deb` files
+per distro (katzenqt and the dependencies it needs that Debian lacks), the Flatpak bundle,
+and `SHA256SUMS`. A tag with a suffix, such as `0.0.4-rc1`, is published as a prerelease
+of the version in the files. If the tag does not match that version, nothing is published.
