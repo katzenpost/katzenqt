@@ -1025,9 +1025,6 @@ class MainWindow(QMainWindow):
             self._update_attachment_controls()
         return self._ptt_audio
 
-    def _push_to_talk_reset_ui(self) -> None:
-        self.ui.ptt_hold_space_label.setText("Hold space bar to record audio.")
-
     def _show_status_message(
         self,
         title: str,
@@ -1446,9 +1443,6 @@ class MainWindow(QMainWindow):
 
         self.push_to_talk_started = True
         self.push_to_talk_recording_conversation_id = convo.conversation_id
-        self.ui.ptt_hold_space_label.setText(
-            "Recording audio... release Space to attach the voice note."
-        )
         if not self.push_to_talk_watchdog.isActive():
             self.push_to_talk_watchdog.start()
 
@@ -1460,7 +1454,6 @@ class MainWindow(QMainWindow):
         self.push_to_talk_started = False
         self.push_to_talk_recording_conversation_id = None
         self.push_to_talk_watchdog.stop()
-        self._push_to_talk_reset_ui()
 
         if not audio:
             return
@@ -1604,9 +1597,6 @@ class MainWindow(QMainWindow):
         and record until we haven't seen a PTT shortcut trigger for a while (~100ms? - TODO how
         do we learn the autoRepeat rate?).
 
-        TODO ptt_hold_space_label should be saying "RECORDING AUDIO ..." when we are
-          - we should restore the label after
-        TODO: when it's saying that we should have a button to cancel.
         TODO: We should also have a keyboard combination to do that, while they're holding space (escape? delete?)
         """
         # CONDITION: push to talk mode in the chat input
