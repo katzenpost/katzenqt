@@ -891,19 +891,6 @@ QToolButton {
                    </property>
                   </widget>
                  </item>
-                 <item>
-                  <widget class="QLineEdit" name="search_in_chat">
-                   <property name="enabled">
-                    <bool>false</bool>
-                   </property>
-                   <property name="toolTip">
-                    <string>Search the messages for keywords</string>
-                   </property>
-                   <property name="placeholderText">
-                    <string>Search in chat...(TODO)</string>
-                   </property>
-                  </widget>
-                 </item>
                 </layout>
                </item>
                <item row="2" column="0">
@@ -2184,37 +2171,6 @@ QToolButton {
                   <attribute name="toolTip">
                    <string>Send a voice message to the current conversation</string>
                   </attribute>
-                  <layout class="QGridLayout" name="gridLayout_7">
-                   <item row="0" column="0">
-                    <widget class="QLabel" name="ptt_cancel">
-                     <property name="text">
-                      <string>**TODO**: *ToolButton to cancel in-progress recording*</string>
-                     </property>
-                     <property name="textFormat">
-                      <enum>Qt::TextFormat::MarkdownText</enum>
-                     </property>
-                     <property name="alignment">
-                      <set>Qt::AlignmentFlag::AlignCenter</set>
-                     </property>
-                     <property name="textInteractionFlags">
-                      <set>Qt::TextInteractionFlag::NoTextInteraction</set>
-                     </property>
-                    </widget>
-                   </item>
-                   <item row="1" column="0">
-                    <widget class="QLabel" name="ptt_hold_space_label">
-                     <property name="enabled">
-                      <bool>false</bool>
-                     </property>
-                     <property name="text">
-                      <string>Hold space bar to record audio.</string>
-                     </property>
-                     <property name="alignment">
-                      <set>Qt::AlignmentFlag::AlignCenter</set>
-                     </property>
-                    </widget>
-                    </item>
-                   </layout>
                   </widget>
                   <widget class="QWidget" name="poll_tab">
                    <property name="enabled">
@@ -2309,17 +2265,8 @@ QToolButton {
      <string>Mixnet status</string>
     </property>
    </widget>
-   <widget class="QMenu" name="menuAbout">
-    <property name="enabled">
-     <bool>false</bool>
-    </property>
-    <property name="title">
-     <string>About</string>
-    </property>
-   </widget>
    <addaction name="menuSettings"/>
    <addaction name="menuMixnetStatus"/>
-   <addaction name="menuAbout"/>
   </widget>
   <widget class="QToolBar" name="toolBar">
    <property name="enabled">

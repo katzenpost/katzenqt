@@ -443,12 +443,6 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout.addWidget(self.invite_contact_toolButton)
 
-        self.search_in_chat = QLineEdit(self.mywidget)
-        self.search_in_chat.setObjectName(u"search_in_chat")
-        self.search_in_chat.setEnabled(False)
-
-        self.horizontalLayout.addWidget(self.search_in_chat)
-
 
         self.gridLayout_3.addLayout(self.horizontalLayout, 1, 0, 1, 1)
 
@@ -749,23 +743,6 @@ class Ui_MainWindow(object):
         self.ptt_tab = QWidget()
         self.ptt_tab.setObjectName(u"ptt_tab")
         self.ptt_tab.setEnabled(False)
-        self.gridLayout_7 = QGridLayout(self.ptt_tab)
-        self.gridLayout_7.setObjectName(u"gridLayout_7")
-        self.ptt_cancel = QLabel(self.ptt_tab)
-        self.ptt_cancel.setObjectName(u"ptt_cancel")
-        self.ptt_cancel.setTextFormat(Qt.TextFormat.MarkdownText)
-        self.ptt_cancel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.ptt_cancel.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-
-        self.gridLayout_7.addWidget(self.ptt_cancel, 0, 0, 1, 1)
-
-        self.ptt_hold_space_label = QLabel(self.ptt_tab)
-        self.ptt_hold_space_label.setObjectName(u"ptt_hold_space_label")
-        self.ptt_hold_space_label.setEnabled(False)
-        self.ptt_hold_space_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self.gridLayout_7.addWidget(self.ptt_hold_space_label, 1, 0, 1, 1)
-
         icon10 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.MediaRecord))
         self.singlemultitab.addTab(self.ptt_tab, icon10, "")
         self.poll_tab = QWidget()
@@ -814,9 +791,6 @@ class Ui_MainWindow(object):
         self.menuMixnetStatus = QMenu(self.menubar)
         self.menuMixnetStatus.setObjectName(u"menuMixnetStatus")
         self.menuMixnetStatus.setEnabled(False)
-        self.menuAbout = QMenu(self.menubar)
-        self.menuAbout.setObjectName(u"menuAbout")
-        self.menuAbout.setEnabled(False)
         MainWindow.setMenuBar(self.menubar)
         self.toolBar = QToolBar(MainWindow)
         self.toolBar.setObjectName(u"toolBar")
@@ -919,7 +893,6 @@ class Ui_MainWindow(object):
 
         self.menubar.addAction(self.menuSettings.menuAction())
         self.menubar.addAction(self.menuMixnetStatus.menuAction())
-        self.menubar.addAction(self.menuAbout.menuAction())
         self.menuSettings.addAction(self.action_display_font)
         self.menuSettings.addAction(self.action_display_language)
         self.menuSettings.addAction(self.action_theme)
@@ -1029,10 +1002,6 @@ class Ui_MainWindow(object):
         self.invite_contact_toolButton.setToolTip(QCoreApplication.translate("MainWindow", u"Generate a voucher to hand to a member who will induct you", None))
 #endif // QT_CONFIG(tooltip)
         self.invite_contact_toolButton.setText(QCoreApplication.translate("MainWindow", u"  Generate voucher", None))
-#if QT_CONFIG(tooltip)
-        self.search_in_chat.setToolTip(QCoreApplication.translate("MainWindow", u"Search the messages for keywords", None))
-#endif // QT_CONFIG(tooltip)
-        self.search_in_chat.setPlaceholderText(QCoreApplication.translate("MainWindow", u"Search in chat...(TODO)", None))
 #if QT_CONFIG(statustip)
         self.chat_lineEdit.setStatusTip(QCoreApplication.translate("MainWindow", u"Type a message. Press Enter when done.", None))
 #endif // QT_CONFIG(statustip)
@@ -1069,8 +1038,6 @@ class Ui_MainWindow(object):
 #if QT_CONFIG(tooltip)
         self.singlemultitab.setTabToolTip(self.singlemultitab.indexOf(self.multilinetab), QCoreApplication.translate("MainWindow", u"Type a message in a multi-line entry field for easier editing", None))
 #endif // QT_CONFIG(tooltip)
-        self.ptt_cancel.setText(QCoreApplication.translate("MainWindow", u"**TODO**: *ToolButton to cancel in-progress recording*", None))
-        self.ptt_hold_space_label.setText(QCoreApplication.translate("MainWindow", u"Hold space bar to record audio.", None))
         self.singlemultitab.setTabText(self.singlemultitab.indexOf(self.ptt_tab), QCoreApplication.translate("MainWindow", u"&Push to talk (voice)", None))
 #if QT_CONFIG(tooltip)
         self.singlemultitab.setTabToolTip(self.singlemultitab.indexOf(self.ptt_tab), QCoreApplication.translate("MainWindow", u"Send a voice message to the current conversation", None))
@@ -1086,7 +1053,6 @@ class Ui_MainWindow(object):
         self.chatTabs.setTabText(self.chatTabs.indexOf(self.defaultcontext), QCoreApplication.translate("MainWindow", u"Contact1", None))
         self.menuSettings.setTitle(QCoreApplication.translate("MainWindow", u"Settings", None))
         self.menuMixnetStatus.setTitle(QCoreApplication.translate("MainWindow", u"Mixnet status", None))
-        self.menuAbout.setTitle(QCoreApplication.translate("MainWindow", u"About", None))
         self.toolBar.setWindowTitle(QCoreApplication.translate("MainWindow", u"toolBar", None))
 #if QT_CONFIG(whatsthis)
         self.toolBar.setWhatsThis("")

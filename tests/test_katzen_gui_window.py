@@ -907,17 +907,11 @@ async def test_push_to_talk_records_and_attaches_a_voice_note(
     assert loaded_window.push_to_talk_recording_conversation_id == (
         convo.conversation_id
     )
-    assert loaded_window.ui.ptt_hold_space_label.text() == (
-        "Recording audio... release Space to attach the voice note."
-    )
     assert loaded_window.push_to_talk_watchdog.isActive() is True
 
     loaded_window.push_to_talk_finish(cancel=False)
     assert loaded_window.push_to_talk_started is False
     assert loaded_window.push_to_talk_watchdog.isActive() is False
-    assert loaded_window.ui.ptt_hold_space_label.text() == (
-        "Hold space bar to record audio."
-    )
     assert len(convo.attached_files) == 1
     assert loaded_window.ui.singlemultitab.currentWidget() is (
         loaded_window.ui.attach_file_tab
@@ -1038,9 +1032,6 @@ def test_finishing_without_an_engine_just_resets_the_ui(
     window.push_to_talk_started = True
     window.push_to_talk_finish(cancel=False)
     assert window.push_to_talk_started is False
-    assert window.ui.ptt_hold_space_label.text() == (
-        "Hold space bar to record audio."
-    )
 
 
 def test_the_watchdog_stops_itself_when_not_recording(
